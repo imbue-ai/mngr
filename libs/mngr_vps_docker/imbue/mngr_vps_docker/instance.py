@@ -111,6 +111,7 @@ from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -242,28 +243,22 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     return tags
 
 
-# Substrings that indicate a teardown step failed only because the resource was
-# already gone (a benign outcome that should not be recorded as a cleanup
-# failure). The teardown helpers raise a generic ``MngrError`` for both
-# already-gone and real failures, so the error text is the only available
-# signal; matching is case-insensitive.
-_BENIGN_NOT_FOUND_SIGNALS: Final = (
-    "no such",
-    "not found",
-    "does not exist",
-    "already",
-)
+# HTTP status codes from the VPS provider API that mean the resource the teardown
+# step targeted was already gone -- a benign outcome that should not be recorded as
+# a cleanup failure.
+_VPS_RESOURCE_ALREADY_GONE_STATUS_CODES: Final = (404, 410)
 
 
-def _is_benign_not_found(error: MngrError) -> bool:
-    """Return True iff ``error`` looks like an "already gone" / not-found outcome.
+def _is_vps_resource_already_gone(error: MngrError) -> bool:
+    """Return True iff ``error`` is a VPS API "already gone" (not-found) response.
 
-    Used to distinguish a benign teardown failure (the resource was already
-    absent) from a real one (the resource exists but could not be removed) when
-    the only signal is the exception text.
+    Both the Vultr and OVH clients raise ``VpsApiError`` carrying the HTTP
+    ``status_code`` (OVH maps its SDK's ``ResourceNotFoundError`` to 404), so we
+    classify by that status rather than fragile error-text matching. A real
+    failure (the resource exists but could not be destroyed) carries some other
+    status and is recorded.
     """
-    message = str(error).lower()
-    return any(signal in message for signal in _BENIGN_NOT_FOUND_SIGNALS)
+    return isinstance(error, VpsApiError) and error.status_code in _VPS_RESOURCE_ALREADY_GONE_STATUS_CODES
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -1148,20 +1143,19 @@ class VpsDockerProvider(BaseProviderInstance):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 # Stop and remove the agent container; removing the volume below
                 # will fail otherwise because the container still holds it open.
-                # ``docker rm -f`` reports "No such container" for an already-gone
-                # container, which we treat as benign.
+                # ``tolerate_missing`` makes an already-gone container a no-op, so any
+                # error raised here means a container that exists but could not be removed.
                 try:
-                    remove_container(outer, vps_config.container_name, force=True)
+                    remove_container(outer, vps_config.container_name, force=True, tolerate_missing=True)
                 except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
-                    if not _is_benign_not_found(e):
-                        failures.append(
-                            CleanupFailure(
-                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                                message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
-                                host_id=host_id,
-                            )
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
+                            host_id=host_id,
                         )
+                    )
 
                 # Delete the per-host btrfs subvolume before the named volume.
                 # The VPS-destroy that follows takes the whole loop file with it,
@@ -1218,16 +1212,14 @@ class VpsDockerProvider(BaseProviderInstance):
                         )
                     )
 
-        # Destroy the VPS instance. The VPS client raises a generic MngrError for
-        # both "instance already gone" and a real failure; without a reliable
-        # not-found signal we treat any raised error as a remaining VPS instance
-        # (which may incur ongoing cost).
+        # Destroy the VPS instance. An "already gone" (HTTP 404/410) response is benign;
+        # any other error means a VPS instance that may still exist (and incur cost).
         with log_span("Destroying VPS instance"):
             try:
                 self.vps_client.destroy_instance(vps_config.vps_instance_id)
             except MngrError as e:
                 logger.warning("Failed to destroy VPS: {}", e)
-                if not _is_benign_not_found(e):
+                if not _is_vps_resource_already_gone(e):
                     failures.append(
                         CleanupFailure(
                             category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -1236,14 +1228,14 @@ class VpsDockerProvider(BaseProviderInstance):
                         )
                     )
 
-        # Clean up SSH key from provider. Same generic-MngrError ambiguity as the
-        # VPS destroy above; absent a not-found signal, treat as a remaining key.
+        # Clean up SSH key from provider. An "already gone" (HTTP 404/410) response is
+        # benign; any other error means a key that may still be registered.
         if vps_config.vps_ssh_key_id is not None:
             try:
                 self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
             except MngrError as e:
                 logger.warning("Failed to delete SSH key from provider: {}", e)
-                if not _is_benign_not_found(e):
+                if not _is_vps_resource_already_gone(e):
                     failures.append(
                         CleanupFailure(
                             category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
