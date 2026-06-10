@@ -8,10 +8,12 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.git import GitSyncError
+from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
 from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import _build_ssh_git_url
+from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.api.testing import FakeHost
@@ -307,3 +309,42 @@ def test_git_push_transfers_commit_from_local_to_remote(
     )
 
     assert (agent_dir / "local_file.txt").read_text() == "local content"
+
+
+# === check_path_gitignore_status ===
+#
+# The helper is path-agnostic (it takes any repo-relative path, not just a
+# ``.claude/`` subpath). These tests pin that with non-``.claude`` paths; the
+# ``.claude``-symlink-resolution branch is covered by mngr_claude's settings
+# guard tests (which use a shell-capable local host).
+
+
+def test_check_path_gitignore_status_returns_not_ignored_for_tracked_path(tmp_path: Path) -> None:
+    """A path that no .gitignore rule covers is reported NOT_IGNORED, with the path echoed back."""
+    init_git_repo(tmp_path, initial_commit=False)
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, checked = check_path_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+
+    assert status is GitignoreStatus.NOT_IGNORED
+    assert checked == Path(".config") / "app" / "state.json"
+
+
+def test_check_path_gitignore_status_returns_ignored_for_any_dir_rule(tmp_path: Path) -> None:
+    """A directory .gitignore rule covers a non-.claude path -- the helper is not claude-specific."""
+    init_git_repo(tmp_path, initial_commit=False)
+    (tmp_path / ".gitignore").write_text(".config/\n")
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, _ = check_path_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+
+    assert status is GitignoreStatus.IGNORED
+
+
+def test_check_path_gitignore_status_skips_outside_git_repo(tmp_path: Path) -> None:
+    """Outside a git work tree there is nothing to enforce, so the status is SKIP."""
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, _ = check_path_gitignore_status(host, tmp_path, Path(".config") / "state.json")
+
+    assert status is GitignoreStatus.SKIP

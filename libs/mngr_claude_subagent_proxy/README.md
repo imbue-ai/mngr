@@ -433,10 +433,11 @@ in place:
    skill could not also adopt a `*.local.md` style suffix.)
 
 2. **Gitignore guard.** At provisioning the plugin runs
-   `_check_proxy_artifact_gitignored` (which shares mngr_claude's
-   `check_claude_path_gitignore_status` helper with the
-   settings.local.json guard) and raises `UnignoredProxyArtifactError`
-   if the target path is not gitignored. The error tells the user to
+   `_check_proxy_artifact_gitignored` (which shares the
+   `check_path_gitignore_status` helper in `mngr.api.git` with
+   mngr_claude's settings.local.json guard) and raises
+   `UnignoredProxyArtifactError` if the target path is not gitignored.
+   The error tells the user to
    either add the path to `.gitignore` or disable the plugin for the
    repo
    (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).

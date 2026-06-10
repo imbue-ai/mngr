@@ -21,6 +21,7 @@ from abc import abstractmethod
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
+from enum import auto
 from pathlib import Path
 
 from loguru import logger
@@ -29,6 +30,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
@@ -69,6 +71,108 @@ class GitSyncError(MngrError):
 
     def __init__(self, message: str) -> None:
         super().__init__(f"Git sync failed: {message}")
+
+
+# === Gitignore status ===
+
+
+class GitignoreStatus(UpperCaseStrEnum):
+    """Result of checking whether a path is gitignored in a repo.
+
+    Returned by ``check_path_gitignore_status`` so callers can build their own
+    domain-specific error messages from a shared check.
+    """
+
+    # Not a git work tree, or a symlinked leading path component points outside
+    # the repo -- git won't track the path, so there is nothing to enforce.
+    SKIP = auto()
+    # Ignored by a repository-level rule (or, when ``require_repo_rule`` is
+    # False, by any rule including the user's global excludes).
+    IGNORED = auto()
+    # Not ignored by any rule.
+    NOT_IGNORED = auto()
+    # Ignored, but only via the user's global excludes; returned only when
+    # ``require_repo_rule`` is True (remote hosts have no global excludes).
+    ONLY_GLOBAL = auto()
+
+
+def check_path_gitignore_status(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    relative_path: Path,
+    require_repo_rule: bool = False,
+) -> tuple[GitignoreStatus, Path]:
+    """Return whether ``<repo_path>/<relative_path>`` is gitignored.
+
+    ``relative_path`` is interpreted relative to ``repo_path``. If its leading
+    path component is a symlink (e.g. ``.claude -> .agents``), it is resolved
+    before consulting ``git check-ignore`` -- git otherwise fails with
+    "pathspec '...' is beyond a symbolic link". Returns a ``(status,
+    checked_relative_path)`` tuple; the second element is the repo-relative
+    path actually consulted, for use in caller error messages.
+
+    See ``GitignoreStatus`` for the meaning of each status. ``SKIP`` means there
+    is nothing to enforce (``repo_path`` is not a git work tree, or the leading
+    symlink points outside the repo). When ``require_repo_rule`` is True, a path
+    ignored only by the user's global excludes returns ``ONLY_GLOBAL`` rather
+    than ``IGNORED`` -- important for preflight checks, since a global gitignore
+    entry won't exist on remote hosts.
+    """
+    checked_relative = relative_path
+
+    is_git_repo = host.execute_idempotent_command(
+        "git rev-parse --is-inside-work-tree",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not is_git_repo.success:
+        return GitignoreStatus.SKIP, checked_relative
+
+    # If the leading path component is a symlink (e.g. .claude -> .agents),
+    # resolve it so git check-ignore doesn't fail with "pathspec is beyond a
+    # symbolic link". Resolving both the component and the repo root (the latter
+    # in case repo_path itself contains symlinks) yields the correct
+    # repo-relative path. Only runs when the component is actually a symlink.
+    leading = relative_path.parts[0]
+    remainder = Path(*relative_path.parts[1:])
+    quoted_leading = shlex.quote(leading)
+    resolve_result = host.execute_idempotent_command(
+        f"test -L {quoted_leading} && realpath {quoted_leading} && realpath .",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if resolve_result.success:
+        lines = resolve_result.stdout.strip().splitlines()
+        if len(lines) == 2:
+            resolved_leading_dir = Path(lines[0])
+            resolved_repo_root = Path(lines[1])
+            try:
+                checked_relative = resolved_leading_dir.relative_to(resolved_repo_root) / remainder
+            except ValueError:
+                # Symlink target is outside the repo -- git won't track it.
+                return GitignoreStatus.SKIP, checked_relative
+
+    result = host.execute_idempotent_command(
+        f"git check-ignore -q {shlex.quote(str(checked_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not result.success:
+        return GitignoreStatus.NOT_IGNORED, checked_relative
+
+    if require_repo_rule:
+        # Re-check with global excludes disabled to see if the rule is from the
+        # repo itself. If only the global gitignore covers it, the remote host
+        # (which has no global gitignore) will fail during provisioning.
+        repo_only_result = host.execute_idempotent_command(
+            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(checked_relative))}",
+            cwd=repo_path,
+            timeout_seconds=5.0,
+        )
+        if not repo_only_result.success:
+            return GitignoreStatus.ONLY_GLOBAL, checked_relative
+
+    return GitignoreStatus.IGNORED, checked_relative
 
 
 # === Git context (run git here, or on a remote host) ===

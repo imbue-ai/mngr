@@ -11,6 +11,8 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.mngr.api.git import GitignoreStatus
+from imbue.mngr.api.git import check_path_gitignore_status
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
@@ -26,8 +28,6 @@ from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
-from imbue.mngr_claude.plugin import ClaudeGitignoreStatus
-from imbue.mngr_claude.plugin import check_claude_path_gitignore_status
 from imbue.mngr_claude_subagent_proxy import hookimpl
 from imbue.mngr_claude_subagent_proxy import resources as _subagent_proxy_resources
 from imbue.mngr_claude_subagent_proxy._stop_hook_guard import MNGR_MANAGED_HOOK_MARKERS
@@ -250,8 +250,8 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
     ``UnignoredProxyArtifactError`` otherwise, pointing the user at both the
     gitignore fix and the option to disable the plugin.
     """
-    status, relative = check_claude_path_gitignore_status(host, work_dir, claude_subpath)
-    if status is not ClaudeGitignoreStatus.NOT_IGNORED:
+    status, relative = check_path_gitignore_status(host, work_dir, Path(".claude") / claude_subpath)
+    if status is not GitignoreStatus.NOT_IGNORED:
         return
     raise UnignoredProxyArtifactError(
         f"'{relative}' is not gitignored in {work_dir}.\n"
