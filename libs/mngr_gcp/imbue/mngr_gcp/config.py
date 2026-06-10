@@ -159,8 +159,8 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         """
         if not self.project_id:
             raise ValueError(
-                "No GCP project_id configured. Set [providers.gcp] project_id = '<your-project>' in "
-                "the project settings.toml."
+                "No GCP project_id configured. Run "
+                "'mngr config set providers.gcp.project_id <your-project>' to set it."
             )
         return self.project_id
 
