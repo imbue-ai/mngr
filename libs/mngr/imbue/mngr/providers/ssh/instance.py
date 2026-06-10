@@ -92,16 +92,8 @@ class SSHProviderInstance(BaseProviderInstance):
             except ValidationError as e:
                 logger.warning("Skipped malformed host '{}' in dynamic hosts file: {}", host_name, e)
                 continue
-            # Expand key_file paths
-            if host_config.key_file is not None:
-                host_config = SSHHostConfig(
-                    address=host_config.address,
-                    port=host_config.port,
-                    user=host_config.user,
-                    key_file=Path(host_config.key_file).expanduser(),
-                    known_hosts_file=host_config.known_hosts_file,
-                )
-            dynamic_hosts[host_name] = host_config
+            # Expand the key_file path (~ resolution), preserving all other fields.
+            dynamic_hosts[host_name] = host_config.with_expanded_key_file()
 
         return dynamic_hosts
 

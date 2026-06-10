@@ -342,3 +342,25 @@ def test_get_host_finds_dynamic_host(
 
     assert host is not None
     assert host.id == provider._host_id_for_name("leased-host")
+
+
+def test_read_dynamic_hosts_expands_key_file_and_preserves_known_hosts_file(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A dynamic host that sets both key_file and known_hosts_file must keep known_hosts_file
+    (strict host-key checking) while still expanding key_file."""
+    dynamic_file = tmp_path / "dynamic_hosts.toml"
+    dynamic_file.write_text(
+        "[leased-host]\n"
+        'address = "203.0.113.10"\n'
+        'key_file = "~/.ssh/id_ed25519"\n'
+        'known_hosts_file = "/etc/ssh/ssh_known_hosts"\n'
+    )
+    provider = make_ssh_provider(temp_mngr_ctx, hosts={}, dynamic_hosts_file=dynamic_file)
+
+    host_config = provider._read_dynamic_hosts()["leased-host"]
+
+    assert host_config.key_file == Path("~/.ssh/id_ed25519").expanduser()
+    assert not str(host_config.key_file).startswith("~")
+    assert host_config.known_hosts_file == Path("/etc/ssh/ssh_known_hosts")
