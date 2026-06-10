@@ -9,6 +9,7 @@ deterministically.
 
 import json
 from collections.abc import Mapping
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -458,6 +459,37 @@ def test_schema_admits_intended_requests_and_rejects_others(tmp_path: Path) -> N
     assert admits(logs, {"method": "GET", "path": f"{create_path}/{creation_id}/logs"})
     assert not admits(logs, {"method": "POST", "path": f"{create_path}/{creation_id}/logs"})
     assert not admits(logs, {"method": "GET", "path": f"{create_path}/{creation_id}/status"})
+
+
+def test_bundled_services_catalog_minds_entry_matches_baseline_schemas(tmp_path: Path) -> None:
+    """The bundled services.json must offer exactly the minds permissions the baseline defines.
+
+    The catalog entry is what the permission dialog renders (and what a
+    user grant writes into the rules), while the baseline schemas are
+    what detent matches requests against. If the two drift apart -- e.g.
+    a ``services.json`` regeneration drops the manually curated
+    ``minds`` entry (kept in ``_MANUAL_SERVICES`` in
+    ``scripts/generate_services_json.py``), or a permission is renamed
+    on one side only -- user grants silently stop matching, so this
+    cross-checks the two shipped artifacts.
+    """
+    catalog = json.loads(
+        resources.files("imbue.mngr_latchkey.extensions").joinpath("services.json").read_text(encoding="utf-8")
+    )
+    minds_entries = catalog["minds"]
+    assert len(minds_entries) == 1
+    (entry,) = minds_entries
+    assert entry["scope"] == "minds"
+    catalog_permission_names = tuple(permission["name"] for permission in entry["permissions"])
+    assert catalog_permission_names == ("minds-create", "minds-status", "minds-logs")
+
+    fake = _full_fake(tmp_path)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+    schemas = json.loads(setup.opaque_permissions_path.read_text())["schemas"]
+    assert entry["scope"] in schemas
+    for permission_name in catalog_permission_names:
+        assert permission_name in schemas
 
 
 # -- Allowed-agent anyOf helpers ---------------------------------------------

@@ -25,6 +25,12 @@ not carry, so they live here as curated constants. A scope without a curated
 display name falls back to a title-cased service name and is reported on stderr
 so a maintainer can curate it.
 
+A few catalog entries describe scopes that are not detent services at all but
+gateway-extension-backed endpoints (e.g. the ``minds`` peer-spawn scope, whose
+detent schemas are materialized inline in every per-agent permissions file by
+``imbue.mngr_latchkey.agent_setup``). Those live in ``_MANUAL_SERVICES`` below
+and are merged into the generated catalog, so regeneration never drops them.
+
 Run with::
 
     uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
@@ -161,6 +167,36 @@ class _ScopeCatalogEntry(FrozenModel):
     )
 
 
+# Catalog entries for scopes that are not detent services but
+# gateway-extension-backed endpoints. Detent's built-in schema files know
+# nothing about them, so they are curated here and merged into the
+# generated catalog (after the detent-derived services) on every run.
+# The matching detent request schemas are materialized inline in every
+# per-agent permissions file by ``imbue.mngr_latchkey.agent_setup``; the
+# permission names here must stay in sync with the schema names there
+# (``agent_setup_test.py`` cross-checks the bundled catalog against the
+# baseline schemas).
+_MANUAL_SERVICES: Final[Mapping[str, tuple[_ScopeCatalogEntry, ...]]] = {
+    "minds": (
+        _ScopeCatalogEntry(
+            scope="minds",
+            display_name="Peer minds",
+            description=(
+                "Identifies requests to the minds desktop client's peer-mind management endpoints, "
+                "made through the latchkey gateway's minds-api-proxy extension."
+            ),
+            permissions=(
+                _CatalogPermission(name="minds-create", description="Spawn a new peer mind."),
+                _CatalogPermission(
+                    name="minds-status", description="Check the creation status of a spawned peer mind."
+                ),
+                _CatalogPermission(name="minds-logs", description="Stream the creation logs of a spawned peer mind."),
+            ),
+        ),
+    ),
+}
+
+
 def _is_scope_schema(schema_name: str, schema: Mapping[str, object], file_name: str) -> bool:
     """Whether a detent schema identifies a whole service (a scope) vs. a narrower permission."""
     if file_name == _AWS_SCHEMA_FILE:
@@ -291,6 +327,16 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
         scope_entries = _build_scope_entries_for_service(service_name, schemas_by_name)
         if len(scope_entries) > 0:
             entries_by_service_name[service_name] = scope_entries
+
+    # Merge in the curated gateway-extension-backed entries that detent's
+    # schema files cannot produce.
+    for service_name, manual_entries in _MANUAL_SERVICES.items():
+        if service_name in entries_by_service_name:
+            raise GenerateServicesError(
+                f"Manual service {service_name!r} collides with a detent-derived service of the same name; "
+                "rename one of them or drop the _MANUAL_SERVICES entry."
+            )
+        entries_by_service_name[service_name] = list(manual_entries)
 
     # Emit services in curated order, serializing each entry to a plain dict.
     ordered_service_names = sorted(entries_by_service_name, key=_service_sort_key)

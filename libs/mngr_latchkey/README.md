@@ -299,7 +299,12 @@ uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
 ```
 
 Display names and the service ordering are editorial metadata detent does
-not carry; they live as curated constants in that script.
+not carry; they live as curated constants in that script. Catalog entries
+for gateway-extension-backed scopes that are not detent services at all
+(e.g. the `minds` peer-spawn scope, whose detent schemas are materialized
+inline in every per-agent permissions file by `agent_setup.py`) also live
+as curated constants there (`_MANUAL_SERVICES`) and are merged into the
+generated catalog, so regeneration never drops them.
 
 A typical end-to-end shell flow:
 
