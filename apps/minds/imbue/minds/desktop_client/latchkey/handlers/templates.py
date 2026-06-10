@@ -24,8 +24,8 @@ out of the generic template module.
 from collections.abc import Sequence
 
 from imbue.imbue_common.pure import pure
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
 from imbue.minds.desktop_client.templates import CATALOG
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 
 
 @pure
