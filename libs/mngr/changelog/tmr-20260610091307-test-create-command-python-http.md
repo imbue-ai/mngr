@@ -1,0 +1,1 @@
+Fixed the `test_create_command_python_http` e2e tutorial test to scope its `mngr list` verification to the local provider (`--provider local`), matching the other command-agent tests. The unscoped `mngr list` fanned out to every configured provider and hard-failed when a remote provider (e.g. Docker) was unreachable, even though the agent under test was created locally.

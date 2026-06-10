@@ -1,0 +1,1 @@
+Scoped the agent-id cross-check in the `test_tips_exec_env_inspect` e2e tutorial test to `mngr list --provider local --ids`, so it no longer fails when the e2e fixture's enabled-but-unreachable Docker provider makes an unscoped `mngr list` exit non-zero. The test is not marked for Docker/Modal, so it should only consult the local provider.

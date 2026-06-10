@@ -1,0 +1,1 @@
+Fixed the `test_plugin_list_active_to_see_types` e2e tutorial test so it no longer hits the default 10s pytest timeout. The test runs `mngr plugin list --active` twice (human and JSON output), and provider/plugin discovery can exceed 10s; it now carries the same `@pytest.mark.timeout(120)` override as the sibling agent-type tests.

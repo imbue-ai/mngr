@@ -1,0 +1,1 @@
+Added a release test (`test_config_list_omits_unset_defaults`) that asserts `mngr config list` shows only explicitly-set keys while `mngr config list --all` additionally surfaces defaulted fields, guarding the default view's filtering contract.

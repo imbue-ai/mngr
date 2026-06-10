@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_invalid_provider_fails` e2e release test so its two back-to-back cold `mngr` subprocess invocations (the failed create plus the `mngr list` verification) no longer exceed the default 10s budget.

@@ -1,0 +1,1 @@
+Strengthened the `mngr config edit --scope project` missing-editor e2e test: it now asserts the precise exit code (1), confirms the command resolves the project-scope file and reaches the "Opening ...settings.toml" launch stage before failing, and verifies the error guidance names both `$EDITOR` and `$VISUAL`.

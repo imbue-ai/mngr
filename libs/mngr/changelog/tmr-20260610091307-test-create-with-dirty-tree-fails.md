@@ -1,0 +1,1 @@
+Raised the per-test timeout on the `test_create_with_dirty_tree_fails` e2e release test so the verifying `mngr list --provider local` step no longer trips the default 10s pytest timeout on a cold run.

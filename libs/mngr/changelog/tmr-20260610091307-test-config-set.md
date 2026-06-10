@@ -1,0 +1,1 @@
+Added an e2e tutorial test covering the `mngr config set` overwrite edge case: setting an already-set key updates the value in place (latest write wins) without leaving a duplicate entry in the settings file.

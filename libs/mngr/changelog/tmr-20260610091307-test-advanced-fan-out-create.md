@@ -1,0 +1,1 @@
+Strengthened the `test_advanced_fan_out_create` e2e test for the fan-out tutorial pattern: it now verifies that every fanned-out agent (not just one) actually launched its task command and is alive, by inspecting each agent's lifecycle state and recorded command via `mngr list --format json`.

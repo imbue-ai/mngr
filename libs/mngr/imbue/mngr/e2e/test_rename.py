@@ -32,7 +32,7 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
     expect(rename_result.stdout).to_contain("my-task -> renamed-task")
 
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="Verify only the new name appears and agent is still alive",
     )
     expect(list_result).to_succeed()
@@ -75,7 +75,7 @@ def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
     expect(dry_run_result.stdout).to_contain("Would rename agent: my-task -> renamed-task")
 
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider local --format json",
         comment="Verify the agent still has its original name (dry-run did not mutate)",
     )
     expect(list_result).to_succeed()

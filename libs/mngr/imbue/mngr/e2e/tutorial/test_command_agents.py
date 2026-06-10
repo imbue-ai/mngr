@@ -80,7 +80,7 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     # applied to the created agent (not silently dropped). The idle settings are
     # the distinctive feature of this tutorial line, so assert they round-trip.
     list_result = e2e.run(
-        "mngr list --format json",
+        "mngr list --provider modal --format json",
         comment="verify the etl-job agent's command and idle configuration",
         timeout=120.0,
     )
@@ -98,6 +98,10 @@ def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# `mngr create` for a command agent sets up the tmux session plus the extra
+# window and waits for the agent to start, which pushes the test past the
+# default 10s per-test timeout (see test_command_agent_python_http).
+@pytest.mark.timeout(60)
 def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # run a dev server with extra tmux windows for logs
@@ -155,9 +159,13 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
         # the container will be automatically snapshotted when completed, so you can later come back and connect (and start) to see the results:
         mngr conn batch-job
     """)
+    # Substitute the python train/evaluate scripts with portable echoes, but have
+    # them write their results to a file so the test can later read them back and
+    # confirm the batch job actually ran (not just that it was registered).
     expect(
         e2e.run(
-            'mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30 --no-connect --no-ensure-clean -- bash -c "echo train && echo evaluate"',
+            "mngr create batch-job --provider modal --type command --idle-mode run --idle-timeout 30"
+            ' --no-connect --no-ensure-clean -- bash -c "echo train > /tmp/batch_result.txt && echo evaluate >> /tmp/batch_result.txt"',
             comment="modal batch job with --idle-mode run",
             timeout=180.0,
         )
@@ -187,3 +195,16 @@ def test_command_agent_batch_job_modal(e2e: E2eSession) -> None:
     assert "echo evaluate" in batch_job["command"], batch_job
 
     expect(e2e.run("mngr conn batch-job", comment="connect back to the batch job")).to_succeed()
+
+    # The tutorial's promise is that you can "come back and connect (and start) to
+    # see the results". Verify that concretely: the batch command wrote its output
+    # to a file, so reading it back (mngr exec auto-starts the host from its
+    # snapshot if idle-mode stopped it) must show that train and evaluate both ran.
+    result = e2e.run(
+        "mngr exec batch-job 'cat /tmp/batch_result.txt'",
+        comment="read back the batch job's results after reconnecting",
+        timeout=120.0,
+    )
+    expect(result).to_succeed()
+    expect(result.stdout).to_contain("train")
+    expect(result.stdout).to_contain("evaluate")

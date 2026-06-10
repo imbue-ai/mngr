@@ -1,0 +1,1 @@
+Strengthened the `mngr create --headless` e2e test (`test_create_headless`): it now verifies that the headless agent runs in its own dedicated git worktree named after the agent (`<host_dir>/worktrees/my-task-<uuid>`) rather than merely checking that `mngr exec my-task pwd` returns some absolute path.

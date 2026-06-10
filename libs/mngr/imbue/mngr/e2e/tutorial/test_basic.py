@@ -26,10 +26,15 @@ def test_help_succeeds(e2e: E2eSession) -> None:
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Usage")
     # The tutorial comment advertises these other commands, so the help output
-    # must actually list them. (push/pull are folded into the `git` command, so
-    # they are not asserted here.)
+    # must actually list them.
     for command in ("create", "list", "destroy", "message", "connect", "clone"):
         expect(result.stdout).to_contain(command)
+    # The remaining advertised commands -- push and pull -- are folded into the
+    # `git` command. Rather than dropping them with a bare comment, assert that
+    # the `git` command is listed and that its summary actually describes the
+    # advertised push/pull functionality, so it stays discoverable from --help.
+    expect(result.stdout).to_contain("git")
+    expect(result.stdout).to_contain("Push or pull git commits")
 
 
 @pytest.mark.release
@@ -72,12 +77,16 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("mngr create - Create and run an agent")
     expect(result.stdout).to_contain("SYNOPSIS")
     # The tutorial promises "tons more arguments", so the help must actually
-    # document them. Assert on a representative spread of the advertised flags.
+    # document them under an OPTIONS section (the structural backbone of the
+    # man-page-style help) and list a representative spread of the flags.
+    expect(result.stdout).to_contain("OPTIONS")
     expect(result.stdout).to_contain("--no-connect")
     expect(result.stdout).to_contain("--type")
     # The man-page-style help renders concrete usage examples, not just an
-    # option list -- this section is what makes the command discoverable.
+    # option list -- this section is what makes the command discoverable. It
+    # must contain real runnable `mngr create` invocations, not just a heading.
     expect(result.stdout).to_contain("EXAMPLES")
+    expect(result.stdout).to_match(r"\$ mngr create")
 
 
 @pytest.mark.release
@@ -101,6 +110,47 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     expect(result.stdout).to_be_empty()
     expect(result.stderr).to_contain("No such option: --this-flag-does-not-exist")
     expect(result.stderr).to_contain("Usage: mngr create")
+    # The rejection must be a clean usage error, not an unhandled crash: a Python
+    # traceback leaking to stderr would mean argument parsing blew up rather than
+    # failing gracefully.
+    expect(result.stderr).not_to_contain("Traceback (most recent call last)")
+
+
+@pytest.mark.release
+# The unknown option is rejected at parse time so no host work happens, but the
+# `mngr list` verification below performs remote discovery that routinely exceeds
+# the global 10s pytest timeout, so raise it like the other create tests above.
+@pytest.mark.timeout(120)
+def test_create_rejects_unknown_option_with_valid_args(e2e: E2eSession) -> None:
+    """Same `mngr create` block, realistic typo scenario: a user takes an
+    otherwise-valid invocation (a positional name plus valid flags) and adds one
+    misspelled option. Click rejects the whole command at parse time before the
+    create callback runs, so the unknown option poisons the invocation regardless
+    of the valid arguments around it -- nothing is created.
+    """
+    e2e.write_tutorial_block("""
+    # tons more arguments for anything you could want! As always, you can learn more via --help
+    mngr create --help
+    """)
+    result = e2e.run(
+        "mngr create my-task --no-connect --this-flag-does-not-exist",
+        comment="an unknown option is rejected even alongside otherwise-valid arguments",
+    )
+    # Parsing aborts on the unknown option even though `my-task` and `--no-connect`
+    # are valid, so the exit code and clean-stderr contract match the bare case.
+    expect(result).to_have_exit_code(2)
+    expect(result.stdout).to_be_empty()
+    expect(result.stderr).to_contain("No such option: --this-flag-does-not-exist")
+    expect(result.stderr).to_contain("Usage: mngr create")
+    expect(result.stderr).not_to_contain("Traceback (most recent call last)")
+
+    # The claim above -- that the option is rejected before any host/agent work --
+    # must hold concretely: the failed create must leave nothing behind, so the
+    # listing is empty.
+    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert parsed["agents"] == []
 
 
 @pytest.mark.rsync
@@ -124,7 +174,13 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
     assert created["agent_id"].startswith("agent-")
     assert created["host_id"].startswith("host-")
 
-    list_result = e2e.run("mngr list --format json", comment="Verify agent appears in JSON list")
+    # The agent is created on the local provider, so verification scopes
+    # `mngr list` to `--provider local`. An unscoped `mngr list` fans out to every
+    # configured provider (Modal, Docker, ...); when one is unreachable it aborts
+    # the whole listing (the default --on-error abort), and even when reachable a
+    # slow remote provider can exceed the per-test timeout. This mirrors the
+    # convention used by the other create tests (e.g. test_agent_types).
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify agent appears in JSON list")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert parsed["errors"] == []
@@ -169,7 +225,13 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
 
     # Suppressing output must not suppress the work: the agent must still exist.
     # `mngr list` output is unaffected by the create command's --quiet flag.
-    list_result = e2e.run("mngr list --format json", comment="Verify the quiet-created agent still exists")
+    # Scope discovery to the local provider (the quiet agent is a local `command`
+    # agent): this verifies exactly the provider that owns the agent and avoids an
+    # incidental hard dependency on other backends (e.g. Docker) being installed,
+    # which this test does not require (note the absence of @pytest.mark.docker).
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify the quiet-created agent still exists"
+    )
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert parsed["errors"] == []
@@ -203,22 +265,24 @@ def test_create_headless(e2e: E2eSession) -> None:
 
     # Verify the headless agent is actually running and reachable, not merely
     # listed: exec a command inside it and confirm it returns the agent's
-    # working directory (an absolute path).
+    # working directory. The default (worktree) create mode places each agent in
+    # its own git worktree at <host_dir>/worktrees/<agent-name>-<uuid> (see
+    # create_work_dir's worktree mode in hosts/host.py), so the reported pwd must
+    # be an absolute path naming this agent's dedicated worktree. Matching that
+    # exact shape is a stronger check than "the path is absolute": it confirms
+    # the headless create gave the agent an isolated, agent-named workspace.
     exec_result = e2e.run("mngr exec my-task pwd", comment="Verify the headless agent is running and reachable")
     expect(exec_result).to_succeed()
-    expect(exec_result.stdout).to_match(r"^/")
+    expect(exec_result.stdout).to_match(r"^/.*/my-task-[0-9a-f]+")
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# No @pytest.mark.modal: this is a purely local create with local host tags.
-# `mngr list`'s Modal discovery runs in the mngr subprocess via the in-process
-# SDK (gRPC), which the resource guard only tracks inside the pytest process --
-# never in a subprocess. The guard's modal binary wrapper is the only
-# subprocess-tracked path, and mngr only shells out to the `modal` CLI when
-# creating a Modal host (which this test never does). Marking it @modal would
-# fail the NEVER_INVOKED resource-guard check once the test passes.
+# This test stays on the local provider throughout (the create is a local
+# command agent and the verification below scopes `mngr list` to
+# --provider local), so it never queries Modal/Docker and is intentionally not
+# marked @pytest.mark.modal.
 # The local `mngr create` routinely exceeds the global 10s pytest timeout, so
 # raise it (mirrors the other e2e create tests, e.g. test_create_commands.py).
 @pytest.mark.timeout(180)
@@ -235,7 +299,11 @@ def test_create_with_label(e2e: E2eSession) -> None:
         )
     ).to_succeed()
 
-    list_result = e2e.run("mngr list --format json", comment="Verify labels appear in JSON output")
+    # Scope discovery to the local provider where this command agent actually
+    # lives: --provider restricts which providers are queried (unlike the
+    # --local result filter, which still fans out to remote providers). This
+    # keeps the check fast and never depends on Docker/Modal being reachable.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify labels appear in JSON output")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     agents = parsed["agents"]
@@ -246,10 +314,10 @@ def test_create_with_label(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# No host work happens (create fails at label parsing, and `mngr list` creates
-# nothing), so no tmux/rsync markers -- but `mngr list`'s remote discovery still
-# routinely exceeds the global 10s pytest timeout, so raise it like the other
-# create tests above.
+# No host work happens (create fails at label parsing, and `mngr list --provider
+# local` creates nothing), so no tmux/rsync markers. The local-only listing also
+# keeps this off the remote-discovery path, but it can still exceed the global
+# 10s pytest timeout, so raise it like the other create tests above.
 @pytest.mark.timeout(120)
 def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
     """Unhappy path for the same `mngr create --label` block: a label missing the
@@ -268,8 +336,11 @@ def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("KEY=VALUE")
 
     # The malformed input must be rejected before any agent is created -- nothing
-    # should be left behind in the listing.
-    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    # should be left behind in the listing. `mngr create` defaults to the local
+    # provider, so a leaked agent could only appear there; scope the listing to
+    # `--provider local` to verify this without depending on the health of the
+    # remote providers (docker/modal) the e2e fixture leaves enabled.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Verify no agent was created")
     expect(list_result).to_succeed()
     parsed = json.loads(list_result.stdout)
     assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []

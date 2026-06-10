@@ -1,0 +1,1 @@
+Strengthened the `mngr create --help` e2e test (`test_create_help_succeeds`) to additionally assert that the help renders an `OPTIONS` section and that the `EXAMPLES` section contains a concrete runnable `mngr create` invocation, not just a bare heading.

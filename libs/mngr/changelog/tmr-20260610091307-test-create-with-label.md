@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification in the `mngr create --label`/`--host-label` e2e tutorial tests to `--provider local`, matching the pattern used by the other local-agent tutorial tests. The checks now query only the local provider where the command agent actually lives, so they no longer fail when Docker/Modal backends are unreachable.

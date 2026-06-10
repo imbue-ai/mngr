@@ -1,0 +1,1 @@
+Made the `test_tips_exec_filtered_hosts` e2e release test robust to environments without a docker daemon. The test now disables the docker provider before running the modal-only `mngr list ... | mngr exec` example, so discovery no longer fails when no docker daemon is reachable (e.g. in CI, which runs release tests inside the release image with no docker daemon).

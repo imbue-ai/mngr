@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification in the agent-rename e2e tests to `--provider local`, so the local-agent rename tests no longer fail when a remote provider (e.g. Docker) is configured but unreachable.

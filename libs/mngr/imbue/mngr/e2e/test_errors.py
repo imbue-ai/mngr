@@ -9,6 +9,11 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+# This test runs two cold `mngr` subprocess invocations back to back (the failed
+# create, then the `mngr list` verification). Each pays the full Python import
+# startup cost, which together can exceed the default 10s per-test timeout in the
+# release environment. Allow extra headroom so the verification step can complete.
+@pytest.mark.timeout(120)
 def test_invalid_provider_fails(e2e: E2eSession) -> None:
     # A valid agent type is supplied so the failure is genuinely attributable to
     # the unknown provider, not to an unrelated missing-type error that would be
@@ -53,8 +58,13 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     expect(duplicate_result.stderr).to_contain("already exists")
 
     # The rejected duplicate must leave the original agent untouched: exactly
-    # one agent named "my-task" should remain.
-    list_result = e2e.run("mngr list --format json", comment="Verify the original agent is intact")
+    # one agent named "my-task" should remain. Scope discovery to the local
+    # provider: the agent is created locally, and fanning out to remote
+    # providers (e.g. Docker) makes `mngr list` exit non-zero when one is
+    # unreachable, which is unrelated to what this test verifies.
+    list_result = e2e.run(
+        "mngr list --provider local --format json", comment="Verify the original agent is intact"
+    )
     expect(list_result).to_succeed()
     agent_names = [agent["name"] for agent in json.loads(list_result.stdout)["agents"]]
     assert agent_names == ["my-task"], f"Expected only the original 'my-task', got {agent_names}"
@@ -72,6 +82,11 @@ def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+# The create command runs full type resolution before hitting the
+# clean-working-tree guard, and the verifying `mngr list --provider local`
+# enumerates the local provider; together these can exceed the default 10s
+# per-test timeout on a cold run. Allow extra headroom for the verification.
+@pytest.mark.timeout(120)
 def test_create_with_dirty_tree_fails(e2e: E2eSession) -> None:
     expect(
         e2e.run(

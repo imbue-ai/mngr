@@ -1,0 +1,3 @@
+Made the `test_advanced_create_reuse_modal` release e2e test robust to unrelated providers being unreachable.
+
+- The test's `mngr list --include 'name == "my-task"'` verification queries enumerated every configured provider. Because `mngr list` defaults to `--on-error abort`, a provider that is enabled in config but unreachable in the sandbox (e.g. a docker daemon that isn't running) made the query exit 1 even though it correctly found the agent. The queries are now scoped to `--provider modal` (where the `my-task` agent lives), matching the provider-scoped discovery already used elsewhere in the same test module.

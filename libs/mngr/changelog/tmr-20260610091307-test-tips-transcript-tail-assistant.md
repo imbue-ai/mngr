@@ -1,0 +1,1 @@
+Strengthened the e2e tutorial test for `mngr transcript --tail 5 --role assistant` to assert the full expected set of surfaced messages, their chronological ordering, and (via JSONL output) the exact event count and roles -- making the role-filter-before-tail behavior explicit.

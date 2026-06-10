@@ -1,0 +1,1 @@
+Strengthened the `mngr --help` e2e test (`test_help_succeeds`) to assert that the `git` command and its push/pull summary appear in the help output, tying the tutorial's advertised "push, pull" commands to observable help behavior instead of a bare code comment.

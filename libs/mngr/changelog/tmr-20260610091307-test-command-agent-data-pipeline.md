@@ -1,0 +1,1 @@
+Fixed the `test_command_agent_data_pipeline` e2e release test so it scopes its `mngr list` call to `--provider modal`. The previously unscoped `mngr list` attempted to discover the `docker` provider, which is unavailable in the test environment, causing the command to exit non-zero and fail the test.

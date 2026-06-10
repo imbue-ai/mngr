@@ -1,0 +1,1 @@
+Fixed the `test_create_codex_positional` e2e tutorial test so its codex agent-type config is written to the local scope (`--scope local`), which opts into pytest config loading. Previously the test wrote to the default project scope, producing a `settings.toml` that the pytest config guard rejected and causing the subsequent `mngr create` to fail.

@@ -1,0 +1,1 @@
+Fixed the `test_command_agent_dev_server_extra_windows` e2e release test, which was failing under the default 10s per-test timeout. Creating a command agent (setting up the tmux session and the extra `-w logs` window) takes longer than 10s, so the test now uses `@pytest.mark.timeout(60)`, matching the sibling command-agent tests.

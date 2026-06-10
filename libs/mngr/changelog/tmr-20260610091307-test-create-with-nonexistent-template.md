@@ -1,0 +1,1 @@
+Added an e2e release test covering the case where `mngr create --template <name>` references a template while no templates are configured at all, verifying the error explains that no templates are configured and points to the `[create_templates.<name>]` config section.

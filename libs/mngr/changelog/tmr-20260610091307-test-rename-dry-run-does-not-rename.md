@@ -1,0 +1,1 @@
+Scoped the `mngr list` verification calls in the rename e2e tests to `--provider local`, matching the convention used by the other e2e tests that verify locally-created agents. This keeps the tests from failing when remote providers (e.g. Docker) are unavailable in the test environment, since `mngr list` treats an unreachable provider as a hard error.

@@ -1,0 +1,1 @@
+Fixed the `test_advanced_watch_dashboard_running` e2e tutorial test so it scopes the watch-dashboard query to the local provider, making it deterministic when no docker daemon is available, and added an assertion that the dashboard query reports no provider errors.

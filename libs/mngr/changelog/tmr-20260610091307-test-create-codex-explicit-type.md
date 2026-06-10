@@ -1,0 +1,1 @@
+Strengthened the `test_create_codex_explicit_type` e2e tutorial test: it now asserts the created codex agent records the exact configured command and verifies that command is actually running as a process inside the agent (via `mngr exec ... ps`), rather than only checking the agent's type and state.

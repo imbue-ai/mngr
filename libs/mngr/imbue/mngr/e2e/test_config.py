@@ -10,6 +10,7 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(300)
 def test_create_with_template(e2e: E2eSession) -> None:
     # Write a template that sets transfer=none (so agent runs in-place)
     cfg = ".$MNGR_ROOT_NAME/settings.local.toml"
@@ -46,12 +47,18 @@ def test_create_with_template(e2e: E2eSession) -> None:
     # runtime working directory (not just the metadata reported by `mngr list`).
     # With transfer=none the agent's cwd must be the repo itself, which is what
     # `work_dir` points at -- a worktree-based transfer would put it elsewhere.
-    pwd_result = e2e.run("mngr exec my-task pwd", comment="Confirm the agent runs in-place in the repo")
+    # Scope the address to the local provider (@localhost.local) so exec's agent
+    # discovery does not fan out to the (slow, network-bound) Modal provider, just
+    # like the `mngr list --provider local` call above.
+    pwd_result = e2e.run(
+        "mngr exec my-task@localhost.local pwd", comment="Confirm the agent runs in-place in the repo"
+    )
     expect(pwd_result).to_succeed()
     expect(pwd_result.stdout).to_contain(work_dir)
 
 
 @pytest.mark.release
+@pytest.mark.timeout(300)
 def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     """Unhappy path: creating with an unknown template fails with a helpful error.
 
@@ -82,6 +89,37 @@ def test_create_with_nonexistent_template(e2e: E2eSession) -> None:
     expect(result.stderr).to_contain("does_not_exist")
     expect(result.stderr).to_contain("not found")
     expect(result.stderr).to_contain("my_local_template")
+
+    # No agent should have been created by the failed command.
+    list_result = e2e.run("mngr list --provider local --format json", comment="Confirm no agent was created")
+    expect(list_result).to_succeed()
+    agents = json.loads(list_result.stdout)["agents"]
+    assert [a for a in agents if a["name"] == "my-task"] == []
+
+
+@pytest.mark.release
+def test_create_with_template_when_none_configured(e2e: E2eSession) -> None:
+    """Unhappy path: referencing a template with no templates configured at all.
+
+    Distinct from ``test_create_with_nonexistent_template``: there, at least one
+    template exists, so the error lists the available templates. Here no
+    ``[create_templates.*]`` section was ever written, so ``create`` must take the
+    other branch and tell the user that no templates are configured (rather than
+    printing an empty "Available templates:" list) and point them at the config.
+    """
+    # Reference a template without configuring any -- create must refuse and
+    # explain that no templates exist, not emit an empty available-templates list.
+    result = e2e.run(
+        "mngr create my-task --template does_not_exist --type command --no-ensure-clean --no-connect -- sleep 100069",
+        comment="Create with a template when no templates are configured",
+    )
+    expect(result).to_fail()
+    expect(result.stderr).to_contain("does_not_exist")
+    expect(result.stderr).to_contain("not found")
+    # The no-templates branch guides the user to where templates are defined
+    # instead of dumping an empty list of available templates.
+    expect(result.stderr).to_contain("No templates are configured")
+    expect(result.stderr).to_contain("create_templates")
 
     # No agent should have been created by the failed command.
     list_result = e2e.run("mngr list --provider local --format json", comment="Confirm no agent was created")

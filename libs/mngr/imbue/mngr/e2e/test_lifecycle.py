@@ -27,14 +27,19 @@ def test_full_lifecycle(e2e: E2eSession) -> None:
     # Stop
     expect(e2e.run("mngr stop my-task", comment="Stop the agent")).to_succeed()
 
-    list_after_stop = e2e.run("mngr list", comment="Verify agent is STOPPED")
+    # The agent is created on the local provider, so verification scopes `mngr
+    # list` to `--provider local`. An unscoped `mngr list` fans out to every
+    # enabled provider (Modal, Docker, ...) and aborts with exit code 1 whenever
+    # one is slow or unreachable -- e.g. when the Docker daemon is absent -- which
+    # has nothing to do with this local agent's lifecycle state.
+    list_after_stop = e2e.run("mngr list --provider local", comment="Verify agent is STOPPED")
     expect(list_after_stop).to_succeed()
     expect(list_after_stop.stdout).to_match(r"my-task\s+STOPPED")
 
     # Start
     expect(e2e.run("mngr start my-task", comment="Start the agent again")).to_succeed()
 
-    list_after_start = e2e.run("mngr list", comment="Verify agent is RUNNING after restart")
+    list_after_start = e2e.run("mngr list --provider local", comment="Verify agent is RUNNING after restart")
     expect(list_after_start).to_succeed()
     expect(list_after_start.stdout).to_match(r"my-task\s+(RUNNING|WAITING)")
 
@@ -54,6 +59,6 @@ def test_full_lifecycle(e2e: E2eSession) -> None:
     # Destroy
     expect(e2e.run("mngr destroy my-task --force", comment="Destroy the agent")).to_succeed()
 
-    list_after_destroy = e2e.run("mngr list", comment="Verify no agents remain")
+    list_after_destroy = e2e.run("mngr list --provider local", comment="Verify no agents remain")
     expect(list_after_destroy).to_succeed()
     expect(list_after_destroy.stdout).to_contain("No agents found")

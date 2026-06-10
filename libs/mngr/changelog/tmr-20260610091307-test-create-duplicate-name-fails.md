@@ -1,0 +1,1 @@
+Fixed the `test_create_duplicate_name_fails` e2e test so its post-rejection verification scopes `mngr list` to the local provider (`--provider local --format json`). Previously the unscoped `mngr list` fanned out to remote providers and exited non-zero when one (e.g. Docker) was unreachable, failing the test for reasons unrelated to the duplicate-name behavior under test.

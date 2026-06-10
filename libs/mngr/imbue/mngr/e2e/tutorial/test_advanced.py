@@ -53,6 +53,26 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
     expect(addrs).to_succeed()
     for task in tasks:
         expect(addrs.stdout).to_contain(f"{task}@")
+    # Appearing in --addrs only proves the agent *state* was registered. Verify
+    # that every fanned-out command actually launched and is alive by inspecting
+    # each agent's lifecycle state. A command agent running `sleep` has a live
+    # process but no user activity, so it reports WAITING rather than RUNNING;
+    # both states mean the agent's own tmux pane and expected `sleep` process are
+    # alive (see determine_lifecycle_state), whereas STOPPED/DONE/REPLACED would
+    # mean the fanned-out command never launched or already exited. This covers
+    # all four tasks, not just the single agent spot-checked via pgrep below.
+    listing = e2e.run(
+        "mngr list --provider local --format json",
+        comment="verify every fanned-out command launched and is alive",
+    )
+    expect(listing).to_succeed()
+    agents_by_name = {agent["name"]: agent for agent in json.loads(listing.stdout)["agents"]}
+    for task in tasks:
+        assert task in agents_by_name, f"{task} not in listed agents {sorted(agents_by_name)}"
+        assert agents_by_name[task]["state"] in ("RUNNING", "WAITING"), agents_by_name[task]
+        # The command field round-trips what the fan-out launched (`-- sleep 101010`),
+        # confirming each agent is running its own task command rather than idling.
+        assert "sleep 101010" in agents_by_name[task]["command"], agents_by_name[task]
     # Confirm the fan-out actually launched the task commands rather than only
     # registering agent state: exec onto an agent's (shared local) host and check
     # the sleep processes are alive. pgrep exits 0 only when it finds a match.
@@ -71,19 +91,38 @@ def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
         # monitor all agents in a refreshing dashboard (uses Unix watch(1))
         watch -n 5 mngr list --running
     """)
-    # No modal mark: with no remote hosts registered, `mngr list --running`
-    # only enumerates the local provider and never contacts modal. `watch`
-    # clears the screen and emits terminal escape codes, so here we only assert
-    # that the one-shot dashboard refresh exits cleanly.
+    # The e2e fixture leaves every remote provider (modal, docker) enabled, but
+    # this release run has no docker daemon, so an unscoped `mngr list --running`
+    # hard-fails during docker discovery. Scope the dashboard query to the
+    # always-available local provider (the same approach as the fan-out test) so
+    # the assertion is deterministic and does not depend on docker/modal being
+    # reachable. No modal mark is needed: scoping to local never shells out to
+    # the modal CLI binary that the resource guard watches.
+    #
+    # `watch` clears the screen and emits terminal escape codes, so for the
+    # tutorial command itself we only assert that the one-shot dashboard refresh
+    # exits cleanly under a 1s timeout.
     expect(
-        e2e.run("timeout 1 watch -n 5 mngr list --running || true", comment="watch refreshing dashboard")
+        e2e.run(
+            "timeout 1 watch -n 5 mngr list --running --provider local || true",
+            comment="watch refreshing dashboard",
+        )
     ).to_succeed()
-    # Verify the actual behavior of the command `watch` re-runs each tick: the
-    # underlying `mngr list --running` query succeeds and emits a well-formed
-    # dashboard (an `agents` list -- empty here, since nothing is running).
-    dashboard = e2e.run("mngr list --running --format json", comment="dashboard query underlying the watch loop")
+    # Verify the actual behavior `watch` re-runs each tick: the underlying
+    # `mngr list --running` query succeeds and emits a well-formed dashboard (an
+    # `agents` list -- empty here, since nothing is running).
+    dashboard = e2e.run(
+        "mngr list --running --provider local --format json",
+        comment="dashboard query underlying the watch loop",
+    )
     expect(dashboard).to_succeed()
-    assert json.loads(dashboard.stdout)["agents"] == [], dashboard.stdout
+    payload = json.loads(dashboard.stdout)
+    assert payload["agents"] == [], dashboard.stdout
+    # The dashboard must render cleanly: scoping to the reachable local provider
+    # means there are no provider-discovery errors to report (an unreachable
+    # provider would populate this list and is exactly what a live dashboard
+    # surfaces to the operator).
+    assert payload["errors"] == [], dashboard.stdout
 
 
 @pytest.mark.release
@@ -102,9 +141,10 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     # environment, which is enough to assert the documented JSONL contract.
     #
     # The stream emits an initial full discovery snapshot and then keeps running,
-    # so we bound it with `timeout` and treat the resulting SIGTERM exit as success.
+    # re-polling on a fixed interval, so we bound it with `timeout` (long enough to
+    # observe more than one poll) and treat the resulting SIGTERM exit as success.
     result = e2e.run(
-        "timeout 20 mngr observe --discovery-only || true",
+        "timeout 25 mngr observe --discovery-only || true",
         comment="JSONL stream of discovery events",
         timeout=45.0,
     )
@@ -115,10 +155,30 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     jsonl_lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert jsonl_lines, f"expected JSONL discovery output but got none. stderr:\n{result.stderr}"
     events = [json.loads(line) for line in jsonl_lines]
+    # Every event in the stream -- not just the snapshot -- must carry the standard
+    # event envelope so programmatic consumers can attribute, order, and
+    # de-duplicate events. The stream itself de-duplicates by event_id, so those
+    # ids must be unique across the whole stream.
+    for event in events:
+        assert event["source"] == "mngr/discovery", event
+        assert event["type"], event
+        assert event["event_id"], event
+        assert event["timestamp"], event
+    event_ids = [event["event_id"] for event in events]
+    assert len(event_ids) == len(set(event_ids)), f"duplicate event_ids in stream: {event_ids}"
     snapshots = [event for event in events if event.get("type") == "DISCOVERY_FULL"]
     assert snapshots, (
         f"expected a DISCOVERY_FULL snapshot in the stream, got types "
         f"{sorted({event.get('type') for event in events})}"
+    )
+    # `observe` is a *stream*, not a one-shot dump: it re-polls every
+    # _DISCOVERY_STREAM_POLL_INTERVAL_SECONDS (10s) and emits a fresh snapshot each
+    # time. Over the ~25s window we therefore expect it to re-emit at least one more
+    # snapshot beyond the initial one -- this is what distinguishes the documented
+    # streaming contract from a single discovery dump.
+    assert len(snapshots) >= 2, (
+        f"expected the stream to re-emit snapshots over time (streaming contract), "
+        f"got only {len(snapshots)}"
     )
     # Verify the documented full-snapshot contract on the first snapshot: it is
     # the baseline event consumers use to reconstruct state, so it must carry the
@@ -185,6 +245,62 @@ def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
     assert "Not a valid agent name" not in combined, f"exec mis-parsed its command: {combined}"
 
 
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(180)
+def test_advanced_collect_results_loop_missing_agent(e2e: E2eSession) -> None:
+    # Unhappy path for the same collect-results tutorial block: when the agent
+    # list references a name that was never created (a typo, or an agent that has
+    # since been destroyed), the loop must still iterate -- echoing each section
+    # header -- and surface a clear "agent not found" error for the missing one,
+    # while the real agent still reports its git history. This is the failure mode
+    # a user hits when one entry in their hand-maintained list goes stale.
+    e2e.write_tutorial_block("""
+        # collect results from all agents
+        for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
+          echo "=== $agent ==="
+          mngr exec "$agent" "git log --oneline -3"
+        done
+    """)
+    expect(
+        e2e.run(
+            "mngr create fix-auth --type command --no-ensure-clean --no-connect -- sleep 101015",
+            comment="create fix-auth",
+        )
+    ).to_succeed()
+    # Run the collect loop over one real agent plus one that does not exist. The
+    # loop's exit status reflects only its last iteration (the failing exec), so
+    # we deliberately do not assert success here.
+    result = e2e.run(
+        (
+            'for agent in "fix-auth" "ghost-agent"; do'
+            '   echo "=== $agent ==="; mngr exec "$agent" "git log --oneline -3";'
+            " done"
+        ),
+        comment="collect results when one agent in the list is missing",
+        timeout=120.0,
+    )
+    combined = result.stdout + result.stderr
+    # Both section headers print: each loop iteration echoes before running exec,
+    # so a failure on one agent does not abort the loop.
+    assert "=== fix-auth ===" in result.stdout, f"missing real-agent header: {result.stdout}"
+    assert "=== ghost-agent ===" in result.stdout, f"missing ghost-agent header: {result.stdout}"
+    # The real agent still reports its git history and a success line.
+    assert "Initial commit" in result.stdout, f"real agent produced no git history: {result.stdout}"
+    assert "Command succeeded on agent fix-auth" in combined, f"exec did not succeed on fix-auth: {combined}"
+    # The missing agent produces a clear "not found" error rather than silently
+    # succeeding, mis-parsing its command, or crashing the loop.
+    assert "ghost-agent" in combined, f"error did not name the missing agent: {combined}"
+    assert "Not a valid agent name" not in combined, f"exec mis-parsed its command: {combined}"
+    assert "No agent" in combined or "not found" in combined.lower(), (
+        f"missing agent did not produce an agent-not-found error: {combined}"
+    )
+    assert "Command succeeded on agent ghost-agent" not in combined, (
+        f"exec must not report success for a nonexistent agent: {combined}"
+    )
+
+
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -206,9 +322,14 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # the Modal environment does not exist yet, bootstraps the environment too).
     expect(e2e.run(create_cmd, comment="use --reuse to make create idempotent", timeout=150.0)).to_succeed()
 
-    # Capture the agent ID of the newly created my-task agent.
+    # Capture the agent ID of the newly created my-task agent. Scope the query to
+    # the modal provider (where my-task lives): `mngr list` defaults to
+    # --on-error abort, so an unrelated provider being unreachable (e.g. a docker
+    # daemon that isn't running in this sandbox) would otherwise make this exit 1
+    # even though it found the agent. This mirrors the provider-scoped discovery
+    # in test_advanced_fan_out_create above.
     first_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="record the my-task agent ID after first create",
     )
     expect(first_list).to_succeed()
@@ -234,7 +355,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 
     # The reuse must not have created a second agent: same single ID as before.
     second_list = e2e.run(
-        "mngr list --include 'name == \"my-task\"' --ids",
+        "mngr list --provider modal --include 'name == \"my-task\"' --ids",
         comment="verify --reuse did not create a duplicate agent",
     )
     expect(second_list).to_succeed()
@@ -258,7 +379,12 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     # `mngr list` is the content the dashboard refreshes. Run it directly (under
     # `watch` with a sub-second timeout it is killed during mngr's cold start
     # before producing output) so we can assert the agent actually shows up.
-    list_result = e2e.run("mngr list", comment="the live dashboard content")
+    # Scope to the local provider so the verification depends only on the local
+    # agent we just created: with the default `--on-error abort`, an enabled-but-
+    # unreachable remote provider (e.g. Docker not running) would abort the whole
+    # listing with a non-zero exit even though the local row is printed. The
+    # tutorial command below still runs the unscoped `mngr list` under `watch`.
+    list_result = e2e.run("mngr list --provider local", comment="the live dashboard content")
     expect(list_result).to_succeed()
     # The dashboard row shows the agent name alongside its live state (RUNNING or
     # WAITING depending on timing for the sleep command agent).
@@ -282,8 +408,14 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     _create_my_task(e2e, 101015)
     # Capture the id mngr records for my-task so we can confirm exec ran inside
     # *that* agent's environment, not merely that some env was dumped. Only one
-    # agent exists, so `mngr list --ids` prints exactly its id.
-    list_result = e2e.run("mngr list --ids", comment="get the agent id to cross-check the exec env")
+    # agent exists, so `mngr list --ids` prints exactly its id. Scope discovery
+    # to the local provider so the cross-check does not depend on (or contact)
+    # the remote providers left enabled in the e2e fixture -- this test is not
+    # marked @pytest.mark.modal/docker, and an unreachable docker daemon would
+    # otherwise make an unscoped `mngr list` exit non-zero.
+    list_result = e2e.run(
+        "mngr list --provider local --ids", comment="get the agent id to cross-check the exec env"
+    )
     expect(list_result).to_succeed()
     agent_id = list_result.stdout.strip()
     assert agent_id, f"expected an agent id from `mngr list --ids`, got: {list_result.stdout!r}"
@@ -313,6 +445,19 @@ def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
         # or use exec to see something across a bunch of hosts by combining with mngr list:
         mngr list --include 'host.provider == "modal"' --ids | mngr exec - 'echo $MNGR_AGENT_ID && env | sort'
     """)
+    # This example is modal-only, so disable the docker provider. Otherwise
+    # discovery tries to reach a docker daemon and `mngr list` exits non-zero
+    # when none is running (e.g. in CI, which executes release tests inside the
+    # release image with no docker daemon). An unrelated provider being down
+    # should not block exec'ing across modal hosts -- this mirrors the remedy
+    # mngr prints for an unavailable provider.
+    expect(
+        e2e.run(
+            "mngr config set --scope user providers.docker.is_enabled false",
+            comment="disable the docker provider (unused by this modal-only example)",
+            timeout=30.0,
+        )
+    ).to_succeed()
     # Create a modal command agent so the filtered list has a real modal host to
     # fan out across (the tutorial demonstrates exec'ing over modal hosts).
     expect(
@@ -352,6 +497,20 @@ def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
         # if you want to get really fancy, you can use xargs to run in parallel across hosts:
         mngr list --include 'host.provider == "modal"' --ids | xargs -P 5 -I {} mngr exec {} 'echo $MNGR_AGENT_ID && pwd'
     """)
+    # The tutorial pipeline only ever talks to modal hosts, but `mngr list`
+    # discovers across every enabled provider before applying the
+    # `host.provider == "modal"` filter. If an unrelated provider (e.g. docker)
+    # is not reachable, discovery records an error and `mngr list` exits 1 even
+    # though the modal ids print correctly. Disable the docker provider in this
+    # test's isolated user config so the modal-only tutorial does not hinge on a
+    # provider it never uses. This is setup, not part of the demonstrated block.
+    expect(
+        e2e.run(
+            "mngr config set --scope user providers.docker.is_enabled false",
+            comment="scope discovery to modal: the tutorial never touches docker",
+            timeout=60.0,
+        )
+    ).to_succeed()
     # Stand up a real modal host (a cheap `sleep` command agent) so the pipeline
     # has something to fan out across. Without a host, `mngr list` returns no ids
     # and xargs runs nothing, making the test a no-op. Creating the host also
@@ -430,6 +589,7 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(180)
 def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) -> None:
     e2e.write_tutorial_block("""
         # check the transcript to see what an agent has been up to
@@ -465,8 +625,27 @@ def test_tips_transcript_tail_assistant(e2e: E2eSession, temp_host_dir: Path) ->
         comment="check the transcript to see what an agent has been up to",
     )
     expect(result).to_succeed()
-    # Only the last five assistant messages, and no user messages.
-    assert "ASSISTANT_MSG_7" in result.stdout, result.stdout
-    assert "ASSISTANT_MSG_3" in result.stdout, result.stdout
+    # The role filter is applied *before* --tail, so the output is the last five
+    # *assistant* messages (3..7), not the assistant messages among the last five
+    # *events* (which would be only 5..7). Verify the full expected set is present.
+    for i in (3, 4, 5, 6, 7):
+        assert f"ASSISTANT_MSG_{i}" in result.stdout, result.stdout
+    # The two oldest assistant messages fall outside the tail window.
+    assert "ASSISTANT_MSG_1" not in result.stdout, result.stdout
     assert "ASSISTANT_MSG_2" not in result.stdout, result.stdout
+    # The role filter excludes every user message.
     assert "USER_MSG" not in result.stdout, result.stdout
+    # Messages are shown oldest-first (chronological), so the tail boundary
+    # message precedes the most recent one in the rendered output.
+    assert result.stdout.index("ASSISTANT_MSG_3") < result.stdout.index("ASSISTANT_MSG_7"), result.stdout
+    # Confirm the exact count and that every surfaced event is an assistant
+    # message by re-running with machine-readable output (mirrors how a human
+    # would sanity-check the cap against the raw events).
+    jsonl = e2e.run(
+        "mngr transcript my-task --tail 5 --role assistant --format jsonl",
+        comment="same query as JSONL to verify the exact event count and roles",
+    )
+    expect(jsonl).to_succeed()
+    lines = [json.loads(line) for line in jsonl.stdout.splitlines() if line.strip()]
+    assert len(lines) == 5, f"expected exactly 5 tailed assistant events, got {len(lines)}: {jsonl.stdout}"
+    assert all(event["type"] == "assistant_message" for event in lines), jsonl.stdout

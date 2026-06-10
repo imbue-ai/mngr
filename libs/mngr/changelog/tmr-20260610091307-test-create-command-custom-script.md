@@ -1,0 +1,1 @@
+Fixed the `test_create_command_custom_script` e2e tutorial test so its `mngr list` verification is scoped to `--provider local`, matching the sibling agent-type tests. The unscoped listing failed outright (nonzero exit) when the Docker provider was unreachable in the test environment.

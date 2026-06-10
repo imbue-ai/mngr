@@ -45,6 +45,44 @@ def test_config_list(e2e: E2eSession) -> None:
 
 @pytest.mark.timeout(60)
 @pytest.mark.release
+def test_config_list_omits_unset_defaults(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # list all configuration values
+        mngr config list
+    """)
+    # Same block as test_config_list, but asserting the *defining* contract of
+    # the default view: it shows only keys explicitly written to a config file,
+    # whereas `--all` adds every settable field with its defaulted value. A set
+    # value (`headless`) must appear in both, but the plain view must be a strict
+    # subset of `--all` -- if the filtering regressed (e.g. `list` started
+    # dumping defaults like `--all`), the key sets would match and this fails.
+    expect(
+        e2e.run(
+            "mngr config set headless true --scope local",
+            comment="persist a known config value for verification",
+        )
+    ).to_succeed()
+    filtered = e2e.run("mngr config list --format json", comment="list explicitly-set configuration values")
+    expect(filtered).to_succeed()
+    full = e2e.run("mngr config list --all --format json", comment="list every settable field including defaults")
+    expect(full).to_succeed()
+
+    filtered_keys = set(json.loads(filtered.stdout)["config"].keys())
+    full_keys = set(json.loads(full.stdout)["config"].keys())
+    # The value we set shows up in both views.
+    assert "headless" in filtered_keys, filtered.stdout
+    assert "headless" in full_keys, full.stdout
+    # The plain view is the explicitly-set projection of the full view: it must
+    # be a strict subset, so `--all` surfaces at least one defaulted key that the
+    # plain view omits.
+    assert filtered_keys < full_keys, (
+        f"expected `list` keys to be a strict subset of `list --all` keys; "
+        f"plain={sorted(filtered_keys)} all={sorted(full_keys)}"
+    )
+
+
+@pytest.mark.timeout(60)
+@pytest.mark.release
 def test_config_list_json(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # list all configuration values
@@ -62,7 +100,14 @@ def test_config_list_json(e2e: E2eSession) -> None:
     result = e2e.run("mngr config list --format json", comment="list all configuration values as JSON")
     expect(result).to_succeed()
     payload = json.loads(result.stdout)
+    # The persisted value round-trips into the merged JSON document.
     assert payload["config"]["headless"] is True, payload
+    # This is the merged (no-`--scope`) view, so the document carries only the
+    # "config" object -- the per-scope "scope"/"path" fields are emitted solely
+    # for scoped listings. Asserting their absence confirms `list` without a
+    # scope really returns the merged document rather than a single scope's file.
+    assert "scope" not in payload, payload
+    assert "path" not in payload, payload
 
 
 # Runs three sequential `mngr` subprocesses; each cold-start costs several seconds,
@@ -135,10 +180,36 @@ def test_config_get_missing_key(e2e: E2eSession) -> None:
         mngr config get commands.create.provider
     """)
     # Unhappy path for the same tutorial command: reading a key that has not
-    # been set fails with a non-zero exit and a clear "Key not found" message.
+    # been set fails with a clear "Key not found" message. The implementation
+    # deterministically calls ctx.exit(1), so pin the exact code rather than just
+    # "non-zero" -- this catches a regression that swaps in a different failure code.
     result = e2e.run("mngr config get commands.create.provider", comment="get a specific config value")
-    expect(result).to_fail()
+    expect(result).to_have_exit_code(1)
     expect(result.stderr).to_contain("Key not found: commands.create.provider")
+    # The diagnostic belongs on stderr only; stdout must stay empty so a caller
+    # piping stdout (e.g. `provider=$(mngr config get ...)`) never captures the
+    # error text as if it were a value.
+    expect(result.stdout.strip()).to_be_empty()
+
+
+@pytest.mark.release
+def test_config_get_missing_key_json(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # get a specific config value
+        mngr config get commands.create.provider
+    """)
+    # Same unhappy path as test_config_get_missing_key, but exercising the
+    # machine-readable branch (`--format json`). Unlike human mode -- where the
+    # error goes to stderr and stdout stays empty -- JSON mode emits a structured
+    # error document on stdout so programmatic callers can branch on it, while
+    # still failing with exit code 1.
+    result = e2e.run(
+        "mngr config get commands.create.provider --format json",
+        comment="get a specific config value",
+    )
+    expect(result).to_have_exit_code(1)
+    payload = json.loads(result.stdout)
+    assert payload == {"error": "Key not found: commands.create.provider", "key": "commands.create.provider"}, payload
 
 
 @pytest.mark.release
@@ -177,11 +248,61 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     result = e2e.run("mngr config set totally_unknown_key value", comment="setting an unknown key is rejected")
     expect(result).to_fail()
     expect(result.stderr).to_contain("Unknown configuration fields")
-    # The rejected write must not be persisted: the project settings file (which
-    # the fixture seeds with only the pytest opt-in) must not gain the bad key.
-    settings = e2e.run("cat .$MNGR_ROOT_NAME/settings.toml", comment="verify the invalid value was not written")
+    # The rejected write must not be persisted. `config set` validates the key
+    # before saving, so a rejected set never even creates the file. The fixture
+    # does NOT seed a project-scope settings.toml, so after the rejection the
+    # project config file must still be absent -- the strongest possible proof
+    # that the bad key was not written.
+    settings_exists = e2e.run(
+        "test -e .$MNGR_ROOT_NAME/settings.toml", comment="verify no project settings file was written"
+    )
+    expect(settings_exists).to_fail()
+
+
+# Runs two mngr subprocesses (set then set again) plus a read-back, so it needs more
+# than the default 10s per-test timeout.
+@pytest.mark.timeout(60)
+@pytest.mark.release
+def test_config_set_overwrites_existing(e2e: E2eSession) -> None:
+    # Shares the `mngr config set` tutorial block; this exercises the edge case of
+    # writing a key that is already set. `set` must update the value in place --
+    # the latest write wins, and the settings file must not end up with a
+    # duplicate entry for the key (which would be invalid TOML).
+    e2e.write_tutorial_block("""
+        # set a config value (at the default scope)
+        mngr config set commands.create.provider modal
+    """)
+    # We need two sequential `mngr` writes here, so we target the *local* scope:
+    # its settings.local.toml is the file the fixture seeds with the pytest
+    # opt-in, and `set` preserves that opt-in, so the second invocation can still
+    # load the file it just wrote. (Writing twice at the default project scope
+    # would trip the pytest-opt-in guard on the second command, since the
+    # freshly-written settings.toml does not carry is_allowed_in_pytest -- see
+    # test_config_set. The overwrite-in-place behavior is itself scope-independent,
+    # and the default scope is already covered by test_config_set.)
+    expect(
+        e2e.run("mngr config set commands.create.provider modal --scope local", comment="set a config value")
+    ).to_succeed()
+    # Second write to the same key with a different value must overwrite it.
+    overwrite = e2e.run(
+        "mngr config set commands.create.provider docker --scope local",
+        comment="overwrite the same key with a new value",
+    )
+    expect(overwrite).to_succeed()
+    expect(overwrite.stdout).to_contain("docker")
+
+    # Read the local settings file the way a human would when debugging: the new
+    # value must be present, the old one gone, and the key must appear exactly
+    # once (no duplicate table entry).
+    settings = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.local.toml", comment="inspect the overwritten local settings file"
+    )
     expect(settings).to_succeed()
-    expect(settings.stdout).not_to_contain("totally_unknown_key")
+    expect(settings.stdout).to_contain('provider = "docker"')
+    expect(settings.stdout).not_to_contain('provider = "modal"')
+    assert settings.stdout.count("provider =") == 1, (
+        f"expected exactly one provider entry after overwrite, got:\n{settings.stdout}"
+    )
 
 
 # Runs several mngr subprocesses (set plus read-backs), so it needs more than the
@@ -320,14 +441,13 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
     fake_editor.chmod(0o755)
 
     # Resolve the project-scope config path (the default scope for `config edit`).
-    # The e2e fixture seeds this file (settings.toml) with the pytest opt-in, so
-    # it already exists; the marker we stamp in below is what proves the editor
-    # was handed this exact file.
+    # The e2e fixture deliberately does NOT seed this file, so this exercises the
+    # genuine first-use behavior: the project config file does not yet exist, and
+    # `config edit` must create it from a template before opening the editor.
     path_result = e2e.run("mngr config path --scope project --format json", comment="resolve the project config path")
     expect(path_result).to_succeed()
     config_path = Path(json.loads(path_result.stdout)["path"])
-    assert config_path.exists(), f"expected the fixture to have seeded {config_path}"
-    assert "# edited by fake editor" not in config_path.read_text(), "marker must not be present before editing"
+    assert not config_path.exists(), f"expected the project config file not to exist yet, found {config_path}"
 
     # open the config file in your editor
     expect(
@@ -338,7 +458,11 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
     # was persisted into that file -- proving `config edit` opened the real file.
     assert recorded_path.exists(), "fake editor was never invoked"
     expect(recorded_path.read_text().strip()).to_equal(str(config_path))
-    expect(config_path.read_text()).to_contain("# edited by fake editor")
+    # `config edit` created the file from its template (header) before opening the
+    # editor, which then appended our marker -- so both must be present on disk.
+    edited_text = config_path.read_text()
+    expect(edited_text).to_contain("# mngr configuration file")
+    expect(edited_text).to_contain("# edited by fake editor")
 
 
 @pytest.mark.release
@@ -359,6 +483,29 @@ def test_config_edit_editor_failure(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+def test_config_edit_editor_failure_propagates_exact_exit_code(e2e: E2eSession, temp_git_repo: Path) -> None:
+    # Shares the `mngr config edit` tutorial block. The sibling
+    # test_config_edit_editor_failure uses /bin/false, which always exits 1 --
+    # so it cannot tell "propagates the editor's exact code" apart from
+    # "hardcodes 1". Here we drive the command with a fake editor that exits
+    # with a distinctive, non-default code (42) to prove the command forwards
+    # the editor's actual exit status rather than substituting its own.
+    e2e.write_tutorial_block("""
+        # open the config file in your editor
+        mngr config edit
+    """)
+    fake_editor = temp_git_repo / "exit_42_editor.sh"
+    fake_editor.write_text("#!/bin/sh\nexit 42\n")
+    fake_editor.chmod(0o755)
+
+    result = e2e.run(f"EDITOR={fake_editor} mngr config edit", comment="editor exits with a distinctive code")
+    # The exact code (42), not a generic non-zero, confirms ctx.exit forwards
+    # the editor's returncode unchanged.
+    expect(result).to_have_exit_code(42)
+    expect(result.stderr).to_contain("Editor exited with error: 42")
+
+
+@pytest.mark.release
 def test_config_edit_scope(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # open a specific scope's config file
@@ -371,6 +518,15 @@ def test_config_edit_scope(e2e: E2eSession) -> None:
     expect(path_result).to_succeed()
     project_config_path = path_result.stdout.strip()
     assert project_config_path, "expected `config path --scope project` to print a path"
+
+    # The fixture deliberately does NOT seed the project-scope settings.toml, so
+    # the file should not exist yet. Confirming its absence up front is what makes
+    # the "creates it from a template" assertion below meaningful -- otherwise the
+    # template header could have been present before the edit ran.
+    absent_before = e2e.run(
+        f"test -e {shlex.quote(project_config_path)}", comment="confirm the project config file does not exist yet"
+    )
+    expect(absent_before).to_fail()
 
     # `mngr config edit` spawns $EDITOR; force it to /bin/true so the command
     # returns immediately with success instead of blocking on a real editor.
@@ -405,13 +561,23 @@ def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
         "VISUAL= EDITOR=/nonexistent/definitely-not-a-real-editor mngr config edit --scope project",
         comment="config edit with a missing editor",
     )
-    expect(result).to_fail()
+    # The command propagates a clean exit code 1 for the missing-editor case (it
+    # calls ctx.exit(1) explicitly), not just some arbitrary non-zero code.
+    expect(result).to_have_exit_code(1)
     combined_output = result.stdout + result.stderr
+    # Before failing, the command resolves the project-scope file and reaches the
+    # launch stage -- so it announces the file it tried to open. This confirms the
+    # failure is the editor itself, not an earlier scope-resolution problem.
+    expect(combined_output).to_contain("Opening")
+    expect(combined_output).to_contain("settings.toml")
     expect(combined_output).to_contain("Editor not found")
     # The error names the missing editor and points the user at the env vars to
-    # set, so the failure is actionable rather than a bare traceback.
+    # set, so the failure is actionable rather than a bare traceback. Both vars
+    # are named (the test cleared $VISUAL so $EDITOR is the one actually consulted,
+    # but the guidance must mention both ways to fix it).
     expect(combined_output).to_contain("/nonexistent/definitely-not-a-real-editor")
     expect(combined_output).to_contain("$EDITOR")
+    expect(combined_output).to_contain("$VISUAL")
 
 
 @pytest.mark.release
