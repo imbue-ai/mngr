@@ -827,6 +827,7 @@ tests or lost first messages.
 - Plugin docs: `libs/mngr/docs/concepts/plugins.md`, `docs/concepts/agent_types.md`,
   `docs/concepts/idle_detection.md`
 - Reference plugins: `libs/mngr_claude/`, `libs/mngr_antigravity/` (the antigravity README
-  is the single best worked example -- it documents each parity decision inline)
-- Stubs: `libs/mngr_opencode/`, `libs/mngr_pi_coding/`,
+  is the single best worked example -- it documents each parity decision inline),
+  `libs/mngr_pi_coding/` (the near-complete extension-based port)
+- Stubs: `libs/mngr_opencode/`,
   `libs/mngr/imbue/mngr/agents/default_plugins/codex_agent.py`
