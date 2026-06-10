@@ -1747,7 +1747,7 @@ async def _handle_set_workspace_color_api(
     semantics, so other labels are preserved), optimistically updates
     the resolver's snapshot so the next SSE workspaces tick reflects the
     new color without waiting for the discovery refresh, and returns
-    ``{"agent_id": ..., "color": "<rrggbb>"}``.
+    ``{"agent_id": ..., "color": "#rrggbb"}``.
     """
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
         return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
