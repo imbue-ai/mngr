@@ -6,18 +6,11 @@
 // settings page can validate user input and the create page can render
 // swatches off the same palette the server uses.
 //
-// The legacy SHA-256-from-agent-id accent (``get`` + ``hueFromAgentId``)
-// is retained during the rollout so existing consumers continue to work
-// while the read/write paths are wired up; it is removed in a follow-up
-// commit once the SSE payload becomes the single source of truth.
-//
 // Usage:
 //   window.mindsAccent.palette                 -> {name: '#rrggbb', ...}
 //   window.mindsAccent.defaultColor            -> '#0b292b' (confusion)
 //   window.mindsAccent.normalizeHex(value)     -> '#rrggbb' | null
 //   window.mindsAccent.pickForegroundForHex(h) -> '0 0 0' | '255 255 255'
-//   window.mindsAccent.get(agentId, cb)        -> [legacy] SHA-derived oklch
-//   window.mindsAccent.pickForeground()        -> [legacy] no-arg, returns '0 0 0'
 (function () {
   // Workspace palette. Mirrors WORKSPACE_PALETTE in templates.py;
   // templates_test.py parses this file and asserts the two stay in
@@ -75,51 +68,10 @@
     return luminance > FOREGROUND_LUMINANCE_THRESHOLD ? '0 0 0' : '255 255 255';
   }
 
-  // -- Legacy SHA-from-agent-id accent (slated for removal). --
-  //
-  // Retained during the palette rollout so chrome.js / sidebar.js stay
-  // green while the SSE-backed color label propagates through the read
-  // and write paths. The values it returns are still OKLCH so any
-  // consumer reading from this helper sees the pre-palette colors --
-  // intentional, so a half-rolled-out system doesn't mix palette and
-  // hash colors in the same UI.
-  var ACCENT_L = 85;
-  var ACCENT_C = 0.08;
-  var colorCache = {};
-  var hueCache = {};
-
-  function hueFromAgentId(agentId) {
-    var cached = hueCache[agentId];
-    if (cached !== undefined) return Promise.resolve(cached);
-    var enc = new TextEncoder().encode(agentId);
-    return crypto.subtle.digest('SHA-256', enc).then(function (digest) {
-      var view = new DataView(digest);
-      var hue = view.getUint32(0, false) % 360;
-      hueCache[agentId] = hue;
-      return hue;
-    });
-  }
-
-  function pickForeground() {
-    return '0 0 0';
-  }
-
-  function get(agentId, cb) {
-    if (colorCache[agentId] !== undefined) { cb(colorCache[agentId]); return; }
-    hueFromAgentId(agentId).then(function (hue) {
-      var c = 'oklch(' + ACCENT_L + '% ' + ACCENT_C + ' ' + hue + ')';
-      colorCache[agentId] = c;
-      cb(c);
-    });
-  }
-
   window.mindsAccent = {
     palette: WORKSPACE_PALETTE,
     defaultColor: DEFAULT_WORKSPACE_COLOR,
     normalizeHex: normalizeHex,
     pickForegroundForHex: pickForegroundForHex,
-    // Legacy surface -- removed in a follow-up commit.
-    get: get,
-    pickForeground: pickForeground,
   };
 })();

@@ -10,11 +10,11 @@
 
   // -- Per-agent accent color ------------------------------------------------
   //
-  // The shared `window.mindsAccent.get(agentId, cb)` helper (loaded from
-  // /_static/workspace_accent.js) mirrors workspace_accent() in templates.py.
-  // The server also attaches `accent` to each workspace dict over SSE so the
-  // client doesn't need to compute in the common case.
-  function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
+  // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
+  // (#rrggbb) and ``accent_fg`` (RGB triple for the contrasting titlebar
+  // foreground). The chrome caches both per agent id (see
+  // ``rememberWorkspaceAccents`` below) so accent application is a
+  // synchronous lookup. No client-side hash or hex math.
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
@@ -76,37 +76,44 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  // Tracks the in-flight accent target so the async ``getAccent`` callback
-  // can guard against landing after a newer accent application has already
-  // been kicked off. (``pickForeground`` is synchronous and applied inline,
-  // so it doesn't need a token.) Independent of ``currentTitleAgentId`` so
-  // the accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
-  // can apply colors without claiming to represent the displayed workspace.
-  var pendingAccentAgentId = null;
+  // Per-agent {accent, accent_fg} map populated from each SSE
+  // ``workspaces`` payload. ``applyTitleAccent`` reads from this cache
+  // so accent application is synchronous -- no more async SHA-from-id.
+  // Workspaces missing from the cache (e.g. an agentId for which no SSE
+  // tick has arrived yet) leave the accent unset on this call and get
+  // painted by ``renderWorkspaces`` on the next tick.
+  var accentByAgentId = {};
+  function rememberWorkspaceAccents(workspaces) {
+    if (!workspaces) return;
+    workspaces.forEach(function (w) {
+      if (!w || !w.id) return;
+      accentByAgentId[w.id] = {
+        accent: typeof w.accent === 'string' ? w.accent : null,
+        fg: typeof w.accent_fg === 'string' ? w.accent_fg : null,
+      };
+    });
+  }
+
   function applyTitleAccent(agentId) {
     if (!agentId) {
-      pendingAccentAgentId = null;
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
       document.documentElement.style.removeProperty('--titlebar-fg');
       return;
     }
-    pendingAccentAgentId = agentId;
-    // ``pickForeground`` is synchronous (the threshold depends only on the
-    // accent's lightness, which is constant for today's hash-derived
-    // accents), so we apply ``--titlebar-fg`` immediately. The background
-    // color resolves asynchronously via SHA-256; the in-flight token
-    // (``pendingAccentAgentId``) guards against a stale callback landing
-    // after a newer ``applyTitleAccent`` has been kicked off.
-    document.documentElement.style.setProperty(
-      '--titlebar-fg',
-      window.mindsAccent.pickForeground(),
-    );
-    getAccent(agentId, function (c) {
-      if (pendingAccentAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--workspace-accent', c);
-      document.documentElement.style.setProperty('--titlebar-bg', c);
-    });
+    var cached = accentByAgentId[agentId];
+    if (!cached || !cached.accent) {
+      // No SSE entry for this agent yet (cold start, workspace just
+      // created, etc.). Leave the bar at whatever it was; the next
+      // ``workspaces`` tick will populate the cache and a follow-up
+      // call paints it.
+      return;
+    }
+    document.documentElement.style.setProperty('--workspace-accent', cached.accent);
+    document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
+    if (cached.fg) {
+      document.documentElement.style.setProperty('--titlebar-fg', cached.fg);
+    }
   }
   // Update the "displayed workspace" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
@@ -371,8 +378,6 @@
         }
         if (typeof w.accent === 'string') {
           row.style.setProperty('--workspace-accent', w.accent);
-        } else {
-          getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
         }
         row.addEventListener('click', function () { selectWorkspace(w.id); });
         container.appendChild(row);
@@ -389,7 +394,14 @@
 
   function handleChromeEvent(data) {
     try {
-      if (data.type === 'workspaces') renderWorkspaces(data.workspaces);
+      if (data.type === 'workspaces') {
+        rememberWorkspaceAccents(data.workspaces);
+        renderWorkspaces(data.workspaces);
+        // If the titlebar already has an active agentId but the cache
+        // was empty until this tick (cold start), re-apply now so the
+        // bar paints without waiting for another navigation event.
+        if (currentTitleAgentId) applyTitleAccent(currentTitleAgentId);
+      }
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);
       if (data.type === 'system_interface_status') handleSystemInterfaceStatus(data.agent_id, data.status);

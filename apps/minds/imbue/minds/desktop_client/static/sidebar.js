@@ -10,12 +10,10 @@
   // Workspace links go to the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
-  // Per-agent accent color comes from the shared
-  // `window.mindsAccent.get(agentId, cb)` helper in
-  // /_static/workspace_accent.js (itself mirroring workspace_accent() in
-  // templates.py). Used only when a workspace dict arrives without an
-  // `accent` field from the server.
-  function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
+  // Per-workspace accent comes from the SSE ``workspaces`` payload's
+  // ``accent`` (#rrggbb) field. Workspaces without one (shouldn't
+  // happen post-migration -- every primary agent carries a color
+  // label) skip the inline style and fall back to the CSS default.
 
   function selectWorkspace(agentId) {
     if (isElectron) window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
@@ -93,8 +91,6 @@
         row.appendChild(btn);
         if (typeof w.accent === 'string') {
           row.style.setProperty('--workspace-accent', w.accent);
-        } else {
-          getAccent(w.id, function (c) { row.style.setProperty('--workspace-accent', c); });
         }
         container.appendChild(row);
       });
