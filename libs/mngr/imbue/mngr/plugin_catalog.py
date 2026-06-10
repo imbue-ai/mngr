@@ -65,6 +65,12 @@ class OpenCodeSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("opencode", "--version")
 
 
+class CodexSignalCheck(SignalCheck):
+    """Detects whether the OpenAI Codex CLI is installed."""
+
+    command: tuple[str, ...] = ("codex", "--version")
+
+
 class AntigravitySignalCheck(SignalCheck):
     """Detects whether the Antigravity CLI is installed."""
 
@@ -92,6 +98,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
+_CODEX_SIGNAL: Final[CodexSignalCheck] = CodexSignalCheck()
 _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
@@ -133,6 +140,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         is_recommended=True,
     ),
     CatalogEntry(
+        entry_point_name="codex",
+        package_name="imbue-mngr-codex",
+        description="Codex agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_CODEX_SIGNAL,
+        is_recommended=True,
+    ),
+    CatalogEntry(
         entry_point_name="antigravity",
         package_name="imbue-mngr-antigravity",
         description="Antigravity agent type plugin for mngr",
@@ -146,6 +161,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_PI_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="modal",
