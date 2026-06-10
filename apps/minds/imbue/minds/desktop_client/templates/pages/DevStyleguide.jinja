@@ -249,23 +249,31 @@
         <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
       </div>
 
-      {# Sidebar items #}
+      {# Sidebar items. The sidebar is rendered as a floating menu inside the
+         shared modal WebContentsView (Electron) or as an inline overlay
+         (browser). Each row is built dynamically by static/chrome.js and
+         static/sidebar.js -- the styleguide bakes the class string + a
+         placeholder accent dot inline so the visual catalog stays
+         faithful without needing JS-driven accent assignment. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
-        <div class="w-[260px] rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="py-2">
-            <div class="sidebar-item is-current cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors bg-white/5">
-              current-workspace
-            </div>
-            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-              another-workspace
-            </div>
-            <div class="sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5">
-              third-one
-            </div>
+        <div class="w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] overflow-hidden">
+          <div class="sidebar-item is-current group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white bg-white/15">
+            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 230);"></span>
+            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">current-workspace</span>
+          </div>
+          <div class="sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/5">
+            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 70);"></span>
+            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">another-workspace</span>
+          </div>
+          <div class="sidebar-item is-stale group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/5">
+            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 320);"></span>
+            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">stale-workspace</span>
+            <span class="sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0"
+                  title="This workspace's provider had a discovery error; its status is unverified (still usable)."></span>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">static/sidebar.js + static/chrome.js (rendered dynamically) :: .sidebar-item from tokens.css</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">static/sidebar.js + static/chrome.js (rendered dynamically) :: .sidebar-item from tokens.css; SidebarBottom.jinja for the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
       </div>
 
       {# Accent spine #}
