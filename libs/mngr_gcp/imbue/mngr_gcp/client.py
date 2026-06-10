@@ -316,9 +316,22 @@ class GcpVpsClient(VpsClientInterface):
         self.resolve_firewall()
 
         instance_name = _make_instance_name(label, tags)
-        ssh_metadata_value = "\n".join(
-            f"{GCE_SSH_USERNAME}:{self._ssh_public_keys_by_id[key_id]}" for key_id in ssh_key_ids
-        )
+        # GCE keeps SSH keys only in per-instance metadata (no provider key
+        # resource), so the public key must have been stashed in this process by
+        # a prior upload_ssh_key call. A missing id means the caller broke that
+        # in-process handoff; surface a typed error rather than a bare KeyError.
+        ssh_metadata_lines: list[str] = []
+        for key_id in ssh_key_ids:
+            public_key = self._ssh_public_keys_by_id.get(key_id)
+            if public_key is None:
+                raise VpsApiError(
+                    400,
+                    f"No in-memory SSH public key for id {key_id!r}; upload_ssh_key must be called "
+                    "in the same process before create_instance (GCE keeps keys only in per-instance "
+                    "metadata, not as a provider resource).",
+                )
+            ssh_metadata_lines.append(f"{GCE_SSH_USERNAME}:{public_key}")
+        ssh_metadata_value = "\n".join(ssh_metadata_lines)
         metadata_items = [
             compute_v1.Items(key="user-data", value=user_data),
             # Disable OS Login and project-wide SSH keys so only the per-instance

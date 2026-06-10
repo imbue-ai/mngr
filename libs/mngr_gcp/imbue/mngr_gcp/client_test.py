@@ -202,6 +202,26 @@ def test_create_instance_translates_api_error() -> None:
         )
 
 
+def test_create_instance_raises_clear_error_for_unknown_ssh_key() -> None:
+    """A referenced ssh_key_id absent from the in-memory map raises VpsApiError, not KeyError.
+
+    GCE keeps SSH keys only in per-instance metadata, so the public key must be
+    stashed by upload_ssh_key in the same process. A missing id should surface a
+    typed, actionable error rather than a bare builtin KeyError.
+    """
+    client = _make_client()
+    # Note: no upload_ssh_key call, so "key-1" is unknown to this client.
+    with pytest.raises(VpsApiError, match="No in-memory SSH public key for id 'key-1'"):
+        client.create_instance(
+            label="mngr-host",
+            region="us-west1-a",
+            plan="e2-small",
+            user_data="x",
+            ssh_key_ids=["key-1"],
+            tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        )
+
+
 # =============================================================================
 # ensure_firewall
 # =============================================================================
