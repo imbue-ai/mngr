@@ -21,21 +21,6 @@ DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
     "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
 )
-# Pinned content digests for the default images. With these in the lima yaml,
-# lima trusts the cached image as long as its sha256 matches and skips the
-# HEAD-revalidation round trip to cloud.debian.org on every boot. Without
-# them, every VM start needs cloud.debian.org reachable to revalidate the
-# Last-Modified header -- a TLS-handshake hiccup leaves lima logging
-# "Using cache" and then fataling with `open <instance>/basedisk: no such
-# file or directory` instead of completing the boot from the cache it
-# already validated. Verified the aarch64 hash against the qcow2 cached on
-# the launch-to-msg mac runner (cloud.debian.org was unreachable from a
-# separate vantage point at the same time, so the digest unblocked CI
-# immediately while the network recovered). amd64 is unset because no
-# active runner exercises the amd64 path; lima's pre-digest behavior
-# (HEAD revalidation) remains the default there.
-DEFAULT_IMAGE_DIGEST_AARCH64: Final[str] = "sha256:bdaa26811748cce09d1eb04124b78c2add028e82e9e7041e5f1aaa0025157762"
-DEFAULT_IMAGE_DIGEST_X86_64: Final[str | None] = None
 
 # Default host directory inside the VM
 DEFAULT_HOST_DIR: Final[str] = "/mngr"
