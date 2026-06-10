@@ -22,8 +22,8 @@ from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.agent_config_registry import list_registered_agent_config_types
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
-from imbue.mngr.config.agent_plugin_registry import register_agent_plugin
-from imbue.mngr.config.agent_plugin_registry import reset_agent_plugin_registry
+from imbue.mngr.config.agent_plugin_registry import register_agent_type_owner
+from imbue.mngr.config.agent_plugin_registry import reset_agent_type_owner_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -43,7 +43,7 @@ def reset_agent_registry() -> None:
     """
     reset_agent_class_registry()
     reset_agent_config_registry()
-    reset_agent_plugin_registry()
+    reset_agent_type_owner_registry()
     reset_agent_alias_registry()
     _registry_state["agents_loaded"] = False
 
@@ -73,7 +73,7 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
         if registration is not None:
             agent_type_name, agent_class, config_class = registration
             _register_agent_internal(agent_type_name, agent_class, config_class)
-            register_agent_plugin(agent_type_name, plugin_name)
+            register_agent_type_owner(agent_type_name, plugin_name)
 
     # Register aliases after all canonical types exist, so an alias can point
     # at any registered type. Aliases live in the alias-resolution layer (not

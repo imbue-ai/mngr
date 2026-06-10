@@ -7,7 +7,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
-from imbue.mngr.config.agent_plugin_registry import get_agent_plugin_name
+from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
@@ -130,11 +130,10 @@ def _check_agent_type_not_disabled(
 
     At each level, the plugin name to compare against ``disabled_plugins`` is
     resolved by this precedence: the explicit ``plugin`` field if set,
-    otherwise the plugin recorded for that type in the agent-plugin registry
-    (the authoritative source -- it knows the real registering plugin even
-    when the type name differs from the entry-point name, e.g. ``pi-coding``
-    registered by the ``pi_coding`` entry point, or alias names like ``agy``
-    registered by the ``antigravity`` plugin), otherwise the type name itself.
+    otherwise the type's recorded owning plugin (the authoritative source --
+    it knows the real registering plugin even when the type name differs from
+    the entry-point name, e.g. ``pi-coding`` registered by the ``pi_coding``
+    entry point), otherwise the type name itself.
 
     Walks the chain: agent_type -> parent_type -> parent's parent_type -> ...
     until we hit a type with no parent_type or one that is not defined in
@@ -154,9 +153,9 @@ def _check_agent_type_not_disabled(
                     f"mngr plugin enable {current_cfg.plugin}"
                 )
             return
-        # Prefer the registered plugin name for this type; fall back to the
+        # Prefer the owning plugin recorded for this type; fall back to the
         # type name when nothing was recorded (e.g. config-only custom types).
-        plugin_name = get_agent_plugin_name(checked) or checked
+        plugin_name = get_agent_type_owner(checked) or checked
         if plugin_name in config.disabled_plugins:
             raise MngrError(
                 f"Agent type '{agent_type}' cannot be used because plugin "
