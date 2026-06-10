@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from typing import Any
+from typing import Final
 from typing import cast
 
 from imbue.mngr.agents.base_agent import BaseAgent
@@ -62,8 +63,11 @@ def _fake_agent_capturing(commands: list[str], *, success: bool = True) -> BaseA
 _FAKE_TARGET = TmuxWindowTarget(session_name="session", window=0)
 
 
-def test_send_enter_waits_on_hook_only_without_a_queue_log() -> None:
-    """With no enqueue log, a single command waits on the hook signal alone (original behavior)."""
+_PROBE_MARKER_COMMAND: Final[str] = "cat /s/marker.jsonl 2>/dev/null | grep accept-marker-probe | tail -n 1"
+
+
+def test_send_enter_waits_on_hook_only_without_a_marker_command() -> None:
+    """With no acceptance-marker command, a single command waits on the hook signal alone."""
     commands: list[str] = []
     agent = _fake_agent_capturing(commands)
     result = _send_enter_and_wait_for_signal(
@@ -71,20 +75,22 @@ def test_send_enter_waits_on_hook_only_without_a_queue_log() -> None:
         tmux_target=_FAKE_TARGET,
         wait_channel="mngr-submit-x",
         timeout_seconds=1.0,
-        queue_log_path_template=None,
+        accept_marker_command=None,
     )
     assert result is True
-    # Exactly one host round-trip, and it watches the hook but not the enqueue log.
+    # Exactly one host round-trip, and it waits on the hook with no marker probe
+    # (the signal-only path uses no sentinel file).
     assert len(commands) == 1
     assert "tmux wait-for" in commands[0]
-    assert "enqueue" not in commands[0]
+    assert "mktemp" not in commands[0]
 
 
-def test_send_enter_watches_enqueue_and_hook_concurrently_with_a_queue_log() -> None:
-    """With an enqueue log, the single command watches BOTH the enqueue event and the hook.
+def test_send_enter_watches_marker_and_hook_concurrently_with_a_marker_command() -> None:
+    """With a marker command, the single command watches BOTH the marker and the hook.
 
-    This is the fast-path that lets a busy agent confirm on enqueue without
-    blocking the full submission timeout on the (slow) hook.
+    This is the fast-path that lets a busy agent confirm on the acceptance
+    marker without blocking the full submission timeout on the (slow) hook. The
+    agent-supplied probe is embedded verbatim so the module stays agent-neutral.
     """
     commands: list[str] = []
     agent = _fake_agent_capturing(commands)
@@ -93,15 +99,15 @@ def test_send_enter_watches_enqueue_and_hook_concurrently_with_a_queue_log() -> 
         tmux_target=_FAKE_TARGET,
         wait_channel="mngr-submit-x",
         timeout_seconds=1.0,
-        queue_log_path_template="$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl",
+        accept_marker_command=_PROBE_MARKER_COMMAND,
     )
     assert result is True
     # Still a single host round-trip (the two conditions are watched in one command)...
     assert len(commands) == 1
-    # ...and it watches the hook AND a fresh enqueue in the transcript log.
+    # ...and it watches the hook AND the agent-supplied acceptance-marker probe.
     assert "tmux wait-for" in commands[0]
-    assert "enqueue" in commands[0]
-    assert "events.jsonl" in commands[0]
+    assert "accept-marker-probe" in commands[0]
+    assert "mktemp" in commands[0]
 
 
 def test_send_enter_returns_false_when_the_command_fails() -> None:
@@ -113,6 +119,6 @@ def test_send_enter_returns_false_when_the_command_fails() -> None:
         tmux_target=_FAKE_TARGET,
         wait_channel="mngr-submit-x",
         timeout_seconds=1.0,
-        queue_log_path_template="$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl",
+        accept_marker_command=_PROBE_MARKER_COMMAND,
     )
     assert result is False

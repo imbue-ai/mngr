@@ -192,7 +192,7 @@ def send_enter_via_tmux_wait_for_hook(
     *,
     wait_channel: str,
     timeout_seconds: float,
-    queue_log_path_template: str | None = None,
+    accept_marker_command: str | None = None,
 ) -> None:
     """Strategy 3: send Enter and wait for a tmux wait-for channel fired by a TUI hook.
 
@@ -204,17 +204,21 @@ def send_enter_via_tmux_wait_for_hook(
     waiter has registered (signals wake exactly one waiter; if none exists
     the signal is lost).
 
-    ``queue_log_path_template`` (when supplied by an agent whose TUI records an
-    ``enqueue`` event in its transcript log the instant a message is accepted
-    into its queue) lets the call also confirm submission from that log,
-    watched *concurrently* with the hook signal. This matters because the hook
-    may only fire once the prompt reaches the model -- for a message sent to a
-    busy agent that is when it is finally dequeued, potentially much later --
-    whereas the enqueue event is recorded immediately on acceptance. We poll
-    for a fresh enqueue alongside the hook wait and succeed on whichever lands
-    first, keeping the call fast (well under any front-door HTTP/proxy timeout)
-    for busy agents while the hook still covers submissions that record no
-    enqueue event. ``None`` waits on the hook alone (the original behavior).
+    ``accept_marker_command`` (when supplied) is an agent-provided shell snippet
+    that prints a lexicographically-monotonic token -- e.g. an ISO-8601
+    timestamp -- for the latest "message accepted" marker its TUI records the
+    instant a message is taken into its queue, or empty output if none has been
+    recorded yet. Supplying it lets the call also confirm submission from that
+    marker, watched *concurrently* with the hook signal. This matters because
+    the hook may only fire once the prompt reaches the model -- for a message
+    sent to a busy agent that is when it is finally dequeued, potentially much
+    later -- whereas the acceptance marker is recorded immediately. We baseline
+    the marker before Enter, poll for a newer value alongside the hook wait, and
+    succeed on whichever lands first, keeping the call fast (well under any
+    front-door HTTP/proxy timeout) for busy agents while the hook still covers
+    submissions that record no marker. ``None`` waits on the hook alone (the
+    original behavior). Keeping the marker command agent-supplied is what lets
+    this module stay agent-neutral.
 
     Raises ``SendMessageError`` on timeout.
     """
@@ -223,7 +227,7 @@ def send_enter_via_tmux_wait_for_hook(
         tmux_target=tmux_target,
         wait_channel=wait_channel,
         timeout_seconds=timeout_seconds,
-        queue_log_path_template=queue_log_path_template,
+        accept_marker_command=accept_marker_command,
     ):
         logger.debug("Message submitted successfully")
         return
@@ -249,16 +253,16 @@ def _send_enter_and_wait_for_signal(
     tmux_target: TmuxWindowTarget,
     wait_channel: str,
     timeout_seconds: float,
-    queue_log_path_template: str | None,
+    accept_marker_command: str | None,
 ) -> bool:
     """Inner helper for send_enter_via_tmux_wait_for_hook; returns True on success."""
     start = time.time()
     full_timeout = timeout_seconds + 1
 
-    if queue_log_path_template is None:
+    if accept_marker_command is None:
         cmd = _build_signal_only_command(full_timeout, wait_channel, tmux_target)
     else:
-        cmd = _build_signal_or_enqueue_command(agent, full_timeout, wait_channel, tmux_target, queue_log_path_template)
+        cmd = _build_signal_or_marker_command(full_timeout, wait_channel, tmux_target, accept_marker_command)
 
     # Give the remote command a beat past its own internal deadline to return
     # cleanly before the pyinfra-level timeout fires.
@@ -280,7 +284,7 @@ def _send_enter_and_wait_for_signal(
 def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_target: TmuxWindowTarget) -> str:
     """The original behavior: send Enter, then block on the hook's wait-for channel.
 
-    Used for TUIs with no enqueue log to watch. The waiter is started (in the
+    Used for TUIs with no acceptance-marker command to watch. The waiter is started (in the
     foreground here) before Enter is sent from a backgrounded subshell, so the
     signal cannot fire before a waiter is registered (signals wake exactly one
     waiter; a signal with none registered is lost).
@@ -293,50 +297,40 @@ def _build_signal_only_command(full_timeout: float, wait_channel: str, tmux_targ
     )
 
 
-# FIXME: this is fairly Claude-specific for an otherwise agent-agnostic module.
-# `queue_log_path_template` plus the hardcoded `"operation":"enqueue"` grep + jq
-# below assume Claude Code's transcript-event-log schema. It would be cleaner to
-# generalize: have the agent supply how to detect its own "message accepted"
-# marker (e.g. a command or matcher) so this module stays agent-neutral. (The
-# coupling predates this function -- it was previously in _get_last_queue_timestamp.)
-def _build_signal_or_enqueue_command(
-    agent: BaseAgent[Any],
+def _build_signal_or_marker_command(
     full_timeout: float,
     wait_channel: str,
     tmux_target: TmuxWindowTarget,
-    queue_log_path_template: str,
+    accept_marker_command: str,
 ) -> str:
-    """Succeed as soon as EITHER the hook signal fires OR a fresh enqueue appears.
+    """Succeed as soon as EITHER the hook signal fires OR a fresh acceptance marker appears.
 
     A single remote command so the two conditions are watched concurrently with
     no dangling process: it registers the (full-timeout) hook waiter in the
     background -- which writes a sentinel file on success, preserving the
     register-before-Enter ordering so the signal is never missed (which matters
-    for submissions that only ever fire the signal, never recording an enqueue)
-    -- sends Enter, then polls both the sentinel and the enqueue log until
+    for submissions that only ever fire the signal, never recording a marker)
+    -- sends Enter, then polls both the sentinel and the acceptance marker until
     either confirms or the deadline passes. Exit 0 = confirmed, non-zero =
     timeout.
 
-    The agent's transcript event log records an ``enqueue`` event the instant a
-    message enters its queue; a baseline is captured before Enter so only a
-    newer enqueue counts. ISO-8601 timestamps compare correctly as plain
-    strings, and an empty baseline sorts before any real timestamp.
+    ``accept_marker_command`` is the agent-supplied shell snippet that prints the
+    agent's latest acceptance-marker token (empty if none yet). A baseline is
+    captured before Enter so only a newer token counts; the comparison is a
+    plain string ``>``, so the token must be lexicographically monotonic (an
+    ISO-8601 timestamp satisfies this, and an empty baseline sorts before any
+    real token). The module stays agent-neutral by treating this command as an
+    opaque probe -- all knowledge of the agent's marker schema lives in the
+    agent that supplies it.
     """
-    env_command_prefix = agent.host.build_source_env_prefix(agent)
-    # Reads the latest enqueue timestamp from the transcript event log; empty if
-    # none. Backslash-escaped quotes are interpreted by the inner bash -c.
-    read_enqueue_ts = (
-        f"{env_command_prefix} cat {queue_log_path_template} 2>/dev/null "
-        f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
-    )
     script = (
         'sig="$(mktemp)"; '
         # Clean up on every exit path: remove the sentinel file and reap any
         # still-running background job (notably the hook waiter, which otherwise
-        # outlives a fast enqueue-win and would recreate "$sig" -- leaking the
+        # outlives a fast marker-win and would recreate "$sig" -- leaking the
         # temp file -- when the hook finally fires). Runs exactly once on exit.
         'trap \'p="$(jobs -p)"; [ -n "$p" ] && kill $p 2>/dev/null; rm -f "$sig"\' EXIT; '
-        f'base="$({read_enqueue_ts})"; '
+        f'base="$({accept_marker_command})"; '
         # Register the hook waiter first (full timeout), sentinel on success.
         f'( timeout {full_timeout} tmux wait-for "$1" >/dev/null 2>&1 && echo 1 > "$sig" ) & '
         # Then submit, after a beat so the waiter is registered.
@@ -344,7 +338,7 @@ def _build_signal_or_enqueue_command(
         f'end="$(( $(date +%s) + {int(full_timeout) + 1} ))"; '
         'while [ "$(date +%s)" -lt "$end" ]; do '
         'if [ -s "$sig" ]; then exit 0; fi; '
-        f'cur="$({read_enqueue_ts})"; '
+        f'cur="$({accept_marker_command})"; '
         'if [[ -n "$cur" && "$cur" > "$base" ]]; then exit 0; fi; '
         "sleep 0.25; "
         "done; "

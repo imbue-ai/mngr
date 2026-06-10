@@ -218,7 +218,7 @@ def test_send_enter_via_hook_returns_when_signal_received(signal_agent: _ProbeAg
             tmux_target,
             wait_channel=wait_channel,
             timeout_seconds=2.0,
-            queue_log_path_template=None,
+            accept_marker_command=None,
         )
     finally:
         signal_agent.host.execute_idempotent_command(
@@ -247,7 +247,7 @@ def test_send_enter_via_hook_raises_on_timeout(signal_agent: _ProbeAgent) -> Non
                 tmux_target,
                 wait_channel=wait_channel,
                 timeout_seconds=0.2,
-                queue_log_path_template=None,
+                accept_marker_command=None,
             )
     finally:
         signal_agent.host.execute_idempotent_command(
