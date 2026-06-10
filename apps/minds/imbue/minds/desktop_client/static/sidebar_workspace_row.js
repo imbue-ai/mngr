@@ -1,8 +1,9 @@
 // Shared icon-button builders for the sidebar workspace rows. Loaded by
 // both Chrome.jinja (browser-mode inline sidebar in chrome.js) and
-// Sidebar.jinja (Electron sidebar WebContentsView in sidebar.js) so the
-// 16px stroke icon markup and the workspace-settings gear SVG path live
-// in one place rather than being copy-pasted into every per-page script.
+// Sidebar.jinja (the sidebar page loaded into the shared modal
+// WebContentsView in sidebar.js) so the 16px stroke icon markup and the
+// workspace-settings gear SVG path live in one place rather than being
+// copy-pasted into every per-page script.
 //
 // Usage:
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
