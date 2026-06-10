@@ -368,17 +368,30 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     temp_host_dir: Path,
     temp_work_dir: Path,
 ) -> None:
-    """Test that destroy_agent still cleans up if agent.on_destroy() raises."""
+    """destroy_agent records an on_destroy failure but still completes the teardown.
+
+    A MngrError raised by the on_destroy hook is captured as an OTHER cleanup failure
+    (returned, not raised) so the remaining teardown steps still run.
+    """
     agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir, on_destroy_should_raise=True)
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     assert agent_dir.exists()
 
-    # Exception propagates, but cleanup still runs
-    with pytest.raises(AgentError, match="cleanup failed"):
-        host.destroy_agent(agent)
+    # The hook failure is recorded and returned rather than propagated.
+    failures = host.destroy_agent(agent)
 
-    # State directory should still be cleaned up
+    assert agent.on_destroy_called
+    # Exactly one failure: the on_destroy hook error, classified as OTHER and tagged
+    # with the agent. The stop of a freshly-created agent with no live session is benign
+    # and contributes no failures.
+    assert len(failures) == 1
+    on_destroy_failure = failures[0]
+    assert on_destroy_failure.category == CleanupFailureCategory.OTHER
+    assert on_destroy_failure.agent_name == agent.name
+    assert "cleanup failed" in on_destroy_failure.message
+
+    # State directory should still be cleaned up despite the hook failure.
     assert not agent_dir.exists()
 
 
