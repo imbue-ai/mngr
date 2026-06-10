@@ -163,7 +163,10 @@ def build_provider_instance(
     ``mngr create`` callers should invoke ``backend.bootstrap_for_host_creation``
     before calling this (see ``api/create.py``); ``build_provider_instance``
     itself is always treated as read-only-or-existing-host and must not
-    bootstrap backend-side state.
+    bootstrap backend-side state. Backends with one-time resources (the Modal
+    per-user environment, the Docker singleton state container) raise
+    ``ProviderEmptyError`` here when those resources are missing, so read paths
+    skip the provider rather than creating them on first use.
     """
     backend_class = get_backend(backend_name)
     obj = backend_class.build_provider_instance(
