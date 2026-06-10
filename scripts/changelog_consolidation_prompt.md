@@ -103,24 +103,37 @@ the right project's consolidated files.
    project's section accumulates across consolidation runs within a
    release window.)
 
-5. Refinement pass: re-read just the `[Unreleased]` section of each
-   `CHANGELOG.md` you touched. Tighten any wordy bullets (cut filler
-   words; keep names of changed APIs/files); merge bullets that
-   describe the same user-visible change within that project; confirm
-   every bullet has a category prefix in the exact `- <Category>:
-   <description>` format.
+5. Merge pass: re-read just the `[Unreleased]` section of each
+   `CHANGELOG.md` you touched and merge any bullets that describe the
+   same user-visible change within that project into a single bullet.
+   (You already merged near-duplicates per date in step 3; this is a
+   second look now that every date's bullets for the project sit
+   together, which surfaces overlaps that weren't visible one section
+   at a time.)
 
-6. Configure git: `git config user.email "bot@imbue.com"`,
+6. Concision pass: for each `[Unreleased]` section you touched, step
+   back and think critically about what actually matters to a reader of
+   *this* project's changelog. For each bullet, decide which part of the
+   change is genuinely important for that audience to see -- re-applying
+   the notable-only test from step 3 -- then drop any bullet that isn't
+   notable and cut the secondary detail from the ones that stay, so each
+   bullet conveys only what matters about the change. Finally, phrase
+   every surviving bullet as concisely as you can: cut filler words,
+   keep the names of changed APIs/files, and confirm each bullet is in
+   the exact `- <Category>: <description>` format with a valid category
+   prefix.
+
+7. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-7. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
+8. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
    date +%Y-%m-%d)`. This identifies *when this consolidation run
    happened*, distinct from the per-entry `## YYYY-MM-DD` section
    headings in each `UNABRIDGED_CHANGELOG.md` (which identify when each
    entry was written). `git add -A` and `git commit -m "Consolidate
    changelog entries (run <RUN_DATE>)"`.
 
-8. Run a changelog accuracy review on the bullets you just added, to
+9. Run a changelog accuracy review on the bullets you just added, to
    guard against stale or inaccurate entries. Spawn one or more
    `general-purpose` reviewer subagents (fresh contexts, so they review
    the bullets with eyes that did not write them), using the Task tool,
@@ -146,7 +159,7 @@ the right project's consolidated files.
    retry it if that seems worthwhile; either way, do NOT fail the whole
    run on its account -- the consolidation commit is still valid.
 
-9. Capture the current branch name with `BRANCH=$(git rev-parse
+10. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
@@ -154,7 +167,7 @@ the right project's consolidated files.
    contains only this run's commits (the consolidation commit plus any
    per-project accuracy-review correction commits).
 
-10. Open a PR with `gh pr create --base main`. Title: `Changelog
+11. Open a PR with `gh pr create --base main`. Title: `Changelog
    consolidation (run <RUN_DATE>)`. Body: describe this automated
    changelog consolidation run (run <RUN_DATE>); what else to surface --
    e.g. anything notable the accuracy reviewers reported -- is up to you.
