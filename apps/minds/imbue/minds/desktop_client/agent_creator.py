@@ -914,7 +914,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
-    color: str | None = None
+    color: str | None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
