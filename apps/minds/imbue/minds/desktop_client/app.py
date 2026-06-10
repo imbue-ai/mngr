@@ -1796,7 +1796,7 @@ def _handle_chrome_page(
 
 
 def _handle_chrome_sidebar(request: Request) -> Response:
-    """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
+    """Serve the standalone sidebar page loaded into the shared modal WebContentsView."""
     html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
     return HTMLResponse(content=html)
 
