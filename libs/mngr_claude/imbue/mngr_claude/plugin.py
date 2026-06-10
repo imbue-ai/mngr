@@ -39,6 +39,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.git import GitignoreStatus
 from imbue.mngr.api.git import check_path_gitignore_status
+from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
@@ -1205,9 +1206,11 @@ def _check_settings_local_gitignored(
     remote hosts, so the provisioning check would fail after expensive host
     creation.
     """
-    status, settings_relative = check_path_gitignore_status(
-        host, repo_path, Path(".claude") / "settings.local.json", require_repo_rule=require_repo_rule
-    )
+    settings_subpath = Path(".claude") / "settings.local.json"
+    if require_repo_rule:
+        status, settings_relative = check_path_repo_gitignore_status(host, repo_path, settings_subpath)
+    else:
+        status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
     if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
         return
     if status is GitignoreStatus.NOT_IGNORED:

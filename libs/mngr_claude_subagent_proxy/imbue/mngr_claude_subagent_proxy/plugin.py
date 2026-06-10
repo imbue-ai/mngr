@@ -245,8 +245,10 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
 
     Mirrors mngr_claude's settings.local.json guard: writing the file into a
     repo where its path is not gitignored would surface it as an unstaged
-    change. Provisioning-time check (``require_repo_rule=False``), so a path
-    ignored only via the user's global excludes is accepted. Raises
+    change. Uses the any-rule ``check_path_gitignore_status`` (not the
+    repo-rule-only variant), so a path ignored only via the user's global
+    excludes is accepted -- this is a local provisioning step, not a preflight
+    whose result has to hold on a remote host. Raises
     ``UnignoredProxyArtifactError`` otherwise, pointing the user at both the
     gitignore fix and the option to disable the plugin.
     """

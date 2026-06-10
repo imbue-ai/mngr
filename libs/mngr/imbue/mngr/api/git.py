@@ -80,20 +80,22 @@ class GitSyncError(MngrError):
 class GitignoreStatus(UpperCaseStrEnum):
     """Result of checking whether a path is gitignored in a repo.
 
-    Returned by ``check_path_gitignore_status`` so callers can build their own
+    Returned by ``check_path_gitignore_status`` /
+    ``check_path_repo_gitignore_status`` so callers can build their own
     domain-specific error messages from a shared check.
     """
 
     # Not a git work tree, or a symlink in the path points outside the repo --
     # git won't track the path, so there is nothing to enforce.
     SKIP = auto()
-    # Ignored by a repository-level rule (or, when ``require_repo_rule`` is
-    # False, by any rule including the user's global excludes).
+    # Ignored by a gitignore rule.
     IGNORED = auto()
     # Not ignored by any rule.
     NOT_IGNORED = auto()
-    # Ignored, but only via the user's global excludes; returned only when
-    # ``require_repo_rule`` is True (remote hosts have no global excludes).
+    # Ignored, but only via the user's global excludes (no repo-level rule
+    # covers it). Returned only by ``check_path_repo_gitignore_status``; remote
+    # hosts and fresh clones have no global excludes, so such a rule won't hold
+    # there.
     ONLY_GLOBAL = auto()
 
 
@@ -119,9 +121,8 @@ def check_path_gitignore_status(
     host: OnlineHostInterface,
     repo_path: Path,
     relative_path: Path,
-    require_repo_rule: bool = False,
 ) -> tuple[GitignoreStatus, Path]:
-    """Return whether ``<repo_path>/<relative_path>`` is gitignored.
+    """Return whether ``<repo_path>/<relative_path>`` is gitignored by any rule.
 
     ``relative_path`` is interpreted relative to ``repo_path`` and need not
     exist yet (the common caller checks a file it is about to write). Any
@@ -131,12 +132,11 @@ def check_path_gitignore_status(
     checked_relative_path)`` tuple; the second element is the repo-relative path
     actually consulted (symlinks resolved), for use in caller error messages.
 
-    See ``GitignoreStatus`` for the meaning of each status. ``SKIP`` means there
-    is nothing to enforce (``repo_path`` is not a git work tree, or a symlink in
-    the path points outside the repo). When ``require_repo_rule`` is True, a
-    path ignored only by the user's global excludes returns ``ONLY_GLOBAL``
-    rather than ``IGNORED`` -- important for preflight checks, since a global
-    gitignore entry won't exist on remote hosts.
+    Returns ``SKIP``, ``IGNORED``, or ``NOT_IGNORED`` -- never ``ONLY_GLOBAL``;
+    use ``check_path_repo_gitignore_status`` when that distinction matters.
+    ``SKIP`` means there is nothing to enforce (``repo_path`` is not a git work
+    tree, or a symlink in the path points outside the repo). ``IGNORED`` covers
+    any rule, including the user's global excludes.
     """
     checked_relative = relative_path
 
@@ -176,19 +176,34 @@ def check_path_gitignore_status(
     )
     if not result.success:
         return GitignoreStatus.NOT_IGNORED, checked_relative
+    return GitignoreStatus.IGNORED, checked_relative
 
-    if require_repo_rule:
-        # Re-check with global excludes disabled to see if the rule is from the
-        # repo itself. If only the global gitignore covers it, the remote host
-        # (which has no global gitignore) will fail during provisioning.
-        repo_only_result = host.execute_idempotent_command(
-            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(checked_relative))}",
-            cwd=repo_path,
-            timeout_seconds=5.0,
-        )
-        if not repo_only_result.success:
-            return GitignoreStatus.ONLY_GLOBAL, checked_relative
 
+def check_path_repo_gitignore_status(
+    host: OnlineHostInterface,
+    repo_path: Path,
+    relative_path: Path,
+) -> tuple[GitignoreStatus, Path]:
+    """Like ``check_path_gitignore_status``, but require a *repository* rule.
+
+    A path ignored only by the user's global excludes (``core.excludesFile``)
+    returns ``ONLY_GLOBAL`` rather than ``IGNORED``. Use this for preflight
+    checks whose outcome must also hold on a remote host or fresh clone, which
+    has no global excludes. ``SKIP`` and ``NOT_IGNORED`` pass through unchanged.
+    """
+    status, checked_relative = check_path_gitignore_status(host, repo_path, relative_path)
+    if status is not GitignoreStatus.IGNORED:
+        return status, checked_relative
+
+    # The path is ignored by *some* rule; re-check with global excludes disabled
+    # to see whether a repo-level rule covers it on its own.
+    repo_only_result = host.execute_idempotent_command(
+        f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(checked_relative))}",
+        cwd=repo_path,
+        timeout_seconds=5.0,
+    )
+    if not repo_only_result.success:
+        return GitignoreStatus.ONLY_GLOBAL, checked_relative
     return GitignoreStatus.IGNORED, checked_relative
 
 

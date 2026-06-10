@@ -14,6 +14,7 @@ from imbue.mngr.api.git import RemoteGitContext
 from imbue.mngr.api.git import UncommittedChangesError
 from imbue.mngr.api.git import _build_ssh_git_url
 from imbue.mngr.api.git import check_path_gitignore_status
+from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
 from imbue.mngr.api.testing import FakeHost
@@ -370,3 +371,53 @@ def test_check_path_gitignore_status_resolves_symlink_at_any_depth(tmp_path: Pat
 
     assert status is GitignoreStatus.IGNORED
     assert checked == Path("backend") / "app" / "state.json"
+
+
+# === check_path_repo_gitignore_status ===
+#
+# Same as check_path_gitignore_status, but distinguishes a repo-level rule from
+# the user's global excludes (which won't exist on a fresh clone / remote host).
+
+
+def test_check_path_repo_gitignore_status_ignored_by_repo_rule(tmp_path: Path) -> None:
+    """A rule in the repo's own .gitignore counts as IGNORED."""
+    init_git_repo(tmp_path, initial_commit=False)
+    (tmp_path / ".gitignore").write_text(".config/\n")
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, _ = check_path_repo_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+
+    assert status is GitignoreStatus.IGNORED
+
+
+def test_check_path_repo_gitignore_status_only_global(tmp_path: Path) -> None:
+    """A path ignored solely via core.excludesFile is ONLY_GLOBAL, not IGNORED.
+
+    The repo has no rule of its own; the match comes only from the configured
+    excludes file. A remote host / fresh clone wouldn't have that file, so the
+    repo-rule check must flag it.
+    """
+    init_git_repo(tmp_path, initial_commit=False)
+    excludes_file = tmp_path / "global_excludes"
+    excludes_file.write_text(".config/\n")
+    # Point core.excludesFile (the "global" excludes) at it via local config --
+    # this does not touch the developer's real global git config.
+    run_git_command(tmp_path, "config", "core.excludesFile", str(excludes_file))
+    host = cast(OnlineHostInterface, FakeHost())
+
+    # Sanity: the any-rule check sees it as ignored...
+    base_status, _ = check_path_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+    assert base_status is GitignoreStatus.IGNORED
+    # ...but the repo-rule check flags that only a global rule covers it.
+    status, _ = check_path_repo_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+    assert status is GitignoreStatus.ONLY_GLOBAL
+
+
+def test_check_path_repo_gitignore_status_passes_through_not_ignored(tmp_path: Path) -> None:
+    """When no rule matches at all, the repo-rule check returns NOT_IGNORED unchanged."""
+    init_git_repo(tmp_path, initial_commit=False)
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, _ = check_path_repo_gitignore_status(host, tmp_path, Path(".config") / "app" / "state.json")
+
+    assert status is GitignoreStatus.NOT_IGNORED
