@@ -1,7 +1,8 @@
-// Electron sidebar WebContentsView: renders the floating menu (workspace
-// list + "New workspace" + "Manage account(s)"). Clicks + context menus go
-// through window.minds IPC. In browser mode the chrome.js embedded sidebar
-// handles the same job inline instead.
+// Electron sidebar page: loaded into the shared modal WebContentsView when
+// the user opens the sidebar. Renders the floating menu (workspace list +
+// "New workspace" + "Manage account(s)"). Clicks + context menus go through
+// window.minds IPC. In browser mode the chrome.js embedded sidebar handles
+// the same job inline instead.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
