@@ -49,10 +49,20 @@
     }
 
     function syncSwatchSelection(normalized) {
+      var anySwatchMatched = false;
       for (var i = 0; i < swatches.length; i++) {
         var sw = swatches[i];
         var checked = sw.getAttribute('data-color') === normalized;
+        if (checked) anySwatchMatched = true;
         sw.setAttribute('aria-checked', checked ? 'true' : 'false');
+      }
+      // Custom hex (no palette swatch matched): the pill itself carries
+      // the blue selection ring so the active color always has exactly
+      // one visibly selected control.
+      if (anySwatchMatched) {
+        hexInput.classList.remove('is-selected');
+      } else {
+        hexInput.classList.add('is-selected');
       }
     }
 

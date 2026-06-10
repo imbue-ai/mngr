@@ -103,7 +103,8 @@ def test_render_workspace_settings_picker_disabled_when_stale() -> None:
 
 def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> None:
     """When the saved color is a custom hex (not in the palette), no
-    swatch shows as selected; the hex input still carries the value."""
+    swatch shows as selected; the hex pill carries the value and the
+    blue selection ring class instead."""
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
         ws_name="ws",
@@ -114,6 +115,22 @@ def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> 
     )
     assert 'value="#123456"' in html
     assert 'aria-checked="true"' not in html
+    assert "is-selected" in html
+
+
+def test_render_workspace_settings_pill_not_selected_for_palette_color() -> None:
+    """When the saved color matches a palette entry, the swatch is the
+    selected control -- the hex pill must not also carry the ring."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+    )
+    assert 'aria-checked="true"' in html
+    assert "is-selected" not in html
 
 
 def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:

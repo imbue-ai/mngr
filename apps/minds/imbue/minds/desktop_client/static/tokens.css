@@ -281,6 +281,19 @@ html {
     0 0 0 2px #fff,
     0 0 0 3px rgba(37, 99, 235, 0.4); /* blue-500/40 */
 }
+/*
+ * When the active color is a custom hex (no palette swatch matches),
+ * the pill carries the same blue selection ring the swatches show via
+ * aria-checked. Toggled by workspace_settings.js in
+ * syncSwatchSelection; declared after :focus so the full-strength
+ * selected ring wins over the focus tint while both apply.
+ */
+.color-hex-pill.is-selected {
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb; /* blue-600, matches .color-swatch[aria-checked="true"] */
+}
 
 /*
  * "Saving" cursor while a settings color POST is in flight. The

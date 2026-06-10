@@ -77,7 +77,11 @@
       <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
       <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
 
-      <SectionHeader>Color <span id="color-saving-badge" class="hidden ml-2 align-middle text-[10px] uppercase tracking-wider font-semibold text-zinc-900 bg-white rounded-sm px-1.5 py-0.5">Saving</span></SectionHeader>
+      {# ``extra`` turns the h2 into a flex row so the badge centers on
+         the title's vertical axis; ``leading-none`` + fixed badge height
+         keeps the line box from growing when the badge un-hides (which
+         previously pushed the swatches down a couple px). #}
+      <SectionHeader extra="flex items-center gap-2">Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-zinc-900 bg-white rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
       <div id="color-section">
         {% if is_stale %}
           <Notice variant="warn">
@@ -101,7 +105,7 @@
           {% endfor %}
           <input id="color-hex-input"
                  type="text"
-                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 disabled:opacity-40"
+                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
                  value="{{ current_color }}"
                  maxlength="9"
                  spellcheck="false"
