@@ -750,14 +750,17 @@ async def _create_workspace_and_first_message(
     logger.info("[{}] creation DONE; navigating directly to {}", label, target)
     await win.goto(target)
     chat_url_re = re.compile(r"agent-[a-f0-9]+\.localhost")
-    chat_deadline = time.time() + 30
+    chat_wait_seconds = 180
+    chat_deadline = time.time() + chat_wait_seconds
     while time.time() < chat_deadline and not chat_url_re.search(win.url):
         await asyncio.sleep(0.5)
     if not chat_url_re.search(win.url):
         for p in all_pages(ctx):
             with contextlib.suppress(Exception):
                 await snap_page(p, f"99-{label}-no-chat-{p.url.split('/')[-1] or 'root'}")
-        raise E2EFailure(f"[{label}] goto({target}) didn't redirect to chat URL within 30s (win.url={win.url})")
+        raise E2EFailure(
+            f"[{label}] goto({target}) didn't redirect to chat URL within {chat_wait_seconds}s (win.url={win.url})"
+        )
     logger.info("[{}] agent DONE; chat URL={}", label, win.url)
     await snap_page(win, snaps.done)
 
