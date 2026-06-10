@@ -41,7 +41,7 @@ command, or a UI affordance -- even if they are not yet uniformly modeled or exp
 - **tasks / delegation** -- the `launch-task` flow: worker branches (`mngr/<name>`), per-dispatch
   runtime dirs, merge gates via main
 - **tickets** -- `tk` records in `runtime/tickets/`, cross-agent work units with assignment
-- **steps** -- turn-bound `tk --step` progress records that drive the chat progress view
+- **steps** -- turn-bound `tk create --step` progress records that drive the chat progress view
 - **reviews** -- worker code review (`.reviewer` settings, review in worker template)
 - **skills** -- `.agents/skills/` directories with SKILL.md, `skills-lock.json`
 - **skill lifecycle** -- crystallize-task, heal-skill, update-skill, do-something-new; crystallized
