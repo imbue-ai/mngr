@@ -209,7 +209,7 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.sidebarView, b.modalView];
+    const views = [b.chromeView, b.contentView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -302,20 +302,6 @@ function updateBundleBounds(bundle) {
       y: TITLEBAR_HEIGHT,
       width: width - CONTENT_INSET * 2,
       height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
-    });
-  }
-  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
-    // The sidebar acts as a modal: the WebContentsView covers the full
-    // content area (under the titlebar to the bottom of the window) so
-    // its transparent backdrop captures clicks outside the floating
-    // menu and closes the sidebar. The menu's actual size + position
-    // is plain CSS inside the sidebar page (top-2 left-2 w-[244px]),
-    // not a function of these bounds.
-    bundle.sidebarView.setBounds({
-      x: 0,
-      y: TITLEBAR_HEIGHT,
-      width,
-      height: height - TITLEBAR_HEIGHT,
     });
   }
   // The modal overlays the entire window (including the title bar) so
@@ -440,7 +426,7 @@ function wireBundleWindowEvents(bundle) {
       clearTimeout(bundle.inboxListReloadTimer);
       bundle.inboxListReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.modalView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -483,8 +469,6 @@ function createBundle() {
     window: win,
     chromeView,
     contentView,
-    sidebarView: null,
-    sidebarVisible: false,
     modalView: null,
     modalVisible: false,
     modalUrl: null,
@@ -563,14 +547,13 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
     }
-    // The sidebar webview refreshes its 'Manage account(s)' / 'Log in'
-    // label whenever the content URL changes (sign-in / sign-out happens
-    // inside the content view). The sidebar's preload exposes
-    // onContentURLChange off the same IPC channel chromeView listens on,
-    // but the channel only fires for the WebContents the message is
-    // explicitly addressed to, so we have to dispatch to both views.
-    if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
-      bundle.sidebarView.webContents.send('content-url-changed', url);
+    // The sidebar (now hosted in the shared modalView) refreshes its
+    // "Manage account(s)" / "Log in" label on every content URL change so
+    // a sign-in / sign-out performed in the workspace iframe propagates
+    // to the menu the next time the user opens it. Inbox doesn't subscribe
+    // to this channel so the send is a no-op when the modal is showing it.
+    if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.webContents.send('content-url-changed', url);
     }
   };
 
@@ -711,63 +694,36 @@ function notifyOpenFailed(url) {
 }
 
 // -- Sidebar helpers (per-bundle) --
+//
+// The sidebar is just the modal overlay loaded with /_chrome/sidebar -- it
+// shares ``modalView``, the same lazy-creation + transparent background +
+// Escape handling + ``modal-state-changed`` titlebar-drag suppression as
+// the inbox. There is no separate sidebar WebContentsView.
 
-// The sidebar view is created lazily the first time the user toggles it
-// on, then reused for all subsequent toggles via setVisible(true/false).
-// Destroying and recreating a WebContentsView on every click means
-// spawning a fresh render process + preload + loadURL round-trip; on
-// rapid clicks these queue up and take seconds to drain.
+function sidebarUrlFor() {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/_chrome/sidebar';
+}
+
+function isSidebarModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible || !bundle.modalUrl) return false;
+  try {
+    return new URL(bundle.modalUrl).pathname === '/_chrome/sidebar';
+  } catch {
+    return false;
+  }
+}
 
 function openSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.sidebarView) {
-    const sidebarView = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-    // Transparent background so the dark teal floating menu rendered by
-    // Sidebar.jinja appears to float over the workspace content view.
-    // The WebContentsView still intercepts mouse events in its bounds --
-    // that's intentional: it acts as the modal's scrim. sidebar.js
-    // catches clicks outside ``#sidebar-menu`` (and Escape) and dismisses
-    // the sidebar via ``window.minds.toggleSidebar()``. Selection clicks
-    // (workspace row, "New workspace", "Manage account(s)", settings,
-    // open-in-new-window) navigate and the main process closes the
-    // sidebar on its end.
-    sidebarView.setBackgroundColor('#00000000');
-    bundle.sidebarView = sidebarView;
-    bundle.window.contentView.addChildView(sidebarView);
-    registerShortcutsFor(bundle, sidebarView.webContents);
-    sidebarView.webContents.on('did-finish-load', () => {
-      sendCurrentWorkspaceToBundleViews(bundle);
-      primeViewWithCachedChromeState(bundle, sidebarView.webContents);
-    });
-    if (backendBaseUrl) {
-      sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
-    }
-  } else {
-    // Re-add to the parent to raise to the top of z-order, then make visible.
-    bundle.window.contentView.removeChildView(bundle.sidebarView);
-    bundle.window.contentView.addChildView(bundle.sidebarView);
-    bundle.sidebarView.setVisible(true);
-  }
-  bundle.sidebarVisible = true;
-  updateBundleBounds(bundle);
-}
-
-function closeSidebar(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.sidebarView || !bundle.sidebarVisible) return;
-  bundle.sidebarView.setVisible(false);
-  bundle.sidebarVisible = false;
+  const url = sidebarUrlFor();
+  if (!url) return;
+  openModal(bundle, url);
 }
 
 function toggleSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  if (bundle.sidebarVisible) closeSidebar(bundle);
+  if (isSidebarModalOpen(bundle)) closeModal(bundle);
   else openSidebar(bundle);
 }
 
@@ -803,6 +759,17 @@ function openModal(bundle, url) {
         event.preventDefault();
         closeModal(bundle);
       }
+    });
+    // Each new URL load (sidebar, inbox, ...) gets the cached chrome state
+    // and the current workspace id pushed before it can fall behind. The
+    // inbox renders its initial list server-side, but the sidebar reuses
+    // the SSE-driven ``workspaces`` event for first paint, so without this
+    // prime it would flash "No projects" until the next SSE push arrives.
+    modal.webContents.on('did-finish-load', () => {
+      if (modal.webContents.isDestroyed()) return;
+      if (modal.webContents.getURL() === 'about:blank') return;
+      sendCurrentWorkspaceToBundleViews(bundle);
+      primeViewWithCachedChromeState(bundle, modal.webContents);
     });
     // Auto-open DevTools for dev-time inspection. Matches the
     // contentView behavior in createBundleWebContentsViews; gated on
@@ -914,15 +881,13 @@ function scheduleInboxListRefresh(bundle, evt) {
 
 function sendCurrentWorkspaceToBundleViews(bundle) {
   if (!bundle) return;
-  // Both the titlebar (chrome view) and the sidebar key UI off the current
-  // workspace -- the titlebar uses it to drive the per-agent accent color
-  // and the auto-redirect to the recovery page (which only fires when a
-  // system_interface_status event matches the currently-displayed agent).
-  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
-  }
-  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
-    bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  // The titlebar (chrome view) and any open modal (sidebar, inbox, ...)
+  // both key UI off the current workspace -- the titlebar drives the
+  // per-agent accent color and the recovery-page auto-redirect, and the
+  // sidebar modal highlights the selected row + shows its bonus icons.
+  for (const view of [bundle.chromeView, bundle.modalView]) {
+    if (!view || view.webContents.isDestroyed()) continue;
+    view.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
   // Persist this window's "last opened workspace" so a subsequent
   // navigation to Home (or any non-workspace URL) keeps the bar tinted in
@@ -1007,7 +972,6 @@ function showErrorInAllWindows(message, details) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isErrorState = true;
 
-    if (bundle.sidebarView) closeSidebar(bundle);
     if (bundle.modalView) closeModal(bundle);
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
@@ -1237,13 +1201,13 @@ function restoreWindowBounds(bundle, entry) {
 }
 
 // ---------- Centralized chrome SSE ----------
-// Every chromeView and sidebarView used to open its own EventSource to
-// /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
-// with a couple of workspace windows + sidebars, ALL subsequent requests
-// (/_chrome/sidebar, /inbox/list, home navigation) queue behind SSE
-// streams -- you'd see load-finish latencies creep from 50ms to 8+
-// seconds. Running one SSE connection in the main process and
-// broadcasting events via IPC avoids the exhaustion entirely.
+// Every chrome and (formerly) sidebar view used to open its own
+// EventSource to /_chrome/events. Chromium caps same-host HTTP/1.1
+// connections at 6, so with a couple of workspace windows + sidebars,
+// subsequent requests (/_chrome/sidebar, /inbox/list, home navigation)
+// would queue behind the SSE streams -- load-finish latencies could
+// creep from 50ms to 8+ seconds. Running one SSE connection in the main
+// process and broadcasting events via IPC avoids the exhaustion entirely.
 
 function handleChromeSSEEvent(evt) {
   if (evt.type === 'workspaces' && Array.isArray(evt.workspaces)) {
@@ -1373,7 +1337,10 @@ function handleChromeSSEEvent(evt) {
 function broadcastChromeEvent(evt) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    for (const view of [b.chromeView, b.sidebarView]) {
+    // Push to the chrome titlebar and to any open modal (sidebar, inbox).
+    // The inbox shell uses these events too (e.g. ``requests`` count); the
+    // sidebar uses ``workspaces`` / ``auth_status`` to render its list.
+    for (const view of [b.chromeView, b.modalView]) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
       try {
@@ -2227,7 +2194,7 @@ ipcMain.on('navigate-content', (event, url) => {
     const existing = findBundleForWorkspace(targetAgentId);
     if (existing) {
       focusBundle(existing);
-      closeSidebar(bundle);
+      closeModal(bundle);
       return;
     }
   }
@@ -2236,7 +2203,7 @@ ipcMain.on('navigate-content', (event, url) => {
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
     bundle.contentView.webContents.loadURL(absolute);
   }
-  closeSidebar(bundle);
+  closeModal(bundle);
 });
 
 ipcMain.on('content-go-back', (event) => {
@@ -2267,7 +2234,7 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   // The sidebar is the sender for both the hover-icon click and the native
   // context-menu "Open in new window" item; close it now that the action is done.
   const bundle = getBundleFromEvent(event);
-  if (bundle) closeSidebar(bundle);
+  if (bundle) closeModal(bundle);
 });
 
 ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
@@ -2336,7 +2303,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
       label: 'Open in new window',
       click: () => {
         openOrFocusWorkspace(agentId, workspaceUrl);
-        closeSidebar(bundle);
+        closeModal(bundle);
       },
     });
     template.push({ type: 'separator' });
@@ -2362,7 +2329,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     click: async () => {
       // Close the sidebar first so the user gets immediate visual feedback
       // while the restart dispatch is acknowledged.
-      closeSidebar(bundle);
+      closeModal(bundle);
       await postRestart(agentId, 'restart-system-interface');
       goToRecoveryView();
     },
@@ -2381,7 +2348,7 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
         detail: 'This restarts the whole workspace. In-progress work in all agents will be interrupted.',
       });
       if (response !== 1) return;
-      closeSidebar(bundle);
+      closeModal(bundle);
       await postRestart(agentId, 'restart-host');
       goToRecoveryView();
     },

@@ -182,22 +182,20 @@
     }
   });
 
-  // -- Modal dismissal: backdrop click + Escape ----------------------------
+  // -- Modal dismissal: backdrop click -------------------------------------
   //
-  // The sidebar WebContentsView covers the full content area; the body is a
+  // The sidebar runs inside the shared modal WebContentsView; the body is a
   // transparent backdrop with the floating panel pinned at top-left. Clicks
-  // anywhere outside the panel close the sidebar. The Esc key does the same
-  // (only fires when the sidebar has focus, which matches the existing
-  // Inbox modal's behavior).
-  function closeSidebar() {
-    if (isElectron && window.minds.toggleSidebar) window.minds.toggleSidebar();
+  // anywhere outside the panel dismiss the modal via the same IPC the
+  // inbox X button uses. Escape is handled by the main process's modal
+  // before-input-event listener (see openModal in electron/main.js), so we
+  // don't need a JS Escape handler here.
+  function dismissModal() {
+    if (isElectron && window.minds.closeModal) window.minds.closeModal();
   }
   document.addEventListener('click', function (e) {
     if (e.target.closest('#sidebar-menu')) return;
-    closeSidebar();
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeSidebar();
+    dismissModal();
   });
 
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
