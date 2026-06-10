@@ -167,6 +167,14 @@ MARKER_LOCK_DIRNAME: str = "codex_marker.lock"
 # capture script hardcodes this same literal.
 TRANSCRIPT_PATH_FILENAME: str = "codex_transcript_path"
 
+# tmux wait-for channel prefix that the ``UserPromptSubmit`` hook signals once a
+# turn is submitted (and *after* the ``active`` marker is set). The full channel is
+# ``<prefix><tmux session>``. ``CodexAgent._send_enter_and_validate`` waits on this
+# channel so ``send_message`` returns only after the agent reads RUNNING, closing
+# the race between submitting a message and the lifecycle state flipping.
+# ``set_active_marker.sh`` hardcodes this same literal (a test keeps them in sync).
+SUBMIT_WAIT_CHANNEL_PREFIX: str = "mngr-submit-"
+
 # Scripts provisioned into ``$MNGR_AGENT_STATE_DIR/commands/``; names kept in
 # sync with the resource files under ``resources/``.
 SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
@@ -488,7 +496,10 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
       ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root
-      turn, record the root ``session_id`` and ``transcript_path``.
+      turn, record the root ``session_id`` and ``transcript_path``. After the
+      marker is set it signals the ``mngr-submit-<session>`` tmux wait-for channel
+      (``SUBMIT_WAIT_CHANNEL_PREFIX``), so ``send_message`` returns only once the
+      agent reads RUNNING.
     * ``Stop`` -> ``clear_active_marker.sh``: clear the root-turn flag when the
       *root* agent's loop ends, then recompute (in-flight subagents keep the
       marker). The clear is guarded on the recorded root ``session_id`` so a

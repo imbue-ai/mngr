@@ -32,6 +32,13 @@
 # of truth for which rollout to follow. The path can change across resume (codex
 # may open a fresh rollout), so it is re-captured at each fresh root turn too.
 #
+# Submit signal: after the marker is set, this hook fires the
+# `mngr-submit-<tmux session>` tmux wait-for channel that CodexAgent.send_message
+# blocks on. Signalling AFTER the recompute means a caller that wakes on it always
+# observes the agent as RUNNING, closing the race between submit and the lifecycle
+# flip. Channel prefix is kept in sync with codex_config.py's
+# SUBMIT_WAIT_CHANNEL_PREFIX (a test pins this).
+#
 # Marker / root / transcript-path file names are kept in sync with
 # codex_config.py via the sourced helper. Never writes stdout (codex treats
 # UserPromptSubmit stdout as additional model context); avoids `set -e` so a
@@ -76,3 +83,14 @@ touch "$CODEX_ROOT_ACTIVE_FILE"
 codex_marker_recompute
 
 codex_marker_unlock
+
+# Wake any `mngr message` waiter blocked on this turn's submission. The `active`
+# marker is now present (recompute ran above), so a caller that woke on this signal
+# observes the agent as RUNNING. Only signal when running inside tmux (codex's
+# pane sets $TMUX, which also tells `display-message` and `wait-for` which server
+# to use); a headless run has no waiter and no server, so skip it entirely. Channel
+# prefix matches codex_config.py's SUBMIT_WAIT_CHANNEL_PREFIX. Best-effort so it
+# can't disrupt codex's loop.
+if [ -n "${TMUX:-}" ]; then
+    tmux wait-for -S "mngr-submit-$(tmux display-message -p '#S' 2>/dev/null)" 2>/dev/null || true
+fi
