@@ -133,6 +133,9 @@ _IN_SANDBOX_RUNNER_PROGRAM: Final[str] = textwrap.dedent(
     def _write_to_os_environ(name: str, value: str) -> None:
         os.environ[name] = value
     ensure_minds_env_defaults(setenv=_write_to_os_environ)
+    # Snapshot builds are test infrastructure, not a real install, so they
+    # must not count toward Latchkey's usage.
+    _write_to_os_environ("LATCHKEY_DISABLE_COUNTING", "1")
     with tempfile.TemporaryDirectory(prefix="snapshot-fct-") as scratch:
         fct_path = resolve_fct_path(Path(scratch))
         workspace_name = f"forever-{get_short_random_string()}"

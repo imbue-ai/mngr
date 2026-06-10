@@ -1,20 +1,30 @@
 import json
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import VolumeFile
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.docker.host_store import HostRecord
+from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr_file.cli.list import _emit_list_result
 from imbue.mngr_file.cli.list import _entry_to_field_mapping
 from imbue.mngr_file.cli.list import _entry_to_json_dict
 from imbue.mngr_file.cli.list import _get_field_value
-from imbue.mngr_file.cli.list import list_files_on_volume
-from imbue.mngr_file.cli.list import parse_list_output
+from imbue.mngr_file.cli.list import _volume_file_to_entry
 from imbue.mngr_file.data_types import FileEntry
 from imbue.mngr_file.data_types import FileType
+
+_HOST_ID = "host-00000000000000000000000000000001"
 
 
 def _make_file_entry(
@@ -35,77 +45,59 @@ def _make_file_entry(
     )
 
 
-# --- parse_list_output ---
+# --- _volume_file_to_entry ---
 
 
-def test_parse_list_output_parses_file_entry() -> None:
-    output = "myfile.txt\t1024\t2026-03-21+12:00:00\tf\t-rw-r--r--\t/home/user/myfile.txt\n"
-    entries = parse_list_output(output)
-
-    assert len(entries) == 1
-    entry = entries[0]
+def test_volume_file_to_entry_file() -> None:
+    vf = VolumeFile(
+        path="/home/user/myfile.txt",
+        file_type=FileType.FILE,
+        mtime=1742558400,
+        size=1024,
+    )
+    entry = _volume_file_to_entry(vf)
     assert entry.name == "myfile.txt"
     assert entry.path == "/home/user/myfile.txt"
     assert entry.file_type == FileType.FILE
     assert entry.size == 1024
-    assert entry.modified == "2026-03-21+12:00:00"
-    assert entry.permissions == "-rw-r--r--"
+    # mtime is rendered as an ISO timestamp in UTC.
+    assert entry.modified == datetime.fromtimestamp(1742558400, tz=timezone.utc).isoformat()
+    # permissions passes through from the VolumeFile; this one has none set.
+    assert entry.permissions is None
 
 
-def test_parse_list_output_parses_directory_with_none_size() -> None:
-    output = "subdir\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user/subdir\n"
-    entries = parse_list_output(output)
-
-    assert len(entries) == 1
-    assert entries[0].file_type == FileType.DIRECTORY
-    assert entries[0].size is None
-
-
-def test_parse_list_output_skips_dot_entry() -> None:
-    output = ".\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user\n"
-    assert parse_list_output(output) == []
-
-
-def test_parse_list_output_parses_multiple_entries() -> None:
-    output = (
-        "file1.txt\t100\t2026-03-21+12:00:00\tf\t-rw-r--r--\t/home/user/file1.txt\n"
-        "file2.txt\t200\t2026-03-21+13:00:00\tf\t-rw-r--r--\t/home/user/file2.txt\n"
-        "subdir\t4096\t2026-03-21+10:00:00\td\tdrwxr-xr-x\t/home/user/subdir\n"
+def test_volume_file_to_entry_passes_through_type_and_permissions() -> None:
+    # A host-produced VolumeFile carries the full type and a mode string; both
+    # flow through to the FileEntry unchanged.
+    vf = VolumeFile(
+        path="/home/user/link",
+        file_type=FileType.SYMLINK,
+        mtime=1742558400,
+        size=12,
+        permissions="lrwxr-xr-x",
     )
-    entries = parse_list_output(output)
-    assert [e.name for e in entries] == ["file1.txt", "file2.txt", "subdir"]
+    entry = _volume_file_to_entry(vf)
+    assert entry.file_type == FileType.SYMLINK
+    assert entry.permissions == "lrwxr-xr-x"
 
 
-def test_parse_list_output_handles_empty_output() -> None:
-    assert parse_list_output("") == []
+def test_volume_file_to_entry_directory_has_none_size() -> None:
+    vf = VolumeFile(path="/home/user/subdir", file_type=FileType.DIRECTORY, mtime=1742558400, size=4096)
+    entry = _volume_file_to_entry(vf)
+    assert entry.file_type == FileType.DIRECTORY
+    assert entry.size is None
 
 
-def test_parse_list_output_skips_malformed_lines() -> None:
-    assert parse_list_output("this is not valid find output\n") == []
+def test_volume_file_to_entry_zero_mtime_yields_none_modified() -> None:
+    vf = VolumeFile(path="/home/user/f.txt", file_type=FileType.FILE, mtime=0, size=10)
+    entry = _volume_file_to_entry(vf)
+    assert entry.modified is None
 
 
-def test_parse_list_output_handles_non_numeric_size() -> None:
-    output = "file.txt\tnotanumber\t2026-03-21+12:00:00\tf\t-rw-r--r--\t/home/user/file.txt\n"
-    entries = parse_list_output(output)
-
-    assert len(entries) == 1
-    assert entries[0].size is None
-
-
-def test_parse_list_output_skips_empty_name() -> None:
-    output = "\t100\t2026-03-21+12:00:00\tf\t-rw-r--r--\t/home/user/\n"
-    entries = parse_list_output(output)
-
-    assert len(entries) == 0
-
-
-def test_parse_list_output_handles_symlink() -> None:
-    output = "link.txt\t10\t2026-03-21+12:00:00\tl\tlrwxrwxrwx\t/home/user/link.txt\n"
-    entries = parse_list_output(output)
-
-    assert len(entries) == 1
-    assert entries[0].file_type == FileType.SYMLINK
-    assert entries[0].size == 10
+def test_volume_file_to_entry_basename_of_root_level_path() -> None:
+    vf = VolumeFile(path="topfile", file_type=FileType.FILE, mtime=0, size=3)
+    entry = _volume_file_to_entry(vf)
+    assert entry.name == "topfile"
 
 
 # --- _get_field_value (parameterized) ---
@@ -209,55 +201,86 @@ def test_emit_list_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     assert json.loads(lines[1])["name"] == "b.txt"
 
 
-# --- list_files_on_volume ---
+# --- list through a readable offline host ---
 
 
-def test_list_files_on_volume_returns_file_entries(tmp_path: Path) -> None:
-    (tmp_path / "file1.txt").write_text("hello")
-    (tmp_path / "file2.bin").write_bytes(b"\x00" * 100)
-    (tmp_path / "subdir").mkdir()
-
-    volume = LocalVolume(root_path=tmp_path)
-    entries = list_files_on_volume(volume=volume, vol_path=".", is_recursive=False)
-
-    names = {e.name for e in entries}
-    assert "file1.txt" in names
-    assert "file2.bin" in names
-    assert "subdir" in names
-
-    file_entry = next(e for e in entries if e.name == "file1.txt")
-    assert file_entry.file_type == FileType.FILE
-    assert file_entry.size == 5
-
-    dir_entry = next(e for e in entries if e.name == "subdir")
-    assert dir_entry.file_type == FileType.DIRECTORY
-    assert dir_entry.size is None
+def _make_readable_offline_host(
+    provider: DockerProviderInstance,
+    host_id: HostId,
+) -> OfflineHostWithVolume:
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+    return host
 
 
-def test_list_files_on_volume_empty_directory(tmp_path: Path) -> None:
-    empty_dir = tmp_path / "empty"
-    empty_dir.mkdir()
-    volume = LocalVolume(root_path=empty_dir)
-    assert list_files_on_volume(volume=volume, vol_path=".", is_recursive=False) == []
+def _host_volume_root(provider: DockerProviderInstance, host_id: HostId, volume_root: Path) -> Path:
+    """Return the on-disk directory backing the host's volume (host_dir root)."""
+    vol_id = DockerProviderInstance._volume_id_for_host(host_id)
+    root = volume_root / "volumes" / str(vol_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
-def test_list_files_on_volume_recursive(tmp_path: Path) -> None:
-    root = tmp_path / "project"
-    root.mkdir()
+def test_offline_host_list_directory_returns_entries(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """Listing a directory through a volume-backed offline host yields entries with permissions=None."""
+    host_id = HostId(_HOST_ID)
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    host = _make_readable_offline_host(provider, host_id)
+
+    root = _host_volume_root(provider, host_id, tmp_path)
+    (root / "file1.txt").write_text("hello")
+    (root / "file2.bin").write_bytes(b"\x00" * 100)
+    (root / "subdir").mkdir()
+
+    volume_files = host.list_directory(host.host_dir, recursive=False)
+    entries = [_volume_file_to_entry(vf) for vf in volume_files]
+
+    by_name = {e.name: e for e in entries}
+    assert {"file1.txt", "file2.bin", "subdir"} <= set(by_name)
+
+    assert by_name["file1.txt"].file_type == FileType.FILE
+    assert by_name["file1.txt"].size == 5
+    assert by_name["subdir"].file_type == FileType.DIRECTORY
+    assert by_name["subdir"].size is None
+
+    # Offline listing never reports permissions.
+    assert all(e.permissions is None for e in entries)
+    # Entries carry absolute paths under host_dir.
+    assert by_name["file1.txt"].path == str(host.host_dir / "file1.txt")
+
+
+def test_offline_host_list_directory_recursive(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    host_id = HostId(_HOST_ID)
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    host = _make_readable_offline_host(provider, host_id)
+
+    root = _host_volume_root(provider, host_id, tmp_path)
     (root / "top.txt").write_text("top")
     sub = root / "subdir"
     sub.mkdir()
     (sub / "nested.txt").write_text("nested")
-    deep = sub / "deep"
-    deep.mkdir()
-    (deep / "deep.txt").write_text("deep")
 
-    volume = LocalVolume(root_path=root)
-    entries = list_files_on_volume(volume=volume, vol_path=".", is_recursive=True)
+    volume_files = host.list_directory(host.host_dir, recursive=True)
+    names = {_volume_file_to_entry(vf).name for vf in volume_files}
+    assert {"top.txt", "subdir", "nested.txt"} <= names
 
-    names = {e.name for e in entries}
-    assert "top.txt" in names
-    assert "subdir" in names
-    assert "nested.txt" in names
-    assert "deep" in names
-    assert "deep.txt" in names
+
+def test_offline_host_read_file_by_absolute_path(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+    """A volume-backed offline host reads files addressed by absolute host_dir paths."""
+    host_id = HostId(_HOST_ID)
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    host = _make_readable_offline_host(provider, host_id)
+
+    root = _host_volume_root(provider, host_id, tmp_path)
+    (root / "agents").mkdir()
+    (root / "agents" / "state.json").write_text("payload")
+
+    assert host.read_file(host.host_dir / "agents" / "state.json") == b"payload"

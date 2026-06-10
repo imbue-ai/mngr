@@ -115,10 +115,26 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     jsonl_lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert jsonl_lines, f"expected JSONL discovery output but got none. stderr:\n{result.stderr}"
     events = [json.loads(line) for line in jsonl_lines]
-    assert any(event.get("type") == "DISCOVERY_FULL" for event in events), (
+    snapshots = [event for event in events if event.get("type") == "DISCOVERY_FULL"]
+    assert snapshots, (
         f"expected a DISCOVERY_FULL snapshot in the stream, got types "
         f"{sorted({event.get('type') for event in events})}"
     )
+    # Verify the documented full-snapshot contract on the first snapshot: it is
+    # the baseline event consumers use to reconstruct state, so it must carry the
+    # discovery source plus the agents/hosts/providers collections.
+    snapshot = snapshots[0]
+    assert snapshot["source"] == "mngr/discovery", snapshot
+    assert isinstance(snapshot["agents"], list), snapshot
+    assert isinstance(snapshot["hosts"], list), snapshot
+    assert isinstance(snapshot["providers"], list), snapshot
+    # The snapshot reports every configured provider; the always-present local
+    # provider must appear (the comment above explains why no remote markers are
+    # needed). In this isolated, empty environment nothing has been created yet,
+    # so the agent list is empty.
+    provider_names = {provider["provider_name"] for provider in snapshot["providers"]}
+    assert "local" in provider_names, provider_names
+    assert snapshot["agents"] == [], snapshot
 
 
 @pytest.mark.rsync
@@ -202,9 +218,19 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     # Second create with --reuse: my-task already exists, so it must be reused
     # (started/attached) rather than creating a duplicate -- this is the
     # idempotency the tutorial block is demonstrating.
-    expect(
-        e2e.run(create_cmd, comment="re-running with --reuse reuses the existing agent", timeout=150.0)
-    ).to_succeed()
+    second_create = e2e.run(create_cmd, comment="re-running with --reuse reuses the existing agent", timeout=150.0)
+    expect(second_create).to_succeed()
+    # Verify the second create actually took the reuse code path rather than
+    # provisioning a fresh agent: it must report "Reusing existing agent" and
+    # must NOT re-create the host or bootstrap the Modal environment again.
+    second_output = second_create.stdout + second_create.stderr
+    assert "Reusing existing agent" in second_output, (
+        f"Expected --reuse to report reusing the existing agent, got: {second_output}"
+    )
+    assert "Created Modal environment" not in second_output, (
+        f"--reuse must not re-bootstrap the Modal environment: {second_output}"
+    )
+    assert "Creating host" not in second_output, f"--reuse must not create a new host: {second_output}"
 
     # The reuse must not have created a second agent: same single ID as before.
     second_list = e2e.run(
@@ -254,14 +280,28 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
         mngr exec my-task -- env | sort
     """)
     _create_my_task(e2e, 101015)
+    # Capture the id mngr records for my-task so we can confirm exec ran inside
+    # *that* agent's environment, not merely that some env was dumped. Only one
+    # agent exists, so `mngr list --ids` prints exactly its id.
+    list_result = e2e.run("mngr list --ids", comment="get the agent id to cross-check the exec env")
+    expect(list_result).to_succeed()
+    agent_id = list_result.stdout.strip()
+    assert agent_id, f"expected an agent id from `mngr list --ids`, got: {list_result.stdout!r}"
     result = e2e.run("mngr exec my-task -- env | sort", comment="quickly inspect an agent's environment")
     expect(result).to_succeed()
     # Verify exec actually ran inside the agent's environment, not just that the
     # pipeline exited cleanly: the `| sort` pipe means the shell exit code is
     # sort's, so a clean exit alone would mask an exec failure. mngr injects
-    # these agent-identifying variables into every agent's environment.
+    # these agent-identifying variables into every agent's environment, and the
+    # injected id must match the one mngr records for my-task.
     expect(result.stdout).to_contain("MNGR_AGENT_NAME=my-task")
-    expect(result.stdout).to_contain("MNGR_AGENT_ID=")
+    expect(result.stdout).to_contain(f"MNGR_AGENT_ID={agent_id}")
+    # The tutorial pipes env through `sort`; confirm the env block really is
+    # sorted so the demonstrated pipeline behaves as shown.
+    env_var_lines = [
+        line.strip() for line in result.stdout.splitlines() if "=" in line and line.split("=", 1)[0].strip().isupper()
+    ]
+    assert env_var_lines == sorted(env_var_lines), "expected the env output to be sorted by `sort`"
 
 
 @pytest.mark.release
@@ -346,9 +386,16 @@ def test_tips_xargs_parallel_exec(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     # Verify the exec actually ran on the modal host: its agent id (echoed from
-    # $MNGR_AGENT_ID) and a `pwd` path both appear in the captured output.
+    # $MNGR_AGENT_ID) and a `pwd` path both appear in the captured output. The
+    # `pwd` line is the agent's absolute work_dir, so require a line that begins
+    # with `/` rather than merely "contains a slash" (which a stray warning could
+    # satisfy). With `xargs -P 5` the two echoed lines can interleave, so match
+    # any line, not a fixed position.
+    output_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     assert agent_id in result.stdout, f"expected agent id {agent_id!r} in exec output, got: {result.stdout!r}"
-    assert "/" in result.stdout, f"expected a pwd path in exec output, got: {result.stdout!r}"
+    assert any(line.startswith("/") for line in output_lines), (
+        f"expected an absolute `pwd` path line in exec output, got: {result.stdout!r}"
+    )
 
 
 def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> None:

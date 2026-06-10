@@ -27,7 +27,7 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
     for name in ["agent-a", "agent-b", "agent-c"]:
         expect(list_result.stdout).to_match(rf"{name}\s+(RUNNING|WAITING)")
 
-    # Exec on each individually to verify isolation
+    # Exec on each individually to verify it is independently reachable.
     for name in ["agent-a", "agent-b", "agent-c"]:
         exec_result = e2e.run(
             f"mngr exec {name} 'echo {name}'",
@@ -35,6 +35,25 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
         )
         expect(exec_result).to_succeed()
         expect(exec_result.stdout).to_contain(name)
+
+    # Coexistence means each agent has its own isolated workspace, not a shared
+    # one. Verify this directly: every agent must report a distinct working
+    # directory (its own worktree), so a leaked path from one cannot collide
+    # with another.
+    work_dirs: dict[str, str] = {}
+    for name in ["agent-a", "agent-b", "agent-c"]:
+        pwd_result = e2e.run(
+            f"mngr exec {name} pwd",
+            comment=f"Report working directory of {name}",
+        )
+        expect(pwd_result).to_succeed()
+        # `mngr exec` interleaves the command output with a trailing status line
+        # ("Command succeeded on agent ..."); the directory is the first
+        # absolute path emitted on stdout.
+        paths = [line.strip() for line in pwd_result.stdout.splitlines() if line.strip().startswith("/")]
+        assert paths, f"no working directory reported for {name}: {pwd_result.stdout!r}"
+        work_dirs[name] = paths[0]
+    assert len(set(work_dirs.values())) == 3, f"agents must occupy distinct working directories: {work_dirs}"
 
 
 @pytest.mark.rsync
@@ -67,6 +86,17 @@ def test_list_filter_by_state(e2e: E2eSession) -> None:
     # The filter must select on actual state, not just name: every agent the
     # --stopped filter returns must really be in the STOPPED state.
     assert all(a["state"] == "STOPPED" for a in stopped_agents), stopped_agents
+
+    # The --stopped flag is documented as an alias for the CEL filter
+    # --include 'state == "STOPPED"'. Verify the alias is faithful: the
+    # explicit CEL form must return exactly the same set of agents.
+    cel_result = e2e.run(
+        "mngr list --include 'state == \"STOPPED\"' --format json",
+        comment="List stopped agents via explicit CEL filter (alias for --stopped)",
+    )
+    expect(cel_result).to_succeed()
+    cel_names = {a["name"] for a in json.loads(cel_result.stdout)["agents"]}
+    assert cel_names == set(stopped_names), (cel_names, stopped_names)
 
     # Without --stopped, both agents should appear (the non-stopped one may
     # be RUNNING or WAITING depending on timing)
