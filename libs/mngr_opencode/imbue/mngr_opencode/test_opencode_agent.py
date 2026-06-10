@@ -105,8 +105,8 @@ def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:
     Asserts the four parity features this branch adds, against the live
     ``opencode`` binary driven through the real ``mngr`` CLI:
 
-    1. The agent reaches readiness and accepts a message (exercises the TUI ready
-       banner + provisioning of the lifecycle plugin / transcript scripts).
+    1. The agent reaches readiness and accepts a message (exercises the launch
+       script's readiness sentinel + provisioning of the lifecycle plugin).
     2. The ``active`` marker appears while the agent works (RUNNING) and is
        removed when it finishes (WAITING) -- this is exactly what
        ``BaseAgent.get_lifecycle_state`` reads.
