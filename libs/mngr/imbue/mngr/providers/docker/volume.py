@@ -31,7 +31,7 @@ STATE_CONTAINER_IMAGE: Final[str] = "alpine:latest"
 STATE_VOLUME_MOUNT_PATH: Final[str] = "/mngr-state"
 
 
-def _state_container_name(prefix: str, user_id: str) -> str:
+def state_container_name(prefix: str, user_id: str) -> str:
     """Generate the name for the singleton state container."""
     return f"{prefix}docker-state-{user_id}"
 
@@ -58,7 +58,7 @@ def ensure_state_container(
 
     Returns the container (created or existing).
     """
-    container_name = _state_container_name(prefix, user_id)
+    container_name = state_container_name(prefix, user_id)
     volume_name = state_volume_name(prefix, user_id)
 
     # Check if container already exists
