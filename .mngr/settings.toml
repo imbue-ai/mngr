@@ -85,7 +85,7 @@ backend = "aws"
 default_region = "us-west-2"
 # 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
 # instance only needs to comfortably run the agent.
-default_plan = "t3.large"
+default_instance_type = "t3.large"
 # Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
 # the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
 auto_shutdown_minutes = 120
