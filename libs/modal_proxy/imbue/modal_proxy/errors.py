@@ -50,17 +50,6 @@ class ModalProxyNotFoundError(ModalProxyError):
     """Raised when a Modal resource is not found."""
 
 
-class ModalProxyPermissionDeniedError(ModalProxyError):
-    """Raised when Modal denies access to a resource.
-
-    Modal's per-user permission entries are propagated asynchronously, so a
-    just-created environment (or a just-deleted volume) will report this
-    error for several seconds before the permission system catches up.
-    Callers that are in the middle of a creation/teardown flow should retry
-    this error with backoff.
-    """
-
-
 class ModalProxyInvalidError(ModalProxyError):
     """Raised when an invalid argument is passed to Modal."""
 

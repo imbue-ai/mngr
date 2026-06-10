@@ -39,6 +39,22 @@ When accessing an agent URL in a regular browser (not the Electron app), the Pyt
 
 Closing an individual window just tears down that window's views -- the backend keeps running while any window is open. When the last window closes (or the user issues `Cmd+Q` / `Ctrl+Q`), Electron sends SIGTERM to the backend process and waits up to 5 seconds. If the process doesn't exit, SIGKILL is sent.
 
+#### Quitting page
+
+Backend teardown (and, when applicable, stopping running local minds) takes a moment, during which the UI would otherwise sit there looking frozen. To make the state obvious, once a quit is *committed* every open window flips to a full-window "quitting" screen: the same animated wordmark as the startup loading screen (`shell.html`, loaded with a `#quitting` hash so it reveals a status line), with the chrome view expanded to fill the window (content/sidebar/modal views collapse to zero, the same takeover `updateBundleBounds` uses for the loading and error screens). Progress text -- `Quitting…`, `Stopping N minds…`, `Closing…` -- is pushed to it through the existing `status-update` IPC channel.
+
+The flip happens *after* the mind shutdown prompt below (it is gated on the same `isShuttingDown` commit), so cancelling that prompt leaves the app fully intact with no visual change. Headless quits (SIGTERM / SIGINT) skip the flip -- they have no interactive UI to update.
+
+#### Mind shutdown prompt
+
+Agent containers run independently of the backend, so quitting the app would otherwise leave any **shutdown-capable** minds (those on a provider whose host minds can stop/start -- the local `docker` / `lima` backends today; the single `provider_backend_supports_shutdown` predicate is the one place that gate lives) running and consuming machine resources. Before tearing the backend down, Electron asks the backend which such minds are still running (`GET /api/minds/running`, which reads each mind's container state straight from the discovery snapshot the single discovery observer keeps fresh -- the same `host.state` that drives the landing-page Start/Stop controls -- so the dialog appears instantly without shelling out). When the last window is closed via the macOS close button, the close is intercepted so this prompt appears *before* the window disappears. If the running-minds check itself fails, the user is asked to **Quit anyway** or **Cancel** rather than silently quitting. If any minds are running:
+
+- A dialog lists how many and which minds are running, with three choices: **Cancel** (stay open), **Leave running** (quit now; containers keep running), or **Shut down all**. This prompt runs *first*, before any window flips to the quitting page; **Cancel** leaves the app untouched.
+- **Leave running** and **Shut down all** both commit the quit, flipping every window to the quitting page (above).
+- **Shut down all** stops all the running minds with a single synchronous `POST /api/minds/stop-hosts` (the ids passed as repeated `agent_id` query params), which runs one `mngr stop <ids…> --stop-host` server-side -- mngr stops every named host concurrently via its own executor, so it is one subprocess, not one per mind. Progress shows *in-page on the quitting screen* (`Stopping N minds…`). The endpoint returns the minds still running after the attempt; if any remain (or the request failed), it offers **Retry** / **Quit anyway** / **Cancel quit** via a native dialog (choosing **Cancel quit** reverses the flip and returns the app to its normal running state). Once every mind is down it also stops this env's mngr docker **state container** (`<MNGR_PREFIX>docker-state-<user_id>`, the provider's bookkeeping container that `mngr stop --stop-host` leaves running) via `POST /api/minds/stop-state-container`, so no minds-related container is left running. The state container is stopped, not removed -- its volume (host records) is preserved and it restarts on next use. Only this env's prefix is targeted, so a differently-prefixed state container (e.g. your own `mngr-` docker usage) is never touched.
+
+Programmatic shutdowns (SIGTERM / SIGINT, e.g. `just minds-stop`) skip the prompt and shut down directly. Minds on providers that don't support host shutdown are never counted or stopped -- they don't use local resources.
+
 ### Crash recovery
 
 If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
@@ -58,7 +74,7 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
-- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId, lastWorkspaceAgentId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped. Each window's per-window `lastWorkspaceAgentId` carries the most-recently-opened workspace for that window so its accent paints the titlebar across navigation away from the workspace; it's cleared for matching windows on workspace deletion and for all windows on account sign-out.
 
 ### Environment variables
 
@@ -102,7 +118,7 @@ same shape:
   config.toml             # Optional minds user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
-  window-state.json       # Per-window content URLs, restored on next launch
+  window-state.json       # Per-window content URLs + last-opened workspace, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories

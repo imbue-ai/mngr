@@ -31,13 +31,18 @@ from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.deps import CORE_DEPS
+from imbue.mngr.utils.env_utils import looks_like_mngr_test_container_name
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 from imbue.mngr.utils.testing import worker_test_ids
 
 # Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
@@ -171,19 +176,11 @@ def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
 def log_warnings() -> Generator[list[str], None, None]:
     """Capture loguru warning messages for assertion in tests.
 
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with plugin_testing.py's identically-named fixture).
     """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
+    with capture_log_warnings() as messages:
         yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 # =============================================================================
@@ -481,7 +478,11 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     """
     try:
         client = create_docker_client()
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        # Called unconditionally at session end, including in sessions with no
+        # Docker daemon (e.g. offload sandboxes), so a connection failure here
+        # is expected -- log at debug only.
+        logger.debug("Skipped stale docker container sweep (Docker unavailable): {}", e)
         return []
 
     try:
@@ -492,7 +493,8 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
                 "label": [LABEL_PROVIDER],
             },
         )
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        logger.warning("Failed to list Docker containers during stale-container sweep: {}", e)
         client.close()
         return []
 
@@ -513,7 +515,7 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
         is_test_container = (
             provider_name.startswith("docker-test-")
             or container_name.startswith("mngr_test-")
-            or _looks_like_test_prefix(container_name)
+            or looks_like_mngr_test_container_name(container_name)
         )
         if not is_test_container:
             continue
@@ -537,22 +539,43 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     return stale
 
 
-def _looks_like_test_prefix(container_name: str) -> bool:
-    """Check if a container name starts with a test prefix pattern.
+def _get_leaked_state_containers_for_prefixes(prefixes: list[str]) -> list[tuple[str, str]]:
+    """Find surviving state containers whose name starts with one of *prefixes*.
 
-    Test prefixes follow the format 'mngr_{hex32}-' where {hex32} is a
-    32-character hex string (uuid4().hex). For example:
-    'mngr_22921e597952421296c8973d922f2eb3-docker-state-...'
+    Returns (container_id, container_name) tuples for state containers (those
+    carrying the state-container type label) created under any of this worker's
+    registered prefixes. These are leaks we can attribute to our own fixtures,
+    so the caller fails the suite for them (after cleaning them up).
     """
-    if not container_name.startswith("mngr_"):
-        return False
-    # Extract the part after 'mngr_' up to the first '-'
-    rest = container_name[4:]
-    dash_idx = rest.find("-")
-    if dash_idx != 32:
-        return False
-    hex_part = rest[:32]
-    return all(c in "0123456789abcdef" for c in hex_part)
+    if not prefixes:
+        return []
+    try:
+        client = create_docker_client()
+    except docker.errors.DockerException as e:
+        # We only reach here when this worker's docker fixtures ran (non-empty
+        # prefixes), so the daemon was reachable during the tests. Failing to
+        # connect now means we cannot verify our own cleanup -- this is
+        # unexpected, so surface it loudly rather than silently skipping.
+        logger.opt(exception=e).error("Failed to connect to Docker to check for leaked state containers")
+        return []
+
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={"label": [f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}"]},
+        )
+    except docker.errors.DockerException as e:
+        logger.opt(exception=e).error("Failed to list Docker containers while checking for leaked state containers")
+        return []
+    finally:
+        client.close()
+
+    leaked: list[tuple[str, str]] = []
+    for container in containers:
+        name = container.name or ""
+        if any(name.startswith(prefix) for prefix in prefixes):
+            leaked.append((container.id, name))
+    return leaked
 
 
 def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
@@ -662,14 +685,16 @@ def session_cleanup() -> Generator[None, None, None]:
     and checks for:
     1. Leftover child processes (excluding xdist workers on the leader)
     2. Leftover tmux sessions created by this worker's tests
-    3. Stale Docker containers from tests (older than 1 hour), including
-       both state containers and host containers
+    3. Docker state containers leaked under one of this worker's registered
+       prefixes (an own-fixture leak)
+    4. Stale Docker test containers from other/older sessions (older than 1
+       hour) that cannot be attributed to this worker
 
     If any leaked resources are found:
-    - An error is raised to fail the test suite (except for stale Docker
-      containers, which are silently cleaned up since they may be from
-      other sessions)
-    - The resources are killed as a last-ditch cleanup measure
+    - An error is raised to fail the test suite for leaks we can attribute to
+      this worker (processes, tmux sessions, prefix-matched state containers);
+      stale containers from other sessions are warn-and-cleaned without failing
+    - The resources are killed/removed as a last-ditch cleanup measure
 
     Tests should always clean up after themselves! This is just a safety net.
     """
@@ -721,13 +746,30 @@ def session_cleanup() -> Generator[None, None, None]:
             + "\n".join(f"  {s}" for s in leftover_sessions)
         )
 
-    # 3. Check for stale Docker containers from tests (older than 1 hour).
-    # This catches both state containers and host containers that were leaked
-    # by crashed or interrupted test runs.  We don't fail the test suite for
-    # these (they may be from other sessions), but we do clean them up.
-    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
+    # 3. Check for Docker state containers leaked by THIS worker's fixtures.
+    # These carry one of the prefixes our docker fixtures registered, so they
+    # are unambiguously our own leaks (a fixture failed to clean up). We fail
+    # the suite for these. We cannot fail on arbitrary containers from other
+    # concurrent workers/sessions (we have no way to attribute them), so those
+    # are handled by the age-based sweep below (warn + clean, no failure).
+    leaked_state_containers = _get_leaked_state_containers_for_prefixes(worker_docker_state_prefixes)
+    if leaked_state_containers:
+        container_lines = [f"  {name} ({cid[:12]})" for cid, name in leaked_state_containers]
+        errors.append(
+            "Leaked Docker state containers found!\n"
+            "A docker fixture failed to remove its state container before completing.\n" + "\n".join(container_lines)
+        )
 
-    # 4. Clean up leaked resources (last-ditch safety measure)
+    # 4. Check for stale Docker test containers from other/older sessions (older
+    # than 1 hour). These cannot be attributed to this worker, so we warn and
+    # clean them but do not fail the suite.
+    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
+    if stale_docker_containers:
+        logger.warning(
+            "Cleaning {} stale docker test container(s) from other/older sessions", len(stale_docker_containers)
+        )
+
+    # 5. Clean up leaked resources (last-ditch safety measure)
     for process in leftover_processes:
         try:
             process.kill()
@@ -735,9 +777,10 @@ def session_cleanup() -> Generator[None, None, None]:
             pass
 
     _kill_tmux_sessions(leftover_sessions)
+    _remove_docker_containers(leaked_state_containers)
     _remove_docker_containers(stale_docker_containers)
 
-    # 5. Fail the test suite if any issues were found
+    # 6. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"
