@@ -35,10 +35,10 @@
   // Browser mode: toggles the floating backdrop's `hidden` class. The
   // backdrop covers the full viewport with the panel pinned at top-left;
   // clicks outside the panel (and the Esc key) close the menu. Electron
-  // mode: defers to the main process, which toggles the separate sidebar
-  // WebContentsView. ``sidebarOpen`` is intentionally browser-mode-only --
-  // in Electron the main process owns visibility (see openSidebar /
-  // closeSidebar in electron/main.js).
+  // mode: defers to the main process, which loads /_chrome/sidebar into
+  // the shared modal WebContentsView. ``sidebarOpen`` is intentionally
+  // browser-mode-only -- in Electron the main process owns visibility
+  // (see toggleSidebar / openModal / closeModal in electron/main.js).
   var sidebarOpen = false;
   function showSidebarPanel() {
     document.getElementById('sidebar-backdrop').classList.remove('hidden');
