@@ -259,7 +259,7 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
         f"'{relative}' is not gitignored in {work_dir}.\n"
         "The mngr subagent-proxy plugin writes this file when provisioning a Claude agent, "
         "but it would appear as an unstaged change in your repository.\n"
-        f"Add '{relative}' to your .gitignore and try again, or disable the plugin for this repository:\n"
+        f"Add '{relative.parent}/' to your .gitignore and try again, or disable the plugin for this repository:\n"
         f"  mngr config set --scope project plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false"
     )
 

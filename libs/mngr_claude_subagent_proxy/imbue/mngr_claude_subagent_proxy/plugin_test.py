@@ -13,6 +13,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyMode
 from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfig
@@ -511,20 +512,14 @@ def test_proxy_mode_does_not_write_mngr_proxy_skill(
     assert not skill_path.exists()
 
 
-def _init_git_repo(host: FakeHost, path: Path) -> None:
-    """Initialize an empty git repo at ``path`` for the gitignore-guard tests."""
-    result = host.execute_idempotent_command("git init", cwd=path)
-    assert result.success, result.stderr
-
-
 def test_proxy_agent_definition_refuses_unignored_git_worktree(work_dir: Path, fake_host: FakeHost) -> None:
     """PROXY provisioning aborts if the agent-definition path is not gitignored.
 
     Writing it would surface as an unstaged change in the tracked worktree.
-    The error must point at both the gitignore fix and the repo-scope
+    The error must point at the subdirectory to gitignore and the repo-scope
     disable command, and the artifact must not be written.
     """
-    _init_git_repo(fake_host, work_dir)
+    init_git_repo(work_dir, initial_commit=False)
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig())
 
     with pytest.raises(UnignoredProxyArtifactError) as exc_info:
@@ -532,6 +527,8 @@ def test_proxy_agent_definition_refuses_unignored_git_worktree(work_dir: Path, f
 
     message = str(exc_info.value)
     assert str(Path(".claude") / "agents" / "mngr-proxy" / "proxy.md") in message
+    # The remediation points at the whole mngr-proxy/ subdir, not just the file.
+    assert f"{Path('.claude') / 'agents' / 'mngr-proxy'}/" in message
     assert "mngr config set --scope project" in message
     assert f"plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false" in message
     assert not (work_dir / ".claude" / "agents" / "mngr-proxy" / "proxy.md").exists()
@@ -539,7 +536,7 @@ def test_proxy_agent_definition_refuses_unignored_git_worktree(work_dir: Path, f
 
 def test_proxy_agent_definition_written_when_gitignored(work_dir: Path, fake_host: FakeHost) -> None:
     """PROXY provisioning writes the agent definition once .claude/ is gitignored."""
-    _init_git_repo(fake_host, work_dir)
+    init_git_repo(work_dir, initial_commit=False)
     (work_dir / ".gitignore").write_text(".claude/\n")
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig())
 
@@ -552,7 +549,7 @@ def test_deny_skill_refuses_unignored_git_worktree(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """DENY provisioning aborts if the skill path is not gitignored."""
-    _init_git_repo(fake_host, work_dir)
+    init_git_repo(work_dir, initial_commit=False)
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
 
