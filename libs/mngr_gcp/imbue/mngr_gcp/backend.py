@@ -159,9 +159,15 @@ class GcpProviderBackend(ProviderBackendInterface):
             raise MngrError(f"Expected GcpProviderConfig, got {type(config).__name__}")
 
         try:
-            credentials = config.get_credentials()
+            # Validate the cheap, local, network-free config first (project_id,
+            # zone). ADC resolution is deliberately last: google.auth.default()
+            # probes the GCE metadata server as its final fallback, which blocks
+            # for seconds in non-GCE environments without credentials (e.g. CI).
+            # An unconfigured provider (no project_id) must fail fast here rather
+            # than hang that probe on every `mngr list` / discovery pass.
             project_id = config.get_project_id()
             config.validate_zone_in_region()
+            credentials = config.get_credentials()
         except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
             # Match the AWS/Modal pattern: when the provider cannot be reached
             # (no resolvable ADC, no project_id, or a malformed zone/region),
