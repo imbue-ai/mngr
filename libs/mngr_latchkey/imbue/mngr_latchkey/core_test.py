@@ -204,6 +204,18 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
         "    sys.exit(0)\n"
+        # ``auth re-encrypt <destination> [service ...]`` writes a fake
+        # filtered store to <destination> recording the requested services
+        # (and that stdin was empty, i.e. the same key is reused). Enough to
+        # verify the manager builds the right command and reads the result.
+        'if sys.argv[1:3] == ["auth", "re-encrypt"]:\n'
+        "    import json as _json, os as _os\n"
+        "    destination = sys.argv[3]\n"
+        "    services = sys.argv[4:]\n"
+        "    stdin_key = sys.stdin.read()\n"
+        "    payload = {'services': services, 'reused_key': stdin_key == ''}\n"
+        "    open(destination, 'w').write(_json.dumps(payload))\n"
+        "    sys.exit(0)\n"
         "import os, socket, signal\n"
         'assert sys.argv[1] == "gateway"\n'
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
@@ -587,6 +599,53 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
     manager.initialize()
     with pytest.raises(LatchkeyJwtMintError):
         manager.derive_gateway_password()
+
+
+def test_export_credentials_subset_passes_sorted_services_and_reuses_key(tmp_path: Path) -> None:
+    """The filtered export lists the services (sorted) and reuses the key (empty stdin)."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    destination = tmp_path / "subset.json.enc"
+
+    manager.export_credentials_subset(destination, {"slack", "github", "discord"})
+
+    payload = json.loads(destination.read_text())
+    # Sorted for a deterministic command line.
+    assert payload["services"] == ["discord", "github", "slack"]
+    # Empty stdin (DEVNULL) means the same encryption key is reused.
+    assert payload["reused_key"] is True
+
+
+def test_export_credentials_subset_with_no_services_writes_empty_subset(tmp_path: Path) -> None:
+    """A deny-all host yields an export with no services."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    destination = tmp_path / "subset.json.enc"
+
+    manager.export_credentials_subset(destination, frozenset())
+
+    assert json.loads(destination.read_text())["services"] == []
+
+
+def test_export_credentials_subset_raises_on_failure(tmp_path: Path) -> None:
+    """A non-zero ``auth re-encrypt`` exit must surface as ``LatchkeyError``."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        'if sys.argv[1] == "--version":\n'
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write('boom\\n')\n"
+        "sys.exit(1)\n"
+    )
+    script.chmod(0o755)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
+    with pytest.raises(LatchkeyError, match="re-encrypt"):
+        manager.export_credentials_subset(tmp_path / "out.enc", {"slack"})
 
 
 def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path) -> None:

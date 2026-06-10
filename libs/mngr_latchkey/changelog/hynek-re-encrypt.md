@@ -1,0 +1,3 @@
+Remote VPS gateways now receive only the latchkey credentials a host's permissions actually grant, instead of the full desktop credential store.
+
+When syncing credentials to a remote VPS, mngr resolves the canonical services a host has been granted (mapping its permissions-rule scopes back to service names via the bundled `services.json` catalog, accessed through the new `services_catalog` module) and re-encrypts a host-scoped subset with the same encryption key via `latchkey auth re-encrypt`. The encryption key is unchanged, so the gateway's derived password and the agents' permissions-override JWTs keep validating; a deny-all host receives an empty store. This limits the blast radius of a VPS compromise to the credentials the agent was actually permitted to use.

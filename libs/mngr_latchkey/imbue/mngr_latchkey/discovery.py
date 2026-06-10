@@ -316,7 +316,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 # Initial sync for the freshly-provisioned host, reusing the
                 # open outer connection: permissions first, then credentials.
                 sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
-                sync_credentials(outer, self.latchkey.latchkey_directory)
+                sync_credentials(outer, self.latchkey, host_id)
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         finally:
             with self._pending_lock:
@@ -445,7 +445,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 if do_permissions:
                     sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
                 if do_credentials:
-                    sync_credentials(outer, self.latchkey.latchkey_directory)
+                    sync_credentials(outer, self.latchkey, host_id)
         except HostNotFoundError:
             with self._remote_hosts_lock:
                 self._remote_host_provider_by_id.pop(host_id_str, None)

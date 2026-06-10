@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,6 +11,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
@@ -161,29 +163,79 @@ def test_ensure_latchkey_installed_falls_back_to_stdout_when_stderr_empty() -> N
         _ensure_latchkey_installed(outer)
 
 
-def test_sync_credentials_copies_local_file_to_remote_latchkey_dir(tmp_path: Path) -> None:
+def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` whose ``auth re-encrypt`` records the requested services.
+
+    Writes the destination file as JSON recording the requested service
+    names, so ``sync_credentials`` can be exercised end-to-end without a
+    real (and as-yet-hypothetical) ``auth re-encrypt`` implementation.
+    """
+    script = tmp_path / "fake-latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
+        "open(sys.argv[3], 'w').write(json.dumps({'services': sys.argv[4:]}))\n"
+        "sys.exit(0)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _latchkey_with_fake_reencrypt(tmp_path: Path) -> Latchkey:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
-    (latchkey_directory / "credentials.json.enc").write_bytes(b"encrypted-secret-bytes")
+    return Latchkey(
+        latchkey_directory=latchkey_directory,
+        latchkey_binary=str(_make_reencrypt_latchkey_binary(tmp_path)),
+    )
+
+
+def test_sync_credentials_ships_only_services_the_host_is_granted(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # Grant the host the slack scope; the catalog maps ``slack-api`` -> ``slack``.
+    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey.latchkey_directory), host_id)
+    permissions_path.parent.mkdir(parents=True)
+    permissions_path.write_text('{"rules": [{"slack-api": ["slack-read-all"]}]}')
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
 
-    sync_credentials(outer, latchkey_directory)
+    sync_credentials(outer, latchkey, host_id)
 
     written = _stub(outer).written
     assert len(written) == 1
     assert written[0].path == "/root/.latchkey/credentials.json.enc"
-    assert written[0].content == b"encrypted-secret-bytes"
+    # Only the granted service's credentials are exported, not the full store.
+    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["slack"]
     assert written[0].mode == "0600"
     # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
     assert written[0].is_atomic is True
 
 
-def test_sync_credentials_raises_when_local_file_missing(tmp_path: Path) -> None:
+def test_sync_credentials_ships_empty_subset_for_deny_all_host(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # No permissions file -> deny-all -> no services shipped.
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    written = _stub(outer).written
+    assert len(written) == 1
+    assert json.loads(written[0].content.decode("utf-8"))["services"] == []
+
+
+def test_sync_credentials_raises_when_reencrypt_fails(tmp_path: Path) -> None:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
+    failing_binary = tmp_path / "fake-latchkey"
+    failing_binary.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    failing_binary.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=latchkey_directory, latchkey_binary=str(failing_binary))
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    with pytest.raises(RemoteGatewayError, match="credentials file does not exist"):
-        sync_credentials(outer, latchkey_directory)
+
+    with pytest.raises(RemoteGatewayError, match="export filtered latchkey credentials"):
+        sync_credentials(outer, latchkey, HostId.generate())
 
 
 def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_path: Path) -> None:

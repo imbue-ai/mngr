@@ -7,6 +7,7 @@ the agent's outer host (the VPS) so a gateway can eventually be run there.
 """
 
 import shlex
+import tempfile
 import time
 from pathlib import Path
 from typing import Final
@@ -17,10 +18,15 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
+from imbue.mngr_latchkey.services_catalog import services_for_permissions
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
@@ -199,27 +205,65 @@ def local_credentials_path(latchkey_directory: Path) -> Path:
     return latchkey_directory / _CREDENTIALS_FILENAME
 
 
-def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None:
-    """Copy the local encrypted latchkey credentials onto the VPS.
+def _services_allowed_for_host(latchkey_directory: Path, host_id: HostId) -> frozenset[str]:
+    """Resolve the canonical service names the host's permissions grant access to.
 
-    Reads ``<latchkey_directory>/credentials.json.enc`` from the local
-    (desktop-side) latchkey directory and writes it to ``~/.latchkey/`` on the
-    VPS so the remote latchkey CLI can decrypt the same credential store.
-    Raises :class:`RemoteGatewayError` if the local file is missing or unreadable.
+    Reads the per-host permissions file and maps its rule scopes back to
+    canonical service names via the bundled catalog. A host with no
+    permissions file (the deny-all default) resolves to the empty set, so
+    no credentials are shipped to it. Raises :class:`RemoteGatewayError`
+    if the permissions file is malformed or the bundled catalog cannot be
+    read (a packaging bug).
     """
-    local_path = local_credentials_path(latchkey_directory)
+    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey_directory), host_id)
+    if not permissions_path.is_file():
+        logger.debug("No permissions file for host {} at {}; shipping no credentials", host_id, permissions_path)
+        return frozenset()
     try:
-        content = local_path.read_bytes()
-    except FileNotFoundError as e:
-        raise RemoteGatewayError(f"Local latchkey credentials file does not exist: {local_path}") from e
-    except OSError as e:
-        raise RemoteGatewayError(f"Failed to read local latchkey credentials file {local_path}: {e}") from e
+        config = load_permissions(permissions_path)
+        return services_for_permissions(config)
+    except (LatchkeyStoreError, ServiceCatalogError) as e:
+        raise RemoteGatewayError(f"Failed to resolve allowed services for host {host_id}: {e}") from e
 
+
+def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
+    """Ship a host-scoped subset of the local latchkey credentials onto the VPS.
+
+    Rather than copying the full desktop credential store verbatim, this
+    resolves the canonical services the host's permissions actually grant
+    (via :func:`_services_allowed_for_host`), then re-encrypts a copy
+    containing *only* those services' credentials with the *same*
+    encryption key (:meth:`Latchkey.export_credentials_subset`). The
+    filtered copy is written to ``~/.latchkey/credentials.json.enc`` on
+    the VPS. Keeping the same key means the VPS gateway's derived password
+    and the agents' permissions-override JWTs keep validating; shipping
+    only the granted services means a VPS compromise cannot leak
+    credentials the agent was never permitted to use.
+
+    Raises :class:`RemoteGatewayError` if resolving the services, the
+    re-encrypt, or reading the filtered copy fails.
+    """
+    service_names = _services_allowed_for_host(latchkey.latchkey_directory, host_id)
     remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
-    with log_span("Syncing latchkey credentials to VPS {} ({})", host.get_name(), remote_path):
-        # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
-        # the gateway never reads a half-written file mid-sync.
-        host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
+    with tempfile.TemporaryDirectory(prefix="mngr-latchkey-creds-") as tmpdir:
+        subset_path = Path(tmpdir) / _CREDENTIALS_FILENAME
+        try:
+            latchkey.export_credentials_subset(subset_path, service_names)
+        except LatchkeyError as e:
+            raise RemoteGatewayError(f"Failed to export filtered latchkey credentials for host {host_id}: {e}") from e
+        try:
+            content = subset_path.read_bytes()
+        except OSError as e:
+            raise RemoteGatewayError(f"Failed to read filtered latchkey credentials at {subset_path}: {e}") from e
+        with log_span(
+            "Syncing {} service(s) of latchkey credentials to VPS {} ({})",
+            len(service_names),
+            host.get_name(),
+            remote_path,
+        ):
+            # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
+            # the gateway never reads a half-written file mid-sync.
+            host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
 def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id: HostId) -> None:
