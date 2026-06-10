@@ -1,4 +1,4 @@
-{#def git_url, host_name, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode #}
+{#def git_url, host_name, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, color="#0b292b", palette={} #}
 {#
   Workspace creation form. The compute provider, AI provider, and backup
   provider defaults depend on whether an account is selected; the page-level
@@ -34,6 +34,29 @@
         buttons[i].textContent = 'Creating...';
       }
     });
+
+    // Color picker: palette-only (no custom hex on create). Clicking a
+    // swatch updates the hidden ``color`` input the form POSTs, and
+    // flips aria-checked so the visual selection ring (driven by an
+    // aria-checked CSS attribute selector in tokens.css) tracks.
+    var colorInput = document.getElementById('create-color-input');
+    var colorSwatches = document.querySelectorAll('#create-color-picker .color-swatch');
+    function selectColorSwatch(hex) {
+      colorInput.value = hex;
+      for (var i = 0; i < colorSwatches.length; i++) {
+        colorSwatches[i].setAttribute(
+          'aria-checked',
+          colorSwatches[i].getAttribute('data-color') === hex ? 'true' : 'false'
+        );
+      }
+    }
+    for (var i = 0; i < colorSwatches.length; i++) {
+      (function (sw) {
+        sw.addEventListener('click', function () {
+          selectColorSwatch(sw.getAttribute('data-color'));
+        });
+      })(colorSwatches[i]);
+    }
 
     var accountSelect = document.getElementById('account_id');
     var launchSelect = document.getElementById('launch_mode');
@@ -211,6 +234,21 @@
       <div class="flex gap-2 items-stretch">
         <TextInput name="host_name" :value="host_name" placeholder="assistant" id="host_name" required extra="flex-1" />
         <ButtonSubmit form="create-form" id="create-submit">Create</ButtonSubmit>
+      </div>
+
+      <div id="create-color-picker" class="mt-3" role="radiogroup" aria-label="Workspace color">
+        <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
+        <div class="flex flex-wrap gap-2">
+          {% for name, hex_value in palette.items() %}
+            <button type="button"
+                    role="radio"
+                    class="color-swatch w-6 h-6 rounded focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                    aria-label="{{ name }}"
+                    aria-checked="{{ 'true' if hex_value == color else 'false' }}"
+                    data-color="{{ hex_value }}"
+                    style="background-color: {{ hex_value }};"></button>
+          {% endfor %}
+        </div>
       </div>
 
       <div class="flex items-center justify-between gap-3 mt-2.5 px-1 text-xs">

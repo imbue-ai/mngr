@@ -227,6 +227,30 @@ def test_render_create_form_omits_env_file_checkbox() -> None:
     assert "include_env_file" not in html
 
 
+def test_render_create_form_includes_color_picker_with_palette_swatches() -> None:
+    html = render_create_form()
+    # All 12 palette swatches present.
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' in html
+    # Hidden input named "color" carries the default selection.
+    assert 'name="color"' in html
+    assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
+
+
+def test_render_create_form_marks_default_color_as_checked() -> None:
+    html = render_create_form()
+    # The default ``confusion`` swatch is the only one with aria-checked=true.
+    assert html.count('aria-checked="true"') == 1
+
+
+def test_render_create_form_pre_selects_provided_color() -> None:
+    html = render_create_form(color="#cecd0c")
+    # The hidden input + the matching swatch's aria-checked carry the
+    # picked color.
+    assert 'value="#cecd0c"' in html
+    assert html.count('aria-checked="true"') == 1
+
+
 def test_render_create_form_shows_error_message_when_supplied() -> None:
     html = render_create_form(error_message="Imbue cloud requires an account.")
     assert "Imbue cloud requires an account." in html

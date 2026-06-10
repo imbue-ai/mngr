@@ -885,6 +885,13 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    # Color picker hidden input. Lenient parse + default fallback so a
+    # malformed value (e.g. browser ate the input) doesn't reject the
+    # whole form -- new workspaces just get the default color.
+    color_raw = str(form.get("color", "")).strip()
+    color = normalize_workspace_color(color_raw) if color_raw else None
+    if color is None:
+        color = DEFAULT_WORKSPACE_COLOR
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -1015,6 +1022,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
+        color=color,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -1114,6 +1122,10 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
+    color_raw = str(body.get("color", "")).strip()
+    color = normalize_workspace_color(color_raw) if color_raw else None
+    if color is None:
+        color = DEFAULT_WORKSPACE_COLOR
     if not git_url:
         return Response(
             status_code=400,
@@ -1195,6 +1207,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         anthropic_api_key=anthropic_api_key,
         on_created=_persist_region_on_created,
         backup_request=backup_request,
+        color=color,
     )
 
     # Apply any onboarding answers supplied inline by the API caller. Absent
