@@ -1,0 +1,1 @@
+The root dev dependency group now installs `imbue-mngr-latchkey[dev]` (and the root `[tool.uv.sources]` table declares `imbue-mngr-latchkey` as a workspace source), so the `jsonschema` test dependency used by the new latchkey peer-minds schema tests is available in the workspace environment.
