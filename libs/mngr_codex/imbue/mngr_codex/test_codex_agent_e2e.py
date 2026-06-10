@@ -10,9 +10,6 @@ with a copy of the user's real ``~/.codex/auth.json`` (so it authenticates witho
 touching the real config), and running the real installed ``mngr``/``codex`` binaries
 (put on ``PATH``) rather than the checkout's. Host-dir and tmux-server isolation come
 for free from the autouse ``setup_test_mngr_env`` fixture, same as every other test.
-codex's marker is racy mid-turn (set on ``UserPromptSubmit``, cleared on ``Stop``), so
-the profile opts out of the RUNNING observation; the transcript-keyed assertions carry
-the lifecycle coverage.
 
 It is a ``release`` test (not run in CI) and requires the ``codex`` binary plus a
 logged-in ``~/.codex/auth.json``; skipped otherwise. The model is pinned to a
@@ -69,10 +66,11 @@ _PROVIDER_SETTINGS: tuple[str, ...] = (
 class _CodexReleaseProfile(AgentReleaseProfile):
     agent_type = "codex"
     common_transcript_subdir = "codex"
-    # codex sets its marker only on UserPromptSubmit and clears it on Stop, so polling it
-    # mid-turn is racy; rely on the transcript-keyed assertions instead. Its turn does not
-    # force a tool call and it does not report usage in the common envelope.
-    observes_running_marker = False
+    # codex's send_message blocks until the agent reads RUNNING (its UserPromptSubmit hook
+    # fires a tmux wait-for signal *after* setting the marker), so the marker is reliably
+    # present once a message returns -- observe it. codex's turn does not force a tool call
+    # and it does not report token usage in the common envelope.
+    observes_running_marker = True
     forces_tool_call = False
     asserts_usage = False
 
