@@ -891,24 +891,17 @@ def test_default_workspace_color_is_confusion() -> None:
     assert DEFAULT_WORKSPACE_COLOR == "#0b292b"
 
 
-def test_workspace_palette_matches_js_mirror() -> None:
-    """Drift guard: ``WORKSPACE_PALETTE`` in templates.py and the
-    ``WORKSPACE_PALETTE`` literal in static/workspace_accent.js must
-    agree exactly. Both halves consume the palette (server side via SSE
-    emit, client side via the picker UI) so any drift will surface as a
-    swatch-vs-titlebar mismatch."""
+def test_workspace_accent_js_has_no_palette_mirror() -> None:
+    """The palette lives server-side only (workspace_color.py) and
+    reaches the client as server-rendered swatches with data-color
+    attributes. A JS palette literal would be a second source of truth
+    to keep in sync; this guard fails if someone reintroduces one.
+    The JS file keeps only the two runtime helpers (normalizeHex /
+    pickForegroundForHex)."""
     js_content = _WORKSPACE_ACCENT_JS_PATH.read_text()
-    palette_block = re.search(
-        r"var WORKSPACE_PALETTE = \{(?P<body>[^}]+)\}",
-        js_content,
-    )
-    assert palette_block is not None, "WORKSPACE_PALETTE literal not found in workspace_accent.js"
-    js_entries: dict[str, str] = {}
-    for line in palette_block.group("body").splitlines():
-        entry_match = re.match(r"\s*(\w+):\s*'(#[0-9a-f]{6})',?\s*$", line)
-        if entry_match:
-            js_entries[entry_match.group(1)] = entry_match.group(2)
-    assert js_entries == dict(WORKSPACE_PALETTE)
+    assert "WORKSPACE_PALETTE" not in js_content
+    assert "normalizeHex" in js_content
+    assert "pickForegroundForHex" in js_content
 
 
 # Cases ordered: 4 dark palette entries (-> white text), 8 light palette

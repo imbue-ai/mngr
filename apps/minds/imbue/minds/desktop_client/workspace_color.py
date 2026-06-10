@@ -52,9 +52,11 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "white": "#ffffff",
 }
 
-# Default workspace color used at create time and for the one-time
-# migration backfill applied to any primary agent that lacks a
-# ``color`` label after the upgrade.
+# Default workspace color: preselected on the create form when no other
+# palette entry is suggested, and used as the renderer-side fallback for
+# primary agents that have no ``color`` label on disk (pre-picker
+# workspaces keep rendering as this until the user picks; no proactive
+# label write happens -- see the plan's migration decision history).
 DEFAULT_WORKSPACE_COLOR_NAME: Final[str] = "confusion"
 DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_NAME]
 

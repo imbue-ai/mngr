@@ -79,7 +79,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(19))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(11))
 
 
 # --- Import style ---
@@ -118,7 +118,7 @@ def test_prevent_asyncio_import() -> None:
     # ``latchkey/handlers/`` (``predefined.py`` and ``file_sharing.py``) both use
     # ``run_in_executor`` to run the blocking grant/deny path off the event loop. All three
     # are intrinsic to FastAPI integration.
-    rc.check_asyncio_import(_DIR, snapshot(5))
+    rc.check_asyncio_import(_DIR, snapshot(3))
 
 
 def test_prevent_pandas_import() -> None:

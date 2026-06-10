@@ -1,45 +1,24 @@
 // Workspace accent helpers. The server attaches each workspace's `accent`
 // (a #rrggbb string) and `accent_fg` (an RGB triple for the foreground)
 // to the SSE workspaces payload; chrome.js / sidebar.js drop those into
-// CSS variables. This file exposes the shared palette + a few pure
-// helpers (lenient hex normalize, WCAG luminance contrast picker) so the
-// settings page can validate user input and the create page can render
-// swatches off the same palette the server uses.
+// CSS variables. The palette itself lives server-side only
+// (workspace_color.py) and reaches the client as server-rendered
+// swatches carrying data-color attributes -- there is intentionally no
+// JS palette mirror to keep in sync.
+//
+// This file exposes the two pure helpers the picker pages need at
+// runtime: a lenient hex normalizer (validating typed input before
+// save) and the WCAG luminance contrast picker (computing the titlebar
+// foreground for instant local previews, where waiting on the server
+// round-trip would defeat the purpose). Both mirror their Python
+// counterparts in workspace_color.py.
 //
 // Usage:
-//   window.mindsAccent.palette                 -> {name: '#rrggbb', ...}
-//   window.mindsAccent.defaultColor            -> '#0b292b' (confusion)
 //   window.mindsAccent.normalizeHex(value)     -> '#rrggbb' | null
 //   window.mindsAccent.pickForegroundForHex(h) -> '0 0 0' | '255 255 255'
 (function () {
-  // Workspace palette. Mirrors WORKSPACE_PALETTE in templates.py;
-  // templates_test.py parses this file and asserts the two stay in
-  // lockstep. The 11 named entries come from the Figma source
-  // (Minds Early IA Explorations, node 356:4113); ``white`` is added
-  // as the 12th so users have a neutral light option distinct from
-  // the warm-cream Figma entries. Order matters and mirrors
-  // WORKSPACE_PALETTE in templates_color (workspace_color.py): the 10
-  // chromatic colors first, then the two achromatic neutrals
-  // (indifference = black, white) grouped at the end.
-  var WORKSPACE_PALETTE = {
-    confusion: '#0b292b',
-    courage: '#492222',
-    envy: '#3c3d06',
-    peace: '#9fbbd3',
-    belonging: '#e8a7a8',
-    energy: '#cecd0c',
-    strength: '#cfc7b3',
-    comfort: '#f5d6a0',
-    inspiration: '#e9ecd9',
-    clarity: '#fcefd4',
-    indifference: '#000000',
-    white: '#ffffff',
-  };
-
-  var DEFAULT_WORKSPACE_COLOR = WORKSPACE_PALETTE.confusion;
-
   // WCAG relative luminance threshold below which white text reads
-  // better than black on the background; see templates.py for the
+  // better than black on the background; see workspace_color.py for the
   // derivation (sqrt(1.05 * 0.05) - 0.05, rounded).
   var FOREGROUND_LUMINANCE_THRESHOLD = 0.179;
 
@@ -72,8 +51,6 @@
   }
 
   window.mindsAccent = {
-    palette: WORKSPACE_PALETTE,
-    defaultColor: DEFAULT_WORKSPACE_COLOR,
     normalizeHex: normalizeHex,
     pickForegroundForHex: pickForegroundForHex,
   };

@@ -26,16 +26,13 @@
   if (hexInput && swatchContainer && errorEl && !isStale) {
     var swatches = swatchContainer.querySelectorAll('.color-swatch');
     var lastSavedHex = (hexInput.value || '').toLowerCase();
-    var hexPattern = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
     function normalizeHex(value) {
-      var match = hexPattern.exec(String(value).trim());
-      if (!match) return null;
-      var body = match[1].toLowerCase();
-      if (body.length === 3) {
-        body = body.split('').map(function (ch) { return ch + ch; }).join('');
-      }
-      return '#' + body;
+      // Shared implementation in workspace_accent.js (loaded by the
+      // page alongside this file) -- one JS copy, mirroring the Python
+      // normalize_workspace_color.
+      if (!window.mindsAccent || !window.mindsAccent.normalizeHex) return null;
+      return window.mindsAccent.normalizeHex(value);
     }
 
     function showError(message) {

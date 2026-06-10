@@ -11,9 +11,10 @@
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
   // Per-workspace accent comes from the SSE ``workspaces`` payload's
-  // ``accent`` (#rrggbb) field. Workspaces without one (shouldn't
-  // happen post-migration -- every primary agent carries a color
-  // label) skip the inline style and fall back to the CSS default.
+  // ``accent`` (#rrggbb) field, which the server always populates
+  // (stored color label, or the default for label-less workspaces).
+  // The skip-when-missing branch below is defensive only; rows
+  // without an inline style fall back to the CSS default.
 
   function selectWorkspace(agentId) {
     if (isElectron) window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
