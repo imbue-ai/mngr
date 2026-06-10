@@ -379,11 +379,11 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  verify:
+  launch_to_msg:
     needs: [check_should_run, build]
     # Skip when `check_should_run` told us to short-circuit (pair
     # unchanged) AND only run when build actually succeeded -- on build
-    # failure verify is skipped; the build job's own `upload build log`
+    # failure this job is skipped; the build job's own `upload build log`
     # step uses always() so the dist log artifact is preserved either way.
     if: needs.check_should_run.outputs.should_run == 'true' && needs.build.result == 'success'
     runs-on: [self-hosted, macOS, minds-runner]
@@ -906,12 +906,8 @@ jobs:
   # Vanilla `macos-latest` cold-launch smoke: the same binary the `build`
   # job produced (or cache-hit) gets installed on a fresh GHA-hosted Mac
   # and asserted via the macos-launch Playwright spec. Runs in parallel
-  # with `verify` (both consume the build artifact, neither blocks the
-  # other), and the workflow's overall status is red if either fails.
-  # Folded in from the old standalone `minds-macos-launch.yml`, which
-  # had to download via the auto-updater (latest *released* binary, not
-  # this SHA's) and went stale every time the spec moved ahead of the
-  # released build.
+  # with `launch_to_msg` (both consume the build artifact, neither blocks
+  # the other); the workflow is red if either fails.
   macos_launch:
     needs: [check_should_run, build]
     if: needs.check_should_run.outputs.should_run == 'true'
@@ -962,11 +958,11 @@ jobs:
 
   # Record the (mngr main HEAD, FCT main HEAD) pair we just verified
   # green so the next run can skip if nothing has moved. Only runs when
-  # BOTH downstream jobs (verify + macos_launch) succeeded -- a partial
-  # green doesn't move the marker, so the next slot retries automatically.
+  # BOTH downstream jobs succeeded -- a partial green doesn't move the
+  # marker, so the next slot retries automatically.
   update_marker:
-    needs: [check_should_run, verify, macos_launch]
-    if: needs.verify.result == 'success' && needs.macos_launch.result == 'success'
+    needs: [check_should_run, launch_to_msg, macos_launch]
+    if: needs.launch_to_msg.result == 'success' && needs.macos_launch.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: store pair key for next-run skip
