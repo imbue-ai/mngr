@@ -5,7 +5,7 @@ from pathlib import Path
 from imbue.mngr.api.list import agent_details_to_cel_context
 from imbue.mngr.cli.field_catalog import FieldContext
 from imbue.mngr.cli.field_catalog import FieldSection
-from imbue.mngr.cli.field_catalog import _CEL_COMPUTED_KEYS
+from imbue.mngr.cli.field_catalog import _CEL_SYNTHESIZED_KEYS
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
 from imbue.mngr.cli.field_catalog import render_catalog_help_markdown
@@ -44,13 +44,13 @@ def test_catalog_omits_the_model_discriminator_tag() -> None:
     assert "resource_type" not in _catalog_keys()
 
 
-def test_computed_keys_match_what_cel_context_actually_emits() -> None:
-    """``_CEL_COMPUTED_KEYS`` must equal the keys agent_details_to_cel_context synthesizes.
+def test_synthesized_keys_match_what_cel_context_actually_emits() -> None:
+    """``_CEL_SYNTHESIZED_KEYS`` must equal the keys agent_details_to_cel_context adds.
 
-    This pins the hand-written computed-field rows to the live computation: if a
-    new computed field is added to ``agent_details_to_cel_context`` without a
-    catalog row (or vice versa), this fails. The sample agent sets the optional
-    inputs (runtime, activity times) so every conditional computed field appears.
+    This pins the hand-written computed/alias rows to the live computation: if a
+    new key is synthesized onto the CEL context (or removed) without updating the
+    catalog, this fails. The sample agent sets the optional inputs (runtime,
+    activity times, a project label) so every conditional synthesized key appears.
     """
     now = datetime.now(timezone.utc)
     host = HostDetails(
@@ -72,6 +72,7 @@ def test_computed_keys_match_what_cel_context_actually_emits() -> None:
         runtime_seconds=10.0,
         user_activity_time=now,
         agent_activity_time=now,
+        labels={"project": "mngr"},
         host=host,
     )
 
@@ -82,23 +83,25 @@ def test_computed_keys_match_what_cel_context_actually_emits() -> None:
     host_extra = set(context["host"]) - set(model_dump["host"])
     emitted = top_level_extra | {f"host.{key}" for key in host_extra}
 
-    assert emitted == set(_CEL_COMPUTED_KEYS), (
+    assert emitted == set(_CEL_SYNTHESIZED_KEYS), (
         f"agent_details_to_cel_context emits {sorted(emitted)} beyond the model, "
-        f"but the catalog declares {sorted(_CEL_COMPUTED_KEYS)}; keep them in sync."
+        f"but the catalog declares {sorted(_CEL_SYNTHESIZED_KEYS)}; keep them in sync."
     )
 
 
-def test_computed_rows_exist_and_are_cel_only_except_provider_alias() -> None:
-    """Every computed key has a catalog row, restricted to CEL contexts.
+def test_synthesized_rows_exist_and_computed_fields_are_cel_only() -> None:
+    """Every synthesized key has a catalog row; only the computed fields are CEL-only.
 
-    ``host.provider`` is the exception: it is also a documented template alias,
-    so it is available in all three contexts.
+    age/runtime/idle cannot be produced by the template path, so they are
+    ``cel``-only. The aliases (host.provider, project) resolve in both contexts.
     """
     rows_by_key = {row.key: row for row in build_list_field_catalog()}
-    for key in _CEL_COMPUTED_KEYS:
-        assert key in rows_by_key, f"computed key {key} has no catalog row"
-    assert set(rows_by_key["age"].contexts) == {FieldContext.FILTER, FieldContext.SORT}
-    assert FieldContext.TEMPLATE in rows_by_key["host.provider"].contexts
+    for key in _CEL_SYNTHESIZED_KEYS:
+        assert key in rows_by_key, f"synthesized key {key} has no catalog row"
+    for computed_key in ("age", "runtime", "idle"):
+        assert set(rows_by_key[computed_key].contexts) == {FieldContext.CEL}
+    for alias_key in ("host.provider", "project"):
+        assert FieldContext.TEMPLATE in rows_by_key[alias_key].contexts
 
 
 def test_catalog_covers_every_field_alias() -> None:
@@ -113,11 +116,11 @@ def test_catalog_covers_every_field_alias() -> None:
 def test_no_orphan_computed_or_alias_rows() -> None:
     """Every row in the "Computed and alias fields" section is backed by reality.
 
-    Each such row must be either a live-computed key (``_CEL_COMPUTED_KEYS``) or a
+    Each such row must be either a synthesized CEL key (``_CEL_SYNTHESIZED_KEYS``) or a
     real alias (``_FIELD_ALIASES``). This is the reverse of the two pins above and
     catches a row left behind in the catalog after its source is removed.
     """
-    backed = set(_CEL_COMPUTED_KEYS) | set(_FIELD_ALIASES)
+    backed = set(_CEL_SYNTHESIZED_KEYS) | set(_FIELD_ALIASES)
     computed_rows = [row for row in build_list_field_catalog() if row.section == FieldSection.COMPUTED]
     orphans = [row.key for row in computed_rows if row.key not in backed]
     assert not orphans, f"catalog has computed/alias rows not backed by the computation or alias table: {orphans}"
@@ -126,9 +129,9 @@ def test_no_orphan_computed_or_alias_rows() -> None:
 def test_rows_as_dicts_collapse_contexts_to_string() -> None:
     rows = catalog_rows_as_dicts()
     age_row = next(row for row in rows if row["key"] == "age")
-    assert age_row["contexts"] == "filter, sort"
+    assert age_row["contexts"] == "cel"
     name_row = next(row for row in rows if row["key"] == "name")
-    assert name_row["contexts"] == "filter, sort, template"
+    assert name_row["contexts"] == "cel, template"
 
 
 def test_help_markdown_renders_each_section_and_field() -> None:
@@ -137,4 +140,4 @@ def test_help_markdown_renders_each_section_and_field() -> None:
     assert "**Host fields:**" in markdown
     assert "**Computed and alias fields:**" in markdown
     assert "`host.resource.cpu.count`" in markdown
-    assert "`age` (filter, sort)" in markdown
+    assert "`age` (cel)" in markdown

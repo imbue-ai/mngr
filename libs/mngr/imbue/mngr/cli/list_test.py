@@ -1729,8 +1729,8 @@ def test_list_schema_json_lists_referenceable_fields(
     rows_by_key = {row["key"]: row for row in output["schema"]}
     # Live model fields (including a deeply nested one) and a computed field.
     assert {"name", "host.resource.cpu.count"} <= set(rows_by_key)
-    assert rows_by_key["age"]["contexts"] == "filter, sort"
-    assert rows_by_key["name"]["contexts"] == "filter, sort, template"
+    assert rows_by_key["age"]["contexts"] == "cel"
+    assert rows_by_key["name"]["contexts"] == "cel, template"
 
 
 def test_list_schema_rejects_agent_selection_options(

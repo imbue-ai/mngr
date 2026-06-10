@@ -793,6 +793,12 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
 
+    # Expose labels.project as the bare `project` alias too, mirroring the --project
+    # filter flag and the host.provider alias, so CEL filters/sorts can use either name.
+    # Always set (None when unset), matching how optional scalar fields appear in the dump.
+    labels = result.get("labels")
+    result["project"] = labels.get("project") if isinstance(labels, dict) else None
+
     return result
 
 

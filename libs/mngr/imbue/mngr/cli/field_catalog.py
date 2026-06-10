@@ -18,7 +18,7 @@ model: the computed fields (``age`` / ``runtime`` / ``idle``) produced by
 ``project``), and the dynamic key patterns (``labels.$KEY``, ``plugin.*``).
 Those are listed explicitly in ``_EXTRA_ROWS`` below. The completeness of that
 hand-written list is pinned to reality by tests in ``field_catalog_test.py``:
-``_CEL_COMPUTED_KEYS`` is cross-checked against what ``agent_details_to_cel_context``
+``_CEL_SYNTHESIZED_KEYS`` is cross-checked against what ``agent_details_to_cel_context``
 actually emits, and the alias rows against ``_FIELD_ALIASES``.
 
 ``mngr list --schema`` renders this catalog directly; the ``list`` command's
@@ -38,18 +38,25 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 
 
 class FieldContext(str, Enum):
-    """A context in which a list field name may be referenced."""
+    """A context in which a list field name may be referenced.
 
-    FILTER = "filter"
-    SORT = "sort"
+    There are only two, because ``--include``/``--exclude`` and ``--sort`` all
+    evaluate CEL against the *same* context (see ``agent_details_to_cel_context``),
+    so a name usable in a filter is always usable in a sort and vice versa --
+    they are one ``CEL`` context, not two. ``TEMPLATE`` is the genuinely separate
+    ``--fields`` / ``--format`` resolution path.
+    """
+
+    CEL = "cel"
     TEMPLATE = "template"
 
 
-# Agent and host model fields work in all three contexts; computed fields are
-# derived during CEL context construction and so are unavailable in plain
-# ``--fields`` / ``--format`` templates.
-ALL_CONTEXTS: tuple[FieldContext, ...] = (FieldContext.FILTER, FieldContext.SORT, FieldContext.TEMPLATE)
-CEL_CONTEXTS: tuple[FieldContext, ...] = (FieldContext.FILTER, FieldContext.SORT)
+# Every field is usable in CEL (``--include``/``--exclude``/``--sort``); the only
+# axis that varies is whether it is *also* usable in ``--fields`` / ``--format``
+# templates. The computed fields (age/runtime/idle) are CEL-only because the
+# template path cannot derive them.
+ALL_CONTEXTS: tuple[FieldContext, ...] = (FieldContext.CEL, FieldContext.TEMPLATE)
+CEL_CONTEXTS: tuple[FieldContext, ...] = (FieldContext.CEL,)
 
 
 class FieldSection(str, Enum):
@@ -81,10 +88,11 @@ class FieldCatalogRow(FrozenModel):
 
 
 # Keys that ``agent_details_to_cel_context`` synthesizes on top of the raw
-# ``AgentDetails`` model dump. Kept as a named constant so the cross-check test
-# can assert the live computation produces exactly these (and the rows below
-# stay in sync with it).
-_CEL_COMPUTED_KEYS: tuple[str, ...] = ("age", "runtime", "idle", "host.provider")
+# ``AgentDetails`` model dump -- the computed fields (age/runtime/idle) and the
+# CEL aliases (host.provider, project). Kept as a named constant so the
+# cross-check test can assert the live computation produces exactly these (and
+# the rows below stay in sync with it).
+_CEL_SYNTHESIZED_KEYS: tuple[str, ...] = ("age", "runtime", "idle", "host.provider", "project")
 
 
 # Fields that are not part of the model shape and so must be described by hand:
@@ -124,8 +132,8 @@ _EXTRA_ROWS: tuple[FieldCatalogRow, ...] = (
     FieldCatalogRow(
         key="project",
         type="str",
-        description="Alias for labels.project (only in --fields / --format templates).",
-        contexts=(FieldContext.TEMPLATE,),
+        description="Alias for labels.project (mirrors the --project filter flag).",
+        contexts=ALL_CONTEXTS,
         section=FieldSection.COMPUTED,
     ),
     FieldCatalogRow(
@@ -231,12 +239,14 @@ def render_catalog_help_markdown() -> str:
     """
     rows = build_list_field_catalog()
     lines: list[str] = [
-        "These field names are shared across the three places they can appear:",
-        "- CEL expressions for `--include`/`--exclude` (filter)",
-        "- CEL expressions for `--sort` (sort)",
-        "- `--fields` and `--format` template strings (template)",
+        "Every field below can be used in CEL expressions for `--include`/`--exclude` and "
+        "`--sort` (these share one evaluation context, so `cel` covers both).",
         "",
-        "Each field below is annotated with the contexts in which it is available.",
+        "Each field is annotated with the contexts it works in:",
+        "- `cel` - usable in `--include`/`--exclude` and `--sort`",
+        "- `template` - also usable in `--fields` and `--format` template strings",
+        "",
+        "Only the computed fields (age/runtime/idle) are `cel`-only; everything else is both.",
         "",
     ]
     for section in _SECTION_ORDER:
