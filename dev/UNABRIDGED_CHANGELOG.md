@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Added the titlebar-workspace-accent blueprint under ``blueprint/`` describing
+the rework of the per-workspace accent from a small swatch next to the title
+into a full-width colored top bar with rounded edges below. The
+implementation lives under ``apps/minds/``.
+
+Add a blueprint plan under `blueprint/loading-window-position/` describing
+the fix for the startup loading window jumping from the default centered
+position to its restored bounds when the backend comes up. The plan
+covers reusing the existing `restoreWindowBounds()` helper at the
+app-startup site, expected behavior in first-launch, multi-window,
+display-gone, and deleted-workspace cases, and the manual verification
+scenarios used since this is Electron main-process code with no
+automated test harness in the repo.
+
+Updated the changelog-writing guidance in `CLAUDE.md`: when a per-PR changelog
+entry uses a list, its bullets should be separated by a double newline (a blank
+line between each bullet).
+
+Added a blueprint plan (`blueprint/docker-state-container-leak/`) documenting the investigation and fix for leaked Docker state containers from local test runs.
+
+Added an implementation-plan design doc under `blueprint/` for the create-template `setting`/`setting__extend` fix (see the `libs/mngr` entry for the user-visible behavior change).
+
+`scripts/snapshot_minds_e2e_state.py` now sets `LATCHKEY_DISABLE_COUNTING=1` in the in-sandbox runner before booting minds. The snapshot builder is test infrastructure (it captures on-disk state into the fixture image used by the `minds_snapshot_resume` tests), so its booted minds -> `mngr latchkey forward` -> `latchkey gateway` chain should not count toward Latchkey's usage -- mirroring the opt-out the pytest conftest already applies to the equivalent e2e test. Genuine minds installs (including dev-from-source launches via `just minds-start`) intentionally still count.
+
 ## 2026-06-08
 
 Fixed the `publish` workflow, which had been failing at the "Verify versions and pin consistency" step since `scripts/utils.py` started importing `UNPUBLISHED_PACKAGES` from `imbue.mngr`. A bare `uv run` only syncs the root project (which does not depend on `imbue-mngr`), so the import raised `ModuleNotFoundError: No module named 'imbue.mngr'`. The three `scripts/verify_publish.py` invocations now use `uv run --all-packages` so the workspace package is installed.
