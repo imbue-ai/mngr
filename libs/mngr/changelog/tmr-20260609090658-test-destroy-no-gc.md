@@ -1,1 +1,0 @@
-Fixed the e2e test fixture that wrote an invalid `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`, which made TOML parsing fail and broke agent creation across e2e tests. Also added the missing `@pytest.mark.timeout(120)` marker to `test_destroy_no_gc` so it no longer falls back to the too-short default timeout.

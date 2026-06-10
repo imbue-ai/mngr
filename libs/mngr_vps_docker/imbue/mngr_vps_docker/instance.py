@@ -95,6 +95,7 @@ from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
@@ -648,6 +649,14 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
         parsed = self._parse_build_args(build_args)
+
+        # Fail fast before provisioning a (billable) VPS: a DEPOT build needs
+        # DEPOT_TOKEN, but the build only runs after the VPS exists and
+        # cloud-init completes -- so a missing token would otherwise waste a
+        # full provision. Only an actual build (non-empty docker_build_args)
+        # needs the token; a plain image pull does not.
+        if parsed.docker_build_args:
+            ensure_depot_token_available(self.config.builder)
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()

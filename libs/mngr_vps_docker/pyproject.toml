@@ -56,7 +56,7 @@ omit = [
 # most of `instance.py` is host-lifecycle code (create, snapshot, exec,
 # destroy) that's exercised end-to-end by each concrete provider's release
 # tests rather than at the unit level.
-fail_under = 42
+fail_under = 45
 omit = [
   "*_test.py",
   "test_*.py",

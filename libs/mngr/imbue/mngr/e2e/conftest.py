@@ -711,12 +711,16 @@ def e2e(
     # commands that load merged config comes from the profile ``settings.toml``
     # and the project ``settings.local.toml`` seeded above.
 
-    # Ensure .claude/settings.local.json is gitignored. Remote providers
-    # (Modal, Docker) need to write Claude hooks to this file, and the
-    # gitignore check fails if it would appear as an unstaged change.
+    # Ensure .claude/settings.local.json and the per-test project config dir
+    # are gitignored. Remote providers (Modal, Docker) need to write Claude
+    # hooks to .claude/settings.local.json. The project config dir holds the
+    # settings.toml / settings.local.toml that the e2e fixture seeds and that
+    # tests further mutate via `mngr config set`. Without these entries, every
+    # `mngr create` invocation against this repo would have to pass
+    # --no-ensure-clean to satisfy the working-tree-clean check.
     gitignore_path = temp_git_repo / ".gitignore"
     if not gitignore_path.exists():
-        gitignore_path.write_text(".claude/settings.local.json\n")
+        gitignore_path.write_text(f".claude/settings.local.json\n/{project_config_dir.name}/\n")
         run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
     session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)

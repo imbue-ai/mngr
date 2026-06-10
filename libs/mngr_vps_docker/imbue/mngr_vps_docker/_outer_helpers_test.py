@@ -35,6 +35,7 @@ from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import get_outer_free_disk_gb
 from imbue.mngr_vps_docker.container_setup import install_btrfs_progs_on_outer
@@ -378,6 +379,29 @@ def test_build_image_on_outer_raises_on_build_failure() -> None:
             on_output=None,
             builder=DockerBuilder.DOCKER,
         )
+
+
+def test_ensure_depot_token_available_raises_for_depot_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_raises_for_depot_with_empty_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "")
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_passes_for_depot_with_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "tok-123")
+    ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_is_noop_for_docker_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The DOCKER builder never needs a token, even when DEPOT_TOKEN is absent.
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    ensure_depot_token_available(DockerBuilder.DOCKER)
 
 
 def test_build_image_on_outer_with_depot_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
