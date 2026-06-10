@@ -3409,8 +3409,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     # permission requests are filed by ``system-services``, so
     # ``req.agent_id`` is the sibling-not-shown-on-homepage. Computing
     # accent off the homepage agent's id keeps the inbox color in sync
-    # with the rest of the UI. Falls back to keying off ``ws_name`` if
-    # no discovered agent claims that workspace (e.g. a freshly-arrived
+    # with the rest of the UI. Falls back to the default workspace color
+    # if no discovered agent claims that workspace (e.g. a freshly-arrived
     # request whose host hasn't been re-discovered yet).
     primary_agent_id_by_ws_name: dict[str, str] = {}
     for aid in backend_resolver.list_known_workspace_ids():
