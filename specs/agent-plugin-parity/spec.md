@@ -7,13 +7,15 @@ implemented, and -- for each dimension -- the concrete questions a new plugin au
 must answer about their target CLI.
 
 The goal: **anything you can do with a Claude agent, you should be able to do with any
-other agent.** Today `mngr_claude` is the gold standard; `mngr_antigravity` and
-`mngr_pi_coding` are near-complete ports (pi-coding via a single in-process extension
-rather than shell hooks -- see dimension F and the transcript/lifecycle dimensions for
-how that shapes the implementation). `codex` and `opencode` are still `BaseAgent` stubs.
-This doc maps the target so the stubs can be brought up to scratch.
+other agent.** Today `mngr_claude` is the gold standard; `mngr_antigravity`,
+`mngr_pi_coding`, and `mngr_opencode` are near-complete ports. pi-coding uses a single
+in-process extension rather than shell hooks; opencode is a client-server app driven over
+an HTTP API, with an in-process TypeScript plugin loaded only into its server process (see
+dimension F and the transcript/lifecycle dimensions for how each shapes the implementation).
+`codex` is still a `BaseAgent` stub. This doc maps the target so the stub can be brought up
+to scratch.
 
-It is descriptive, not prescriptive about future architecture: it documents what the two
+It is descriptive, not prescriptive about future architecture: it documents what the
 reference plugins *do*, with file:line citations, plus the gotchas they hit so the next
 port does not rediscover them.
 
@@ -37,7 +39,7 @@ A mngr agent-type plugin is a Python package exposing a `register_agent_type` ho
 - **AgentClass** -- an `AgentInterface` implementation. You almost never subclass the bare
   interface; you subclass one of the concrete bases below. Returning `BaseAgent` directly
   gives you a config-driven shell command with no custom behavior (this is what the
-  `codex`/`opencode`/`command` stubs do).
+  `codex`/`command` stubs do).
 - **ConfigClass** -- a subclass of `AgentTypeConfig` (`libs/mngr/imbue/mngr/config/data_types.py:366`)
   declaring the agent's tunables. `None` falls back to the base `AgentTypeConfig`.
 
@@ -45,6 +47,12 @@ Registration flow: `load_agents_from_plugins` (`libs/mngr/imbue/mngr/agents/agen
 calls the hook and registers the class and config in two parallel registries. Built-in
 non-claude types (`codex`, `command`, `headless_command`) are registered directly in
 core; claude/antigravity/opencode/pi come from installed plugin packages.
+
+`mngr_opencode` is the structural odd one out: opencode is a client-server app, so the
+plugin runs each agent as a headless `opencode serve` plus an `opencode attach` TUI client
+(see [dimension F](#f-input-delivery--submission-confirmation) and the launch dimension),
+delivers input over the server's HTTP API rather than tmux keystrokes, and maintains its
+marker/transcripts from an in-process TypeScript plugin loaded only into the server.
 
 The full hookspec surface lives in `libs/mngr/imbue/mngr/plugins/hookspecs.py`. Most
 agent behavior is *not* dispatched through pluggy hooks -- it lives on **AgentInterface
@@ -99,18 +107,30 @@ Capability mixins (opt in by inheritance): `HasTranscriptMixin`,
 - `on_destroy()` cleanup of any external state (global trust entries, leases, etc.).
 - The pluggy hooks for deploy, field generators, and offline preservation.
 
-### Your lever: shell hooks vs an in-process extension
+### Your lever: shell hooks vs an in-process extension vs an HTTP server API
 
 Before any of the dimensions below, answer one question: **what mechanism does the CLI give
-you to run your code at its lifecycle points?** It shapes every dimension downstream.
+you to run your code at its lifecycle points, and to feed it input?** It shapes every
+dimension downstream.
 
 - **Shell hooks** (claude, agy): the CLI invokes shell scripts on events
   (`SessionStart`/`Stop`/`PreToolUse`/...). mngr provisions scripts into `commands/` and the
   CLI runs them. This is the model most of this doc assumes.
-- **An in-process extension/plugin** (pi): the CLI has no shell hooks; instead it loads code
-  *into its own process* (pi loads a TypeScript module via `pi -e`). mngr provisions one
-  extension that handles every dimension at once -- marker, readiness sentinel, transcripts,
-  input injection. Many modern agent CLIs are in this camp, so expect it.
+- **An in-process extension/plugin** (pi, opencode): the CLI has no shell hooks; instead it
+  loads code *into its own process* (pi loads a TypeScript module via `pi -e`; opencode
+  auto-loads `$OPENCODE_CONFIG_DIR/plugin/*.ts` whose `event` hook sees the event bus). mngr
+  provisions one extension that handles the lifecycle dimensions at once -- marker, readiness,
+  transcripts. Many modern agent CLIs are in this camp, so expect it.
+- **An HTTP server API** (opencode): the CLI is a client-server app -- a server owns the
+  sessions and an event bus; TUI/CLI/HTTP clients talk to it. mngr runs the agent as a
+  headless server (`opencode serve`) plus a foreground TUI client (`opencode attach`), and
+  drives it over HTTP: input goes by `POST /session/{id}/prompt_async` rather than tmux
+  keystrokes, and the attached client renders the result so `mngr connect` stays fully
+  visible. This is orthogonal to the lifecycle lever -- opencode *also* uses an in-process
+  plugin for the marker/transcripts (loaded only into the server, role-gated) -- but it
+  replaces the tmux-keystroke input path of dimension F entirely, which is why it is a
+  first-class lever: structured input over HTTP sidesteps the keystroke-paste races that pi
+  hit, and behaves identically on local and remote hosts.
 - **Nothing** (the `BaseAgent` stubs): no event surface at all, so you can only use what the
   tmux pane + process table afford -- which is why those stubs report WAITING forever.
 
@@ -138,27 +158,27 @@ Y = implemented, partial = present but incomplete, - = absent.
 
 | Dimension | claude | antigravity | pi-coding | opencode | codex |
 |---|---|---|---|---|---|
-| Custom agent class | Y | Y | Y | - (BaseAgent) | - (BaseAgent) |
-| Launch command isolation | Y | Y | Y | - | - |
-| Lifecycle marker (RUNNING/WAITING) | Y | Y | Y (extension marker) | - | - |
-| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | n/a (no in-process subagents) | - | - |
-| Readiness detection | Y (sentinel hook) | Y (TUI banner) | Y (`session_start` sentinel) | - | - |
-| Input delivery & submission | Y (tmux paste+Enter) | Y (tmux paste+Enter) | Y (extension injection) | partial (inherited) | partial (inherited) |
-| Auth / credential sharing | Y (keychain + file) | Y (token symlink) | Y (`sync_auth`) | - | - |
-| HOME / config-dir isolation | Y (`CLAUDE_CONFIG_DIR`) | Y (per-agent `$HOME`) | Y (`PI_CODING_AGENT_DIR`) | - | - |
-| Settings/resource sync | Y | Y | Y | - | - |
-| Per-agent permissions | Y | Y | - | - | - |
-| Auto-allow permissions | Y | Y | - | - | - |
-| Trust / dialog handling | Y | Y | Y (`trust.json` seed) | - | - |
-| Onboarding NUX seed | Y | Y | n/a (no NUX) | - | - |
-| Raw transcript | Y | Y | Y | - | - |
-| Common transcript | Y | Y | Y | - | - |
-| Conversation resume (stop/start) | Y | Y | Y (`--session`) | - | - |
+| Custom agent class | Y | Y | Y | Y | - (BaseAgent) |
+| Launch command isolation | Y | Y | Y | Y (serve+attach launch script) | - |
+| Lifecycle marker (RUNNING/WAITING) | Y | Y | Y (extension marker) | Y (in-process plugin, server-only) | - |
+| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | n/a (no in-process subagents) | Y (root-session gating, load-bearing) | - |
+| Readiness detection | Y (sentinel hook) | Y (TUI banner) | Y (`session_start` sentinel) | Y (launch-script HTTP sentinel) | - |
+| Input delivery & submission | Y (tmux paste+Enter) | Y (tmux paste+Enter) | Y (extension injection) | Y (HTTP `prompt_async` POST) | partial (inherited) |
+| Auth / credential sharing | Y (keychain + file) | Y (token symlink) | Y (`sync_auth`) | Y (`auth.json` symlink, `symlink_auth`) | - |
+| HOME / config-dir isolation | Y (`CLAUDE_CONFIG_DIR`) | Y (per-agent `$HOME`) | Y (`PI_CODING_AGENT_DIR`) | Y (`OPENCODE_CONFIG_DIR`+`XDG_DATA_HOME`) | - |
+| Settings/resource sync | Y | Y | Y | Y (`sync_global_config`) | - |
+| Per-agent permissions | Y | Y | - | Y (`permission` via `config_overrides`) | - |
+| Auto-allow permissions | Y | Y | - | Y (`auto_allow_permissions`) | - |
+| Trust / dialog handling | Y | Y | Y (`trust.json` seed) | n/a (no trust dialog) | - |
+| Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | - |
+| Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | - |
+| Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | - |
+| Conversation resume (stop/start) | Y | Y | Y (`--session`) | Y (`attach --session`) | - |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
 | Field generators (waiting_reason) | Y (online) | - | - | - | - |
-| Installation management | Y | - | Y | - | - |
+| Installation management | Y | - | Y | - (no version pinning) | - |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - |
 
 Notable observations:
@@ -171,12 +191,24 @@ Notable observations:
   in-process TypeScript extension** (pi has no shell hooks), and it **delivers input by
   injection** rather than tmux keystrokes, so it subclasses `BaseAgent` directly rather
   than `InteractiveTuiAgent` (see dimension F).
+- **`opencode` is now a real port too, at roughly `antigravity` parity** -- no longer a
+  stub: lifecycle marker, readiness sentinel, raw + common transcripts, conversation resume,
+  per-agent isolation, shared auth, and per-agent/auto-allow permissions. Its distinguishing
+  trait is **architecture**: opencode is a client-server app, so each agent runs as a
+  headless `opencode serve` plus an `opencode attach` TUI client, mngr drives it over the
+  server's **HTTP API** (input is a `prompt_async` POST, not tmux keystrokes), and the
+  marker/transcripts are maintained by an in-process TypeScript plugin loaded *only into the
+  server* (role-gated). Unlike pi, opencode has real in-turn subagents (the task tool spawns
+  child sessions, each firing its own idle), so its root-session idle gating is
+  **load-bearing**, not a no-op. It carries the same deferred tail as antigravity (session
+  preservation, streaming snapshot, deploy contributions, field generators) plus version
+  pinning / install management.
 - **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
   deploy contributions, and field generators** relative to claude. These are the claude
   features no port has yet matched.
-- **`codex`/`opencode` are pure `BaseAgent` shells**: they only get the free baseline.
-  They will *appear* to work (`mngr create` succeeds, you can send messages) but will
-  report WAITING forever, have no transcript, no resume, and no credential sharing.
+- **`codex` is a pure `BaseAgent` shell**: it only gets the free baseline. It will *appear*
+  to work (`mngr create` succeeds, you can send messages) but will report WAITING forever,
+  have no transcript, no resume, and no credential sharing.
 
 ---
 
@@ -197,8 +229,14 @@ The minimum to exist as an agent type. Both reference plugins subclass
   `SkillProvisionedAgent` base) -- `plugin.py:2719`.
 - **antigravity**: `AntigravityAgent(InteractiveTuiAgent, HasCommonTranscriptMixin)`;
   registers 1 type -- `plugin.py:306`, `plugin.py:887`.
+- **opencode**: `OpenCodeAgent(BaseAgent, HasCommonTranscriptMixin)` -- subclasses `BaseAgent`
+  directly, *not* `InteractiveTuiAgent`, because input is delivered over HTTP rather than tmux
+  keystrokes (like pi, for the same reason -- see dimension F); registers 1 type
+  (`plugin.py:198`, `plugin.py:490`).
 
-**Questions**: TUI or headless? One type or several (e.g. a skill-provisioned variant)?
+**Questions**: TUI or headless? One type or several (e.g. a skill-provisioned variant)? Does
+input come in over the terminal (subclass `InteractiveTuiAgent`) or a programmatic channel
+(subclass `BaseAgent`, as pi and opencode do)?
 
 ### B. Launch command assembly (`assemble_command`)
 
@@ -212,6 +250,18 @@ the command**, not computed in Python, because the stored command is replayed ve
 - **antigravity** (`plugin.py:787`): backgrounds the supervisor; `mkdir` log dir + `ln
   -sfn` workspace symlink; `cd` into the symlink; a `--conversation <id>` resume prelude
   read from `root_conversation`; `env HOME=<per-agent-home> agy ...`.
+- **opencode** (`plugin.py:438`): the command is `env <isolation + MNGR_OPENCODE_*> bash
+  opencode_launch.sh <user-args>`. The env carries the config/data isolation
+  (`OPENCODE_CONFIG_DIR`/`XDG_DATA_HOME`), the opencode bin, an *ephemeral* port (`--port 0`,
+  so co-resident agents never collide), the URL-encoded workdir (encoded in Python via the
+  stdlib so the script can drop it straight into the session-create `?directory=` query), and
+  -- when `emit_common_transcript` is on -- `MNGR_OPENCODE_EMIT_COMMON=1`. The launch script
+  (`resources/opencode_launch.sh`) is where the heavy lifting lives: it starts `opencode
+  serve` (role-tagged `MNGR_OPENCODE_ROLE=server`, scoped to that one command), polls the
+  server log for the actual bound port, creates *or reuses* the root session via HTTP, writes
+  the port + root-session-id + readiness-sentinel files, then `attach`es the TUI client in the
+  foreground. Resume across stop/start is handled inside the script (it reuses the recorded
+  root session id), so there is no resume flag in the Python-assembled command.
 
 **Gotchas**:
 - `BaseAgent.assemble_command` already `shlex.quote`s `agent_args` (post-`--`), but
@@ -235,6 +285,13 @@ WAITING`. **The RUNNING/WAITING split is purely the presence of
   (`plugin.py:1478`).
 - **antigravity** (`antigravity_config.py:326`): `PreInvocation` -> `set_active_marker.sh`
   touches `active`; `Stop` -> `clear_active_marker_when_idle.sh` removes it.
+- **opencode** (`resources/mngr_opencode_plugin.ts:291`): no shell hooks -- the in-process
+  plugin's `event` hook watches the server event bus. `session.status` `busy`/`retry` touches
+  `active`; `idle` removes it, but **only when the root session goes idle** (dimension D). The
+  plugin runs *only in the server process* -- it returns early (inert) unless
+  `MNGR_OPENCODE_ROLE=server`, which the launch script sets exclusively on the `serve`
+  invocation, so the marker has exactly one writer even though the `attach` client loads the
+  same plugin file.
 
 **Questions**: Does the CLI emit pre-invocation / stop (or equivalent) hook events you can
 attach scripts to? If not, you need another mechanism (TUI-state polling, a sentinel
@@ -276,8 +333,19 @@ reference plugins face genuinely different situations:
   (`resources/set_active_marker.sh`, `resources/clear_active_marker_when_idle.sh`). A
   liveness fallback clears on `fullyIdle:true` if no root was ever recorded, so a failure
   to record the root can't strand the agent in RUNNING forever.
+- **opencode -- root-session matching, and the gating is load-bearing.** Unlike pi (which has
+  no in-process subagents, so its idle gating is a no-op), opencode has real in-turn child
+  sessions: the task tool spawns child sessions, and **each fires its own idle**, exactly the
+  naive failure mode. So opencode must discriminate root from child, like agy. The
+  discriminator is the session's `parentID`: the plugin learns `parentBySession` from
+  `session.created`/`session.updated` events (which carry the full `Session`), and on a
+  `session.status:idle` (or the deprecated `session.idle`) it clears `active` **only if the
+  session is root** -- `parentID` undefined/empty (`resources/mngr_opencode_plugin.ts:180`,
+  `:296`, `:304`). Child-session idles leave the marker alone, so task subagents keep the agent
+  RUNNING until the whole turn finishes. Like agy's fallback, an as-yet-unseen session
+  hierarchy is treated as root so an idle can still clear the marker rather than strand RUNNING.
 
-So the two plugins illustrate the spectrum: Claude's harness already isolates subagents
+So these plugins illustrate the spectrum: Claude's harness already isolates subagents
 into a separate event class (mngr just declines to hook it) and only needs a guard for
 recursive whole-process invocations; agy collapses everything onto one `Stop` event and
 needs explicit root-vs-child id matching. **This is the single most important and
@@ -354,6 +422,13 @@ How `mngr create`/start knows the agent is ready to receive the first message.
 - **pi-coding**: the lifecycle extension writes a `pi_session_started` sentinel from pi's
   `session_start` event, polled by `wait_for_ready_signal` -- a real sentinel, like claude.
   The `"pi v"` startup banner is deliberately *not* used.
+- **opencode** (`plugin.py:214`, `resources/opencode_launch.sh:90`): the *launch script*
+  writes an `opencode_ready` sentinel once the server is up **and** the root session exists --
+  i.e. the agent can accept the HTTP-delivered first message -- and `wait_for_ready_signal`
+  polls it (clearing any stale one at startup so it can't return early). A real sentinel, like
+  claude/pi. This replaced an earlier approach that scraped the attach client's TUI footer
+  (`"ctrl+p commands"`): the launch script owns the true "server + session up" fact, so a
+  signal from it is more reliable than reading the banner.
 
 **The failure mode to avoid:** gating readiness on a string that prints *before* input is
 accepted (a splash/version banner) makes `create` return too early, so the first message is
@@ -387,6 +462,14 @@ real per-CLI decision, and the "free" path is not always reliable.
   programmatic input channel -- an inject API, an RPC `prompt` command, a control
   socket -- prefer it over terminal keystroke simulation: it is more robust and
   behaves identically on local and remote hosts.
+- **opencode** (`plugin.py:287`, `:330`): also bypasses the terminal -- but over **HTTP**
+  rather than an in-process inject API. `send_message` reads the recorded server port + root
+  session id (written by the launch script) and POSTs the message as a JSON text part to
+  `http://127.0.0.1:{port}/session/{id}/prompt_async` via `curl -fsS` on the host; the
+  attached TUI renders the prompt and reply, so `mngr connect` stays fully visible.
+  `prompt_async` enqueues without blocking on the reply (the marker tracks completion). This
+  was a deliberate move *away* from typing into the TUI, which races opencode's post-launch
+  input repaint (it drops keys), exactly pi's hazard.
 
 **Submission confirmation is the subtle half.** Keystrokes (or an inject call) can
 silently fail to start a turn, so you need a positive signal that the message *was*
@@ -394,6 +477,14 @@ accepted. The dependable one is the lifecycle marker: the agent writes `active`
 (dimension C) only when it begins processing, so `send_message` can poll for the
 marker to appear as confirmation -- re-sending (if using keystrokes) until it does.
 Scraping the pane for an echoed prompt is brittle and racy; avoid it.
+
+opencode is a case where this confirmation step was *deliberately skipped*: `curl -fsS`
+already fails loudly if the POST is dropped or the server rejects it (the real, observed
+failure mode), and an accepted-but-never-started turn is not a demonstrated failure here, so
+`send_message` does **not** poll the marker for a turn-start ACK (`plugin.py:287`). The
+documented decision is to revisit (poll the `active` marker, as pi does) only if a
+silent-accept failure ever manifests -- a structured-input channel that fails loudly on the
+POST itself buys you a weaker but cheaper guarantee than the keystroke path needs.
 
 **Questions**: Does the CLI reliably accept tmux paste + Enter, or does it drop
 keystrokes? Is there a programmatic input API (inject / RPC / socket) that bypasses
@@ -422,6 +513,14 @@ per-agent isolated config dirs.
   keychain isn't reliably readable from a relocated `$HOME`, so agy falls back to the file
   token -- exactly the shared mechanism (a harmless "keychain cannot be found" popup
   appears on first login).
+- **opencode** (`plugin.py:416`): the same write-through-symlink shape as agy. The per-agent
+  `auth.json` (under the agent's `XDG_DATA_HOME/opencode/`) symlinks to the shared
+  `~/.local/share/opencode/auth.json`, created even when the shared file doesn't exist yet.
+  opencode writes `auth.json` in place, so the first agent's `opencode auth login` writes
+  through to the shared path and authenticates every agent (refreshes propagate too). Toggle:
+  `symlink_auth` (default True); False copies the shared file in (full isolation, no sharing).
+  Because opencode isolates via a *config-dir/XDG* scheme rather than HOME relocation, there is
+  no macOS-keychain headache here -- credentials are a plain file.
 
 **Gotchas**: whether the CLI writes its token **in place** vs atomic-rename decides whether
 a symlink-to-shared works (in-place: yes; rename: the symlink gets replaced by a regular
@@ -454,6 +553,13 @@ gives no finer-grained lever. Do it only if your CLI has no config-dir override.
   and rewriting plugin/marketplace install paths. A `use_env_config_dir` escape hatch
   shares the user's `$CLAUDE_CONFIG_DIR` (local-only, mngr writes nothing).
 - **pi-coding** -- also preferred shape: sets `PI_CODING_AGENT_DIR` to a per-agent dir.
+- **opencode** (`opencode_config.py`, `plugin.py:474`) -- also preferred shape, via *two*
+  env vars (no `$HOME` relocation): `OPENCODE_CONFIG_DIR` -> a per-agent config dir holding
+  `opencode.json` and the auto-loaded `plugin/*.ts`; `XDG_DATA_HOME` -> a per-agent data root
+  under which opencode keeps `opencode/{opencode.db,auth.json,storage,log}`, so sessions
+  (hence resume) and credentials are per-agent. The two are independent -- `OPENCODE_CONFIG_DIR`
+  moves only config, not data. Both are injected only on the opencode processes (inherited by
+  `serve` and `attach`), so tmux keeps the real environment.
 - **antigravity** (`plugin.py:513`) -- *the fallback*: `agy` has **no** config-dir env var
   and ignores per-workspace settings, so relocating `$HOME` to
   `<agent_state_dir>/plugin/antigravity/home/` (injected only on the agy process via
@@ -485,6 +591,13 @@ Per-agent allow/deny/ask policy, plus an auto-approve-everything escape.
   (`plugin.py:851`). Note: agy's `PreToolUse {"decision":"allow"}` hook does **not** gate
   the `run_command` confirmation dialog (verified live), so the flag -- not a hook -- is
   the only way to auto-approve.
+- **opencode** (`opencode_config.py:216`): config-based, no flag. opencode's `permission`
+  block (e.g. `{"bash": {"git *": "allow", "rm -rf *": "deny"}, "edit": "ask"}`) is merged
+  into the per-agent `opencode.json` via `config_overrides` (the free-form blob applied last);
+  `auto_allow_permissions` injects a wildcard `{"*": "allow"}` permission block (auto-approve
+  everything not explicitly denied -- the config analog of a skip-all flag). Because the
+  policy lives in the file the server reads, opencode (like agy) supports a per-resource
+  policy, and (unlike agy) needs no separate skip flag for the auto-allow case.
 
 **Questions**: Does a PreToolUse allow-decision actually suppress dialogs, or do you need a
 skip-all flag? Is there a per-resource policy format?
@@ -513,6 +626,10 @@ untrusted code**.
   per-agent dir. Same gating matrix as agy (already-trusted -> no-op;
   `--yes`/`auto_dismiss_dialogs` -> silent; interactive -> `click.confirm`;
   non-interactive without opt-in or declined -> `SystemExit`). pi has no onboarding NUX.
+- **opencode**: nothing to seed -- opencode has **no** first-run trust dialog (verified
+  live), so there is no trust state to write and no onboarding NUX to skip. The whole
+  dimension is a no-op for it, which is itself a result worth recording: per the gotchas
+  below, you must *confirm this empirically against the running binary* rather than assume.
 
 **Gotchas**: trust dialogs are often keyed off an exact cwd match -- a symlinked or
 relocated workspace path must be the one seeded. Don't write transient paths to shared
@@ -562,6 +679,33 @@ then something *you* assemble rather than copy -- pi wraps each native message v
 thin `{type, timestamp, message}` envelope, so it stays lossless and CLI-native, just
 collected by the extension instead of tailed from a file.
 
+**opencode also emits both layers in-process, but with a restart-survival gotcha worth
+documenting.** Like pi, opencode has no flat session file to tail, so the same in-process
+TypeScript plugin writes both -- no shell converter, no background supervisor
+(`get_raw_transcript_scripts`/`get_common_transcript_scripts` return `{}`,
+`plugin.py:249`/`:262`). The two layers are produced *differently*, though:
+- **Raw** is *append-only*: each `message.updated`/`message.part.updated` event is appended
+  verbatim (as `{type, properties}`) to `logs/opencode_transcript/events.jsonl`
+  (`resources/mngr_opencode_plugin.ts:311`).
+- **Common** is *rebuilt wholesale on idle*: the plugin keeps the latest message/part state in
+  memory and, on root-session idle, rebuilds the entire common transcript from that state and
+  writes it atomically (tmp + rename) (`mngr_opencode_plugin.ts:264`, `:299`). Rebuilding from
+  full state once per turn is self-healing -- no message-completion detection, no streamer --
+  and the live in-progress view is just the tmux pane.
+
+**The gotcha (dimension K, opencode-specific): a wholesale rebuild from in-memory state must
+seed that state from the persisted raw log, or a restart truncates pre-restart turns.** A
+`mngr stop`/`start` gives a *fresh* `opencode serve` process with empty in-memory maps, and
+opencode does **not** replay history through the plugin on `attach --session` resume
+(verified). Since the common rebuild does a full atomic *overwrite*, the first post-restart
+idle would otherwise clobber the common transcript down to only the new turn -- an asymmetric
+loss, since the append-only raw log survives. The fix: at plugin startup the in-memory state
+is **seeded by replaying the persisted append-only raw transcript**
+(`mngr_opencode_plugin.ts:132`), which is idempotent with later live updates (keyed by id),
+so the first rebuild reflects full history. The general lesson for any rebuild-on-idle scheme:
+your overwrite is only as complete as the state you rebuild from, so seed it from the durable
+append-only log on every (re)start.
+
 **Gotchas**: scope the streamer to *this agent's* conversations (antigravity reads its
 conversation-ids file). If the CLI's per-event index is conversation-scoped rather than
 globally unique, you can't use the shared reconcile-offset helper -- dedupe by event id
@@ -580,14 +724,21 @@ start fresh. Automatic; no flag.
 - **antigravity** (`plugin.py:874`): a shell prelude reads the id from `root_conversation`
   and appends `--conversation <id>`. Crucially it uses the *root* conversation, not the
   last id in the conversation-ids file (which could be a subagent's).
+- **opencode** (`resources/opencode_launch.sh:74`): the launch script records the root
+  session id on first launch (it creates the session via HTTP and writes the id to
+  `opencode_root_session`) and reuses it on every restart -- reading it back and re-attaching
+  with `attach --session <id>`, while messages POST to that same id. So resume is handled
+  inside the script, not via a flag computed in Python (the per-agent `XDG_DATA_HOME` SQLite
+  store survives the stop, carrying the conversation).
 
 **Gotchas**: the resume id must survive the hard kill that `mngr stop` performs (agy keeps
 an incremental on-disk store; verify your CLI does too). Resume must be shell-evaluated in
 `assemble_command` since the command is replayed.
 
-**Known gap (both)**: *cloning* an agent does not yet carry the source's conversation
+**Known gap (all ports)**: *cloning* an agent does not yet carry the source's conversation
 forward -- the clone path doesn't copy the source's session/conversation store into the new
-agent or set its resume id. (The antigravity changelog attributes this to a "global"
+agent or set its resume id (opencode's per-agent `XDG_DATA_HOME` SQLite store has the same
+not-copied-on-clone limitation). (The antigravity changelog attributes this to a "global"
 conversation store, but that phrasing predates the per-agent `$HOME` work in the same PR
 series: with HOME relocation, `ANTIGRAVITY_APP_DATA_DIR` -- where agy writes
 `brain/<conv_id>/...` -- points into each agent's own home, so conversations are now
@@ -660,6 +811,11 @@ Check the binary is present and optionally install/pin a version.
   local-vs-remote/auto-approve.
 - **antigravity**: none -- assumes `agy` is on PATH (and documents a PATH-shadowing caveat
   with the desktop app's bundled shim).
+- **opencode**: none yet -- assumes `opencode` is on PATH, with no version pinning. opencode
+  self-upgrades, so the installed version is a moving target (verified against 1.16.2); the
+  integration is written to *tolerate* old/new event shapes (it handles both `session.status`
+  and the deprecated `session.idle`). Version pinning / install management is a natural
+  follow-up.
 
 ### R. Workspace path quirks
 
@@ -670,6 +826,8 @@ Some CLIs reject mngr's dotted work-dir path (`~/.mngr/worktrees/...`).
   `/tmp/mngr_antigravity_workspaces/<id>` -> real work_dir, recreated via `ln -sfn` on every
   launch, with `cd` into the symlink (`plugin.py:856`).
 - **claude**: no such issue.
+- **opencode**: no such issue -- the work dir is passed (URL-encoded) as the session-create
+  `?directory=` query, with no dotted-segment rejection, so no symlink workaround is needed.
 
 **Questions**: Does the CLI accept a dotted (`~/.mngr/...`) path as its cwd/workspace?
 
@@ -679,6 +837,8 @@ Some CLIs reject mngr's dotted work-dir path (`~/.mngr/worktrees/...`).
 which defaults to the command basename. Override if the binary's process name differs.
 
 - **claude**: `"claude"`. **antigravity**: `"agy"` (`plugin.py:325`). **pi-coding**: `"pi"`.
+  **opencode**: `"opencode"` (`plugin.py:208`) -- both `opencode serve` and `opencode attach`
+  report `opencode`, and the foreground `attach` client is what lifecycle detection keys off.
 
 ### T. Extra agent subtypes
 
@@ -811,7 +971,10 @@ tests or lost first messages.
 **Packaging & distribution** (don't forget once the plugin works)
 - [ ] Registered in `PLUGIN_CATALOG` (`libs/mngr/imbue/mngr/plugin_catalog.py`) with its entry
   point, package name, a signal check that detects the CLI binary, and `is_recommended` if it
-  should be offered by default?
+  should be offered by default? A bare config-shell stub usually predates real support with a
+  catalog entry that lacks the signal check and `is_recommended`, so re-check both when a stub
+  graduates to a real port. (opencode's entry now carries an `opencode --version`
+  `OpenCodeSignalCheck` and `is_recommended=True`, `plugin_catalog.py:62`,`:128`.)
 - [ ] Is the package publishable -- i.e. *not* listed in `UNPUBLISHED_PACKAGES` -- so the
   release tooling and `mngr extras` will actually offer it?
 
@@ -828,5 +991,6 @@ tests or lost first messages.
   `docs/concepts/idle_detection.md`
 - Reference plugins: `libs/mngr_claude/`, `libs/mngr_antigravity/` (the antigravity README
   is the single best worked example -- it documents each parity decision inline)
-- Stubs: `libs/mngr_opencode/`, `libs/mngr_pi_coding/`,
-  `libs/mngr/imbue/mngr/agents/default_plugins/codex_agent.py`
+- Other real ports: `libs/mngr_pi_coding/` (in-process extension), `libs/mngr_opencode/`
+  (client-server / HTTP-driven, in-process server plugin)
+- Stub: `libs/mngr/imbue/mngr/agents/default_plugins/codex_agent.py`
