@@ -345,18 +345,19 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
-    # The floating-menu wrapper id. The sidebar WebContentsView covers the
-    # full content area and acts as a modal: sidebar.js compares click
-    # targets against ``#sidebar-menu`` to distinguish clicks inside the
-    # floating panel (let the menu's own handlers run) from clicks on the
-    # transparent backdrop outside it (close the sidebar). Renaming or
-    # dropping this id breaks the click-outside-to-close behavior.
+    # The floating-menu wrapper id. The sidebar runs inside the shared
+    # modal WebContentsView, which covers the full window content area and
+    # acts as a modal: sidebar.js compares click targets against
+    # ``#sidebar-menu`` to distinguish clicks inside the floating panel
+    # (let the menu's own handlers run) from clicks on the transparent
+    # backdrop outside it (dismiss the modal). Renaming or dropping this id
+    # breaks the click-outside-to-close behavior.
     assert 'id="sidebar-menu"' in html
     # SidebarBottom.jinja is rendered inside the floating menu in both
-    # Chrome.jinja (browser mode) and Sidebar.jinja (Electron sidebar
-    # WebContentsView). It carries the "New workspace" CTA and the
-    # "Manage account(s)" / "Log in" entry; the label is updated
-    # dynamically by sidebar.js from /auth/api/status.
+    # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
+    # into the shared modal WebContentsView in Electron). It carries the
+    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
+    # label is updated dynamically by sidebar.js from /auth/api/status.
     assert 'id="sidebar-new-workspace"' in html
     assert 'id="sidebar-account"' in html
     assert 'id="sidebar-account-label"' in html
