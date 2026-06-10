@@ -25,11 +25,12 @@ Two codebases, treated as one system:
 
 ## How to read this
 
-- **`README.md`** (this file) — the canonical glossary: one standardized term + one-line
-  definition + canonical code location per concept. Start here.
-- **`HUMAN-READABLE.md`** — the plain-language, app/docs-voice definition of each concept
-  for non-technical users, with explicit flags wherever the *user-facing* name is unsettled
-  or has competing candidates (the product naming decisions to actually resolve).
+- **`README.md`** (this file) — the canonical glossary: one standardized term, a
+  plain-language definition, the precise/technical definition, the canonical code location,
+  and a status flag per concept. Works as a full standalone summary. Start here.
+- **`HUMAN-READABLE.md`** — the expanded plain-language, app/docs-voice definitions for
+  non-technical users, with the full reasoning behind each flagged user-facing naming
+  decision. The "Plain language" column here is the condensed version of that doc.
 - **`CROSS-CUTTING.md`** — the heart of the standardization work: every word that is
   **overloaded** across subsystems (agent, provider, plugin, hook, service/application,
   task/ticket/step, message/notification/event, secret/credential, backup/snapshot,
@@ -53,119 +54,132 @@ move. A sample of the highest-impact claims (the `RequestStatus` enum having no 
 `layout_inspect.active_panel` actually returning `activeGroup`, latchkey permissions being
 keyed by `host_id` not `agent_id`) was spot-verified against the code during synthesis.
 
-## The canonical glossary
+## Reading the "Plain language" column
 
-The recommended canonical term for each concept, its one-line definition, and where it is
-(or should be) defined in code. "Status" flags concepts whose current naming is
-inconsistent and needs a rename/cleanup (see `CROSS-CUTTING.md`).
+The **Plain language** column is how you'd describe the concept to a non-technical user in
+the app or docs. Conventions:
+
+- **⚠** = the *user-facing* name is unsettled or has multiple candidates — a product
+  decision to resolve. (The technical canonical term can be settled even when this isn't.)
+  Full options are in `HUMAN-READABLE.md`.
+- **"internal"** = users never see this; a plain-language name would be noise. Inventing one
+  is not recommended.
+- Where a concept's plain-language framing is genuinely impossible to pin down without a
+  prior product decision, the cell says so and points to the blocking decision.
+
+The **Status** column flags concepts whose current *code* naming is inconsistent and needs
+a rename/cleanup (see `CROSS-CUTTING.md`) — distinct from the ⚠ user-facing flags.
+
+## The canonical glossary
 
 ### Compute substrate (mngr)
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **provider backend** | Stateless factory (one per backend type) registered via pluggy `register_provider_backend`; identified by `ProviderBackendName` (`"local"`, `"docker"`, `"modal"`, `"lima"`, `"vultr"`, `"ovh"`, `"imbue_cloud"`). | `libs/mngr/imbue/mngr/interfaces/provider_backend.py:12` | OK |
-| **provider instance** | A configured endpoint that creates/manages hosts; identified by `ProviderInstanceName`; declared at `[providers.<name>]`. Reserve the bare word **provider** for this. | `libs/mngr/imbue/mngr/interfaces/provider_instance.py:291` | naming: `VultrProvider` plays both roles |
-| **region** | A provider-specific datacenter string on a cloud provider's config. No shared type; three incompatible formats today (`US-EAST-VA`, `ewr`, `us-east`). | per-provider `config.py` (`default_region`) | needs shared type |
-| **host** | A managed compute environment (container/VM/sandbox/local machine) belonging to one provider instance; identified by `HostId` + `HostName`. | `libs/mngr/imbue/mngr/interfaces/host.py:49` | OK |
-| **host pool** (imbue_cloud) | Server-side pool of pre-baked VPS hosts the `imbue_cloud` provider *leases* (vs. provisions). | `libs/mngr_imbue_cloud/.../instance.py` (`lease_host`) | OK |
-| **agent** | A named, identified process (typically a coding agent) running in a tmux session on a host; identity `(AgentId, AgentName, AgentTypeName, host_id)`. Roles are layered on top via labels/templates. | `libs/mngr/imbue/mngr/interfaces/agent.py:39` | OK (roles overloaded — see CROSS-CUTTING) |
-| **host state** | Host lifecycle enum: BUILDING/STARTING/RUNNING/STOPPING/STOPPED/PAUSED/CRASHED/FAILED/DESTROYED/UNAUTHENTICATED/UNKNOWN. | `libs/mngr/imbue/mngr/primitives.py:244` | OK |
-| **agent lifecycle state** | Agent lifecycle enum: STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN. | `libs/mngr/imbue/mngr/primitives.py:263` | no CREATING state |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **provider backend** | internal — users never see "provider" | Stateless factory (one per backend type) registered via pluggy `register_provider_backend`; identified by `ProviderBackendName` (`local`/`docker`/`modal`/`lima`/`vultr`/`ovh`/`imbue_cloud`). | `libs/mngr/.../interfaces/provider_backend.py:12` | OK |
+| **provider instance** | internal — surfaced to users only as *launch mode* | A configured endpoint that creates/manages hosts; identified by `ProviderInstanceName`; declared at `[providers.<name>]`. Reserve bare "provider" for this. | `libs/mngr/.../interfaces/provider_instance.py:291` | `VultrProvider` plays both roles |
+| **region** | *"Where in the world your mind's computer runs."* ⚠ "region" vs "location" | A provider-specific datacenter string; no shared type; 3 incompatible formats (`US-EAST-VA`/`ewr`/`us-east`). | per-provider `config.py` (`default_region`) | needs shared type |
+| **host** | internal — *"the computer your mind runs on"*; users shouldn't see "host" | A managed compute environment (container/VM/sandbox/local) belonging to one provider instance; `HostId` + `HostName`. | `libs/mngr/.../interfaces/host.py:49` | OK |
+| **host pool** (imbue_cloud) | internal — pre-warmed machines that make creating a mind faster | Server-side pool of pre-baked VPS hosts the `imbue_cloud` provider *leases* rather than provisions. | `libs/mngr_imbue_cloud/.../instance.py` | OK |
+| **agent** | internal primitive — users meet it only via roles (chat agent, worker). ⚠ avoid showing users the bare word "agent" | A named process `(AgentId, AgentName, AgentTypeName, host_id)` in a tmux session on a host; roles layered via labels/templates. | `libs/mngr/.../interfaces/agent.py:39` | roles overloaded (CROSS-CUTTING §1) |
+| **host state** | the status badge — *Awake / Asleep / Stopped / Starting*. ⚠ "Paused" vs "Stopped" wording | Host lifecycle enum: BUILDING/STARTING/RUNNING/STOPPING/STOPPED/PAUSED/CRASHED/FAILED/DESTROYED/UNAUTHENTICATED/UNKNOWN. | `libs/mngr/.../primitives.py:244` | OK |
+| **agent lifecycle state** | internal — whether an agent is running/waiting/done; feeds status UI indirectly | Agent lifecycle enum: STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN. | `libs/mngr/.../primitives.py:263` | no CREATING state |
 
 ### Git & coding-agent infrastructure
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **agent branch** | The `mngr/<agent_name>` branch an agent commits to. | `libs/mngr/imbue/mngr/primitives.py:334` (`DEFAULT_BRANCH_PREFIX`) | OK |
-| **git remote** | A standard git named-URL remote (`origin`). Never use bare "remote" — see **remote host**. | `libs/mngr/imbue/mngr/api/git.py` | overloaded with "remote host" |
-| **LLM auth mode** | How a coding agent authenticates to the model API: LiteLLM virtual key, raw `ANTHROPIC_API_KEY`, or OAuth subscription. Currently implicit/untyped. Never call this an "AI provider". | (no type — env-determined) | needs a type |
-| **model alias** | The Claude-Code-level model string (e.g. `opus[1m]`); resolved to a **concrete model ID** (`claude-opus-4-8`) by the LiteLLM proxy. | `litellm_proxy/config.yaml` (de facto registry) | no typed registry |
-| **MCP server** / **MCP tool** | An external process exposing tools to the agent via MCP; tools are named `mcp__<server>__<tool>`. Distinct from built-in **Claude Code tools**. | `.claude/settings.json`, `.mngr/settings.toml` | OK |
-| **skill** | A markdown `SKILL.md` under `.agents/skills/<name>/` (+ optional `scripts/run.py`), invoked as `/<name>`. | `.agents/skills/` | OK |
-| **skills lock** | `skills-lock.json` pinning *externally sourced* skills by content hash (covers only 2 of 18 FCT skills). | `skills-lock.json` | partial coverage |
-| **Claude Code hook** | Shell command on a Claude Code lifecycle event in `.claude/settings.json`. Distinct from **mngr plugin hook** (pluggy), **git hook**, and the `LifecycleHook` enum. | `.claude/settings.json` | "hook" 4-way overloaded |
-| **mngr plugin** | A pluggy-based Python extension of mngr (provider backends, agent types, CLI, lifecycle). Distinct from **Claude Code plugin** (npm). | `libs/mngr/imbue/mngr/plugins/hookspecs.py` | "plugin" 2-way overloaded |
-| **Claude Code plugin** | An npm/Node Claude Code extension from a marketplace; `name@marketplace`. | `.claude/settings.json` (`enabledPlugins`) | "plugin" 2-way overloaded |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **agent branch** | *"Your mind's full change history — viewable and reversible."* ⚠ show as "history"/"versions", not git terms | The `mngr/<agent_name>` branch an agent commits to. | `libs/mngr/.../primitives.py:334` | OK |
+| **git remote** | internal git plumbing | A standard git named-URL remote (`origin`). Never bare "remote" (see "remote host"). | `libs/mngr/.../api/git.py` | overloaded with "remote host" |
+| **LLM auth mode** | *"How your mind connects to and pays for its AI."* ⚠ frame as "AI connection/billing"; the 3 options need friendly names | LiteLLM virtual key vs raw `ANTHROPIC_API_KEY` vs OAuth subscription. Currently implicit/untyped. Never "AI provider". | (no type — env-determined) | needs a type |
+| **model alias** | *"Which AI brain your mind uses — smarter = slower/costlier."* ⚠ tiers (capable/balanced/fast) vs raw model names; `opus[1m]` is jargon | Claude-Code model string resolved to a **concrete model ID** by the LiteLLM proxy. | `litellm_proxy/config.yaml` (de facto registry) | no typed registry |
+| **MCP server** / **MCP tool** | *"Extra abilities your mind can use (web search, browser)."* ⚠ never show "MCP"; say "tools"/"abilities" | An external process exposing tools via MCP; tools named `mcp__<server>__<tool>`. Distinct from built-in **Claude Code tools**. | `.claude/settings.json`, `.mngr/settings.toml` | OK |
+| **skill** | *"A saved how-to your mind can reuse — a recipe for a task it's done before."* ⚠ "skill" vs "command" vs "recipe" | A markdown `SKILL.md` under `.agents/skills/<name>/` (+ optional `scripts/run.py`), invoked as `/<name>`. | `.agents/skills/` | OK |
+| **skills lock** | internal versioning detail | `skills-lock.json` pinning externally sourced skills by content hash (covers 2 of 18 FCT skills). | `skills-lock.json` | partial coverage |
+| **Claude Code hook** | internal — if an extensions UI exists, fold under "add-ons" | Shell command on a Claude Code lifecycle event. Distinct from mngr plugin hook, git hook, `LifecycleHook` enum. | `.claude/settings.json` | "hook" 4-way overloaded |
+| **mngr plugin** | internal/power — *"add-ons that extend your mind"* | A pluggy-based Python extension of mngr (backends, agent types, CLI, lifecycle). | `libs/mngr/.../plugins/hookspecs.py` | "plugin" 2-way overloaded |
+| **Claude Code plugin** | internal/power — same "add-ons" framing as above | An npm/Node Claude Code extension from a marketplace; `name@marketplace`. | `.claude/settings.json` (`enabledPlugins`) | "plugin" 2-way overloaded |
 
 ### Compute & runtime
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **workspace** | The persistent unit a user interacts with: a host + its **services agent**, identified at the API by that agent's `AgentId`; discovered by the labels `workspace=<host_name>` + `is_primary=true`. | `apps/minds/.../backend_resolver.py:711` | OK |
-| **mind** | Product-/UI-level synonym for **workspace**. Not a code type (only `MindLiveness` + UI copy). | `apps/minds/.../mind_liveness.py:55` | UI-only synonym |
-| **create template** | A named preset of `mngr create` args under `[create_templates.<name>]`, applied via `--template`; stackable. | `.mngr/settings.toml`; `libs/mngr/.../cli/common_opts.py:739` | name clashes with "template repository" |
-| **template repository** | The git repo (forever-claude-template) cloned to form a workspace. | FCT root | name clashes with "create template" |
-| **service** | A named background process declared in `services.toml`, run by the bootstrap manager in tmux window `svc-<name>` with restart policy `never`/`on-failure`. | `.external_worktrees/.../libs/bootstrap/.../manager.py` | overloaded with "application" |
-| **forwarded service** (today: "application") | A **service** that registered a forwardable URL via `forward_port.py` into `runtime/applications.toml`. | `scripts/forward_port.py`; `libs/app_watcher` | naming split service/application |
-| **deferred install** | A heavy package installed idempotently on first boot (not baked into the image), gated by a marker file. | `scripts/deferred_install.sh` | OK |
-| **mind liveness** | Container up/down state (RUNNING/STOPPED/UNKNOWN) derived from `HostState`; docker/lima only. | `apps/minds/.../mind_liveness.py:55` | OK |
-| **system interface health** | Whether the in-container `system_interface` web server is responding (HEALTHY/STUCK/RESTARTING/RESTART_FAILED). | `apps/minds/.../system_interface_health.py:80` | enum base style differs |
-| **recovery probe** | On-demand in-container diagnostic (7 checks) classifying *why* a workspace is broken into a `DispatchTier`. | `apps/minds/.../recovery_probe.py` | dup `_OFFLINE_HOST_STATES` |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **workspace** | *"The mind you create and use."* ⚠⚠ **the top-level naming decision** — mind vs workspace vs assistant (and one-chat-per-mind vs many) | A host + its **services agent**, identified by that agent's `AgentId`; discovered via labels `workspace=<host_name>` + `is_primary=true`. | `apps/minds/.../backend_resolver.py:711` | OK |
+| **mind** | product/UI synonym for workspace. ⚠⚠ same decision as above | Not a code type (only `MindLiveness` + UI copy). | `apps/minds/.../mind_liveness.py:55` | UI-only synonym |
+| **create template** | *"The starting point a mind is built from."* ⚠ users say "template" | A named preset of `mngr create` args under `[create_templates.<name>]`, applied via `--template`; stackable. | `.mngr/settings.toml`; `cli/common_opts.py:739` | name clashes w/ template repository |
+| **template repository** | *"The source a mind is cloned from"* — users call it the "template" | The git repo (forever-claude-template) cloned to form a workspace. | FCT root | name clashes w/ create template |
+| **service** | *"An app your mind runs that you can open in a tab."* ⚠ user word "app" (not service/application/view) | A named background process in `services.toml`, run by bootstrap in tmux `svc-<name>` (restart `never`/`on-failure`). | `FCT/libs/bootstrap/.../manager.py` | overloaded with "application" |
+| **forwarded service** (today: "application") | same as above — *"an app you can open in a tab"* | A **service** that registered a forwardable URL via `forward_port.py` into `runtime/applications.toml`. | `scripts/forward_port.py`; `libs/app_watcher` | naming split service/application |
+| **deferred install** | internal — heavy extras installed on first boot | A package installed idempotently on first boot (not baked into the image), gated by a marker file. | `scripts/deferred_install.sh` | OK |
+| **mind liveness** | *"Whether your mind is running"* (the status badge) | Container up/down state (RUNNING/STOPPED/UNKNOWN) from `HostState`; docker/lima only. | `apps/minds/.../mind_liveness.py:55` | OK |
+| **system interface health** | internal — drives auto-recovery; user sees only the recovery page | Whether the in-container `system_interface` server responds (HEALTHY/STUCK/RESTARTING/RESTART_FAILED). | `apps/minds/.../system_interface_health.py:80` | enum base style differs |
+| **recovery probe** | internal — *"figuring out why your mind isn't responding"* | On-demand in-container diagnostic (7 checks) classifying failure into a `DispatchTier`. | `apps/minds/.../recovery_probe.py` | dup `_OFFLINE_HOST_STATES` |
 
 ### Agents & work
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **worker** | A short-lived agent created by `launch-task` (or crystallize/heal/update) to do one bounded task on its own `mngr/<name>` branch, reporting back via a report file. | `.agents/skills/launch-task/scripts/create_worker.py` | called worker / sub-agent / background agent |
-| **lead agent** | The agent that dispatches a worker and merges its branch. | `.agents/skills/launch-task/...` | OK |
-| **task brief** | The `task.md` file handed to a worker. Avoid bare "task". | `runtime/launch-task/<name>/task.md` | "task" catastrophically overloaded |
-| **ticket** | A markdown+frontmatter record under `$TICKETS_DIR`, managed by the `tk` CLI. | `vendor/tk/ticket`; parsed by `system_interface/tickets_parser.py:50` | OK |
-| **step record** | A `step: true` ticket (ID contains `-step-`): a turn-bound, creator-private progress marker that drives the progress view. | `tickets_parser.py:78`; `vendor/tk/ticket` | "step" overloaded |
-| **code review gate** | The `.reviewer`/imbue-code-guardian automated review (autofix, verify-architecture, verify-conversation). Distinct from worker **approval gates**. | `.reviewer/settings.json` | "review" overloaded |
-| **crystallized skill** | A skill with `metadata.crystallized: true` (validator then requires `scripts/run.py`). Opposite: **hand-authored skill**. | `.agents/skills/.../SKILL.md`; `validate_skill.py` | validator vs spec-summary divergence |
-| **services agent** | The hidden `system-services` agent (`is_primary=true`) that runs only bootstrap/services and never actually runs Claude. Prefer this term over "primary agent". | created in `apps/minds/.../agent_creator.py:541`; guarded in `system_interface/server.py` | "primary" overloaded |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **worker** | *"A helper your mind spins up to work in the background."* ⚠ "helper" vs "background task" vs "worker" | A short-lived agent created by `launch-task` to do one bounded task on its own `mngr/<name>` branch, reporting via a report file. | `.agents/skills/launch-task/scripts/create_worker.py` | called worker/sub-agent/background agent |
+| **lead agent** | internal — the agent that hands work to a helper | The agent that dispatches a worker and merges its branch. | `.agents/skills/launch-task/...` | OK |
+| **task brief** | *"The instructions you give a helper."* ⚠ avoid bare "task" | The `task.md` file handed to a worker. | `runtime/launch-task/<name>/task.md` | "task" catastrophically overloaded |
+| **ticket** | *"A tracked unit of work / to-do."* ⚠ do users see "tickets"? "tasks"/"to-dos" vs "tickets" | A markdown+frontmatter record under `$TICKETS_DIR`, managed by the `tk` CLI. | `vendor/tk/ticket`; `tickets_parser.py:50` | OK |
+| **step record** | *"One step of what your mind is doing now"* (the progress-view items) | A `step: true` ticket (ID has `-step-`): turn-bound, creator-private progress marker. | `tickets_parser.py:78`; `vendor/tk/ticket` | "step" overloaded |
+| **code review gate** | internal automated check; the worker **approval** is the user-facing part | The `.reviewer`/imbue-code-guardian review (autofix, verify-architecture/-conversation). | `.reviewer/settings.json` | "review" overloaded |
+| **crystallized skill** | internal — *"learned automatically"* vs *"written by hand"* | A skill with `metadata.crystallized: true` (validator then requires `scripts/run.py`). | `.agents/skills/.../SKILL.md`; `validate_skill.py` | validator vs spec-summary divergence |
+| **services agent** | hidden by design — **never show users**; never narrate as "primary agent" | The hidden `system-services` agent (`is_primary=true`) running only bootstrap/services; never runs Claude. | `apps/minds/.../agent_creator.py:541`; `system_interface/server.py` | "primary" overloaded |
 
 ### Conversation & communication
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **chat agent** | An agent created with `--template chat` that the user talks to via the chat panel. No runtime type marker — only creation-time signal. | `system_interface/agent_manager.py:466` | no persistent type label |
-| **transcript** | The ordered parsed event sequence (`user_message`/`assistant_message`/`tool_result`) built from one or more Claude **session** JSONL files. | `system_interface/session_parser.py`, `session_watcher.py` | OK |
-| **session** (transcript) | One `<session_id>.jsonl` Claude Code file. A transcript spans one or more sessions. Collides with auth **session**. | `system_interface/session_watcher.py:196` | collides with auth session |
-| **send message** | Injecting text into a running agent's tmux stdin (`mngr message` / `POST /api/agents/{id}/message`). Avoid bare "message". | `libs/mngr/imbue/mngr/api/message.py:46` | "message" triple-overloaded |
-| **progress view** (today docs say "plan") | The rendered timeline of step records for one turn. The word "plan" is docs-only; code says progress view / timeline / sections. | `system_interface/frontend/.../ProgressBlock.ts` | "plan" not a code term |
-| **inbox** | The desktop-client drawer of pending permission requests (event-sourced `RequestInbox`). | `apps/minds/.../request_events.py:213` | exclusively permission requests |
-| **permission request** | A structured `RequestEvent` an agent emits for user authorization; resolved GRANTED/DENIED (no FAILED). | `apps/minds/.../request_events.py:62` | doc says "failed" — wrong |
-| **notification** | An OS-level desktop alert (message/title/urgency/url) dispatched by the desktop client; `POST /api/v1/agents/{id}/notifications`. | `apps/minds/.../notification.py:67` | OK |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **chat agent** | *"A conversation with your mind"* OR *"an assistant working for you."* ⚠⚠ chat/conversation vs agent/assistant (different products) | An agent created with `--template chat`. No runtime type marker — only creation-time signal. | `system_interface/agent_manager.py:466` | no persistent type label |
+| **transcript** | *"Your conversation history."* ⚠ show as "conversation"/"history", never "transcript" | The ordered parsed event sequence (`user_message`/`assistant_message`/`tool_result`) from session files. | `system_interface/session_parser.py` | OK |
+| **session** (transcript) | internal — a piece of a conversation; collides with login "session", keep hidden | One `<session_id>.jsonl` Claude file; a transcript spans one or more. | `system_interface/session_watcher.py:196` | collides with auth session |
+| **send message** | *"Message your mind."* (settled) | Injecting text into a running agent's stdin (`mngr message` / `POST .../message`). | `libs/mngr/.../api/message.py:46` | "message" triple-overloaded |
+| **progress view** (docs say "plan") | *"A live checklist of what your mind is doing."* ⚠⚠ "steps/progress" vs "plan" (and de-collide from build "plans") | The rendered timeline of step records for one turn. "Plan" is docs-only; code says progress view/timeline/sections. | `system_interface/.../ProgressBlock.ts` | "plan" not a code term |
+| **inbox** | *"Where your mind's requests wait for you."* ⚠ "Inbox" vs "Approvals/Requests" (it holds only permission requests today) | Event-sourced aggregate (`RequestInbox`) of pending permission requests. | `apps/minds/.../request_events.py:213` | permission-requests only |
+| **permission request** | *"Your mind asking to do something — allow or deny."* ⚠ item name + allow/deny wording | A structured `RequestEvent`; resolved GRANTED/DENIED (no FAILED — see divergences). | `apps/minds/.../request_events.py:62` | doc says "failed" (wrong) |
+| **notification** | *"An alert from your mind."* (settled) | OS-level desktop alert (message/title/urgency/url); `POST /api/v1/agents/{id}/notifications`. | `apps/minds/.../notification.py:67` | OK |
 
 ### Security, identity & access
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **runtime secret** | A `runtime/secrets/<name>.env` file inside a container, watched by a service. Distinct from Modal Secrets and Vault secrets. | `apps/minds/.../tunnel_token_injection.py:28` | "secret" 3-system overload |
-| **service credential** | Latchkey-managed third-party service auth (OAuth/API keys via `latchkey auth`). | `libs/mngr_latchkey/.../core.py:142` | OK |
-| **account credential** | The SuperTokens session (access/refresh JWT) for a Minds cloud account. | `libs/mngr_imbue_cloud/.../session_store.py` | called "session" |
-| **permission** / **scope** (detent) | A detent permission schema name granted under a scope (e.g. `slack-api` → `slack-read-all`). | `libs/mngr_latchkey/.../store.py:206` | collides w/ `permissions_preference` |
-| **account** | A signed-in Minds cloud user (`user_id`, email, display name, workspace list). | `apps/minds/.../session_store.py:50` (`AccountSession`) | `AccountSession` misnamed |
-| **workspace sharing** | Exposing a workspace service to external users via Cloudflare tunnel + Access. Distinct from **file access grant** (WebDAV). | `apps/minds/.../sharing_handler.py:127` | "sharing" 2-way overload |
-| **data preference** | The onboarding Q1 choice (CONVENIENCE/PRIVACY/CONTROL) controlling the local context scan. | `apps/minds/.../primitives.py` (`UserDataPreference`) | CONVENIENCE==PRIVACY today |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **runtime secret** | internal plumbing | A `runtime/secrets/<name>.env` file inside a container, watched by a service. | `apps/minds/.../tunnel_token_injection.py:28` | "secret" 3-system overload |
+| **service credential** | *"A connected account your mind can use (Slack, Google)."* ⚠ "connection"/"connected account" vs "credential" | Latchkey-managed third-party service auth (OAuth/API keys via `latchkey auth`). | `libs/mngr_latchkey/.../core.py:142` | OK |
+| **account credential** | *"Your Minds login."* ⚠ collides with "connected accounts" | The SuperTokens session (access/refresh JWT) for a Minds cloud account. | `libs/mngr_imbue_cloud/.../session_store.py` | called "session" |
+| **permission** / **scope** (detent) | *"What your mind is allowed to access."* ⚠ separate from autonomy "preference" (don't both say "permissions") | A detent permission schema granted under a scope (`slack-api` → `slack-read-all`). | `libs/mngr_latchkey/.../store.py:206` | collides w/ `permissions_preference` |
+| **account** | *"Your Minds account."* ⚠ collides with connected accounts | A signed-in Minds cloud user (`user_id`, email, display name, workspace list). | `apps/minds/.../session_store.py:50` | `AccountSession` misnamed |
+| **workspace sharing** | *"Let someone open your mind's app via a link."* ⚠ "Share" (out) vs **file access** (in) | Expose a workspace service to external users via Cloudflare tunnel + Access. | `apps/minds/.../sharing_handler.py:127` | "sharing" 2-way overload |
+| **data preference** | setup question *"How much should your mind learn about you?"* ⚠ labels **and** behavior (CONVENIENCE==PRIVACY today — see divergences) | Onboarding Q1 choice (CONVENIENCE/PRIVACY/CONTROL) controlling the local context scan. | `apps/minds/.../primitives.py` | CONVENIENCE==PRIVACY today |
 
 ### Data & durability
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **runtime state** | Persistent per-feature data under `runtime/<feature>/` (gitignored from main). | `FCT/CLAUDE.md`; convention | events/ dir undocumented |
-| **spec** | A freeform, human-authored design/architecture doc in `specs/<name>/`. | `FCT/specs/` | spec vs blueprint undocumented |
-| **blueprint** | A structured implementation plan in `blueprint/<slug>/` produced by the `blueprint` + `blueprint-generate` skills. | `.agents/skills/blueprint-generate` | output also called "plan" |
-| **changelog entry** | A per-PR `<project>/changelog/<branch>.md`, fanned nightly into `CHANGELOG.md` (concise) + `UNABRIDGED_CHANGELOG.md` (verbatim). | repo CLAUDE.md convention | CI enforcement opaque |
-| **workspace backup** (today: host_backup) | Encrypted, deduplicated restic backup of the whole host_dir to R2/S3, hourly. | `FCT/libs/host_backup/` | "backup" overloaded |
-| **runtime checkpoint** (today: runtime_backup) | A git commit of `runtime/` to orphan branch `mindsbackup/<agent_id>`, every 60s. | `FCT/libs/runtime_backup/` | called "backup" |
-| **host snapshot** | A provider-level VM/disk snapshot (`mngr snapshot`). Distinct from **restic backup artifact** and host_backup **consistency capture**. | `libs/mngr/imbue/mngr/cli/snapshot.py` | "snapshot" 3-way overload |
-| **file sharing** | The WsgiDAV/WebDAV service at `/api/v1/files` exposing home + `/tmp`. | `apps/minds/.../webdav.py` | OK |
-| **agent memory** | Claude auto-memory at `runtime/memory/` (`autoMemoryDirectory`). Distinct from **user memory** (`~/.claude/.../MEMORY.md`). | `FCT/.claude/settings.json` | format opaque |
-| **event log** | The persistent on-disk append-only `events/<source>/events.jsonl` read by `mngr event`. Distinct from the in-memory SSE **event stream**. | `libs/mngr/imbue/mngr/api/events.py:54` | SSE system undocumented in style guide |
-| **upstream** | The template repo a workspace derives from (`parent.toml`), pulled by `update-self`, pushed to by `submit-upstream-changes`. Standardize on "upstream" over "parent". | `FCT/parent.toml` | "parent" vs "upstream" |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **runtime state** | internal plumbing | Persistent per-feature data under `runtime/<feature>/` (gitignored from main). | `FCT/CLAUDE.md`; convention | events/ dir undocumented |
+| **spec** | *"A description of what to build"* (developer-facing) ⚠ collapse spec/blueprint/plan for any user surface | A freeform human-authored design/architecture doc in `specs/<name>/`. | `FCT/specs/` | spec vs blueprint undocumented |
+| **blueprint** | *"A step-by-step build plan"* (developer-facing) ⚠ "plan" collides with the progress view | A structured implementation plan in `blueprint/<slug>/` from the `blueprint`(+`-generate`) skills. | `.agents/skills/blueprint-generate` | output also called "plan" |
+| **changelog entry** | *"What changed in each update."* (settled) | A per-PR `<project>/changelog/<branch>.md`, fanned nightly into `CHANGELOG.md` + `UNABRIDGED_CHANGELOG.md`. | repo CLAUDE.md convention | CI enforcement opaque |
+| **workspace backup** (today: host_backup) | *"A saved copy of your mind to restore from."* ⚠⚠ collapse all 3 durability mechanisms to one user-facing "Backup" | Encrypted, deduplicated restic backup of the whole host_dir to R2/S3, hourly. | `FCT/libs/host_backup/` | "backup" overloaded |
+| **runtime checkpoint** (today: runtime_backup) | internal — frequent state checkpoints; part of "Backup" to users | A git commit of `runtime/` to orphan branch `mindsbackup/<agent_id>` every 60s. | `FCT/libs/runtime_backup/` | called "backup" |
+| **host snapshot** | internal/power — a provider-level VM snapshot | A provider-level VM/disk snapshot (`mngr snapshot`). | `libs/mngr/.../cli/snapshot.py` | "snapshot" 3-way overload |
+| **file sharing** | *"Let your mind read/write specific files on your computer."* ⚠ name must not collide with "Share" | The WsgiDAV/WebDAV service at `/api/v1/files` exposing home + `/tmp`. | `apps/minds/.../webdav.py` | OK |
+| **agent memory** | *"What your mind remembers about you and your work."* ⚠ one unified "Memory" vs two (workspace vs user) | Claude auto-memory at `runtime/memory/` (`autoMemoryDirectory`). Distinct from **user memory**. | `FCT/.claude/settings.json` | format opaque |
+| **event log** | *"A record of what your mind did."* ⚠ frame as "Activity"/"History" (also the future audit-log concept) | Persistent append-only `events/<source>/events.jsonl` read by `mngr event`. Distinct from in-memory SSE **event stream**. | `libs/mngr/.../api/events.py:54` | SSE system undocumented |
+| **upstream** | *"The template your mind updates from."* ⚠ users say "template", not "upstream"/"parent" | The template repo a workspace derives from (`parent.toml`); `update-self` pulls, `submit-upstream-changes` pushes. | `FCT/parent.toml` | "parent" vs "upstream" |
 
 ### Presentation
 
-| Canonical term | Definition | Canonical location | Status |
-|---|---|---|---|
-| **panel** | The atomic addressable content unit in the dockview layout (component `chat`/`iframe`/`subagent`), addressed by a type-prefixed **ref** (`chat:`, `service:`, `terminal:`, …). | `system_interface/frontend/.../DockviewWorkspace.ts` | OK |
-| **group** | A set of panels sharing one pane + tab bar; exactly one active at a time. | dockview; `layout_ops.py` | OK |
-| **tab** | User-facing name for a panel's tab-bar entry. UI copy only. | `manage-layout/SKILL.md` | OK |
-| **layout** | The persisted dockview tree of groups/panels (`workspace_layout/layout.json`). | `DockviewWorkspace.ts:101` | `active_panel` returns a group id |
-| **terminal** | An iframe panel loading a `ttyd` web shell at `/service/terminal/`. | `scripts/run_ttyd.sh`; `libs/mngr_ttyd` | two ttyd provisioning paths |
-| **browser** | *Aspirational* — no dedicated browser panel exists; closest is an ad-hoc `url:<hash>` iframe navigable via `replace-url`. | (none) | listed as existing, isn't |
+| Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
+|---|---|---|---|---|
+| **panel** | internal term — users say "tab" | The atomic addressable content unit in the dockview layout (component `chat`/`iframe`/`subagent`), addressed by a typed **ref**. | `system_interface/.../DockviewWorkspace.ts` | OK |
+| **group** | internal layout term | A set of panels sharing one pane + tab bar; exactly one active at a time. | dockview; `layout_ops.py` | OK |
+| **tab** | *"A tab."* (settled) | User-facing name for a panel's tab-bar entry. | `manage-layout/SKILL.md` | OK |
+| **layout** | *"How your tabs are arranged."* (mostly settled) | The persisted dockview tree of groups/panels (`workspace_layout/layout.json`). | `DockviewWorkspace.ts:101` | `active_panel` returns a group id |
+| **terminal** | *"A command line into your mind's computer."* ⚠ "terminal" vs "command line/console" for non-technical users | An iframe panel loading a `ttyd` web shell at `/service/terminal/`. | `scripts/run_ttyd.sh`; `libs/mngr_ttyd` | two ttyd provisioning paths |
+| **browser** | *"A web browser your mind can see and click for you."* ⚠ **not built yet** — don't promise in UI/docs | Aspirational; closest is an ad-hoc `url:<hash>` iframe navigable via `replace-url`. | (none) | listed as existing, isn't |
 
-See `CROSS-CUTTING.md` for the overloaded terms and `DOC-CODE-DIVERGENCES.md` for the
-divergence register.
+See `HUMAN-READABLE.md` for the full reasoning behind each ⚠ user-facing decision,
+`CROSS-CUTTING.md` for the internal overloaded-term decisions, and
+`DOC-CODE-DIVERGENCES.md` for the divergence register.
