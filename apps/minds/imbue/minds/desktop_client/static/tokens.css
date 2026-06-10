@@ -230,19 +230,53 @@ html {
 }
 
 /*
- * Workspace color picker (workspace settings page).
+ * Workspace color picker (workspace settings page + create form).
  * The swatch's selected state is conveyed via aria-checked="true" so
  * screen readers see the radio role correctly; the visual ring uses
- * the same attribute selector so the two stay in lockstep. The
- * inner-shadow border is what makes a white / very-light swatch
- * still readable against the zinc-50 page background.
+ * the same attribute selector so the two stay in lockstep. The 2px
+ * black-25% inset shadow gives every swatch a thin dark rim that's
+ * legible against any background -- including the lightest palette
+ * entries (white / clarity) over the zinc-50 page.
  */
 .color-swatch {
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
 }
 .color-swatch[aria-checked="true"] {
   box-shadow:
-    inset 0 0 0 1px rgba(0, 0, 0, 0.08),
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
     0 0 0 4px #2563eb; /* blue-600 selection ring */
+}
+
+/*
+ * Hex-input pill (workspace settings page). Sits inline with the
+ * color swatches and mimics one visually: same height + the same 2px
+ * black-25% inset shadow as a "rim", pill-shaped via rounded-full on
+ * the element. Focus ring matches the swatch selection ring shape so
+ * the picker feels coherent under keyboard navigation.
+ */
+.color-hex-pill {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.color-hex-pill:focus {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(37, 99, 235, 0.4); /* blue-500/40 */
+}
+
+/*
+ * "Saving" cursor while a settings color POST is in flight. The
+ * workspace_settings.js handler toggles ``is-saving`` on
+ * ``#color-section`` during the save; CSS scopes the progress
+ * cursor to disabled controls inside that scope so the stale-
+ * workspace case (controls disabled at render time, no
+ * ``is-saving``) keeps the default cursor instead of looking
+ * mid-save.
+ */
+#color-section.is-saving .color-swatch:disabled,
+#color-section.is-saving .color-hex-pill:disabled {
+  cursor: progress;
 }

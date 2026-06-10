@@ -20,6 +20,8 @@
   var hexInput = document.getElementById('color-hex-input');
   var swatchContainer = document.getElementById('color-swatches');
   var errorEl = document.getElementById('color-error');
+  var colorSection = document.getElementById('color-section');
+  var savingBadge = document.getElementById('color-saving-badge');
 
   if (hexInput && swatchContainer && errorEl && !isStale) {
     var swatches = swatchContainer.querySelectorAll('.color-swatch');
@@ -61,6 +63,22 @@
       }
     }
 
+    function setSavingState(saving) {
+      // Drives both the cursor (CSS uses ``#color-section.is-saving
+      // :disabled { cursor: progress }``) and the "SAVING" badge next
+      // to the Color section header. Decoupled from the stale-host
+      // disable so a permanently disabled stale picker doesn't look
+      // mid-save.
+      if (colorSection) {
+        if (saving) colorSection.classList.add('is-saving');
+        else colorSection.classList.remove('is-saving');
+      }
+      if (savingBadge) {
+        if (saving) savingBadge.classList.remove('hidden');
+        else savingBadge.classList.add('hidden');
+      }
+    }
+
     function previewChromeAccent(hex) {
       // Optimistic local repaint: the content-relay-preload watches for
       // ``minds:preview-workspace-accent`` postMessages and forwards
@@ -92,6 +110,7 @@
       // color before the POST returns.
       previewChromeAccent(normalized);
       setControlsDisabled(true);
+      setSavingState(true);
       fetch('/api/workspaces/' + encodeURIComponent(agentId) + '/color', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,6 +121,7 @@
         })
         .then(function (result) {
           setControlsDisabled(false);
+          setSavingState(false);
           if (result.ok) {
             lastSavedHex = normalized;
             hexInput.value = normalized;
@@ -131,6 +151,7 @@
         })
         .catch(function (err) {
           setControlsDisabled(false);
+          setSavingState(false);
           showError('Network error saving color: ' + err.message);
           hexInput.value = lastSavedHex;
           syncSwatchSelection(lastSavedHex);
