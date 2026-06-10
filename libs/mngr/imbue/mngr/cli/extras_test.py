@@ -187,7 +187,7 @@ def test_install_completion_skips_without_tty(tmp_path: Path, monkeypatch: pytes
             auto=False,
             status_fn=lambda: (False, "zsh", rc),
             is_interactive_fn=lambda: False,
-            confirm_fn=lambda _rc: True,
+            confirm_fn=lambda _rc, _replace: True,
         )
         is False
     )
@@ -204,11 +204,48 @@ def test_install_completion_picker_skip_writes_nothing(tmp_path: Path, monkeypat
             auto=False,
             status_fn=lambda: (False, "zsh", rc),
             is_interactive_fn=lambda: True,
-            confirm_fn=lambda _rc: False,
+            confirm_fn=lambda _rc, _replace: False,
         )
         is False
     )
     assert COMPLETION_SHIM_MARKER not in rc.read_text()
+
+
+def test_install_completion_confirm_prompt_signals_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When an old block is present, the confirm prompt is told it's a replacement (will_replace=True)."""
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    rc = tmp_path / ".zshrc"
+    old_block = (
+        "_mngr_complete() {\n"
+        "    local -a completions\n"
+        "    (( ! $+commands[mngr] )) && return 1\n"
+        '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
+        ' /some/python -m imbue.mngr.cli.complete)"})\n'
+        "    compadd -U -V unsorted -a completions\n"
+        "}\n"
+        "compdef _mngr_complete mngr"
+    )
+    rc.write_text(f"# config\n{old_block}\n")
+    captured: dict[str, bool] = {}
+
+    def _confirm(_rc: Path, will_replace: bool) -> bool:
+        captured["will_replace"] = will_replace
+        return True
+
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, "zsh", rc),
+            is_interactive_fn=lambda: True,
+            confirm_fn=_confirm,
+        )
+        is True
+    )
+    assert captured["will_replace"] is True
+    assert COMPLETION_SHIM_MARKER in rc.read_text()
+    assert "compadd -U -V unsorted -a completions" not in rc.read_text()
 
 
 def _all_installed() -> tuple[bool, dict[str, bool]]:

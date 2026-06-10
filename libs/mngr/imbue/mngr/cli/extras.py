@@ -111,6 +111,20 @@ def _completion_status() -> tuple[bool, str, Path]:
     return configured, shell_type, rc_path
 
 
+def _default_completion_confirm(rc_path: Path, will_replace: bool) -> bool:
+    """Prompt to install/replace shell completion, surfacing whether an old block was detected."""
+    if will_replace:
+        question = (
+            f"Found an existing mngr completion in {rc_path} from an older version. "
+            "Replace it with the auto-updating managed shim?"
+        )
+        install_label = "Replace shell completion"
+    else:
+        question = f"Enable shell completion? This sets up an auto-updating mngr completion in {rc_path}."
+        install_label = "Enable shell completion"
+    return _confirm_install(question, install_label)
+
+
 def _install_completion(
     auto: bool,
     *,
@@ -118,16 +132,15 @@ def _install_completion(
     # in-memory fakes without monkeypatching module-level callables.
     status_fn: Callable[[], tuple[bool, str, Path]] = _completion_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
-    confirm_fn: Callable[[Path], bool] = lambda rc_path: _confirm_install(
-        f"Enable shell completion? This will add a line to {rc_path}.",
-        "Enable shell completion",
-    ),
+    confirm_fn: Callable[[Path, bool], bool] = _default_completion_confirm,
 ) -> bool:
     """Install shell completion. Returns True if installed (or already configured).
 
     The rc gets a small shim that sources a managed completion file mngr keeps up
     to date; the managed files are (re)written here so completion-logic changes
-    reach the user without further rc edits.
+    reach the user without further rc edits. An old self-contained completion
+    block left by a previous version is detected and replaced (the confirm prompt
+    says so).
     """
     configured, shell_type, rc_path = status_fn()
 
@@ -148,11 +161,16 @@ def _install_completion(
             write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
         return True
 
+    if removed_legacy:
+        write_human_line(
+            "Found an existing mngr completion in {} from an older version; it will be replaced.", rc_path
+        )
+
     if not auto:
         if not is_interactive_fn():
             write_human_line("No interactive terminal available. Skipping shell completion.")
             return False
-        if not confirm_fn(rc_path):
+        if not confirm_fn(rc_path, removed_legacy):
             write_human_line("Skipping shell completion.")
             return False
 
