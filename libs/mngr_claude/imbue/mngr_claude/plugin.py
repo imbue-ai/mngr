@@ -1044,9 +1044,9 @@ _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 # The raw-transcript streamer (returned by ClaudeAgent.get_raw_transcript_scripts
 # per HasTranscriptMixin). Always provisioned: it tails Claude's native session
 # JSONL files into logs/claude_transcript/events.jsonl, which is read by the
-# common transcript converter *and* by send_enter_via_tmux_wait_for_hook (the
-# fallback path for the UserPromptSubmit-via-tmux-wait-for hook), so the
-# streamer must keep running even when the common transcript is disabled.
+# common transcript converter *and* by ClaudeAgent._build_accept_marker_command
+# (the enqueue-marker fallback for the UserPromptSubmit-via-tmux-wait-for hook),
+# so the streamer must keep running even when the common transcript is disabled.
 _CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
 
 # Claude-specific scripts that are always provisioned regardless of
@@ -1363,10 +1363,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
     TUI_READY_INDICATOR = "Claude Code"
 
-    # Path template for the transcript event log, passed through to
-    # send_enter_via_tmux_wait_for_hook as the fallback source when the
-    # UserPromptSubmit hook misfires. The bash command in tui_utils evaluates
-    # the embedded $MNGR_AGENT_STATE_DIR on the host. Claude-specific.
+    # Path template for the transcript event log that the acceptance-marker
+    # probe (see _build_accept_marker_command) reads as the fallback source when
+    # the UserPromptSubmit hook misfires. The embedded $MNGR_AGENT_STATE_DIR is
+    # evaluated on the host by the env prefix the probe carries. Claude-specific.
     _QUEUE_LOG_PATH_TEMPLATE: ClassVar[str] = "$MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl"
 
     @property
@@ -1379,10 +1379,10 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         Always provisioned (per :class:`HasTranscriptMixin`): the streamer
         tails Claude's native session JSONL into
         ``logs/claude_transcript/events.jsonl``, which feeds both the
-        common-transcript converter and
-        ``send_enter_via_tmux_wait_for_hook``'s fallback path. The
-        background orchestrator that supervises this streamer is
-        provisioned separately by ``_provision_claude_always_on_scripts``.
+        common-transcript converter and the enqueue-marker fallback in
+        ``_build_accept_marker_command``. The background orchestrator that
+        supervises this streamer is provisioned separately by
+        ``_provision_claude_always_on_scripts``.
         """
         return {_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_RAW_TRANSCRIPT_SCRIPT_NAME)}
 
@@ -1400,6 +1400,27 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
         }
 
+    def _build_accept_marker_command(self) -> str:
+        """Shell snippet printing the latest enqueue timestamp from Claude's transcript log.
+
+        Claude's transcript event log records an ``enqueue`` event (an
+        ``"operation":"enqueue"`` JSONL line) the instant a message enters its
+        queue. This prints that event's ISO-8601 ``timestamp`` (empty if none
+        yet) -- the lexicographically-monotonic "message accepted" token that
+        ``send_enter_via_tmux_wait_for_hook`` baselines before Enter and watches
+        for a newer value, confirming submission the moment the message is
+        accepted rather than waiting on the (possibly slow) UserPromptSubmit
+        hook. The Claude-specific log schema lives here so ``tui_utils`` stays
+        agent-neutral; the env prefix evaluates the embedded
+        ``$MNGR_AGENT_STATE_DIR`` on the host, and the backslash-escaped quotes
+        are interpreted by the inner ``bash -c`` that runs the probe.
+        """
+        env_command_prefix = self.host.build_source_env_prefix(self)
+        return (
+            f"{env_command_prefix} cat {self._QUEUE_LOG_PATH_TEMPLATE} 2>/dev/null "
+            f'| grep "\\"operation\\":\\"enqueue\\"," | tail -n 1 | jq -r .timestamp 2>/dev/null'
+        )
+
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Claude wires a UserPromptSubmit hook that fires `tmux wait-for -S`
         # on the per-session channel; wait for it. If the hook misfires
@@ -1410,7 +1431,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             tmux_target,
             wait_channel=f"mngr-submit-{self.session_name}",
             timeout_seconds=self.enter_submission_timeout_seconds,
-            queue_log_path_template=self._QUEUE_LOG_PATH_TEMPLATE,
+            accept_marker_command=self._build_accept_marker_command(),
         )
 
     @classmethod
