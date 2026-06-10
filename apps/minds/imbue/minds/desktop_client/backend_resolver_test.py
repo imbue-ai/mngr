@@ -334,30 +334,27 @@ def _workspace_agent(
 #      once-per-agent warning log
 
 
-def test_get_workspace_color_returns_none_when_label_missing() -> None:
-    """Pre-migration / freshly-created workspaces have no color label."""
+def _resolver_with_workspace_agent(extra_labels: Mapping[str, str] = {}) -> tuple[MngrCliBackendResolver, AgentId]:
+    """A resolver holding a single primary-workspace agent, returned with its id."""
     resolver = MngrCliBackendResolver()
-    host = HostId.generate()
     agent = AgentId.generate()
     resolver.update_agents(
         ParsedAgentsResult(
             agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
+            discovered_agents=(_workspace_agent(HostId.generate(), agent, extra_labels=extra_labels),),
         )
     )
+    return resolver, agent
+
+
+def test_get_workspace_color_returns_none_when_label_missing() -> None:
+    """Pre-migration / freshly-created workspaces have no color label."""
+    resolver, agent = _resolver_with_workspace_agent()
     assert resolver.get_workspace_color(agent) is None
 
 
 def test_get_workspace_color_returns_normalized_hex_when_label_set() -> None:
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "#0b292b"}),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "#0b292b"})
     assert resolver.get_workspace_color(agent) == "#0b292b"
 
 
@@ -372,15 +369,7 @@ def test_get_workspace_color_returns_normalized_hex_when_label_set() -> None:
     ],
 )
 def test_get_workspace_color_normalizes_lenient_label_values(stored_label: str, expected_hex: str) -> None:
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": stored_label}),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": stored_label})
     assert resolver.get_workspace_color(agent) == expected_hex
 
 
@@ -388,15 +377,7 @@ def test_get_workspace_color_recovers_to_default_when_label_malformed() -> None:
     """Mngr does not validate label values; a hand-edited / future-version
     label might be junk. The resolver returns the default workspace color
     rather than crashing the SSE generator."""
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "not-a-hex"}),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "not-a-hex"})
     assert resolver.get_workspace_color(agent) == DEFAULT_WORKSPACE_COLOR
 
 
@@ -410,15 +391,7 @@ def test_set_workspace_color_locally_updates_the_cached_label() -> None:
     resolver's cached snapshot is updated in place so the next SSE
     workspaces emit reflects the new color -- without waiting for the
     ~10s discovery tick to re-emit through ``mngr observe``."""
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent()
     assert resolver.get_workspace_color(agent) is None
 
     assert resolver.set_workspace_color_locally(agent, "#0b292b") is True
@@ -430,15 +403,7 @@ def test_set_workspace_color_locally_clears_the_malformed_log_marker() -> None:
     is cleared so a future round-trip with a *different* bad value will
     log again. (The fix path -- repick from settings -- should leave the
     log in a useful state for any next failure.)"""
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "junk"}),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "junk"})
     # First read triggers the warning + marks the agent as logged.
     resolver.get_workspace_color(agent)
     assert str(agent) in resolver._logged_malformed_color_agents
@@ -456,15 +421,7 @@ def test_set_workspace_color_locally_fires_on_change_callbacks() -> None:
     """SSE subscribers register an on-change callback to wake on resolver
     mutations; the optimistic color write must fire it so the chrome
     repaints within one SSE tick of the settings save."""
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent()
 
     callback_calls: list[int] = []
     resolver.add_on_change_callback(lambda: callback_calls.append(1))
@@ -477,15 +434,7 @@ def test_get_workspace_color_logs_each_malformed_agent_only_once() -> None:
     the log. Subsequent reads for the same agent stay silent. Uses a
     loguru sink instead of caplog because loguru does not propagate
     to the standard logging module that caplog hooks."""
-    resolver = MngrCliBackendResolver()
-    host = HostId.generate()
-    agent = AgentId.generate()
-    resolver.update_agents(
-        ParsedAgentsResult(
-            agent_ids=(agent,),
-            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "junk"}),),
-        )
-    )
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "junk"})
     log_records: list[str] = []
     sink_id = loguru_logger.add(lambda msg: log_records.append(str(msg)), level="WARNING")
     try:
