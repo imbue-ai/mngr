@@ -98,9 +98,9 @@ the right project's consolidated files.
 
    Group the bullets you generated in step 3 for that project by
    category and merge them into the `[Unreleased]` section under
-   `### <Category>` subheadings, in the
-   canonical order: Added, Changed, Deprecated, Removed, Fixed,
-   Security. Append to any existing bullets under each subheading; do
+   `### <Category>` subheadings, in the canonical order: Added, Changed,
+   Deprecated, Removed, Fixed, Security. Append to any existing bullets
+   under each subheading; do
    not delete or rewrite pre-existing bullets. (`scripts/release.py`
    renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
    and inserts a fresh empty `[Unreleased]` above it, so each
