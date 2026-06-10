@@ -8,10 +8,10 @@
 # `codex_root_session` and the rollout `transcript_path` in
 # `codex_transcript_path`.
 #
-# Async-subagent model: codex subagents run ASYNCHRONOUSLY, so the marker is no
-# longer a simple touch/remove. It is recomputed under a lock from two pieces of
-# state -- the `codex_root_active` flag this hook sets and the per-subagent files
-# the SubagentStart/Stop hooks maintain -- so the `active` marker (RUNNING) stays
+# Async-subagent model: codex subagents run ASYNCHRONOUSLY, so the marker is not
+# a simple touch/remove. It is recomputed under a lock from two pieces of state
+# -- the `codex_root_active` flag this hook sets and the per-subagent files the
+# SubagentStart/Stop hooks maintain -- so the `active` marker (RUNNING) stays
 # present until the root turn AND every in-flight subagent are done. The shared
 # helper codex_marker_state.sh owns the lock, the paths, and the recompute (see
 # its header for the full invariant).
@@ -26,9 +26,8 @@
 # WAITING. Re-recording at each fresh root turn (including after `codex resume`,
 # which may assign a new session id) keeps the root + transcript path correct.
 #
-# Why also record the transcript path here (unlike antigravity, which scopes the
-# stream via a conversation-ids set): codex writes a single rollout JSONL per
-# session and hands its absolute path to every hook as `transcript_path`.
+# Why also record the transcript path here: codex writes a single rollout JSONL
+# per session and hands its absolute path to every hook as `transcript_path`.
 # stream_transcript.sh tails exactly that file, so this hook is the single source
 # of truth for which rollout to follow. The path can change across resume (codex
 # may open a fresh rollout), so it is re-captured at each fresh root turn too.

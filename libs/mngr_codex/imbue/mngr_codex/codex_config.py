@@ -1,12 +1,9 @@
 """Read/write helpers for the OpenAI Codex CLI (``codex``) under a per-agent ``CODEX_HOME``.
 
-Unlike Antigravity (which forces a per-agent ``$HOME`` relocation), the Codex
-CLI exposes a first-class config-dir override env var, ``CODEX_HOME`` (default
-``~/.codex``). That is the preferred isolation shape -- the same one
-``mngr_claude`` uses via ``CLAUDE_CONFIG_DIR`` -- so ``mngr_codex`` points each
-agent at its own ``CODEX_HOME`` under the agent state dir and leaves the user's
-real ``$HOME`` untouched. Codex resolves its entire config/auth/session/hook
-tree from ``CODEX_HOME``:
+The Codex CLI exposes a first-class config-dir override env var, ``CODEX_HOME``
+(default ``~/.codex``). ``mngr_codex`` points each agent at its own ``CODEX_HOME``
+under the agent state dir and leaves the user's real ``$HOME`` untouched. Codex
+resolves its entire config/auth/session/hook tree from ``CODEX_HOME``:
 
     <CODEX_HOME>/
       config.toml        # model, approval, sandbox, trust, notices (mngr-owned)
@@ -70,7 +67,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 
 # Per-agent ``CODEX_HOME`` under the agent state dir. Codex resolves its whole
 # config/auth/session/hook tree from here (set via the ``CODEX_HOME`` env var on
-# the codex process). Mirrors ``mngr_claude``'s per-agent ``CLAUDE_CONFIG_DIR``.
+# the codex process).
 CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
 
 _CONFIG_FILENAME: str = "config.toml"
@@ -176,17 +173,16 @@ SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
 CLEAR_ACTIVE_MARKER_SCRIPT_NAME: str = "clear_active_marker.sh"
 SUBAGENT_STARTED_SCRIPT_NAME: str = "subagent_started.sh"
 SUBAGENT_STOPPED_SCRIPT_NAME: str = "subagent_stopped.sh"
-# Shared POSIX-sh helper sourced by the four lifecycle hooks (mngr_codex-owned,
-# like the way the other scripts source mngr_log.sh). Defines the marker state
-# paths, the mkdir-based lock, and the recompute that enforces the invariant.
+# Shared POSIX-sh helper sourced by the four lifecycle hooks. Defines the marker
+# state paths, the mkdir-based lock, and the recompute that enforces the invariant.
 MARKER_STATE_LIB_SCRIPT_NAME: str = "codex_marker_state.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
 
-# Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers,
-# matching the conventions the other plugins use: raw bytes under ``logs/`` and
-# the agent-agnostic common transcript under ``events/``.
+# Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers:
+# raw bytes under ``logs/`` and the agent-agnostic common transcript under
+# ``events/``.
 RAW_TRANSCRIPT_OUTPUT_RELATIVE: str = "logs/codex_transcript/events.jsonl"
 COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.jsonl"
 
@@ -330,7 +326,7 @@ def build_codex_config(
         config[PROJECTS_KEY] = projects
 
     # Shallow merge: a top-level override key replaces the built-in value
-    # wholesale (matching mngr_claude/antigravity ``*_overrides`` semantics).
+    # wholesale.
     for key, value in config_overrides.items():
         config[key] = value
     return config
@@ -487,9 +483,8 @@ def build_codex_hooks_config() -> dict[str, Any]:
     ordering guarantee and no ``fullyIdle`` signal -- the marker is recomputed
     under a lock from two pieces of tracked state (a root-turn flag and one file
     per in-flight subagent) so it stays present until the root turn **and** every
-    subagent are done. We therefore DO hook ``SubagentStart``/``SubagentStop``
-    now (to track in-flight subagents), correcting the earlier design that left
-    subagents unhooked.
+    subagent are done. ``SubagentStart``/``SubagentStop`` are hooked so that the
+    in-flight subagents can be tracked.
 
     * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
       ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root

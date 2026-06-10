@@ -1,10 +1,9 @@
 """``mngr_codex`` plugin -- registers the ``codex`` agent type for the OpenAI Codex CLI.
 
-The Codex CLI (the Rust ``codex`` binary) is the closest CLI yet to Claude Code:
-a Claude-style hook system (``UserPromptSubmit``/``Stop``/``SubagentStop``/...),
-a first-class config-dir override env var, file-based auth, resume-by-id, and an
-append-as-you-go session JSONL. So ``mngr_codex`` follows the ``mngr_claude``
-shape, using ``mngr_antigravity`` only for the banner-poll readiness fallback.
+The Codex CLI (the Rust ``codex`` binary) has a hook system
+(``UserPromptSubmit``/``Stop``/``SubagentStop``/...), a first-class config-dir
+override env var, file-based auth, resume-by-id, and an append-as-you-go session
+JSONL.
 
 Per-agent ``CODEX_HOME`` (the isolation lever)
 ----------------------------------------------
@@ -12,9 +11,8 @@ Codex resolves its whole config/auth/session/hook tree from ``CODEX_HOME``
 (default ``~/.codex``). Pointing each agent at its own ``CODEX_HOME`` under the
 agent state dir -- injected only on the codex process via ``env CODEX_HOME=...``
 -- isolates the agent's config/permissions/transcripts while leaving the user's
-real ``$HOME`` untouched. This is the preferred shape (cf. ``CLAUDE_CONFIG_DIR``);
-no ``$HOME`` relocation, no workspace symlink (codex accepts the dotted
-``~/.mngr/...`` cwd), and no heavy per-home caches to re-share.
+real ``$HOME`` untouched. codex accepts the dotted ``~/.mngr/...`` cwd, so there
+is no workspace symlink either.
 
 The per-agent ``CODEX_HOME`` tree (mngr-owned files rewritten each provision;
 see :mod:`imbue.mngr_codex.codex_config`)::
@@ -50,8 +48,8 @@ resources.
 
 Readiness: codex's ``SessionStart`` hook fires *lazily* (on the first prompt,
 not at TUI launch -- openai/codex issue #15269), so there is no pre-input
-sentinel; readiness falls back to the ``InteractiveTuiAgent`` banner poll on a
-stable header string (``TUI_READY_INDICATOR``).
+sentinel; readiness uses the ``InteractiveTuiAgent`` banner poll on a stable
+header string (``TUI_READY_INDICATOR``).
 
 Hook trust: codex requires command hooks to be trusted before they run. mngr
 passes ``--dangerously-bypass-hook-trust`` so its own lifecycle hooks run
@@ -190,28 +188,28 @@ class CodexAgentConfig(AgentTypeConfig):
     )
     # auto_allow_permissions sets ``approval_policy = "never"`` in the per-agent
     # config.toml, which suppresses every approval dialog while keeping the
-    # sandbox on. Unlike antigravity (whose hook allow-decision does not gate the
-    # dialog), codex honors ``approval_policy`` directly, so no skip-all flag is
-    # needed. Sandbox isolation is governed separately by ``sandbox_mode``.
+    # sandbox on. (codex's ``never`` is the "never *ask for* approval" value --
+    # it auto-proceeds without prompting -- not "never allow".) codex honors
+    # ``approval_policy`` directly, so no separate skip-all flag is needed. Sandbox
+    # isolation is governed separately by ``sandbox_mode``.
     auto_allow_permissions: bool = Field(
         default=False,
         description="When True, set approval_policy='never' so codex never prompts for tool "
         "approval (the sandbox set by sandbox_mode still applies).",
     )
-    # config_overrides mirrors mngr_claude's settings_overrides / antigravity's:
-    # a free-form blob merged last (shallow) into the per-agent config.toml.
-    # Covers anything not surfaced as a typed knob (extra [notice] keys, a
-    # [profiles.*] table, model_provider, etc.).
+    # config_overrides is a free-form blob merged last (shallow) into the
+    # per-agent config.toml. Covers anything not surfaced as a typed knob (extra
+    # [notice] keys, a [profiles.*] table, model_provider, etc.).
     config_overrides: dict[str, Any] = Field(
         default_factory=dict,
         description="Key-value overrides merged last into the per-agent config.toml. "
         'Example: {"model_provider": "openai", "approval_policy": "on-request"}.',
     )
-    # auto_dismiss_dialogs is the mngr_claude-style auto-consent knob. When True
-    # (or under ``mngr create --yes``), provisioning silently records workspace
-    # trust + the hook-bypass consent without prompting. When False (default),
-    # the user is prompted via click.confirm before mngr mutates the global
-    # config or runs codex with hook review bypassed.
+    # auto_dismiss_dialogs is the auto-consent knob. When True (or under
+    # ``mngr create --yes``), provisioning silently records workspace trust + the
+    # hook-bypass consent without prompting. When False (default), the user is
+    # prompted via click.confirm before mngr mutates the global config or runs
+    # codex with hook review bypassed.
     auto_dismiss_dialogs: bool = Field(
         default=False,
         description="When True, trust the source repo and allow the codex hook-review bypass "
@@ -259,9 +257,9 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     # input composer once the TUI is ready to receive keystrokes (verified live
     # against codex 0.138.0). codex has no pre-input readiness hook -- its
     # ``SessionStart`` fires lazily on the first prompt (openai/codex #15269) --
-    # so this banner poll is the readiness signal, as with antigravity. There is
-    # no OAuth splash delay (auth is a file), so unlike agy the header box is a
-    # safe indicator: it appears only with the rendered, ready composer.
+    # so this banner poll is the readiness signal. There is no OAuth splash delay
+    # (auth is a file), so the header box is a safe indicator: it appears only
+    # with the rendered, ready composer.
     TUI_READY_INDICATOR: ClassVar[str] = "/model to change"
 
     def get_expected_process_name(self) -> str:
@@ -271,7 +269,7 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # codex submits the composer on Enter. Upstream ``wait_for_paste_visible``
         # already confirmed the message landed in the pane before we get here, so
-        # a best-effort Enter is the right strategy (as with antigravity).
+        # a best-effort Enter is the right strategy.
         send_enter_best_effort(self, tmux_target)
 
     @property
@@ -443,10 +441,10 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     def _find_git_source_path(self, mngr_ctx: MngrContext) -> Path | None:
         """Find the source repo root for this agent's ``work_dir`` (or None if not in a repo).
 
-        Delegates to the shared core helper (also used by mngr_claude/antigravity).
-        The source-repo root is the durable thing trust is persisted against, so a
-        single grant covers every worktree of the same repo. Kept as a method so
-        tests can override without monkeypatching.
+        Delegates to the shared core helper. The source-repo root is the durable
+        thing trust is persisted against, so a single grant covers every worktree
+        of the same repo. Kept as a method so tests can override without
+        monkeypatching.
         """
         return find_git_source_path(self.work_dir, mngr_ctx.concurrency_group)
 
@@ -464,17 +462,17 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
           mngr's lifecycle hooks run -- which, on a trusted workspace, also lets
           codex load any repo-local ``.codex/hooks.json`` unreviewed.
 
-        Gating mirrors mngr_claude/antigravity: source already trusted in the
-        user's global ``config.toml`` -> no-op (consent previously given);
-        ``auto_dismiss_dialogs`` or ``mngr_ctx.is_auto_approve`` -> silent;
-        interactive -> ``click.confirm`` (default False); non-interactive without
-        opt-in, or declined -> ``SystemExit(1)``. We never run an agent on
-        untrusted code, or bypass codex's hook review, without the user's say-so.
+        Gating: source already trusted in the user's global ``config.toml`` ->
+        no-op (consent previously given); ``auto_dismiss_dialogs`` or
+        ``mngr_ctx.is_auto_approve`` -> silent; interactive -> ``click.confirm``
+        (default False); non-interactive without opt-in, or declined ->
+        ``SystemExit(1)``. We never run an agent on untrusted code, or bypass
+        codex's hook review, without the user's say-so.
 
-        ``SystemExit`` (not ``UserInputError``) for the same reason as the other
-        plugins: ``provision_agent`` wraps its body in a ``ConcurrencyExceptionGroup``
-        that re-raises ``BaseException`` unwrapped but turns ``Exception`` into a
-        noisy auto-diagnostics traceback.
+        ``SystemExit`` (not ``UserInputError``) because ``provision_agent`` wraps
+        its body in a ``ConcurrencyExceptionGroup`` that re-raises
+        ``BaseException`` unwrapped but turns ``Exception`` into a noisy
+        auto-diagnostics traceback.
         """
         user_config_path = get_codex_config_path(user_codex_home)
         existing_config = read_codex_config(host, user_config_path)
@@ -669,7 +667,7 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
 
         One backgrounded subshell owns the streamer + converter lifecycle
         (pidfile-deduped, restart-on-death), so replaying the command on restart
-        is safe. Mirrors mngr_claude/antigravity.
+        is safe.
         """
         script_path = f"$MNGR_AGENT_STATE_DIR/commands/{BACKGROUND_TASKS_SCRIPT_NAME}"
         return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"

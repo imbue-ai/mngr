@@ -7,14 +7,13 @@
 # agent_id, so the shared recompute keeps the `active` marker (RUNNING) present
 # while any subagent is in flight.
 #
-# Why this hook exists now (it did not before): codex subagents run
-# ASYNCHRONOUSLY. The root agent's Stop fires when the root model loop is done
-# WHILE its subagents may still be running, and their SubagentStop hooks arrive
-# later with no ordering guarantee. Tracking each live subagent here -- and
-# removing it in subagent_stopped.sh -- lets the marker stay present until the
-# root turn AND every subagent are done, instead of flipping to WAITING the
-# moment the root loop ends. See codex_marker_state.sh for the invariant and the
-# lock.
+# Why this hook exists: codex subagents run ASYNCHRONOUSLY. The root agent's Stop
+# fires when the root model loop is done WHILE its subagents may still be running,
+# and their SubagentStop hooks arrive later with no ordering guarantee. Tracking
+# each live subagent here -- and removing it in subagent_stopped.sh -- lets the
+# marker stay present until the root turn AND every subagent are done, instead of
+# flipping to WAITING the moment the root loop ends. See codex_marker_state.sh for
+# the invariant and the lock.
 #
 # Never writes stdout (codex can treat Stop-class hook stdout as control output);
 # avoids `set -e` so a malformed payload can't disrupt codex's loop.

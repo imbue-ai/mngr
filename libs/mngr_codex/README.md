@@ -9,15 +9,14 @@ on par with the `claude` and `antigravity` agent types.
 
 ## How it works
 
-Codex is architecturally the closest CLI to Claude Code, so this plugin follows the
-`mngr_claude` shape. See `specs/agent-plugin-parity/codex-investigation.md` in the monorepo
-for the full, source-verified investigation behind each decision.
+See `specs/agent-plugin-parity/codex-investigation.md` in the monorepo for the full,
+source-verified investigation behind each decision.
 
 - **Per-agent isolation via `CODEX_HOME`.** Codex resolves its whole
   config/auth/session/hook tree from `CODEX_HOME` (default `~/.codex`). Each agent gets its
   own `CODEX_HOME` under the agent state dir, injected only on the codex process
-  (`env CODEX_HOME=...`), leaving the user's real `$HOME` untouched. No `$HOME` relocation,
-  no workspace symlink (codex accepts the dotted `~/.mngr/...` cwd).
+  (`env CODEX_HOME=...`), leaving the user's real `$HOME` untouched. codex accepts the
+  dotted `~/.mngr/...` cwd, so there is no workspace symlink either.
 - **Shared auth.** The per-agent `auth.json` is a symlink to the user's shared
   `~/.codex/auth.json`. Codex writes that file in place and reloads-before-refreshing, so
   one login authenticates every agent and token refreshes propagate. `config.toml` pins
@@ -106,9 +105,20 @@ the streaming snapshot, and installation/version management.
 
 This agent drives the codex **TUI** by `tmux send-keys` (paste + Enter), with banner-poll
 readiness. That works, but it's fragile (screen-scraping) and codex's `SessionStart` fires
-lazily, so there's no clean pre-input readiness signal. Codex offers a much cleaner surface we
-should adopt in a **follow-up** as a *second* agent type (mirroring `mngr_claude`'s
-`claude` + `headless_claude`): the **app-server**.
+lazily, so there's no clean pre-input readiness signal. Codex offers a much cleaner surface to
+drive programmatically -- the **app-server** -- and a second agent type built on it is a planned
+follow-up (mirroring `mngr_claude`'s `claude` + `headless_claude` split).
+
+We built the TUI agent **first**, though, for a concrete reason: like `claude -p`, the app-server
+does not have full feature parity with the interactive TUI on a ChatGPT-subscription login. The
+backend gates some `*-codex` models on the **client identity** (the `originator`, derived from the
+app-server's `initialize` `clientInfo.name`) -- the first-party TUI presents as `codex-tui` and is
+entitled to them; a programmatic app-server client identifying honestly as mngr is not. The only
+way to close that gap is to spoof the TUI identity, which OpenAI's terms disallow (see "client
+identity" below). So the TUI agent is how you get full `*-codex` model access on a ChatGPT login
+today, and the app-server variant is a *complement* for the cases where the identity gap is
+acceptable (API-key auth, which carries the full entitlement; or only models the honest identity
+already gets) -- not a replacement.
 
 ### What it would give us
 - **Programmatic messaging instead of tmux paste.** `codex app-server` speaks a JSON-RPC

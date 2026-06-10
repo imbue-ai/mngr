@@ -313,7 +313,7 @@ def test_provision_sets_approval_never_when_auto_allow(local_provider: LocalProv
 
 
 # =============================================================================
-# Trust / hook-bypass consent (mirrors mngr_claude / antigravity)
+# Trust / hook-bypass consent
 # =============================================================================
 
 
