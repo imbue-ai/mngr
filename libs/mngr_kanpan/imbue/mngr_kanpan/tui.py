@@ -1281,8 +1281,11 @@ def resolve_board_layout(
 
     Returns ``(columns, section_order)`` where ``columns`` is an ordered tuple
     of ``(field_key, header)`` pairs (headers stripped of the display padding the
-    TUI adds) in the same order the TUI would render them. Shares the column and
-    section resolution with ``run_kanpan`` so the JSON output matches the board.
+    TUI adds) in the same order the TUI would render them. Built from the same
+    primitives ``run_kanpan`` uses (``_assemble_column_defs`` /
+    ``_resolve_section_order``) so the JSON layout matches the board; ``run_kanpan``
+    keeps the full ``_ColumnDef`` objects (with render closures) it needs for urwid,
+    so it does not call this wrapper directly.
     """
     source_col_defs = _build_data_source_column_defs(data_sources)
     column_defs = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, source_col_defs, plugin_config.column_order)
