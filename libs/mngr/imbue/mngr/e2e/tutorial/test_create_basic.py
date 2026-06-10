@@ -183,18 +183,17 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# This test runs three sequential mngr operations (config set, create, list),
-# each of which performs full provider discovery, so it needs more than the
-# default 10s.
+# Agent creation (provisioning, rsync, ttyd install attempt) plus the follow-up
+# `mngr list` can exceed the default 10s per-test timeout, so allow extra
+# headroom.
 #
-# No @pytest.mark.modal here: this test only creates a local codex agent
-# (configured to `sleep 99999`) and runs `mngr list`. `mngr list` reaches Modal
-# solely through the in-process gRPC SDK inside the spawned `mngr` subprocess,
-# which the resource guard cannot track (the SDK monkeypatch lives in the pytest
-# process, and the `modal` CLI binary -- the only cross-process-tracked path --
-# is never invoked for local agents). With the mark, the guard's NEVER_INVOKED
-# check fails the test; without it there is no tracked Modal usage, so no BLOCKED
-# violation.
+# No @pytest.mark.modal here: the codex agent is created locally (and not even
+# launched -- see --no-auto-start below), and `mngr list` reaches Modal solely
+# through the in-process gRPC SDK inside the spawned `mngr` subprocess, which the
+# resource guard cannot track (the SDK monkeypatch lives in the pytest process,
+# and the `modal` CLI binary -- the only cross-process-tracked path -- is never
+# invoked for local agents). With the mark, the guard's NEVER_INVOKED check fails
+# the test; without it there is no tracked Modal usage, so no BLOCKED violation.
 @pytest.mark.timeout(120)
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
