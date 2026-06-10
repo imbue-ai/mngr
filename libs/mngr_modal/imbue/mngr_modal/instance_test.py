@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -5,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
@@ -35,8 +37,8 @@ from imbue.mngr_modal.testing import make_sandbox_with_tags
 from imbue.mngr_modal.testing import make_snapshot
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.interface import AppInterface
-from imbue.modal_proxy.testing import TestingModalInterface
-from imbue.modal_proxy.testing import TestingSecret
+from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeSecret
 
 # =============================================================================
 # Unit tests for sandbox tag helper functions
@@ -145,7 +147,7 @@ class ExpiredCredentialsModalProviderInstance(ModalProviderInstance):
 
 @pytest.fixture
 def modal_provider(testing_provider: ModalProviderInstance) -> ModalProviderInstance:
-    """A ModalProviderInstance backed by TestingModalInterface.
+    """A ModalProviderInstance backed by FakeModalInterface.
 
     Alias of ``testing_provider`` kept for the many property and
     ``_parse_build_args`` tests that only need a fully-constructed instance.
@@ -315,7 +317,7 @@ def test_list_all_host_records_skips_non_json_files(
 
 def test_discover_hosts_running_sandbox_surfaces_running_state_from_record(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """A host with a live sandbox is reported RUNNING regardless of its record's snapshots.
 
@@ -337,7 +339,7 @@ def test_discover_hosts_running_sandbox_surfaces_running_state_from_record(
 
 def test_discover_hosts_skips_running_sandbox_without_host_record(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """A running sandbox with no host record on the volume is not surfaced.
 
@@ -408,7 +410,7 @@ def test_discover_hosts_includes_destroyed_hosts_when_requested(
 
 def test_discover_hosts_prefers_running_sandbox_over_host_record(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """discover_hosts derives RUNNING state from a live sandbox even when a stale record exists.
 
@@ -779,7 +781,7 @@ def test_parse_volume_spec_invalid_empty_parts() -> None:
 
 def make_modal_provider_with_config_defaults(
     mngr_ctx: MngrContext,
-    modal_interface: TestingModalInterface,
+    modal_interface: FakeModalInterface,
     app_name: str,
     default_gpu: str | None = None,
     default_image: str | None = None,
@@ -787,7 +789,7 @@ def make_modal_provider_with_config_defaults(
 ) -> ModalProviderInstance:
     """Create a ModalProviderInstance with custom config defaults for testing.
 
-    Builds through the shared backend factory against a TestingModalInterface so
+    Builds through the shared backend factory against a FakeModalInterface so
     the instance is a real fake (no MagicMock app/volume).
     """
     config = ModalProviderConfig(
@@ -815,7 +817,7 @@ def make_modal_provider_with_config_defaults(
 
 
 def test_parse_build_args_uses_config_default_gpu(
-    temp_mngr_ctx: MngrContext, testing_modal: TestingModalInterface
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
 ) -> None:
     """When default_gpu is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
@@ -833,7 +835,7 @@ def test_parse_build_args_uses_config_default_gpu(
 
 
 def test_parse_build_args_uses_config_default_image(
-    temp_mngr_ctx: MngrContext, testing_modal: TestingModalInterface
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
 ) -> None:
     """When default_image is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
@@ -847,7 +849,7 @@ def test_parse_build_args_uses_config_default_image(
 
 
 def test_parse_build_args_uses_config_default_region(
-    temp_mngr_ctx: MngrContext, testing_modal: TestingModalInterface
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
 ) -> None:
     """When default_region is set in config, _parse_build_args should use it."""
     provider = make_modal_provider_with_config_defaults(
@@ -861,7 +863,7 @@ def test_parse_build_args_uses_config_default_region(
 
 
 def test_parse_build_args_uses_all_config_defaults(
-    temp_mngr_ctx: MngrContext, testing_modal: TestingModalInterface
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
 ) -> None:
     """When all defaults are set in config, _parse_build_args should use them."""
     provider = make_modal_provider_with_config_defaults(
@@ -879,7 +881,7 @@ def test_parse_build_args_uses_all_config_defaults(
 
 
 def test_parse_build_args_explicit_args_override_config_defaults(
-    temp_mngr_ctx: MngrContext, testing_modal: TestingModalInterface
+    temp_mngr_ctx: MngrContext, testing_modal: FakeModalInterface
 ) -> None:
     """Explicit build args should override config defaults."""
     provider = make_modal_provider_with_config_defaults(
@@ -933,7 +935,7 @@ def test_modal_provider_config_user_id_can_be_set() -> None:
 # =============================================================================
 
 
-def test_build_modal_secrets_from_env_empty_list(testing_modal: TestingModalInterface) -> None:
+def test_build_modal_secrets_from_env_empty_list(testing_modal: FakeModalInterface) -> None:
     """Empty list of env vars should return empty list of secrets."""
     result = _build_modal_secrets_from_env([], testing_modal)
     assert result == []
@@ -941,7 +943,7 @@ def test_build_modal_secrets_from_env_empty_list(testing_modal: TestingModalInte
 
 def test_build_modal_secrets_from_env_with_set_vars(
     monkeypatch: pytest.MonkeyPatch,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Should create a single Modal secret carrying every set env var's value."""
     monkeypatch.setenv("TEST_SECRET_1", "value1")
@@ -952,13 +954,13 @@ def test_build_modal_secrets_from_env_with_set_vars(
     # All vars are combined into one Secret holding the exact key-value mapping.
     assert len(result) == 1
     secret = result[0]
-    assert isinstance(secret, TestingSecret)
+    assert isinstance(secret, FakeSecret)
     assert secret.values == {"TEST_SECRET_1": "value1", "TEST_SECRET_2": "value2"}
 
 
 def test_build_modal_secrets_from_env_missing_var_raises_error(
     monkeypatch: pytest.MonkeyPatch,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Should raise MngrError when an environment variable is not set."""
     monkeypatch.delenv("NONEXISTENT_VAR", raising=False)
@@ -972,7 +974,7 @@ def test_build_modal_secrets_from_env_missing_var_raises_error(
 
 def test_build_modal_secrets_from_env_multiple_missing_vars(
     monkeypatch: pytest.MonkeyPatch,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Should report all missing environment variables in the error."""
     monkeypatch.delenv("MISSING_VAR_1", raising=False)
@@ -988,7 +990,7 @@ def test_build_modal_secrets_from_env_multiple_missing_vars(
 
 def test_build_modal_secrets_from_env_partial_missing_vars(
     monkeypatch: pytest.MonkeyPatch,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Should raise error listing only the missing vars when some are set."""
     monkeypatch.setenv("SET_VAR", "value")
@@ -1029,7 +1031,7 @@ class _CapturingHost:
 
 def test_create_shutdown_script_generates_correct_content(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_create_shutdown_script should generate a script with correct content."""
     host = _CapturingHost()
@@ -1160,8 +1162,30 @@ def test_get_volume_for_host_returns_none_when_host_volume_disabled(
     assert result is None
 
 
+class _VolumeAuthErrorModalInterface(FakeModalInterface):
+    """Fake Modal interface whose ``volume_from_name`` always raises an auth error.
+
+    Mirrors ``ExpiredCredentialsModalProviderInstance`` (which raises from
+    ``_get_modal_app``) but targets the ``volume_from_name`` call that
+    ``get_volume_reference_for_host`` makes, so the @handle_modal_auth_error
+    conversion path runs end-to-end against a real fake rather than a MagicMock.
+    """
+
+    def volume_from_name(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+        version: int | None = None,
+    ) -> Any:
+        raise ModalProxyAuthError("Token missing or expired")
+
+
 def test_get_volume_reference_for_host_converts_auth_error(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
 ) -> None:
     """get_volume_reference_for_host should convert ModalProxyAuthError to ModalAuthError.
 
@@ -1169,47 +1193,67 @@ def test_get_volume_reference_for_host_converts_auth_error(
     make_readable_offline_host -> to_offline_host, so it must surface the
     user-friendly ModalAuthError rather than the raw proxy error.
     """
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    mock_interface.volume_from_name.side_effect = ModalProxyAuthError("Token missing or expired")
+    root = tmp_path / "auth-fail"
+    root.mkdir(parents=True, exist_ok=True)
+    auth_failing_interface = _VolumeAuthErrorModalInterface(root_dir=root, concurrency_group=cg)
+    # Swap only the interface on the already-constructed provider so the
+    # auth failure surfaces at the host-volume lookup (not during app/state-volume
+    # construction, which also calls volume_from_name).
+    modal_app_with_auth_failure = testing_provider.modal_app.model_copy_update(
+        to_update(testing_provider.modal_app.field_ref().modal_interface, auth_failing_interface)
+    )
+    provider = testing_provider.model_copy_update(
+        to_update(testing_provider.field_ref().modal_app, modal_app_with_auth_failure)
+    )
     with pytest.raises(ModalAuthError):
-        modal_provider.get_volume_reference_for_host(HostId.generate())
+        provider.get_volume_reference_for_host(HostId.generate())
 
 
 def test_get_volume_reference_for_host_does_not_probe(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """The reference method must NOT call listdir -- skipping that existence probe
     is its entire reason to exist (it keeps make_readable_offline_host cheap during
-    host discovery)."""
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    vol_iface = mock_interface.volume_from_name.return_value
-    vol_iface.listdir.reset_mock()
+    host discovery).
 
-    ref = modal_provider.get_volume_reference_for_host(HostId.generate())
+    We create a real host volume, then delete its backing directory while keeping
+    the lazy ``volume_from_name`` reference resolvable. A ``listdir`` probe on the
+    now-missing directory would raise ``ModalProxyNotFoundError``; the reference
+    method returning a value proves it did not probe.
+    """
+    host_id = HostId.generate()
+    volume = cast(Any, testing_provider._build_host_volume(host_id))
+    shutil.rmtree(volume.root_dir)
+
+    ref = testing_provider.get_volume_reference_for_host(host_id)
 
     assert ref is not None
-    vol_iface.listdir.assert_not_called()
 
 
 def test_get_volume_for_host_probes_with_listdir(
-    modal_provider: ModalProviderInstance,
+    testing_provider: ModalProviderInstance,
 ) -> None:
     """By contrast, get_volume_for_host confirms the volume exists with a listdir('/')
     probe (volume_from_name returns a lazy reference that does not fail for a deleted
-    volume)."""
-    mock_interface = cast(Any, modal_provider.modal_app.modal_interface)
-    vol_iface = mock_interface.volume_from_name.return_value
-    vol_iface.listdir.reset_mock()
+    volume).
 
-    result = modal_provider.get_volume_for_host(HostId.generate())
+    With the backing directory deleted out from under the still-resolvable
+    reference, the ``listdir('/')`` probe raises ``ModalProxyNotFoundError``, so
+    get_volume_for_host returns None -- whereas get_volume_reference_for_host
+    (which skips the probe) returns a reference for the same host.
+    """
+    host_id = HostId.generate()
+    volume = cast(Any, testing_provider._build_host_volume(host_id))
+    shutil.rmtree(volume.root_dir)
 
-    assert result is not None
-    vol_iface.listdir.assert_called_once_with("/")
+    assert testing_provider.get_volume_for_host(host_id) is None
+    # The reference path, which skips the probe, still returns a value for the same host.
+    assert testing_provider.get_volume_reference_for_host(host_id) is not None
 
 
 def test_shutdown_script_omits_volume_sync_when_host_volume_disabled(
     testing_provider_no_host_volume: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should not include volume sync when is_host_volume_created=False."""
     host = _CapturingHost()
@@ -1232,7 +1276,7 @@ def test_shutdown_script_omits_volume_sync_when_host_volume_disabled(
 
 def test_shutdown_script_includes_volume_sync_when_host_volume_enabled(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should include volume sync when is_host_volume_created=True."""
     host = _CapturingHost()
@@ -1255,7 +1299,7 @@ def test_shutdown_script_includes_volume_sync_when_host_volume_enabled(
 
 def test_shutdown_script_forces_kill_on_curl_failure(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """Shutdown script should log response, sync volume, and kill -9 1 when curl fails."""
     host = _CapturingHost()
@@ -1371,7 +1415,7 @@ def test_list_running_host_ids_returns_empty_when_no_sandboxes(
 
 def test_list_running_host_ids_fetches_tags_in_parallel(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_list_running_host_ids fetches tags for all sandboxes and extracts host IDs."""
     host_id_1 = HostId.generate()
@@ -1386,7 +1430,7 @@ def test_list_running_host_ids_fetches_tags_in_parallel(
 
 def test_list_running_host_ids_skips_sandboxes_without_host_id_tag(
     testing_provider: ModalProviderInstance,
-    testing_modal: TestingModalInterface,
+    testing_modal: FakeModalInterface,
 ) -> None:
     """_list_running_host_ids skips sandboxes that don't have the host ID tag."""
     host_id = HostId.generate()
