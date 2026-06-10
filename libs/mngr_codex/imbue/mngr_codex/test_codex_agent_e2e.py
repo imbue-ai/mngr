@@ -5,12 +5,14 @@ WAITING -> message -> transcript -> stop/start resume -> destroy). The arc and
 assertions live in ``imbue.mngr.agents.agent_release_testing``; this file supplies
 codex's plumbing via an :class:`AgentReleaseProfile`.
 
-codex's plumbing is the most involved: an isolated ``MNGR_HOST_DIR`` and a throwaway
-``CODEX_HOME`` seeded with a copy of the user's real ``~/.codex/auth.json`` (so it
-authenticates without touching the real config), plus a private tmux server so the
-agent's sessions never touch the real one. codex's marker is racy mid-turn (set on
-``UserPromptSubmit``, cleared on ``Stop``), so the profile opts out of the RUNNING
-observation; the transcript-keyed assertions carry the lifecycle coverage.
+codex's only real specifics over the other ports: a throwaway ``CODEX_HOME`` seeded
+with a copy of the user's real ``~/.codex/auth.json`` (so it authenticates without
+touching the real config), and running the real installed ``mngr``/``codex`` binaries
+(put on ``PATH``) rather than the checkout's. Host-dir and tmux-server isolation come
+for free from the autouse ``setup_test_mngr_env`` fixture, same as every other test.
+codex's marker is racy mid-turn (set on ``UserPromptSubmit``, cleared on ``Stop``), so
+the profile opts out of the RUNNING observation; the transcript-keyed assertions carry
+the lifecycle coverage.
 
 It is a ``release`` test (not run in CI) and requires the ``codex`` binary plus a
 logged-in ``~/.codex/auth.json``; skipped otherwise. The model is pinned to a
@@ -23,7 +25,6 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -32,6 +33,8 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.utils.testing import get_subprocess_test_env
+from imbue.mngr.utils.testing import init_git_repo
 
 # Resolved at import time, before the autouse ``setup_test_mngr_env`` fixture redirects
 # $HOME / mutates PATH: the real home (auth source) and the real codex / mngr binaries.
@@ -52,8 +55,6 @@ _REAL_MODELS_CACHE = _REAL_HOME / ".codex" / "models_cache.json"
 # login rejects with a 400. Update if this account's available models change.
 _CODEX_MODEL = "gpt-5.5"
 
-_TMUX_TMPDIR_PREFIX = "/tmp/mngr-codex-e2e-tmux-"
-
 # Disable the remote-provider backends for every command: a purely local agent test,
 # and leaving them on makes mngr probe Modal/Docker. ``-S`` is a per-command option, so
 # it is injected right after the subcommand.
@@ -63,22 +64,6 @@ _PROVIDER_SETTINGS: tuple[str, ...] = (
     "-S",
     "providers.docker.is_enabled=false",
 )
-
-
-def _kill_private_tmux_server(tmux_tmpdir: Path) -> None:
-    """Kill the throwaway tmux server for ``tmux_tmpdir`` (guarded against the real server)."""
-    tmpdir_str = str(tmux_tmpdir)
-    # Safety: only ever kill a server whose socket lives under our private prefix, so a
-    # mis-set path can never take down the user's real tmux server.
-    assert tmpdir_str.startswith(_TMUX_TMPDIR_PREFIX), (
-        f"refusing to kill-server for unexpected TMUX_TMPDIR {tmpdir_str}"
-    )
-    socket_path = tmux_tmpdir / f"tmux-{os.getuid()}" / "default"
-    kill_env = os.environ.copy()
-    kill_env.pop("TMUX", None)
-    kill_env["TMUX_TMPDIR"] = tmpdir_str
-    subprocess.run(["tmux", "-S", str(socket_path), "kill-server"], capture_output=True, env=kill_env)
-    shutil.rmtree(tmux_tmpdir, ignore_errors=True)
 
 
 class _CodexReleaseProfile(AgentReleaseProfile):
@@ -98,47 +83,29 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 
     def setup(self, tmp_path: Path) -> AgentReleaseContext:
         assert _CODEX_BIN is not None and _MNGR_BIN is not None
-        host_dir = tmp_path / "host"
-        repo = tmp_path / "repo"
-        user_codex_home = tmp_path / "user_codex"
-        host_dir.mkdir()
-        user_codex_home.mkdir()
-        # Private tmux server (short /tmp path -- tmux sockets are length-limited) so the
-        # agent's sessions never touch the real server this test may run inside.
-        # Derive the mkdtemp args from _TMUX_TMPDIR_PREFIX so the created path is guaranteed
-        # to satisfy the safety guard in _kill_private_tmux_server (the two cannot drift).
-        tmux_tmpdir = Path(
-            tempfile.mkdtemp(prefix=os.path.basename(_TMUX_TMPDIR_PREFIX), dir=os.path.dirname(_TMUX_TMPDIR_PREFIX))
-        )
+        # Inherits the autouse fixture's isolated MNGR_HOST_DIR, redirected $HOME, and private
+        # tmux server (via copied os.environ); we only add codex's auth home and the real bins.
+        env = get_subprocess_test_env(root_name="mngr-codex-release-test")
 
+        user_codex_home = tmp_path / "user_codex"
+        user_codex_home.mkdir()
         shutil.copy2(_REAL_AUTH, user_codex_home / "auth.json")
         (user_codex_home / "auth.json").chmod(0o600)
         if _REAL_MODELS_CACHE.exists():
             # Avoids codex's "model metadata not found" degradation on a fresh home.
             shutil.copy2(_REAL_MODELS_CACHE, user_codex_home / "models_cache.json")
-
-        repo.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-        subprocess.run(["git", "config", "user.name", "codex e2e"], cwd=repo, check=True)
-        (repo / "README.md").write_text("codex e2e\n")
-        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True)
-
-        env = os.environ.copy()
-        env["MNGR_HOST_DIR"] = str(host_dir)
         env["CODEX_HOME"] = str(user_codex_home)
-        env.pop("TMUX", None)
-        env["TMUX_TMPDIR"] = str(tmux_tmpdir)
-        extra_path = os.pathsep.join({str(Path(_CODEX_BIN).parent), str(Path(_MNGR_BIN).parent)})
-        env["PATH"] = extra_path + os.pathsep + env.get("PATH", "")
 
-        return AgentReleaseContext(
-            env=env,
-            workspace=repo,
-            host_dir=host_dir,
-            teardown=lambda: _kill_private_tmux_server(tmux_tmpdir),
-        )
+        # Put the real codex + mngr binaries on PATH (the autouse fixture redirects HOME).
+        # Append, don't prepend: the resource guard prepends its tmux wrapper dir to PATH to
+        # track tmux use, and prepending the real bin dir (which also holds the real tmux)
+        # would shadow that wrapper and trip the guard's "marked tmux but never invoked" check.
+        extra_path = os.pathsep.join({str(Path(_CODEX_BIN).parent), str(Path(_MNGR_BIN).parent)})
+        env["PATH"] = env.get("PATH", "") + os.pathsep + extra_path
+
+        repo = tmp_path / "repo"
+        init_git_repo(repo)
+        return AgentReleaseContext(env=env, workspace=repo, host_dir=Path(env["MNGR_HOST_DIR"]))
 
     def create_extra_args(self, ctx: AgentReleaseContext) -> Sequence[str]:
         # No --source: codex takes its source/work dir from the mngr cwd (the repo).
@@ -159,9 +126,8 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 
 
 @pytest.mark.release
-# Marked tmux because teardown invokes ``tmux kill-server`` in-process to tear down the
-# agent's private tmux server (the resource guard requires the marker for in-process tmux
-# use). The server is a throwaway under /tmp/mngr-codex-e2e-tmux-*, never the real one.
+# The agent runs in tmux; the autouse setup_test_mngr_env fixture gives the test its own
+# isolated tmux server (the resource guard requires this marker for any tmux use).
 @pytest.mark.tmux
 @pytest.mark.timeout(900)
 def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
