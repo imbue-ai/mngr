@@ -11,9 +11,13 @@ no other minds imports -- so the ``BackendResolver`` (which is below
 imports ``backend_resolver``) can read the default color and normalize
 stored labels without creating a cycle.
 
-Mirrored in ``static/workspace_accent.js``; a drift-guard test in
-``templates_test.py`` parses the JS file and asserts the two halves
-stay in lockstep.
+The two pure helpers (``normalize_workspace_color`` and
+``pick_workspace_foreground``) are mirrored as ``normalizeHex`` /
+``pickForegroundForHex`` in ``static/workspace_accent.js`` for the
+picker pages' local validation and previews. The palette itself is
+server-side only; a guard test in ``templates_test.py`` asserts the JS
+keeps exporting the two helpers and never reintroduces a palette
+mirror.
 """
 
 import re
@@ -27,10 +31,9 @@ from imbue.imbue_common.pure import pure
 # the Figma source (Minds Early IA Explorations, node 356:4113); the
 # twelfth ("white") is added so users have a neutral light option
 # distinct from the warm-cream Figma entries. Names are kebab-case and
-# are not surfaced in the UI today (the picker shows unlabeled
-# swatches); they exist so the system can refer to the default by
-# name in code and so the same name list is auditable in both Python
-# and JS.
+# are not surfaced visually in the UI today (the picker shows unlabeled
+# swatches); they exist so code can refer to the default by name and as
+# the swatches' screen-reader labels (the ColorSwatch aria-label).
 #
 # Order matters: the picker renders swatches in this order and
 # ``pick_unused_create_color`` walks it to find the first free color.
@@ -55,8 +58,8 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
 # Default workspace color: preselected on the create form when no other
 # palette entry is suggested, and used as the renderer-side fallback for
 # primary agents that have no ``color`` label on disk (pre-picker
-# workspaces keep rendering as this until the user picks; no proactive
-# label write happens -- see the plan's migration decision history).
+# workspaces keep rendering as this until the user picks; nothing
+# proactively writes the label).
 DEFAULT_WORKSPACE_COLOR_NAME: Final[str] = "confusion"
 DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_NAME]
 
@@ -130,9 +133,8 @@ def pick_workspace_foreground(hex_color: str) -> str:
 
     The returned value is ``"0 0 0"`` (black) or ``"255 255 255"``
     (white), suitable for dropping into ``rgb(var(--titlebar-fg) / <alpha>)``.
-    Chooses by WCAG relative luminance so the picker stays legible across
-    the whole 12-color palette and any custom hex -- replacing the prior
-    fixed-OKLCH-L-85 picker that always emitted black.
+    Chooses by WCAG relative luminance so the titlebar text stays legible
+    across the whole 12-color palette and any custom hex.
 
     ``hex_color`` must be a normalized lowercase ``#rrggbb`` hex string.
     Callers should pass values through ``normalize_workspace_color`` first.
