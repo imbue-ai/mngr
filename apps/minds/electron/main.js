@@ -79,8 +79,8 @@ let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
 
 // Central cache of the latest SSE state from /_chrome/events so newly-loaded
-// chrome/sidebar webContents can be primed without opening their own SSE
-// connection.
+// chrome and modal webContents (which may host the sidebar, inbox, or any
+// future overlay page) can be primed without opening their own SSE connection.
 const latestChromeState = {
   workspaces: null, // most recent workspaces payload
   authStatus: null, // most recent auth_status payload
