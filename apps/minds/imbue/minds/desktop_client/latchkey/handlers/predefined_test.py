@@ -366,11 +366,15 @@ def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browse
     # The dialog's progress notice must match what ``grant()`` will
     # actually do: UNKNOWN credential status proceeds straight to the
     # grant (no ``latchkey auth browser``), so the fragment must show
-    # the generic notice, not the sign-in one.
+    # the generic notice, not the sign-in one. Empty auth options mirror
+    # the real degraded-UNKNOWN case (``services info`` fails for a
+    # non-latchkey scope like Peer minds) and hit the legacy "no auth
+    # options" fallback, which would falsely promise a browser under a
+    # plain not-VALID condition.
     handler = _build_handler(
         tmp_path,
         credential_status="unknown",
-        auth_options_json=json.dumps(["set"]),
+        auth_options_json=json.dumps([]),
     )
     event = create_latchkey_predefined_permission_request_event(
         agent_id=str(AgentId()),
