@@ -188,7 +188,12 @@ def test_prevent_returns_in_docstrings() -> None:
 
 
 def test_prevent_literal_with_multiple_options() -> None:
-    rc.check_literal_with_multiple_options(_DIR, snapshot(0))
+    # The single allowed match is a misfire: cli/model_schema.py builds the display
+    # string "Literal[" + ... + "]" when rendering a Literal annotation's type, which
+    # the regex matches even though it is not a multi-option Literal annotation. The
+    # check is shared (libs/imbue_common), so we tolerate this one string-construction
+    # match here rather than narrowing the regex for every project.
+    rc.check_literal_with_multiple_options(_DIR, snapshot(1))
 
 
 def test_prevent_bare_generic_types() -> None:
