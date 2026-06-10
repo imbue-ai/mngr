@@ -49,6 +49,7 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -2270,9 +2271,10 @@ class _DestroyableProvider(MockProviderInstance):
 
     destroyed_hosts: list[HostId] = Field(default_factory=list)
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
         host_id = host.id if isinstance(host, HostInterface) else host
         self.destroyed_hosts.append(host_id)
+        return []
 
 
 def _make_remote_host(

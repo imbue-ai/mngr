@@ -20,6 +20,7 @@ from imbue.mngr.cli.address_params import parse_agent_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.destroy import get_agent_name_from_session
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import apply_labels
@@ -36,6 +37,7 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -314,6 +316,8 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
     # Stop each agent
     stopped_agents: list[str] = []
     stopped_matches: list[AgentMatch] = []
+    # Real cleanup failures (resources left behind); drives the process exit code.
+    failures: list[CleanupFailure] = []
 
     # Group agents by host to stop them together
     agents_by_host = group_agents_by_host(agents_to_stop)
@@ -329,9 +333,10 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is online (can't stop agents on offline hosts)
         match host:
             case OnlineHostInterface() as online_host:
-                # Stop each named agent on this host
+                # Stop each named agent on this host. stop_agents is best-effort and returns
+                # the real cleanup failures (resources left behind) rather than raising for them.
                 agent_ids_to_stop = [m.agent_id for m in agent_list]
-                online_host.stop_agents(agent_ids_to_stop)
+                failures.extend(online_host.stop_agents(agent_ids_to_stop))
 
                 for m in agent_list:
                     stopped_agents.append(str(m.agent_name))
@@ -350,8 +355,12 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         now = datetime.now(timezone.utc).isoformat()
         apply_labels(stopped_matches, {"archived_at": now}, mngr_ctx, output_opts)
 
-    # Output final result
+    # Output final result, then surface any real cleanup failures and exit with a
+    # cause-specific code (see specs/cleanup-error-aggregation.md).
     _output_result(stopped_agents, output_opts)
+    for failure in failures:
+        _output(f"Cleanup failure [{failure.category.value}]: {failure.message}", output_opts)
+    ctx.exit(exit_code_for_failures(failures))
 
 
 # Register help metadata for git-style help formatting

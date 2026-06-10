@@ -24,6 +24,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.primitives import AgentId
@@ -103,8 +105,8 @@ class _OfflineHostSuccessProvider(_OfflineHostProvider):
     Used to test the success path in _execute_destroy for offline hosts.
     """
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
-        pass
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+        return []
 
 
 class _StopFailingHost(Host):
@@ -113,7 +115,7 @@ class _StopFailingHost(Host):
     Used to test that _execute_stop records stop errors and respects ABORT.
     """
 
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> list[CleanupFailure]:
         raise MngrError("Simulated stop error")
 
 
@@ -654,8 +656,9 @@ def test_run_post_cleanup_gc_provider_error_is_recorded_in_result(
     result = CleanupResult()
     _run_post_cleanup_gc(bad_ctx, result)
 
-    assert len(result.errors) == 1
-    assert result.errors[0].startswith("Post-cleanup garbage collection failed:")
+    assert len(result.failures) == 1
+    assert result.failures[0].category == CleanupFailureCategory.OTHER
+    assert "Post-cleanup garbage collection failed:" in result.failures[0].message
 
 
 def test_execute_cleanup_destroy_offline_host_success(
@@ -695,12 +698,13 @@ def test_execute_cleanup_destroy_offline_host_success(
         assert AgentName("offline-success-agent-two") in result.destroyed_agents
 
 
-@pytest.mark.allow_warnings(match=r"^Skipping 1 agent\(s\) on offline host")
-def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
+@pytest.mark.allow_warnings(match=r"^Cannot stop \d+ agent\(s\) on offline host")
+def test_execute_cleanup_stop_on_offline_host_records_provider_inaccessible_failure(
     temp_host_dir: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """When a STOP action is attempted on an offline host, the host is skipped with a warning."""
+    """When a STOP action is attempted on an offline host, the host is unreachable so we
+    cannot stop or verify its agents, and a PROVIDER_INACCESSIBLE failure is recorded."""
     provider_name = ProviderInstanceName("offline-stop-provider")
     offline_provider = _OfflineHostProvider(
         name=provider_name,
@@ -723,8 +727,9 @@ def test_execute_cleanup_stop_on_offline_host_skips_with_warning(
             error_behavior=ErrorBehavior.CONTINUE,
         )
 
-        # Offline host agents are not stopped, a warning is recorded instead.
+        # Offline host agents are not stopped; a PROVIDER_INACCESSIBLE failure is recorded.
         assert result.stopped_agents == []
-        assert len(result.errors) == 1
-        assert "Skipping" in result.errors[0]
-        assert "offline host" in result.errors[0]
+        assert len(result.failures) == 1
+        assert result.failures[0].category == CleanupFailureCategory.PROVIDER_INACCESSIBLE
+        assert "offline host" in result.failures[0].message
+        assert "unreachable" in result.failures[0].message

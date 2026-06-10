@@ -69,7 +69,7 @@ Rationale: leaked paid infrastructure is worst; live processes next; local state
 
 ## Data model
 
-All in `libs/mngr/imbue/mngr/api/data_types.py` unless noted.
+`CleanupFailureCategory` and `CleanupFailure` live in `libs/mngr/imbue/mngr/interfaces/data_types.py` (alongside `CommandResult`), so the `hosts` and `providers` layers can return them without importing `api`. `CleanupResult` stays in `libs/mngr/imbue/mngr/api/data_types.py`. `CleanupFailureCategory` is an `UpperCaseStrEnum` (member values `TIMEOUT`, `PROCESSES_REMAIN`, ...). The low-level methods **return** these (no `CleanupIncompleteError` carrier exception is needed).
 
 ```python
 class CleanupFailureCategory(StrEnum):
@@ -178,7 +178,7 @@ This replaces the current fail-fast `raise_on_timeout` propagation. `raise_on_ti
 - The per-agent / per-host calls now `result.failures.extend(host.stop_agents(...))` / `extend(host.destroy_agent(...))` / `extend(provider.destroy_host(...))`. A still-raised `MngrError` (from `get_provider_instance` / `get_host` / a provider op that could not be made to return) is caught and converted to a single `CleanupFailure` (category inferred from type: `HostNotFoundError`/`ProviderUnavailableError`/`LocalHostNotDestroyableError`/`NotImplementedError` -> `PROVIDER_INACCESSIBLE`; else `OTHER`).
 - `ErrorBehavior.ABORT` still returns early after recording; `CONTINUE` proceeds to the next host/agent. Aggregation within a host/agent is unconditional.
 - Agents are still appended to `stopped_agents` / `destroyed_agents` when the operation was attempted (even if it recorded failures) -- those lists reflect "we acted on this agent". A consumer distinguishes "fully clean" from "acted but incomplete" via `failures` and the exit code. Exception: a `PROVIDER_INACCESSIBLE` failure means we could not act at all, so those agents are **not** added to the stopped/destroyed lists.
-- The offline-host STOP case (currently a warning appended to `errors`) is reclassified as **benign**: an agent on an offline host is not running, so it is already effectively stopped. No failure is recorded. (DESTROY of an offline host goes through `destroy_host` and is unaffected.)
+- The offline-host STOP case (previously a warning appended to `errors`) is recorded as a real `PROVIDER_INACCESSIBLE` failure: the host is unreachable, so we cannot stop -- or even verify the state of -- its agents, and must not claim success we did not achieve. The affected agents are not added to `stopped_agents`. (DESTROY of an offline host goes through `destroy_host` and is unaffected.)
 
 ### CLI (`cli/cleanup.py`, and `stop` / `destroy`)
 

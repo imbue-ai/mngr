@@ -27,6 +27,7 @@ from imbue.mngr.cli.agent_selector import filter_agents
 from imbue.mngr.cli.agent_selector import handle_search_key
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.exit_codes import exit_code_for_failures
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -216,8 +217,9 @@ def _cleanup_impl(ctx: click.Context, **kwargs) -> None:
         error_behavior=error_behavior,
     )
 
-    # Output results
+    # Output results, then exit with a cause-specific code if any real failures remain.
     _emit_result(result, output_opts)
+    ctx.exit(exit_code_for_failures(result.failures))
 
 
 @pure
@@ -621,13 +623,23 @@ def _emit_result(
     output_opts: OutputOptions,
 ) -> None:
     """Output the final result of the cleanup operation."""
+    exit_code = exit_code_for_failures(result.failures)
     result_data = {
         "destroyed_agents": [str(n) for n in result.destroyed_agents],
         "stopped_agents": [str(n) for n in result.stopped_agents],
-        "errors": result.errors,
+        "failures": [
+            {
+                "category": failure.category.value,
+                "message": failure.message,
+                "agent_name": str(failure.agent_name) if failure.agent_name is not None else None,
+                "host_id": str(failure.host_id) if failure.host_id is not None else None,
+            }
+            for failure in result.failures
+        ],
         "destroyed_count": len(result.destroyed_agents),
         "stopped_count": len(result.stopped_agents),
-        "error_count": len(result.errors),
+        "failure_count": len(result.failures),
+        "exit_code": exit_code,
     }
 
     match output_opts.output_format:
@@ -644,10 +656,10 @@ def _emit_result(
                 write_human_line("Successfully stopped {} agent(s)", len(result.stopped_agents))
                 for name in result.stopped_agents:
                     write_human_line("  - {}", name)
-            if result.errors:
-                logger.warning("{} error(s) occurred:", len(result.errors))
-                for error in result.errors:
-                    logger.warning("  - {}", error)
+            if result.failures:
+                logger.warning("{} cleanup failure(s) -- resources may remain:", len(result.failures))
+                for failure in result.failures:
+                    logger.warning("  - [{}] {}", failure.category.value, failure.message)
             if not result.destroyed_agents and not result.stopped_agents:
                 write_human_line("No agents were affected")
         case _ as unreachable:

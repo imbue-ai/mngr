@@ -11,6 +11,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -40,6 +41,8 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -237,6 +240,30 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
         if stripped:
             tags.append(stripped)
     return tags
+
+
+# Substrings that indicate a teardown step failed only because the resource was
+# already gone (a benign outcome that should not be recorded as a cleanup
+# failure). The teardown helpers raise a generic ``MngrError`` for both
+# already-gone and real failures, so the error text is the only available
+# signal; matching is case-insensitive.
+_BENIGN_NOT_FOUND_SIGNALS: Final = (
+    "no such",
+    "not found",
+    "does not exist",
+    "already",
+)
+
+
+def _is_benign_not_found(error: MngrError) -> bool:
+    """Return True iff ``error`` looks like an "already gone" / not-found outcome.
+
+    Used to distinguish a benign teardown failure (the resource was already
+    absent) from a real one (the resource exists but could not be removed) when
+    the only signal is the exception text.
+    """
+    message = str(error).lower()
+    return any(signal in message for signal in _BENIGN_NOT_FOUND_SIGNALS)
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -1089,8 +1116,20 @@ class VpsDockerProvider(BaseProviderInstance):
     # Core Lifecycle: destroy_host
     # =========================================================================
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+        """Destroy a VPS-backed Docker host permanently.
+
+        Best-effort: every teardown step is attempted. A failure that means a
+        resource is already gone is benign (dropped). A failure that means a
+        resource exists but could not be removed is real -- it is recorded as a
+        ``CleanupFailure`` and collected, and the remaining steps still run. The
+        collected failures are returned. See specs/cleanup-error-aggregation.md.
+
+        A missing host record still raises ``HostNotFoundError``; the
+        orchestration layer classifies that abort.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
+        failures: list[CleanupFailure] = []
 
         # Disconnect SSH before destroying (also disconnect the passed-in host
         # in case it is a different instance than the cached one).
@@ -1109,67 +1148,127 @@ class VpsDockerProvider(BaseProviderInstance):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 # Stop and remove the agent container; removing the volume below
                 # will fail otherwise because the container still holds it open.
+                # ``docker rm -f`` reports "No such container" for an already-gone
+                # container, which we treat as benign.
                 try:
                     remove_container(outer, vps_config.container_name, force=True)
                 except MngrError as e:
                     logger.warning("Failed to remove container: {}", e)
+                    if not _is_benign_not_found(e):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to remove container {vps_config.container_name} for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
                 # Delete the per-host btrfs subvolume before the named volume.
                 # The VPS-destroy that follows takes the whole loop file with it,
                 # so this is primarily belt-and-suspenders for the rare case of
                 # a destroy retried on a still-existing VPS (e.g. the operator
                 # re-runs `mngr destroy` after VPS termination has failed).
+                # ``delete_btrfs_subvolume_on_outer`` already no-ops on an absent
+                # subvolume, so any raised error means a present subvolume remains.
                 subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
                 try:
                     delete_btrfs_subvolume_on_outer(outer, subvolume_path)
                 except MngrError as e:
                     logger.warning("Failed to delete btrfs subvolume {}: {}", subvolume_path, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to delete btrfs subvolume {subvolume_path} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
                 # Remove the unified host volume. With bind options the volume
                 # itself holds no data (the subvolume above did), but the named
                 # entry still needs cleanup so a later create with the same
-                # volume name doesn't collide.
+                # volume name doesn't collide. ``docker volume rm -f`` already
+                # no-ops on a missing volume, so any raised error means the named
+                # volume entry remains.
                 try:
                     remove_volume(outer, vps_config.volume_name)
                 except MngrError as e:
                     logger.warning("Failed to remove host volume: {}", e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove host volume {vps_config.volume_name} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
                 # Remove the per-host snapshot-trigger volume (the named entry;
                 # the bind source at OUTER_SNAPSHOT_TRIGGER_DIR is shared across
-                # all containers on this outer and is left alone).
+                # all containers on this outer and is left alone). Same ``-f``
+                # no-op-on-missing semantics as the host volume above.
+                trigger_volume_name = snapshot_trigger_volume_name_for(host_id)
                 try:
-                    remove_volume(outer, snapshot_trigger_volume_name_for(host_id))
+                    remove_volume(outer, trigger_volume_name)
                 except MngrError as e:
                     logger.warning("Failed to remove snapshot trigger volume: {}", e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to remove snapshot trigger volume {trigger_volume_name} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        # Destroy the VPS instance
+        # Destroy the VPS instance. The VPS client raises a generic MngrError for
+        # both "instance already gone" and a real failure; without a reliable
+        # not-found signal we treat any raised error as a remaining VPS instance
+        # (which may incur ongoing cost).
         with log_span("Destroying VPS instance"):
             try:
                 self.vps_client.destroy_instance(vps_config.vps_instance_id)
-            except Exception as e:
+            except MngrError as e:
                 logger.warning("Failed to destroy VPS: {}", e)
+                if not _is_benign_not_found(e):
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to destroy VPS instance {vps_config.vps_instance_id} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        # Clean up SSH key from provider
+        # Clean up SSH key from provider. Same generic-MngrError ambiguity as the
+        # VPS destroy above; absent a not-found signal, treat as a remaining key.
         if vps_config.vps_ssh_key_id is not None:
             try:
                 self.vps_client.delete_ssh_key(vps_config.vps_ssh_key_id)
-            except Exception as e:
+            except MngrError as e:
                 logger.warning("Failed to delete SSH key from provider: {}", e)
+                if not _is_benign_not_found(e):
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to delete SSH key {vps_config.vps_ssh_key_id} for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
 
-        # Clean up local known_hosts
+        # Clean up local known_hosts. These are cosmetic local-file edits; a
+        # missing file or OS error here leaves no infrastructure behind, so it is
+        # always benign and never recorded as a failure.
         if vps_ip is not None:
             try:
                 remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
-            except Exception as e:
+            except (FileNotFoundError, OSError) as e:
                 logger.trace("Failed to clean up VPS known_hosts: {}", e)
             try:
                 remove_host_from_known_hosts(
                     self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
                 )
-            except Exception as e:
+            except (FileNotFoundError, OSError) as e:
                 logger.trace("Failed to clean up container known_hosts: {}", e)
 
         logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
+        return failures
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""

@@ -20,6 +20,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -196,7 +197,7 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> Host:
         raise NotImplementedError("SSH provider does not support starting hosts")
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
         raise NotImplementedError("SSH provider does not support destroying hosts")
 
     def delete_host(self, host: HostInterface) -> None:

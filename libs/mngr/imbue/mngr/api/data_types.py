@@ -6,6 +6,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -121,7 +122,12 @@ class CleanupResult(MutableModel):
         default_factory=list,
         description="Names of agents that were stopped",
     )
-    errors: list[str] = Field(
+    failures: list[CleanupFailure] = Field(
         default_factory=list,
-        description="Errors encountered during cleanup",
+        description="Real failures (resources left behind) encountered during cleanup",
     )
+
+    @property
+    def errors(self) -> list[str]:
+        """Formatted failure messages, for human output and legacy string consumers."""
+        return [f"[{failure.category}] {failure.message}" for failure in self.failures]

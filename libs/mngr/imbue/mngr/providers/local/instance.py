@@ -25,6 +25,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -240,11 +241,12 @@ class LocalProviderInstance(BaseProviderInstance):
 
         return local_host
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
         """Destroy the host.
 
         Always raises LocalHostNotDestroyableError because the local computer
-        cannot be destroyed by mngr.
+        cannot be destroyed by mngr. The orchestration layer classifies this as a
+        PROVIDER_INACCESSIBLE cleanup failure.
         """
         raise LocalHostNotDestroyableError(self.name)
 

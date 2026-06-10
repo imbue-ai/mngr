@@ -14,13 +14,40 @@ from imbue.mngr.api.list import list_agents
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderInstanceNotFoundError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CleanupAction
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
+
+# Exception types that mean cleanup could not even be attempted (the host/provider
+# was unreachable or the host is intentionally not destroyable / unsupported).
+_PROVIDER_INACCESSIBLE_EXCEPTIONS = (
+    HostNotFoundError,
+    ProviderInstanceNotFoundError,
+    ProviderUnavailableError,
+    LocalHostNotDestroyableError,
+    NotImplementedError,
+)
+
+
+def _category_for_destroy_host_error(error: Exception) -> CleanupFailureCategory:
+    """Classify an exception raised out of ``provider.destroy_host``.
+
+    A "could not even attempt" error (host unreachable / not destroyable) is
+    PROVIDER_INACCESSIBLE; anything else is OTHER.
+    """
+    if isinstance(error, _PROVIDER_INACCESSIBLE_EXCEPTIONS):
+        return CleanupFailureCategory.PROVIDER_INACCESSIBLE
+    return CleanupFailureCategory.OTHER
 
 
 @log_call
@@ -97,60 +124,83 @@ def _execute_destroy(
         try:
             provider = get_provider_instance(provider_name, mngr_ctx)
             host = provider.get_host(host_id)
-
-            match host:
-                case OnlineHostInterface() as online_host:
-                    with log_span("Destroying agents on online host {}", host_id):
-                        for agent_details in host_agents:
-                            try:
-                                # Find the agent interface on the host
-                                for agent in online_host.get_agents():
-                                    if agent.id == agent_details.id:
-                                        mngr_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=online_host)
-                                        online_host.destroy_agent(agent)
-                                        mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
-                                        result.destroyed_agents.append(agent_details.name)
-                                        logger.debug("Destroyed agent: {}", agent_details.name)
-                                        emit_agent_destroyed(mngr_ctx.config, agent_details.id, host_id)
-                                        emit_discovery_events_for_host(mngr_ctx.config, online_host)
-                                        break
-                                else:
-                                    # Agent not found on host (likely already cleaned up)
-                                    logger.debug(
-                                        "Agent {} not found on host, treating as already destroyed",
-                                        agent_details.name,
-                                    )
-                                    result.destroyed_agents.append(agent_details.name)
-                            except MngrError as e:
-                                error_msg = f"Error destroying agent {agent_details.name}: {e}"
-                                logger.warning(error_msg)
-                                result.errors.append(error_msg)
-                                if error_behavior == ErrorBehavior.ABORT:
-                                    return
-                case HostInterface() as offline_host:
-                    with log_span("Destroying offline host {} with {} agent(s)", host_id, len(host_agents)):
-                        try:
-                            mngr_ctx.pm.hook.on_before_host_destroy(host=offline_host, mngr_ctx=mngr_ctx)
-                            provider.destroy_host(offline_host)
-                            mngr_ctx.pm.hook.on_host_destroyed(host=offline_host, mngr_ctx=mngr_ctx)
-                            for agent_details in host_agents:
-                                result.destroyed_agents.append(agent_details.name)
-                                logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
-                            emit_host_destroyed(mngr_ctx.config, host_id, [ad.id for ad in host_agents])
-                        except MngrError as e:
-                            error_msg = f"Error destroying offline host {host_id}: {e}"
-                            logger.warning(error_msg)
-                            result.errors.append(error_msg)
-                            if error_behavior == ErrorBehavior.ABORT:
-                                return
-                case _ as unreachable:
-                    assert_never(unreachable)
         except MngrError as e:
+            # Could not access the host at all -- nothing was cleaned up.
             error_msg = f"Error accessing host {host_id}: {e}"
             logger.warning(error_msg)
-            result.errors.append(error_msg)
+            result.failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.PROVIDER_INACCESSIBLE, message=error_msg, host_id=host_id
+                )
+            )
             if error_behavior == ErrorBehavior.ABORT:
                 return
+            continue
+
+        match host:
+            case OnlineHostInterface() as online_host:
+                with log_span("Destroying agents on online host {}", host_id):
+                    for agent_details in host_agents:
+                        try:
+                            # Find the agent interface on the host
+                            for agent in online_host.get_agents():
+                                if agent.id == agent_details.id:
+                                    mngr_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=online_host)
+                                    # destroy_agent is best-effort: it returns the real failures
+                                    # (resources left behind) rather than raising for them.
+                                    result.failures.extend(online_host.destroy_agent(agent))
+                                    mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
+                                    result.destroyed_agents.append(agent_details.name)
+                                    logger.debug("Destroyed agent: {}", agent_details.name)
+                                    emit_agent_destroyed(mngr_ctx.config, agent_details.id, host_id)
+                                    emit_discovery_events_for_host(mngr_ctx.config, online_host)
+                                    break
+                            else:
+                                # Agent not found on host (already gone) -- benign.
+                                logger.debug(
+                                    "Agent {} not found on host, treating as already destroyed",
+                                    agent_details.name,
+                                )
+                                result.destroyed_agents.append(agent_details.name)
+                        except MngrError as e:
+                            # A hook or host-access error while destroying this agent.
+                            error_msg = f"Error destroying agent {agent_details.name}: {e}"
+                            logger.warning(error_msg)
+                            result.failures.append(
+                                CleanupFailure(
+                                    category=CleanupFailureCategory.OTHER,
+                                    message=error_msg,
+                                    agent_name=agent_details.name,
+                                    host_id=host_id,
+                                )
+                            )
+                            if error_behavior == ErrorBehavior.ABORT:
+                                return
+            case HostInterface() as offline_host:
+                with log_span("Destroying offline host {} with {} agent(s)", host_id, len(host_agents)):
+                    try:
+                        mngr_ctx.pm.hook.on_before_host_destroy(host=offline_host, mngr_ctx=mngr_ctx)
+                        host_failures = provider.destroy_host(offline_host)
+                        mngr_ctx.pm.hook.on_host_destroyed(host=offline_host, mngr_ctx=mngr_ctx)
+                    except (MngrError, NotImplementedError) as e:
+                        # Could not destroy the host at all.
+                        error_msg = f"Error destroying offline host {host_id}: {e}"
+                        logger.warning(error_msg)
+                        result.failures.append(
+                            CleanupFailure(
+                                category=_category_for_destroy_host_error(e), message=error_msg, host_id=host_id
+                            )
+                        )
+                        if error_behavior == ErrorBehavior.ABORT:
+                            return
+                    else:
+                        result.failures.extend(host_failures)
+                        for agent_details in host_agents:
+                            result.destroyed_agents.append(agent_details.name)
+                            logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
+                        emit_host_destroyed(mngr_ctx.config, host_id, [ad.id for ad in host_agents])
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def _execute_stop(
@@ -165,37 +215,54 @@ def _execute_stop(
         try:
             provider = get_provider_instance(provider_name, mngr_ctx)
             host = provider.get_host(host_id)
-
-            match host:
-                case OnlineHostInterface() as online_host:
-                    with log_span("Stopping agents on host {}", host_id):
-                        agent_ids_to_stop = [agent_details.id for agent_details in host_agents]
-                        try:
-                            online_host.stop_agents(agent_ids_to_stop)
-                            for agent_details in host_agents:
-                                result.stopped_agents.append(agent_details.name)
-                                logger.debug("Stopped agent: {}", agent_details.name)
-                        except MngrError as e:
-                            error_msg = f"Error stopping agents on host {host_id}: {e}"
-                            logger.warning(error_msg)
-                            result.errors.append(error_msg)
-                            if error_behavior == ErrorBehavior.ABORT:
-                                return
-                case HostInterface():
-                    warning_msg = (
-                        f"Skipping {len(host_agents)} agent(s) on offline host {host_id} "
-                        "(cannot stop agents on offline hosts)"
-                    )
-                    logger.warning(warning_msg)
-                    result.errors.append(warning_msg)
-                case _ as unreachable:
-                    assert_never(unreachable)
         except MngrError as e:
             error_msg = f"Error accessing host {host_id}: {e}"
             logger.warning(error_msg)
-            result.errors.append(error_msg)
+            result.failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.PROVIDER_INACCESSIBLE, message=error_msg, host_id=host_id
+                )
+            )
             if error_behavior == ErrorBehavior.ABORT:
                 return
+            continue
+
+        match host:
+            case OnlineHostInterface() as online_host:
+                with log_span("Stopping agents on host {}", host_id):
+                    agent_ids_to_stop = [agent_details.id for agent_details in host_agents]
+                    try:
+                        # stop_agents is best-effort: it returns the real failures rather than
+                        # raising for them.
+                        stop_failures = online_host.stop_agents(agent_ids_to_stop)
+                    except MngrError as e:
+                        error_msg = f"Error stopping agents on host {host_id}: {e}"
+                        logger.warning(error_msg)
+                        result.failures.append(
+                            CleanupFailure(category=CleanupFailureCategory.OTHER, message=error_msg, host_id=host_id)
+                        )
+                        if error_behavior == ErrorBehavior.ABORT:
+                            return
+                    else:
+                        result.failures.extend(stop_failures)
+                        for agent_details in host_agents:
+                            result.stopped_agents.append(agent_details.name)
+                            logger.debug("Stopped agent: {}", agent_details.name)
+            case HostInterface():
+                # The host is offline, so we cannot reach it to stop (or verify the state of)
+                # its agents. We do not know whether they are still running, so this is a real
+                # PROVIDER_INACCESSIBLE failure rather than a benign no-op.
+                error_msg = f"Cannot stop {len(host_agents)} agent(s) on offline host {host_id} (host is unreachable)"
+                logger.warning(error_msg)
+                result.failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.PROVIDER_INACCESSIBLE, message=error_msg, host_id=host_id
+                    )
+                )
+                if error_behavior == ErrorBehavior.ABORT:
+                    return
+            case _ as unreachable:
+                assert_never(unreachable)
 
 
 def _run_post_cleanup_gc(
@@ -223,8 +290,10 @@ def _run_post_cleanup_gc(
             )
             if gc_result.errors:
                 for error in gc_result.errors:
-                    result.errors.append(f"GC: {error}")
+                    result.failures.append(
+                        CleanupFailure(category=CleanupFailureCategory.OTHER, message=f"GC: {error}")
+                    )
     except MngrError as e:
         error_msg = f"Post-cleanup garbage collection failed: {e}"
         logger.warning(error_msg)
-        result.errors.append(error_msg)
+        result.failures.append(CleanupFailure(category=CleanupFailureCategory.OTHER, message=error_msg))

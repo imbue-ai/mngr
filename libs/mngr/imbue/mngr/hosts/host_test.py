@@ -41,6 +41,7 @@ from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_boot_time_output
 from imbue.mngr.hosts.host import _parse_uptime_output
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -1210,17 +1211,15 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
 
 
-def test_stop_agents_raises_on_command_timeout(
+def test_stop_agents_records_timeout_failure_and_continues(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """A timed-out stop-path command must surface as a loud CommandTimeoutError.
+    """A timed-out stop-path command is recorded as a TIMEOUT failure and returned,
+    not silently swallowed -- and cleanup continues (aggregate, not fail-fast).
 
-    A timeout is not silently swallowed: continuing past a wedged command has no
-    real value (the only teardown step, kill-session, would itself be wedged if
-    the tmux server is stuck), so stop_agents raises rather than report a false
-    success. This simulates execute_idempotent_command's behavior with
-    raise_on_timeout=True, where both backends' timeouts are normalized to
-    CommandTimeoutError. The wedged list-panes must abort before kill-session.
+    Simulates execute_idempotent_command raising CommandTimeoutError (which
+    _run_classified_cleanup_command catches and converts to a TIMEOUT failure).
+    The wedged list-panes does not abort: the session teardown is still attempted.
     """
     agent = make_test_agent_details("cleanup-timeout-agent")
 
@@ -1232,13 +1231,45 @@ def test_stop_agents_raises_on_command_timeout(
 
     host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
 
-    with pytest.raises(CommandTimeoutError):
-        host.stop_agents([agent.id])
+    failures = host.stop_agents([agent.id])
 
+    assert [f.category for f in failures] == [CleanupFailureCategory.TIMEOUT]
     commands = [command for command, _ in recorded]
     assert any("list-panes" in command for command in commands)
-    # Fail-fast: a wedged command aborts before the session teardown step.
-    assert not any("kill-session" in command for command in commands)
+    # Aggregate-and-continue: the timeout does not abort; kill-session is still attempted.
+    assert any("kill-session" in command for command in commands)
+
+
+def test_stop_agents_classifies_real_vs_benign_stderr(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """Stderr signalling 'already gone' (tmux can't-find-session, kill ESRCH) is benign
+    (no failure); any other stderr line is a real failure.
+    """
+    agent = make_test_agent_details("cleanup-classify-agent")
+
+    def handle_benign(command: str) -> CommandResult:
+        # Session already gone: list-windows and kill-session report it on stderr.
+        if "list-windows" in command or "kill-session" in command:
+            return CommandResult(stdout="", stderr="can't find session: mngr_x", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    benign_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_benign)
+    assert benign_host.stop_agents([agent.id]) == []
+
+    def handle_real(command: str) -> CommandResult:
+        if "list-windows" in command:
+            return CommandResult(stdout="0", stderr="", success=True)
+        if "list-panes" in command:
+            return CommandResult(stdout="999", stderr="", success=True)
+        if "kill -TERM" in command or "kill -KILL" in command:
+            # A process that cannot be killed -> a real PROCESSES_REMAIN failure.
+            return CommandResult(stdout="", stderr="kill: (999): Operation not permitted", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    real_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_real)
+    failures = real_host.stop_agents([agent.id])
+    assert [f.category for f in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
 
 
 def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(

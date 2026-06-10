@@ -29,6 +29,8 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -120,6 +122,17 @@ _LIMA_STATUS_TO_HOST_STATE: dict[str, HostState] = {
 
 # Filename of the pre-injected ed25519 sshd host key stored per host on disk.
 _HOST_KEY_NAME = "ssh_host_ed25519_key"
+
+# Substrings that, when present in a LimaCommandError message, indicate the
+# targeted VM or disk is already gone (so the cleanup failure is benign rather
+# than a resource left behind). Matched case-insensitively.
+_LIMA_NOT_FOUND_MARKERS: tuple[str, ...] = ("no such", "not found", "does not exist", "already")
+
+
+def _is_lima_not_found_error(message: str) -> bool:
+    """Whether a limactl error message indicates the target resource is already gone."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in _LIMA_NOT_FOUND_MARKERS)
 
 
 class LimaProviderInstance(BaseProviderInstance):
@@ -1222,12 +1235,21 @@ sudo poweroff
         self._evict_cached_host(host_id, replacement=host_obj)
         return host_obj
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
-        """Permanently destroy a Lima VM and mark the host as DESTROYED."""
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+        """Permanently destroy a Lima VM and mark the host as DESTROYED.
+
+        Best-effort: every teardown step is attempted, and a real failure (a
+        resource that exists but could not be removed) is recorded and returned
+        rather than aborting or being silently swallowed. A failure indicating
+        the resource was already gone is benign. See
+        specs/cleanup-error-aggregation.md.
+        """
         host_id = host.id if isinstance(host, HostInterface) else host
         logger.info("Destroying Lima VM: {}", host_id)
 
-        # Disconnect SSH
+        failures: list[CleanupFailure] = []
+
+        # Disconnect SSH (local, no remote resource -- nothing to record on failure).
         if isinstance(host, Host):
             host.disconnect()
         self._evict_cached_host(host_id)
@@ -1238,6 +1260,14 @@ sudo poweroff
                 limactl_delete(self.mngr_ctx.concurrency_group, host_record.config.instance_name, force=True)
             except LimaCommandError as e:
                 logger.warning("Error deleting Lima instance: {}", e)
+                if not _is_lima_not_found_error(str(e)):
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=f"failed to delete Lima VM for host {host_id}: {e}",
+                            host_id=host_id,
+                        )
+                    )
             # Remove the Lima-managed btrfs additional disk for hosts that
             # were created with is_host_data_volume_exposed=False. The disk
             # lives under ~/.lima/_disks/ and is otherwise orphaned because
@@ -1252,10 +1282,19 @@ sudo poweroff
                     )
                 except LimaCommandError as e:
                     logger.warning("Error deleting Lima additional disk: {}", e)
+                    if not _is_lima_not_found_error(str(e)):
+                        failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                                message=f"failed to delete Lima additional disk for host {host_id}: {e}",
+                                host_id=host_id,
+                            )
+                        )
 
             # Drop the forwarded-port entry from the container known_hosts file
             # so a later host that happens to reuse the same host port doesn't
             # trip a host-key mismatch. The container itself is gone with the VM.
+            # This is a cosmetic local-file cleanup, so any failure is benign.
             if host_record.config.is_host_in_docker and host_record.config.container_host_port is not None:
                 try:
                     remove_host_from_known_hosts(
@@ -1264,17 +1303,30 @@ sudo poweroff
                 except OSError as e:
                     logger.trace("Failed to clean up container known_hosts: {}", e)
 
-        # Mark as destroyed in host record
+        # Mark as destroyed in host record. A failure here leaves the record
+        # inconsistent rather than leaving infrastructure behind, so it is OTHER.
         if host_record is not None:
             updated_certified = host_record.certified_host_data.model_copy_update(
                 to_update(host_record.certified_host_data.field_ref().stop_reason, HostState.DESTROYED.value),
                 to_update(host_record.certified_host_data.field_ref().updated_at, datetime.now(timezone.utc)),
             )
-            self._host_store.write_host_record(
-                host_record.model_copy_update(
-                    to_update(host_record.field_ref().certified_host_data, updated_certified),
+            try:
+                self._host_store.write_host_record(
+                    host_record.model_copy_update(
+                        to_update(host_record.field_ref().certified_host_data, updated_certified),
+                    )
                 )
-            )
+            except (MngrError, OSError) as e:
+                logger.warning("Error marking host {} as destroyed: {}", host_id, e)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"failed to mark host {host_id} destroyed: {e}",
+                        host_id=host_id,
+                    )
+                )
+
+        return failures
 
     def delete_host(self, host: HostInterface) -> None:
         """Permanently delete all records associated with a destroyed host."""

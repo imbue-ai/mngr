@@ -19,6 +19,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
@@ -337,8 +338,9 @@ class _RecordingDestroyProvider(LocalProviderInstance):
 
     destroyed_host_ids: list[HostId] = Field(default_factory=list)
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
         self.destroyed_host_ids.append(host if isinstance(host, HostId) else host.id)
+        return []
 
 
 def _make_recording_provider(local_provider: LocalProviderInstance) -> _RecordingDestroyProvider:

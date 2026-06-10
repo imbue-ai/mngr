@@ -1,6 +1,7 @@
 """Unit tests for the destroy CLI command."""
 
 import json
+import threading
 from typing import cast
 
 import pluggy
@@ -19,6 +20,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
@@ -147,7 +150,7 @@ def test_destroy_session_cannot_combine_with_agent_names(
 def test_destroy_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in HUMAN format with destroyed agents."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    _output_result([AgentName("agent-a"), AgentName("agent-b")], output_opts)
+    _output_result([AgentName("agent-a"), AgentName("agent-b")], [], output_opts)
     captured = capsys.readouterr()
     assert "Successfully destroyed 2 agent(s)" in captured.out
 
@@ -155,17 +158,20 @@ def test_destroy_output_result_human_with_agents(capsys: pytest.CaptureFixture[s
 def test_destroy_output_result_json(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSON format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    _output_result([AgentName("agent-x")], output_opts)
+    _output_result([AgentName("agent-x")], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["destroyed_agents"] == ["agent-x"]
     assert data["count"] == 1
+    assert data["failures"] == []
+    assert data["failure_count"] == 0
+    assert data["exit_code"] == 0
 
 
 def test_destroy_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result in JSONL format."""
     output_opts = OutputOptions(output_format=OutputFormat.JSONL)
-    _output_result([AgentName("agent-y")], output_opts)
+    _output_result([AgentName("agent-y")], [], output_opts)
     captured = capsys.readouterr()
     data = json.loads(captured.out.strip())
     assert data["event"] == "destroy_result"
@@ -175,9 +181,35 @@ def test_destroy_output_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None
 def test_destroy_output_result_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """Test _output_result with a format template."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}")
-    _output_result([AgentName("my-agent")], output_opts)
+    _output_result([AgentName("my-agent")], [], output_opts)
     captured = capsys.readouterr()
     assert "my-agent" in captured.out
+
+
+def test_destroy_output_result_json_reports_failures(capsys: pytest.CaptureFixture[str]) -> None:
+    """_output_result emits the structured failures payload (failures / failure_count / exit_code)."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    host_id = HostId.generate()
+    failure = CleanupFailure(
+        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+        message="leaked host vps",
+        agent_name=AgentName("agent-z"),
+        host_id=host_id,
+    )
+    _output_result([AgentName("agent-z")], [failure], output_opts)
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["failure_count"] == 1
+    assert data["failures"] == [
+        {
+            "category": "HOST_RESOURCE_REMAINS",
+            "message": "leaked host vps",
+            "agent_name": "agent-z",
+            "host_id": str(host_id),
+        }
+    ]
+    # HOST_RESOURCE_REMAINS maps to exit code 5.
+    assert data["exit_code"] == 5
 
 
 # =============================================================================
@@ -359,10 +391,11 @@ class _RecordingProvider:
         self.destroyed_hosts: list[object] = []
         self._raise_on_destroy = raise_on_destroy
 
-    def destroy_host(self, host: object) -> None:
+    def destroy_host(self, host: object) -> list[CleanupFailure]:
         if self._raise_on_destroy is not None:
             raise self._raise_on_destroy
         self.destroyed_hosts.append(host)
+        return []
 
 
 def _pair_for_emptied(
@@ -380,6 +413,8 @@ def test_destroy_emptied_hosts_destroys_host_when_no_agents_remain(temp_mngr_ctx
         online_hosts_with_provider=[_pair_for_emptied(host, provider)],
         mngr_ctx=temp_mngr_ctx,
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=[],
     )
 
     assert provider.destroyed_hosts == [host], (
@@ -400,6 +435,8 @@ def test_destroy_emptied_hosts_skips_host_with_remaining_agents(temp_mngr_ctx: M
         online_hosts_with_provider=[_pair_for_emptied(host, provider)],
         mngr_ctx=temp_mngr_ctx,
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=[],
     )
 
     assert provider.destroyed_hosts == [], (
@@ -426,6 +463,8 @@ def test_destroy_emptied_hosts_skips_host_when_get_agents_raises_connection_erro
         online_hosts_with_provider=[_pair_for_emptied(host, provider)],
         mngr_ctx=temp_mngr_ctx,
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=[],
     )
 
     assert provider.destroyed_hosts == []
@@ -444,6 +483,7 @@ def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: 
     failing_provider = _RecordingProvider(raise_on_destroy=MngrError("provider broke"))
     working_provider = _RecordingProvider()
 
+    failures: list[CleanupFailure] = []
     _destroy_emptied_hosts(
         online_hosts_with_provider=[
             _pair_for_emptied(empty_host_a, failing_provider),
@@ -451,6 +491,8 @@ def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: 
         ],
         mngr_ctx=temp_mngr_ctx,
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=failures,
     )
 
     # The failing host's destroy was attempted (it raised before recording).
@@ -458,6 +500,11 @@ def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: 
     # "one bad host doesn't block the others" guarantee.
     assert failing_provider.destroyed_hosts == []
     assert working_provider.destroyed_hosts == [empty_host_b]
+    # The failed host destroy is aggregated as a real cleanup failure (the
+    # provider was inaccessible) so the command can exit non-zero.
+    assert len(failures) == 1
+    assert failures[0].category == CleanupFailureCategory.PROVIDER_INACCESSIBLE
+    assert failures[0].host_id == empty_host_a.id
 
 
 def test_destroy_emptied_hosts_does_nothing_for_empty_input(temp_mngr_ctx: MngrContext) -> None:
@@ -466,6 +513,8 @@ def test_destroy_emptied_hosts_does_nothing_for_empty_input(temp_mngr_ctx: MngrC
         online_hosts_with_provider=[],
         mngr_ctx=temp_mngr_ctx,
         output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=[],
     )
     # No assertions on side effects; we're just verifying it doesn't crash.
 

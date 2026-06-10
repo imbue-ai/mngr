@@ -10,6 +10,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -100,7 +101,7 @@ class MockProviderInstance(BaseProviderInstance):
             for h in self.mock_hosts
         ]
 
-    def destroy_host(self, host: HostInterface | HostId) -> None:
+    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
         raise NotImplementedError()
 
     def delete_host(self, host: HostInterface) -> None:

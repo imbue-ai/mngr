@@ -69,6 +69,8 @@ from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
@@ -286,11 +288,27 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 # is why the test-cleanup helpers in utils/testing.py already bound every tmux
 # subprocess. Without a bound here, a single stuck `tmux list-panes` blocks
 # stop_agents forever (observed hanging an entire offload batch). On timeout the
-# step raises CommandTimeoutError (see _run_bounded_stop_command) rather than
-# degrading: continuing past a wedged command has no real teardown value. These
-# commands normally return near-instantly; the bound is generous headroom
-# (including for slower remote hosts) before declaring a command wedged.
+# step is recorded as a TIMEOUT cleanup failure (see _run_classified_cleanup_command)
+# rather than hanging or being silently swallowed. These commands normally return
+# near-instantly; the bound is generous headroom (including for slower remote hosts)
+# before declaring a command wedged.
 _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Lowercased stderr substrings that mark a *benign* stop-command failure: the target
+# resource was already gone, so nothing is left behind. A non-empty stderr line that
+# matches none of the relevant set is treated as a real failure (see
+# Host._classify_cleanup_command_stderr and specs/cleanup-error-aggregation.md).
+#
+# tmux emits these when its target session/window/pane (or the server) is already gone.
+_TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
+    "can't find session",
+    "can't find window",
+    "can't find pane",
+    "no server running",
+)
+# kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
+# pids routinely die between collection and the kill loop.
+_KILL_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = ("no such process",)
 
 # Default tmux window dimensions used when the agent does not specify its own.
 # These match the historical hard-coded ``-x 200 -y 50`` (see the new-session
@@ -2436,18 +2454,60 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 certified_data=updated,
             )
 
-    def destroy_agent(self, agent: AgentInterface) -> None:
-        """Destroy an agent and clean up its resources."""
+    def destroy_agent(self, agent: AgentInterface) -> list[CleanupFailure]:
+        """Destroy an agent and clean up its resources.
+
+        Returns the list of *real* cleanup failures (resources left behind); empty if the
+        agent was fully destroyed or only benign "already gone" outcomes occurred. Each
+        step is best-effort: a failure on the on_destroy hook, the stop, the state-dir
+        removal, or the persisted-data removal is recorded and the remaining steps still
+        run (see specs/cleanup-error-aggregation.md).
+        """
+        failures: list[CleanupFailure] = []
         with log_span("Destroying agent", agent_id=str(agent.id), agent_name=str(agent.name)):
+            # Plugin on_destroy hook (runs before teardown). A hook failure is recorded but
+            # must not prevent the actual teardown below. (An unexpected non-MngrError is a
+            # plugin bug and is left to propagate.)
             try:
                 agent.on_destroy(self)
-            finally:
-                self.stop_agents([agent.id])
-                state_dir = self.host_dir / "agents" / str(agent.id)
-                self._remove_directory(state_dir)
+            except MngrError as e:
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.OTHER,
+                        message=f"on_destroy hook failed for agent {agent.name}: {e}",
+                        agent_name=agent.name,
+                        host_id=self.id,
+                    )
+                )
 
-                # Remove persisted agent data from external storage (e.g., Modal volume)
+            # Kill the agent's processes and tmux session.
+            failures.extend(self.stop_agents([agent.id]))
+
+            # Remove the agent's on-host state directory. A missing dir is benign (rm -rf
+            # exits 0 with no stderr); a permission/IO error leaves local state behind.
+            state_dir = self.host_dir / "agents" / str(agent.id)
+            _result, failure = self._run_classified_cleanup_command(
+                f"rm -rf '{str(state_dir)}'",
+                failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                benign_stderr_substrings=(),
+                agent_name=agent.name,
+            )
+            if failure is not None:
+                failures.append(failure)
+
+            # Remove persisted agent data from external storage (e.g., Modal volume).
+            try:
                 self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
+            except MngrError as e:
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                        message=f"failed to remove persisted data for agent {agent.name}: {e}",
+                        agent_name=agent.name,
+                        host_id=self.id,
+                    )
+                )
+        return failures
 
     def _build_env_shell_command(self, agent: AgentInterface) -> str:
         """Build a shell command that sources env files and then execs into a shell.
@@ -2614,33 +2674,86 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
-    def _run_bounded_stop_command(
+    def _run_classified_cleanup_command(
         self,
         command: str,
+        *,
+        failure_category: CleanupFailureCategory,
+        benign_stderr_substrings: tuple[str, ...],
+        agent_name: AgentName | None,
         timeout_seconds: float = _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
-    ) -> CommandResult:
-        """Run one shell step of the stop/cleanup path, bounded and raising loudly on timeout.
+    ) -> tuple[CommandResult, CleanupFailure | None]:
+        """Run one bounded shell step of the stop/cleanup path and classify its outcome.
 
-        Every step is bounded so a wedged tmux/pgrep client can't hang cleanup
-        (the original bug). A timeout does not silently degrade: it raises
-        ``CommandTimeoutError`` (a ``MngrError``). The stop path can't usefully
-        continue past a wedged command -- the only step with real teardown value
-        is ``tmux kill-session``, and if the tmux server is wedged enough to hang
-        ``list-panes`` it will hang ``kill-session`` too -- so we surface the
-        failure rather than report a false success. ``cleanup.execute_cleanup``
-        records it in ``CleanupResult.errors`` and honors the caller's
-        ``ErrorBehavior``, and at the CLI it renders as a clean error.
+        Returns the ``CommandResult`` (use ``.success`` / ``.stdout`` for the step's data)
+        plus a ``CleanupFailure`` iff the step represents a *real* failure -- something
+        actually left behind. ``None`` means success or a benign "already gone" outcome.
 
-        Benign failures (a command that runs and exits non-zero, e.g. a
-        ``list-panes`` whose session is already gone) still return
-        ``success=False`` and are handled by the caller as before -- only a
-        genuine timeout raises (``raise_on_timeout`` normalizes the local and
-        remote backends, which report timeouts differently, into one error).
+        Classification (see specs/cleanup-error-aggregation.md):
+        - a timeout (the original hang bug) -> a ``TIMEOUT`` failure;
+        - otherwise, a real failure iff stderr contains a non-empty line that matches none
+          of ``benign_stderr_substrings``. A resource that was already gone surfaces as a
+          recognized benign message (tmux "can't find session", kill ESRCH "No such
+          process"), so it is filtered out.
+
+        The exit code is intentionally not used for classification: several stop commands
+        (the kill loop, ``pgrep`` with no matches) exit non-zero benignly, and message
+        matching is robust to the session vanishing mid-teardown.
         """
-        return self.execute_idempotent_command(command, timeout_seconds=timeout_seconds, raise_on_timeout=True)
+        try:
+            result = self.execute_idempotent_command(command, timeout_seconds=timeout_seconds, raise_on_timeout=True)
+        except CommandTimeoutError as e:
+            timeout_failure = CleanupFailure(
+                category=CleanupFailureCategory.TIMEOUT,
+                message=str(e),
+                agent_name=agent_name,
+                host_id=self.id,
+            )
+            return CommandResult(stdout="", stderr=str(e), success=False), timeout_failure
+        failure = self._classify_cleanup_command_stderr(
+            command=command,
+            stderr=result.stderr,
+            failure_category=failure_category,
+            benign_stderr_substrings=benign_stderr_substrings,
+            agent_name=agent_name,
+        )
+        return result, failure
 
-    def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
+    def _classify_cleanup_command_stderr(
+        self,
+        *,
+        command: str,
+        stderr: str,
+        failure_category: CleanupFailureCategory,
+        benign_stderr_substrings: tuple[str, ...],
+        agent_name: AgentName | None,
+    ) -> CleanupFailure | None:
+        """Return a CleanupFailure iff stderr has a line not explained by a benign cause."""
+        offending = [
+            line.strip()
+            for line in stderr.splitlines()
+            if line.strip() and not any(substring in line.lower() for substring in benign_stderr_substrings)
+        ]
+        if not offending:
+            return None
+        return CleanupFailure(
+            category=failure_category,
+            message=f"{command}: {'; '.join(offending)}",
+            agent_name=agent_name,
+            host_id=self.id,
+        )
+
+    def _get_all_descendant_pids(
+        self,
+        parent_pid: str,
+        failures: list[CleanupFailure],
+        agent_name: AgentName | None,
+        visited: set[str] | None = None,
+    ) -> list[str]:
         """Recursively get all descendant PIDs of a given parent PID.
+
+        Appends any real failures (a ``pgrep`` error, or a timeout) to ``failures``;
+        ``pgrep`` exiting 1 with no children is benign and produces no failure.
 
         Tracks already-visited PIDs in ``visited`` to break cycles that can
         appear via pid reuse (a long-lived process at pid X dies, the kernel
@@ -2656,20 +2769,34 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         visited.add(parent_pid)
         descendant_pids: list[str] = []
 
-        # Get immediate children
-        result = self._run_bounded_stop_command(f"pgrep -P {parent_pid} 2>/dev/null || true")
+        # Get immediate children. pgrep exits 1 (no stderr) when there are no children --
+        # benign; a real pgrep error writes to stderr and is classified as a failure.
+        result, failure = self._run_classified_cleanup_command(
+            f"pgrep -P {parent_pid}",
+            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+            benign_stderr_substrings=(),
+            agent_name=agent_name,
+        )
+        if failure is not None:
+            failures.append(failure)
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
                 if child_pid and child_pid not in visited:
                     descendant_pids.append(child_pid)
                     # Recursively get descendants of this child
-                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, visited))
+                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, failures, agent_name, visited))
 
         return descendant_pids
 
-    def _collect_session_pids(self, session_name: str) -> list[str]:
+    def _collect_session_pids(
+        self, session_name: str, failures: list[CleanupFailure], agent_name: AgentName | None
+    ) -> list[str]:
         """Collect all pane PIDs and their descendants for a tmux session.
+
+        Appends any real failures (a tmux error, or a timeout) to ``failures``; a session
+        or window that is already gone (tmux "can't find session/window") is benign and
+        produces no failure.
 
         Iterates the session's windows and calls ``list-panes`` per window so
         every operation uses an exact-match target (``=<session>:<window>``).
@@ -2682,9 +2809,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         (cheap, and this is a cleanup path) and removes the prefix-matching
         risk entirely.
         """
-        windows_result = self._run_bounded_stop_command(
-            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
+        windows_result, failure = self._run_classified_cleanup_command(
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I'",
+            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+            benign_stderr_substrings=_TMUX_BENIGN_STDERR_SUBSTRINGS,
+            agent_name=agent_name,
         )
+        if failure is not None:
+            failures.append(failure)
         if not windows_result.success or not windows_result.stdout.strip():
             return []
 
@@ -2692,18 +2824,29 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         window_indices = [w.strip() for w in windows_result.stdout.strip().split("\n") if w.strip()]
         for window_idx in window_indices:
             window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
-            result = self._run_bounded_stop_command(
-                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
+            result, failure = self._run_classified_cleanup_command(
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}'",
+                failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+                benign_stderr_substrings=_TMUX_BENIGN_STDERR_SUBSTRINGS,
+                agent_name=agent_name,
             )
+            if failure is not None:
+                failures.append(failure)
             if result.success and result.stdout.strip():
                 pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
                 for pane_pid in pane_pids:
                     all_pids.append(pane_pid)
-                    all_pids.extend(self._get_all_descendant_pids(pane_pid))
+                    all_pids.extend(self._get_all_descendant_pids(pane_pid, failures, agent_name))
         return all_pids
 
-    def _collect_pids_by_agent_id_env(self, agent_id: AgentId) -> list[str]:
+    def _collect_pids_by_agent_id_env(
+        self, agent_id: AgentId, failures: list[CleanupFailure], agent_name: AgentName | None
+    ) -> list[str]:
         """Find all PIDs whose MNGR_AGENT_ID environment matches agent_id.
+
+        Appends a failure to ``failures`` only if the scan itself times out; the command
+        is constructed to exit 0 (see the ``; true`` below) and suppresses per-pid grep
+        noise, so it does not otherwise produce a real failure.
 
         The agent's env file (sourced via `set -a`) exports MNGR_AGENT_ID into every
         process spawned in its tmux session. Scanning by env var catches orphans
@@ -2757,13 +2900,25 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "  done; "
             "fi; true"
         )
-        result = self._run_bounded_stop_command(cmd)
+        result, failure = self._run_classified_cleanup_command(
+            cmd,
+            failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+            benign_stderr_substrings=(),
+            agent_name=agent_name,
+        )
+        if failure is not None:
+            failures.append(failure)
         if not result.stdout.strip():
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
 
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> list[CleanupFailure]:
         """Stop agents by killing all processes in their tmux sessions.
+
+        Returns the list of *real* cleanup failures (resources left behind); empty if
+        every agent was fully stopped or only benign "already gone" outcomes occurred.
+        Every step is best-effort and bounded: a failure on one step or agent is recorded
+        and the rest still run (see specs/cleanup-error-aggregation.md).
 
         This ensures all processes in all panes are terminated by:
         1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
@@ -2771,6 +2926,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
         """
+        failures: list[CleanupFailure] = []
         with log_span("Stopping {} agent(s) with timeout={}s", len(agent_ids), timeout_seconds):
             all_pids: list[str] = []
 
@@ -2783,10 +2939,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
                 current_agents.append(agent)
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                all_pids.extend(self._collect_session_pids(session_name))
+                all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
                 # Also pick up orphans (e.g. children of an OOM-killed claude) that
                 # reparented to PID 1 and so are invisible to the pane-descendant walk.
-                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id))
+                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
 
             # Deduplicate while preserving order (a pid may appear in both lists).
             all_pids = list(dict.fromkeys(all_pids))
@@ -2798,22 +2954,41 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # This is done in a single shell command to avoid the issue where one non-responsive
                 # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
                 # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
+                #
+                # stderr is captured (no `2>/dev/null`) so kill failures can be classified: a pid
+                # that died between collection and the kill (ESRCH "No such process") is benign,
+                # while an unkillable process (e.g. EPERM "Operation not permitted") is a real
+                # PROCESSES_REMAIN failure. The kill is batched across all agents, so a failure here
+                # is not attributed to a single agent.
                 grace_seconds = min(1.0, timeout_seconds)
-                # Bound by the grace sleep plus a fixed margin so a stuck kill
-                # loop can't hang cleanup; the command itself only sleeps once.
-                self._run_bounded_stop_command(
-                    f"for p in {pid_list}; do kill -TERM $p 2>/dev/null; done; "
+                _result, failure = self._run_classified_cleanup_command(
+                    f"for p in {pid_list}; do kill -TERM $p; done; "
                     f"sleep {grace_seconds}; "
-                    f"for p in {pid_list}; do kill -KILL $p 2>/dev/null; done; true",
+                    f"for p in {pid_list}; do kill -KILL $p; done",
+                    failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+                    benign_stderr_substrings=_KILL_BENIGN_STDERR_SUBSTRINGS,
+                    agent_name=None,
+                    # Bound by the grace sleep plus a fixed margin so a stuck kill loop can't hang
+                    # cleanup; the command itself only sleeps once.
                     timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
                 )
+                if failure is not None:
+                    failures.append(failure)
 
-            # Finally kill the tmux sessions themselves
+            # Finally kill the tmux sessions themselves. A session already gone (tmux
+            # "can't find session") is benign; a session that exists but cannot be killed
+            # is a real LOCAL_STATE_REMAINS failure.
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self._run_bounded_stop_command(
-                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
+                _result, failure = self._run_classified_cleanup_command(
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}",
+                    failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                    benign_stderr_substrings=_TMUX_BENIGN_STDERR_SUBSTRINGS,
+                    agent_name=agent.name,
                 )
+                if failure is not None:
+                    failures.append(failure)
+        return failures
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
