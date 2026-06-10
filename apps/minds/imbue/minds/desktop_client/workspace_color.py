@@ -107,9 +107,5 @@ def pick_workspace_foreground(hex_color: str) -> str:
     r = int(hex_color[1:3], 16) / 255.0
     g = int(hex_color[3:5], 16) / 255.0
     b = int(hex_color[5:7], 16) / 255.0
-    luminance = (
-        0.2126 * _srgb_to_linear(r)
-        + 0.7152 * _srgb_to_linear(g)
-        + 0.0722 * _srgb_to_linear(b)
-    )
+    luminance = 0.2126 * _srgb_to_linear(r) + 0.7152 * _srgb_to_linear(g) + 0.0722 * _srgb_to_linear(b)
     return "0 0 0" if luminance > _FOREGROUND_LUMINANCE_THRESHOLD else "255 255 255"

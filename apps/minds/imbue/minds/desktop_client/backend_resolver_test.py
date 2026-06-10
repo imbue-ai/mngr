@@ -371,9 +371,7 @@ def test_get_workspace_color_returns_normalized_hex_when_label_set() -> None:
         ("  #0b292b  ", "#0b292b"),
     ],
 )
-def test_get_workspace_color_normalizes_lenient_label_values(
-    stored_label: str, expected_hex: str
-) -> None:
+def test_get_workspace_color_normalizes_lenient_label_values(stored_label: str, expected_hex: str) -> None:
     resolver = MngrCliBackendResolver()
     host = HostId.generate()
     agent = AgentId.generate()

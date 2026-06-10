@@ -775,9 +775,7 @@ _EXPECTED_PALETTE: Final[dict[str, str]] = {
     "white": "#ffffff",
 }
 
-_WORKSPACE_ACCENT_JS_PATH = (
-    Path(_templates_module.__file__).resolve().parent / "static" / "workspace_accent.js"
-)
+_WORKSPACE_ACCENT_JS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "workspace_accent.js"
 
 
 def test_workspace_palette_matches_expected_entries() -> None:
@@ -834,9 +832,7 @@ _PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
 
 
 @pytest.mark.parametrize(("hex_color", "expected_foreground"), _PICK_FOREGROUND_CASES)
-def test_pick_workspace_foreground_chooses_legible_text(
-    hex_color: str, expected_foreground: str
-) -> None:
+def test_pick_workspace_foreground_chooses_legible_text(hex_color: str, expected_foreground: str) -> None:
     assert pick_workspace_foreground(hex_color) == expected_foreground
 
 
