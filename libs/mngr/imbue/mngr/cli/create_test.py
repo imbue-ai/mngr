@@ -551,9 +551,7 @@ def test_try_reuse_existing_agent_scopes_to_address_host_name_among_many(
         provider_name=ProviderInstanceName("local"),
     )
     # A same-named agent on a *different* host, which host-name scoping must exclude.
-    other_host_ref = _make_discovered_host(
-        provider="local", host_id=TEST_HOST_ID_2, host_name="other-workspace"
-    )
+    other_host_ref = _make_discovered_host(provider="local", host_id=TEST_HOST_ID_2, host_name="other-workspace")
     other_agent_ref = _make_discovered_agent(
         agent_id=TEST_AGENT_ID_2, agent_name="system-services", host_id=TEST_HOST_ID_2, provider="local"
     )
