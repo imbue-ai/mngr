@@ -47,7 +47,7 @@ _MAX_SEARCH_PAGES: Final[int] = 10
 # exponential backoff before we give up on it. Each retry re-requests the *same*
 # page cursor, so pages already fetched are never re-fetched.
 _PAGE_FETCH_ATTEMPTS: Final[int] = 3
-_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS: Final[float] = 1.0
+_PAGE_RETRY_BASE_WAIT_SECONDS: Final[float] = 1.0
 _PAGE_RETRY_MIN_WAIT_SECONDS: Final[float] = 1.0
 _PAGE_RETRY_MAX_WAIT_SECONDS: Final[float] = 8.0
 _STDERR_EXCERPT_LENGTH: Final[int] = 200
@@ -318,7 +318,7 @@ def _build_page_retrying() -> Retrying:
         retry=retry_if_exception_type(GitHubBoardFetchError),
         stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
         wait=wait_exponential(
-            multiplier=_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS,
+            multiplier=_PAGE_RETRY_BASE_WAIT_SECONDS,
             min=_PAGE_RETRY_MIN_WAIT_SECONDS,
             max=_PAGE_RETRY_MAX_WAIT_SECONDS,
         ),
