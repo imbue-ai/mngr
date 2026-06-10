@@ -18,7 +18,7 @@ def test_default_config_values() -> None:
     assert config.ssh_connect_timeout == 60.0
     assert config.instance_boot_timeout == 300.0
     assert config.docker_install_timeout == 300.0
-    assert config.cloud_init_slow_warning_threshold_seconds == 90.0
+    assert config.cloud_init_slow_warning_threshold_seconds == 30.0
     assert config.container_ssh_port == 2222
     assert config.default_region == "ewr"
     # default_plan moved off the shared base; each provider's config carries its
