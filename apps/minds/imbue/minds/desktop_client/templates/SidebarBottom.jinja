@@ -1,12 +1,12 @@
 {#
   Shared bottom of the floating sidebar menu: the "New workspace" CTA, a
   horizontal divider, and the "Manage account(s)" / "Log in" entry. Rendered
-  inside Chrome.jinja (browser-mode inline sidebar) and Sidebar.jinja
-  (Electron sidebar WebContentsView) so the markup, classes, and SVG path
-  data live in one place. The two button ids (#sidebar-new-workspace and
-  #sidebar-account) are wired up in chrome.js and sidebar.js respectively;
-  the #sidebar-account-label span is updated by both scripts when the auth
-  status changes.
+  inside Chrome.jinja (browser-mode inline sidebar) and Sidebar.jinja (the
+  sidebar page loaded into the shared modal WebContentsView in Electron) so
+  the markup, classes, and SVG path data live in one place. The two button
+  ids (#sidebar-new-workspace and #sidebar-account) are wired up in
+  chrome.js and sidebar.js respectively; the #sidebar-account-label span is
+  updated by both scripts when the auth status changes.
 #}
 <button id="sidebar-new-workspace"
         type="button"
