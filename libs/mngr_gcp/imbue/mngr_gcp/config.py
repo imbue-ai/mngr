@@ -44,8 +44,10 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     project_id: str = Field(
         default="",
         description=(
-            "GCP project ID for new instances (required). A plain identifier, not a credential. "
-            "Leave the ADC mechanism to supply the actual credentials."
+            "GCP project ID for new instances. A plain identifier, not a credential. When left "
+            "empty, the project is taken from Application Default Credentials (the active "
+            "'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to "
+            "pin a specific project. Leave the ADC mechanism to supply the actual credentials."
         ),
     )
     default_region: str = Field(
@@ -124,22 +126,32 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         description="OAuth scopes for the attached service account (only used when service_account_email is set).",
     )
 
-    def get_credentials(self) -> Credentials:
-        """Resolve Google Application Default Credentials via ``google.auth.default()``.
+    def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
+        """Resolve Google Application Default Credentials and the project ADC infers.
 
-        Returns the resolved credentials object so the backend can hand it to
-        the ``google-cloud-compute`` clients. mngr never inspects or stores the
-        secret material -- the SDK consumes the credentials transparently.
+        ``google.auth.default()`` returns both the credentials object and the
+        project ID it resolves from the ambient environment, in this precedence:
+        the ``GOOGLE_CLOUD_PROJECT`` env var, the active ``gcloud config set
+        project``, a service-account key's embedded project, then the GCE
+        metadata server. mngr never inspects or stores the secret credential
+        material -- the SDK consumes it transparently -- but the resolved
+        project is handed to ``resolve_project_id`` as the fallback when no
+        ``project_id`` is configured explicitly.
 
-        Raises ``ValueError`` when ADC resolves nothing (no
+        Returning both from a single ``default()`` call lets the backend resolve
+        credentials and the fallback project without probing twice.
+
+        Raises ``ValueError`` when ADC resolves no credentials (no
         ``GOOGLE_APPLICATION_CREDENTIALS``, no ``gcloud auth
         application-default login`` file, no attached service account). The
         backend wraps this in ``ProviderEmptyError`` so read paths (mngr list /
         mngr gc / discovery) skip the GCP provider instead of constructing a
-        half-working placeholder.
+        half-working placeholder. The resolved project may be ``None`` even when
+        credentials succeed (e.g. a bare service-account key with no project and
+        no ``GOOGLE_CLOUD_PROJECT``).
         """
         try:
-            credentials, _resolved_project = google.auth.default()
+            credentials, resolved_project = google.auth.default()
         except google_auth_exceptions.DefaultCredentialsError as e:
             raise ValueError(
                 "GCP Application Default Credentials not configured. Run "
@@ -147,22 +159,33 @@ class GcpProviderConfig(VpsDockerProviderConfig):
                 "service-account key file, or run on a GCE/Cloud Run/GKE instance with an attached "
                 "service account."
             ) from e
-        return credentials
+        return credentials, resolved_project
 
-    def get_project_id(self) -> str:
-        """Return the configured project ID, raising ``ValueError`` if unset.
+    def resolve_project_id(self, adc_fallback_project: str | None) -> str:
+        """Return the project to launch instances in, raising ``ValueError`` if none.
 
-        Unlike credentials, the project ID is a required plain identifier with
-        no sensible default. Raising here surfaces clearly on
-        ``mngr create --provider gcp`` while letting ``mngr list`` skip the
+        The explicitly configured ``project_id`` always wins. When it is unset,
+        fall back to ``adc_fallback_project`` -- the project ADC resolved from
+        the ambient environment (see ``get_credentials_and_resolved_project``),
+        which is the same default a user gets from ``gcloud config set project``
+        or ``GOOGLE_CLOUD_PROJECT``. Raising here surfaces clearly on
+        ``mngr create --provider gcp`` while letting read paths skip the
         provider (the backend wraps this in ``ProviderEmptyError``).
+
+        ``adc_fallback_project`` is injected by the caller (from the single
+        ``google.auth.default()`` call shared with credential resolution) so
+        this method stays pure and deterministically testable.
         """
-        if not self.project_id:
+        project_id = self.project_id or adc_fallback_project
+        if not project_id:
             raise ValueError(
-                "No GCP project_id configured. Run "
-                "'mngr config set providers.gcp.project_id <your-project>' to set it."
+                "No GCP project_id configured and none was resolved from the environment. Run "
+                "'mngr config set providers.gcp.project_id <your-project>', set the "
+                "GOOGLE_CLOUD_PROJECT environment variable, or run 'gcloud config set project "
+                "<your-project>' (the active gcloud project is used automatically when Application "
+                "Default Credentials are present)."
             )
-        return self.project_id
+        return project_id
 
     def validate_zone_in_region(self) -> None:
         """Raise ``ValueError`` if ``default_zone`` does not lie in ``default_region``.

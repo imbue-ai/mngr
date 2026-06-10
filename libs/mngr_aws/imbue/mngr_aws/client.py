@@ -188,7 +188,7 @@ class AwsVpsClient(VpsClientInterface):
         if not existing:
             raise MngrError(
                 f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
-                f"Run `uv run mngr aws prepare --region {self.region}` once to create it "
+                f"Run `mngr aws prepare --region {self.region}` once to create it "
                 "(needs ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress), then "
                 "retry the create with your usual RunInstances-only credentials. Alternatively, "
                 "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "

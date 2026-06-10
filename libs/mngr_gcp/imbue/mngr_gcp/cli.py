@@ -34,10 +34,14 @@ def _build_prepare_client(
     fine because the prepare path never calls ``create_instance``.
     """
     base = GcpProviderConfig()
-    credentials = base.get_credentials()
+    credentials, adc_project = base.get_credentials_and_resolved_project()
     return GcpVpsClient(
         credentials=credentials,
-        project_id=project_id or base.project_id,
+        # Precedence: explicit --project, then configured project_id, then the
+        # project ADC resolved (gcloud config / GOOGLE_CLOUD_PROJECT). Coalesce a
+        # None ADC project to "" so the constructor's str contract holds; the
+        # caller raises a clear error when the resulting project_id is empty.
+        project_id=project_id or base.project_id or adc_project or "",
         zone=zone or base.default_zone,
         image="projects/debian-cloud/global/images/family/debian-12",
         network=network or base.network,
@@ -114,14 +118,16 @@ def prepare(
         )
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
         # ``ValueError`` covers the no-ADC case raised by
-        # ``GcpProviderConfig.get_credentials``; ``GoogleAuthError`` covers other
-        # auth-resolution failures. Mirrors the pair caught by
-        # ``GcpProviderBackend.build_provider_instance``.
+        # ``GcpProviderConfig.get_credentials_and_resolved_project``;
+        # ``GoogleAuthError`` covers other auth-resolution failures. Mirrors the
+        # pair caught by ``GcpProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     if not client.project_id:
         raise click.ClickException(
-            "No GCP project resolved. Pass --project, or run "
-            "'mngr config set providers.gcp.project_id <your-project>' to set it."
+            "No GCP project resolved. Pass --project, run "
+            "'mngr config set providers.gcp.project_id <your-project>', set the GOOGLE_CLOUD_PROJECT "
+            "environment variable, or run 'gcloud config set project <your-project>' (the active "
+            "gcloud project is used automatically when Application Default Credentials are present)."
         )
     try:
         target_tag = client.ensure_firewall()
