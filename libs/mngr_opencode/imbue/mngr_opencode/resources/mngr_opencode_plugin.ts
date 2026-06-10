@@ -31,7 +31,11 @@
 //      atomically. Rebuilding from full state on idle is robust (self-healing, no
 //      message-completion detection) and needs no background converter/supervisor.
 //      Once per turn is sufficient: the live in-progress view is the tmux pane
-//      (mngr connect), and `mngr transcript` reads on demand.
+//      (mngr connect), and `mngr transcript` reads on demand. To survive
+//      mngr stop/start (a fresh server with empty in-memory state, and opencode
+//      does not replay history through the plugin), the state is seeded from the
+//      persisted append-only raw transcript at startup, so the rebuild reflects
+//      full history rather than truncating pre-restart turns.
 //
 // The root session id (for resume) is owned by mngr (opencode_launch.sh). Paths,
 // the role/emit env vars, and the common `source` below are kept in sync with
@@ -39,7 +43,7 @@
 // wrapped so a transient error never disrupts OpenCode's loop.
 
 import type { Plugin } from "@opencode-ai/plugin"
-import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 // Keep in sync with opencode_config.py: ACTIVE_MARKER_FILENAME,
@@ -100,6 +104,49 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   // Latest message info / parts per id, for rebuilding the common transcript.
   const messageById = new Map<string, any>()
   const partsByMessage = new Map<string, Map<string, any>>()
+
+  // Fold a message.updated / message.part.updated event into the in-memory state
+  // the common transcript is rebuilt from. Used both for live events and to seed
+  // from the persisted raw transcript at startup (below). Keyed by id, so it is
+  // idempotent -- replaying the same event (or a later update of a streaming part)
+  // is last-write-wins.
+  const accumulateMessageEvent = (eventType: string, properties: any): void => {
+    if (eventType === "message.updated") {
+      messageById.set(properties.info.id, properties.info)
+    } else if (eventType === "message.part.updated") {
+      const part = properties.part
+      const parts = partsByMessage.get(part.messageID) ?? new Map<string, any>()
+      parts.set(part.id, part)
+      partsByMessage.set(part.messageID, parts)
+    }
+  }
+
+  // Seed the maps from the persisted raw transcript so the first post-restart
+  // rebuild reflects FULL history. opencode does NOT replay historical events
+  // through the plugin on `attach --session` resume (verified), and rebuildCommon
+  // does a full atomic overwrite -- so without this, the first idle after
+  // `mngr start` would truncate every pre-restart turn from the common transcript
+  // (the raw transcript is append-only and would survive, an asymmetric loss).
+  // The raw JSONL is exactly the event log we need; replaying it here is
+  // idempotent with any later live updates (keyed by id).
+  if (emitCommon) {
+    try {
+      const persisted = readFileSync(rawTranscriptPath, "utf8")
+      for (const line of persisted.split("\n")) {
+        if (!line.trim()) {
+          continue
+        }
+        try {
+          const seedEvent = JSON.parse(line)
+          accumulateMessageEvent(seedEvent.type, seedEvent.properties)
+        } catch {
+          // skip a malformed/partial line
+        }
+      }
+    } catch {
+      // no persisted raw transcript yet (first start)
+    }
+  }
 
   const touchMarker = (): void => {
     try {
@@ -261,17 +308,8 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         return
       }
 
-      if (type === "message.updated") {
-        const info = event.properties.info
-        messageById.set(info.id, info)
-        appendRaw(JSON.stringify({ type, properties: event.properties }))
-        return
-      }
-      if (type === "message.part.updated") {
-        const part = event.properties.part
-        const parts = partsByMessage.get(part.messageID) ?? new Map<string, any>()
-        parts.set(part.id, part)
-        partsByMessage.set(part.messageID, parts)
+      if (type === "message.updated" || type === "message.part.updated") {
+        accumulateMessageEvent(type, event.properties)
         appendRaw(JSON.stringify({ type, properties: event.properties }))
         return
       }

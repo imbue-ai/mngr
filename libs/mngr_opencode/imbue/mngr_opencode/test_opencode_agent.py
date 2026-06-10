@@ -186,6 +186,16 @@ def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:
             poll_interval=2.0,
             error_message=f"agent did not recall the secret {secret!r} after stop/start -> resume failed",
         )
+
+        # (4b) History preservation: the post-restart in-process rebuild does a
+        # full atomic overwrite of the common transcript, so it must seed from the
+        # persisted raw transcript -- otherwise the first post-restart idle would
+        # truncate every pre-restart turn. Assert the very first turn's user prompt
+        # still survives in the common transcript after the restart.
+        events_after_restart = _read_common_transcript(agent_state_dir)
+        assert any(
+            e["type"] == "user_message" and "Count slowly" in e.get("content", "") for e in events_after_restart
+        ), "pre-restart turns were truncated from the common transcript after stop/start (raw-seeding regressed?)"
     finally:
         # Best-effort cleanup: run_mngr_subprocess only raises on timeout, not on
         # a nonzero exit, so a destroy failure won't mask the real test result.
