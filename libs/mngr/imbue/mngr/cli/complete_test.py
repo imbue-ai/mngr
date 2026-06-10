@@ -1713,6 +1713,81 @@ def test_get_completions_short_value_option_does_not_consume_positional(
     assert result == ["my-agent", "other-agent"]
 
 
+def test_get_completions_value_option_bash_equals_residue_does_not_consume_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """In bash, -S KEY=VALUE splits on '=' into three words; the whole value must be consumed.
+
+    Otherwise the trailing ``= VALUE`` words are miscounted as positionals and a
+    later positional (the agent name) gets suppressed by the nargs limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting", "-S"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    # bash tokenizes `-S commands.create.connect=false` as 3 words (KEY, =, VALUE).
+    set_comp_env("mngr destroy -S commands.create.connect = false ", "6")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_value_option_without_equals_consumes_only_its_value(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A value option whose value has no '=' consumes exactly the option + its value, not more.
+
+    The bash '=' coalescing must not over-consume a following real positional when
+    the value contains no '='.
+    """
+    data = CompletionCacheData(
+        commands=["foo"],
+        options_by_command={"foo": ["--message", "-m"]},
+        flag_options_by_command={"foo": []},
+        positional_nargs_by_command={"foo": 1},
+        positional_completions={"foo": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr foo -m hello ", "4")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_value_option_equals_still_counts_following_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """The '=' coalescing stops at the value; a genuine positional after it is still counted."""
+    data = CompletionCacheData(
+        commands=["foo"],
+        subcommand_by_command={},
+        options_by_command={"foo": ["--setting", "-S"]},
+        flag_options_by_command={"foo": []},
+        config_keys=["prefix"],
+        positional_nargs_by_command={"foo": 1},
+        positional_completions={"foo": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent"])
+    # bash: `-S a=b` (3 words) + one real positional already typed -> nargs=1 reached.
+    set_comp_env("mngr foo -S a = b pos1 ", "7")
+
+    result = _get_completions()
+
+    assert result == []
+
+
 def test_get_completions_short_value_option_absent_still_consumes_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],

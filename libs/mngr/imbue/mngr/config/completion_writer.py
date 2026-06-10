@@ -131,39 +131,39 @@ _FIELD_TYPE_COMPLETION_SOURCES: Final[dict[type, str]] = {
 
 
 def _extract_options_for_command(cmd: click.Command) -> list[str]:
-    """Extract option names from a click command for completion.
+    """Extract every option name from a click command, both ``--long`` and ``-short`` forms.
 
-    Records every ``--long`` option name (these are the candidates offered when
-    completing ``--``), plus the short ``-x`` form of any *value-taking* option.
-
-    The short value-option forms are needed by the positional-argument counter in
-    the completer (``_count_positional_words``): a value-taking option consumes
-    the following word, so a short option like ``-S KEY=VALUE`` must be recognised
-    to avoid miscounting its value as a positional argument. Flag and ``count``
-    short forms (e.g. ``-v``) consume no value and are recorded separately in
-    flag_options, so they are intentionally excluded here -- recording them as
-    value-taking would make the counter skip the following positional.
+    This is the full set of recognised options. It serves two roles in the
+    completer: the ``--long`` entries are the candidates offered when completing
+    ``--`` (short forms are filtered out there by the ``--`` prefix), and the
+    whole set lets the positional-argument counter (``_count_positional_words``)
+    recognise an option so it knows to consume its value. A value-taking option
+    consumes the following word, so a short option like ``-S KEY=VALUE`` must be
+    recognised here to avoid miscounting its value as a positional argument.
+    No-value options (flags and ``count`` options) are additionally recorded in
+    flag_options so the counter consumes only the option word itself.
     """
     options: list[str] = []
     for param in cmd.params:
-        if not isinstance(param, click.Option):
-            continue
-        takes_value = not param.is_flag and not param.count
-        for opt in param.opts + param.secondary_opts:
-            if opt.startswith("--"):
-                options.append(opt)
-            elif takes_value and opt.startswith("-"):
-                options.append(opt)
+        if isinstance(param, click.Option):
+            options.extend(param.opts + param.secondary_opts)
     return sorted(options)
 
 
 def _extract_flag_options_for_command(cmd: click.Command) -> list[str]:
-    """Extract all option names (both --long and -short) where ``is_flag`` is True."""
+    """Extract no-value option names (both --long and -short forms).
+
+    These are the options that take no value: boolean flags (``is_flag``) and
+    repeatable counters (``count``, e.g. ``-v``/``--verbose``). The
+    positional-argument counter consumes only the option word itself for these,
+    rather than also consuming the following word as it does for value-taking
+    options. Both the long and short forms are recorded so they are treated
+    uniformly.
+    """
     flags: list[str] = []
     for param in cmd.params:
-        if isinstance(param, click.Option) and param.is_flag:
-            for opt in param.opts + param.secondary_opts:
-                flags.append(opt)
+        if isinstance(param, click.Option) and (param.is_flag or param.count):
+            flags.extend(param.opts + param.secondary_opts)
     return sorted(flags)
 
 

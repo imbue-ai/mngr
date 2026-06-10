@@ -198,28 +198,31 @@ def test_setting_option_names_reference_real_options(
     assert cache.config_value_choices, "config_value_choices is empty; -S value completion would offer nothing"
 
 
-def test_short_value_option_forms_are_recorded(completion_cache_dir: Path) -> None:
-    """options_by_command records short forms of value-taking options, but not of no-value ones.
+def test_options_record_both_forms_and_classify_no_value_options(completion_cache_dir: Path) -> None:
+    """options_by_command holds both forms of every option; flag_options holds the no-value ones.
 
-    The positional-argument counter relies on this to know a short value option
-    (e.g. ``-S KEY=VALUE``) consumes the following word. Short forms of flag/count
-    options (e.g. ``-v``) must stay out, or the counter would skip the next
-    positional after them.
+    The positional-argument counter checks flag_options first (consume 1 word) and
+    otherwise consumes a recognised option's value (2 words). So value-taking
+    options (e.g. ``-S``/``--setting``) must be in options_by_command but not
+    flag_options, while no-value options (flags and count options like
+    ``-v``/``--verbose``) must be in flag_options -- both long and short forms,
+    treated uniformly.
     """
     write_cli_completions_cache(cli_group=cli)
     cache = _read_cache(completion_cache_dir)
 
     create_options = cache.options_by_command["create"]
+    create_flags = cache.flag_options_by_command["create"]
 
-    # -S/--setting is a value-taking common option: both forms recorded.
-    assert "-S" in create_options
-    assert "--setting" in create_options
+    # -S/--setting is value-taking: both forms recognised, neither is a no-value option.
+    assert {"-S", "--setting"} <= set(create_options)
+    assert "-S" not in create_flags
+    assert "--setting" not in create_flags
 
-    # -v/--verbose is a count option (no value): the long form is still listed (for
-    # ``--`` completion) but the short form must not be, so it is not treated as
-    # value-taking by the counter.
-    assert "--verbose" in create_options
-    assert "-v" not in create_options
+    # -v/--verbose is a count option (no value): both forms recognised AND both
+    # classified as no-value, so the counter consumes only the option word.
+    assert {"-v", "--verbose"} <= set(create_options)
+    assert {"-v", "--verbose"} <= set(create_flags)
 
 
 def test_every_option_is_classified(completion_cache_dir: Path) -> None:
