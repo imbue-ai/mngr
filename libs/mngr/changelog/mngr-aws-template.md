@@ -21,3 +21,14 @@ config-layer merging is unaffected. This also coerces nested-model provider
 fields (e.g. SSH static `hosts` tables to `SSHHostConfig`), subsuming the
 dedicated post-`model_construct` coercion helper that previously handled only
 that case.
+
+Added a `ScalarTuple` marker type (and the `ScalarStrTuple` annotated alias) for
+tuple-typed settings fields that are semantically a single scalar value -- a
+higher-precedence config layer that sets one replaces the whole value rather
+than tripping the settings-narrowing guard. `StringDerivedTuple` (string-shaped
+TOML values like `cli_args = "..."`) is now a specialization of it. This lets a
+field like the AWS provider's `allowed_ssh_cidrs` be tightened in a developer's
+`settings.local.toml` without the guard rejecting it as "dropping" the committed
+default -- combining CIDRs across config layers is never the intent. The marker
+is applied by `model_validate` (via the after-validator), so it relies on the
+provider-parsing switch to `model_validate` described above.

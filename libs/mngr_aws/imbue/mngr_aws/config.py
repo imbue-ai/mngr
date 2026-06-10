@@ -6,6 +6,8 @@ import boto3
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.data_types import ScalarStrTuple
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
@@ -111,8 +113,8 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
+    allowed_ssh_cidrs: ScalarStrTuple = Field(
+        default=ScalarTuple(("0.0.0.0/0",)),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the "
             "auto-created security group. Default ['0.0.0.0/0'] matches the de-facto "
@@ -121,7 +123,11 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "is what actually protects the host). Tighten to e.g. ['203.0.113.4/32'] to "
             "restrict to a known IP for production. Empty tuple means 'add no ingress "
             "rules' -- the auto-created SG ends up unreachable from outside its VPC, "
-            "which is logged as a warning at provision time."
+            "which is logged as a warning at provision time. Declared ScalarStrTuple so "
+            "a higher-precedence settings layer (e.g. a developer's settings.local.toml "
+            "narrowing it to their own IP) replaces the value rather than tripping the "
+            "settings-narrowing guard -- combining CIDRs across config layers is never "
+            "the intent."
         ),
     )
     associate_public_ip: bool = Field(
