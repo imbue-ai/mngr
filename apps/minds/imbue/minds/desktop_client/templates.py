@@ -245,11 +245,13 @@ def render_landing_page(
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
 # Pin to an annotated FCT tag rather than a moving branch so a shipped
-# binary always clones the exact pilot snapshot it was verified against.
-# Pilot evolves independently; future binaries bump this to a newer tag
-# only after re-verifying. See FCT v0.2.35 (commit 4476621) for the snapshot
-# currently bound to this binary.
-FALLBACK_BRANCH: Final[str] = "v0.2.35"
+# binary always clones the exact FCT snapshot it was verified against. FCT
+# main evolves independently; future binaries bump this to a newer tag only
+# after re-verifying. See FCT v0.3.0 (commit 82a70518) for the snapshot
+# currently bound to this binary -- the first release on the simpler-lima
+# architecture (PR #150 dropped docker-in-VM) with the M5 lima-VZ SVE2
+# workaround (PR #151) baked in.
+FALLBACK_BRANCH: Final[str] = "v0.3.0"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an

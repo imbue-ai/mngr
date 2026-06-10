@@ -395,7 +395,7 @@ def checkout_branch(
 
     Uses ``git checkout -B <branch> <branch>`` rather than plain
     ``git checkout <branch>`` so an annotated-tag input (e.g. the
-    ``FALLBACK_BRANCH = "v0.2.35"`` pin in templates.py) lands the worktree
+    ``FALLBACK_BRANCH = "v0.3.0"`` pin in templates.py) lands the worktree
     on a real local branch named after the tag instead of in detached-HEAD
     state. Downstream mngr.create's source-base autodetection (``git
     rev-parse --abbrev-ref HEAD``) then returns that branch name and the

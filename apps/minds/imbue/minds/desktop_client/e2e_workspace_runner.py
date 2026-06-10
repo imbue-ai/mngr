@@ -211,10 +211,10 @@ def _shallow_clone_fct(branch: str, destination: Path) -> Path:
 
     Also fetches any release tags into the clone. The minds create form's
     default branch field (see ``FALLBACK_BRANCH`` in templates.py) pins
-    to an annotated FCT tag (e.g. ``v0.2.35``); without this extra fetch,
+    to an annotated FCT tag (e.g. ``v0.3.0``); without this extra fetch,
     a depth-1 clone of an unrelated branch does not have the tag's commit,
     and the downstream ``mngr create`` clone of the form's branch field
-    would fail with ``Remote branch v0.2.35 not found``. Cheap (a handful
+    would fail with ``Remote branch v0.3.0 not found``. Cheap (a handful
     of extra refs) and keeps test create flows aligned with production.
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
