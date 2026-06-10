@@ -1,5 +1,7 @@
+from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,6 +16,7 @@ from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.create import resolve_target_host
+from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.api.testing import inject_provider_instance
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
