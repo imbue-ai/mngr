@@ -189,6 +189,7 @@ def test_reconcile_adopts_delivered_orphan_so_recycle_claims_it_same_bake(
         "new_host_id": HostId.generate(),
         "requested_plan": "vps-2025-model1",
         "requested_region": "US-EAST-VA",
+        "extra_tags": {},
     }
 
     # Untagged orphan is invisible to the recycle filter -> no candidate.
