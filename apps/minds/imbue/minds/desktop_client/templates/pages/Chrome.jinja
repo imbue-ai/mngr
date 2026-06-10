@@ -70,9 +70,10 @@
      (#sidebar-backdrop) with a floating dark teal menu (#sidebar-menu)
      pinned to the top-left under the titlebar. Clicks on the backdrop and
      Escape close the menu (handled by chrome.js). In Electron this whole
-     block is hidden via JS; the sidebar is a separate WebContentsView
-     (served by Sidebar.jinja) using the same #sidebar-backdrop /
-     #sidebar-menu shape and the /_static/sidebar.js renderer. #}
+     block is hidden via JS; the sidebar page (Sidebar.jinja) is loaded
+     into the shared modal WebContentsView and uses the same
+     #sidebar-backdrop / #sidebar-menu shape with the /_static/sidebar.js
+     renderer. #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
     <div id="sidebar-menu"
          class="absolute left-2 top-[46px] w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
