@@ -54,9 +54,10 @@ def gcp_credentials_available() -> bool:
     """Return True iff Google ADC can resolve credentials.
 
     Used to gate release tests (skipif) and the session-end cleanup hook (no-op
-    when credentials are absent). Matches what ``GcpProviderConfig.get_credentials``
-    does at provider-construction time, so the gate and production code agree on
-    what counts as "available".
+    when credentials are absent). Matches what
+    ``GcpProviderConfig.get_credentials_and_resolved_project`` does at
+    provider-construction time, so the gate and production code agree on what
+    counts as "available".
     """
     try:
         credentials, _project = google.auth.default()

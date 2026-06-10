@@ -14,7 +14,7 @@ Credentials are resolved exclusively via Google [Application Default Credentials
 - `GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json`
 - Attached service account / metadata server (when running on GCE / Cloud Run / GKE)
 
-The only required config field is `project_id` — a plain, non-secret identifier.
+No config fields are strictly required. The one identifier the provider needs is `project_id` — a plain, non-secret value — and when it is omitted it falls back to the project that ADC resolves from the environment: the active `gcloud config set project` or the `GOOGLE_CLOUD_PROJECT` env var. Set `project_id` explicitly to pin a specific project (recommended when you have access to several); `mngr create` logs which project it inferred when relying on the fallback.
 
 ### One-time firewall setup
 
@@ -38,7 +38,7 @@ pointer back to `prepare` if it is missing.
 [providers.gcp]
 backend = "gcp"
 
-project_id = "my-gcp-project"      # required; no credential material
+project_id = "my-gcp-project"      # optional; falls back to the gcloud/ADC default. no credential material
 default_region = "us-west1"
 default_zone = "us-west1-a"        # GCE VMs are zonal
 default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
@@ -99,7 +99,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `project_id` | (required) | GCP project ID. A plain identifier, not a credential. |
+| `project_id` | gcloud/ADC default | GCP project ID. A plain identifier, not a credential. Falls back to the active `gcloud config set project` / `GOOGLE_CLOUD_PROJECT` when empty. |
 | `default_region` | `us-west1` | GCE region. Used to validate that the chosen zone belongs to it. |
 | `default_zone` | `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
 | `default_machine_type` | `e2-small` | GCE machine type. |
