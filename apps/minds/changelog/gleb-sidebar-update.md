@@ -2,7 +2,9 @@ The sidebar is now a floating menu: dark teal panel with rounded corners,
 shadow, and a colored dot per workspace, matching the Figma "Space switcher
 menu" design. In Electron the page loads into the shared modal
 WebContentsView (transparent background), so the panel reads as a floating
-overlay above the workspace content.
+overlay above the workspace content. Each row's accent is shown by the dot
+alone -- the old left-edge vertical accent stripe (carried over from the
+docked sidebar) is removed as redundant.
 
 The current workspace row now carries an "Open in new window" button and
 a per-workspace settings gear; non-current rows reveal the open-in-new

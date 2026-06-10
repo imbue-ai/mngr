@@ -40,26 +40,6 @@ html {
   background: var(--workspace-accent, oklch(85% 0.08 230));
 }
 
-.sidebar-item {
-  position: relative;
-}
-.sidebar-item::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--workspace-accent, oklch(85% 0.08 230));
-  opacity: 0.55;
-  transition: opacity 100ms;
-}
-.sidebar-item:hover::before,
-.sidebar-item.is-current::before {
-  opacity: 1;
-}
-
 .accent-swatch {
   background: var(--workspace-accent, oklch(85% 0.08 230));
 }
