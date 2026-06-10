@@ -14,7 +14,7 @@ I want to extend the current workspace color system to use a set of predefined v
 * Persist only the resolved hex string — not a tagged union with palette name
 * Foreground contrast picker switches to **WCAG relative luminance** so titlebar text/icons stay legible across the wider palette range; replaces the current fixed `0 0 0` output
 * Color edits propagate **live** via the existing SSE workspaces payload — titlebar / sidebar / chrome in every open window repaint immediately, using the existing `notify_change()` infrastructure on the backend resolver
-* Migration: one-time backfill resets every existing workspace to `confusion`; `workspace_accent()` (Python) and `hueFromAgentId()` (JS) are deleted entirely
+* Migration: workspaces without a `color` label render with `DEFAULT_WORKSPACE_COLOR` (`confusion`) via a renderer-side fallback (no proactive `mngr label` write); the on-disk label is set the next time the user picks in settings. `workspace_accent()` (Python) and `hueFromAgentId()` (JS) are deleted entirely. See the "Migration / backfill" entry under Changes for the rationale
 * Sidebar item spines on `bg-zinc-900` are accepted to be invisible / low-contrast for dark accents — sidebar visual rework is deferred to a separate PR
 
 ## Architectural note (storage substrate)
@@ -44,7 +44,7 @@ These come from the way mngr labels propagate (see the in-conversation analysis)
 - Add a minimal palette-only color picker as a new first field in the workspace-create form (`Create.jinja`), defaulting to `confusion`.
 - Add a fuller picker (palette swatches + always-visible hex input, swatch selection mirrored by hex value) to `WorkspaceSettings.jinja` with implicit save and inline validation.
 - Replace the L=0.85-only contrast picker with a WCAG relative luminance picker so titlebar text/icons remain legible across the full hex range; emit the foreground choice from the server as part of the SSE workspaces payload so the renderer no longer needs to compute it.
-- Backfill every existing workspace with `confusion` on first server-side read after the upgrade; delete the SHA derivation entirely once the backfill ships.
+- Render existing workspaces without a `color` label as `confusion` via a renderer-side fallback in `_build_workspace_list`; delete the SHA derivation entirely. On-disk `mngr label` state is updated lazily — only when the user picks in settings.
 
 ## Expected behavior
 
@@ -63,11 +63,13 @@ These come from the way mngr labels propagate (see the in-conversation analysis)
 
 - **Palette source-of-truth** in `apps/minds/imbue/minds/desktop_client/templates.py`: a new module-level constant `WORKSPACE_PALETTE` mapping each name (`indifference`, `confusion`, …, `white`) to its `#rrggbb` hex. Exported once and consumed everywhere on the server side.
 - **Palette mirror** in `apps/minds/imbue/minds/desktop_client/static/workspace_accent.js`: a JS object with the same name → hex entries. Mirrors `WORKSPACE_PALETTE` exactly (kept in lockstep via a ratchet that hashes both and asserts equality, similar to the existing accent-mirror invariant).
-- **Default color constant**: `confusion` is named in both palettes as the default for new workspaces and the migration backfill.
+- **Default color constant**: `confusion` is named in both palettes as the default for new workspaces and as the renderer-side fallback for un-labeled workspaces.
 - **mngr label**: extend the primary agent's labels with a `color=<hex>` field at create time, written in `agent_creator.py` alongside the existing `workspace=<name>` label. Writes go through the `mngr label` CLI to inherit merge semantics (avoids the full-replace race that `BaseAgent.set_labels` carries).
 - **Backend resolver**: a new `get_workspace_color(agent_id) -> str | None` on `BackendResolverInterface` (and its implementations), mirroring `get_workspace_name`. Reads from the same cached `_agents_result.discovered_agents` snapshot. Returns the stored hex label or `None` if unset (treated by callers as "needs backfill"). The read is **defensively parsed**: if the stored string is not a valid `#rrggbb`, the resolver returns `confusion` and logs once.
 - **Color-write path**: a new desktop-client HTTP endpoint (`POST /api/workspaces/{agent_id}/color` body `{hex: str}`) that validates and normalizes the hex, gates on the agent's primary status (`is_primary=true`), shells out to `mngr label <agent_id> -l color=<hex>` (so concurrent writes against other labels are merged, not clobbered), updates the resolver's in-memory snapshot for that agent optimistically, and calls `backend_resolver.notify_change()` so SSE picks it up within the same tick. Returns a structured error if the workspace's provider is in `is_stale` mode or the host is unreachable.
-- **Migration / backfill**: on the first SSE workspaces tick after the upgrade, every primary agent lacking a `color` label gets `confusion` written via the CLI. Done once per agent (idempotent — if the label is already present, no write). Implemented as a pass inside `_build_workspace_list` rather than a separate sweep so it happens lazily and idempotently.
+- **Migration / backfill**: workspaces created before the picker shipped (no `color` label on disk) render with `DEFAULT_WORKSPACE_COLOR` (`confusion`) via a renderer-side fallback in `_build_workspace_list`; the on-disk agent label stays absent until the user picks a color in settings, at which point Phase 3's POST endpoint writes it through `mngr label`. **No proactive `mngr label` write happens at upgrade time.**
+
+    *Decision history*: the original plan called for a proactive backfill from inside `_build_workspace_list` on the first SSE tick. As-built drops that step because (a) `_build_workspace_list` runs synchronously inside the SSE generator's hot path, where a per-agent subprocess fork-exec would visibly stall the tick; (b) tracking "already backfilled" state to keep the write idempotent adds an in-memory set + lock semantics in a path that wants to be a pure read; (c) a failed `mngr label` write (host unreachable, stale provider) would either fail the SSE tick or get silently swallowed -- both bad. The renderer-default approach achieves the same user-visible behavior (every client sees `confusion` for un-labeled workspaces) without those costs. The trade-off is that introspecting `agent.labels["color"]` via `mngr list` on an un-touched workspace will show no entry rather than `color=#0b292b`; if a future feature needs the label to exist explicitly for all workspaces, a follow-up can backfill from a background task (e.g. piggybacked onto `MngrCliBackendResolver.update_agents`, not the SSE generator).
 - **SSE workspace payload** (`_build_workspace_list` in `app.py`): each entry's `accent` field is sourced from the stored color label (via `get_workspace_color`) rather than computed via `workspace_accent(aid)`. The entry also carries a new `accent_fg` field with the WCAG-derived foreground RGB triple (`"0 0 0"` or `"255 255 255"`) computed server-side. SSE tick logic and the diff-based suppress are unchanged.
 - **SHA derivation deletion**: remove `workspace_accent()` from `templates.py` and its `_WORKSPACE_L` / `_WORKSPACE_C` constants. Remove `hueFromAgentId()` and the `hueCache` / `colorCache` from `static/workspace_accent.js`.
 - **Contrast picker rewrite** in `static/workspace_accent.js`: replace `pickForeground()` (currently constant) with a pure function from a hex string to `'0 0 0' | '255 255 255'` using the WCAG relative luminance formula (`L = 0.2126*R + 0.7152*G + 0.0722*B` against the standard `0.179` cutoff). The same function lives server-side as a Python helper for the `accent_fg` SSE field.
@@ -85,8 +87,8 @@ These come from the way mngr labels propagate (see the in-conversation analysis)
   - Integration: settings POST endpoint refuses to write to a non-primary agent (gates on `is_primary=true`).
   - Integration: settings POST endpoint surfaces `stale_provider` / `host_unreachable` errors distinctly.
   - Integration: `Create.jinja` submit carries the picked color into the new agent's labels.
-  - Integration: migration backfill writes `confusion` for an agent that lacks the label, exactly once (idempotent on a second invocation).
   - Integration: defensive read — a malformed stored `color` value resolves to `confusion` at read time without crashing the SSE stream.
+  - Integration: `_build_workspace_list` falls back to `DEFAULT_WORKSPACE_COLOR` for primary agents lacking the `color` label (renderer-side default; no `mngr label` write).
   - Templates: `templates_test.py` assertion that `workspace_accent()` is gone and `_build_workspace_list` no longer hashes the agent id.
 - **Deletions** (post-migration cleanup, same PR):
   - `templates.py:workspace_accent` + `_WORKSPACE_L` + `_WORKSPACE_C`.
@@ -98,3 +100,4 @@ These come from the way mngr labels propagate (see the in-conversation analysis)
   - Surfacing palette names in the UI (e.g. tooltips, captions).
   - Per-user-per-workspace color overrides.
   - Any RSC-side color persistence (current substrate is mngr labels on the agent).
+  - Proactive `mngr label color=#0b292b` backfill for pre-existing un-labeled workspaces (the renderer-side default covers the user-visible case; a background-task backfill from `MngrCliBackendResolver.update_agents` is feasible if some future feature needs the label to exist explicitly for all workspaces).
