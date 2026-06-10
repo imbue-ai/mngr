@@ -44,16 +44,15 @@ the right project's consolidated files.
    the synthetic dev bucket (the same directory that holds the project's
    `changelog/` entries dir).
 
-3. The `SECTION` lines may include several dates for the same project.
-   Process them **one project at a time**, not one section at a time: for
-   each project that has at least one `SECTION` line, read the bullets
-   from *all* of that project's new date sections in its
-   `UNABRIDGED_CHANGELOG.md` (each section sits between its `## <date>`
-   heading and the next `## ` line), pool them, and from that pooled set
-   generate a few concise, human-friendly bullets for that project's
-   `CHANGELOG.md`. Summarizing the whole pool at once — rather than per
-   date — means a single user-visible change yields a single bullet even
-   when several entries (possibly across different days) touched it.
+3. A project may have several `SECTION` lines (one per new date). Process
+   the work one project at a time: for each project that has at least one
+   `SECTION` line, read the bullets from *all* of that project's new date
+   sections in its `UNABRIDGED_CHANGELOG.md` (each section sits between its
+   `## <date>` heading and the next `## ` line), pool them, and from that
+   pooled set generate a few concise, human-friendly bullets for that
+   project's `CHANGELOG.md`. Summarizing a project's whole pool together
+   lets a single user-visible change become one bullet even when several
+   entries (possibly across different days) touched it.
    Each bullet MUST start with one of these Keep-a-Changelog categories
    followed by `: ` and the description, e.g.:
 
