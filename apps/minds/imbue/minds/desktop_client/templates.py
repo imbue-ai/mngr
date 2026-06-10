@@ -182,6 +182,11 @@ def render_landing_page(
 
     agent_names maps agent ID strings to human-readable workspace names.
 
+    agent_accents maps agent ID strings to ``#rrggbb`` workspace accent
+    hexes (the stored color label, resolved by the caller). Agents without
+    an entry -- including the whole map being None -- render their homepage
+    tile with the default workspace color.
+
     destroying_status_by_agent_id maps agent ID strings to one of
     ``"running"``/``"failed"`` for agents whose detached destroy subprocess
     is currently in flight (running) or exited without removing the agent
