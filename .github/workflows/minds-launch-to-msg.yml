@@ -540,6 +540,58 @@ jobs:
           uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py 2>&1 \
             | tee /tmp/launch-to-msg-logs/e2e-stdout.log
 
+      - name: probe agent VM + container state on failure
+        if: failure()
+        # When the e2e fails after agent creation reached DONE (e.g. chat-URL
+        # recovery loop didn't resolve), we need to know why mngr_forward
+        # can't reach the agent's system_interface. Probe the lima VM and the
+        # docker container inside it for service / network state.
+        run: |
+          set +e
+          LIMA=/Applications/Minds.app/Contents/Resources/lima/bin/limactl
+          mkdir -p /tmp/launch-to-msg-logs
+          {
+            echo "=== limactl list ==="
+            "$LIMA" list 2>&1
+            VM=$("$LIMA" list -q 2>/dev/null | head -1)
+            if [ -z "$VM" ]; then
+              echo "(no lima VM)"
+              exit 0
+            fi
+            echo
+            echo "=== VM: $VM ==="
+            echo "=== docker ps inside VM ==="
+            "$LIMA" shell "$VM" -- docker ps -a 2>&1 | head -20
+            CID=$("$LIMA" shell "$VM" -- docker ps -q 2>/dev/null | head -1)
+            if [ -z "$CID" ]; then
+              echo "(no docker container)"
+              exit 0
+            fi
+            echo
+            echo "=== container: $CID ==="
+            echo "=== docker exec ss -tlnp ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" ss -tlnp 2>&1 | head -30
+            echo
+            echo "=== tmux list-sessions inside container ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" tmux list-sessions 2>&1 | head -20
+            echo
+            echo "=== tmux capture-pane svc-system_interface ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
+            echo
+            echo "=== tmux capture-pane svc-bootstrap ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" tmux capture-pane -t svc-bootstrap -p 2>&1 | tail -40
+            echo
+            echo "=== /var/log/cloud-init-output.log tail (VM) ==="
+            "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
+            echo
+            echo "=== curl localhost:1234 from container (system_interface default port) ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" curl -s -m 3 http://localhost:1234/health 2>&1 | head -5
+            echo
+            echo "=== ps inside container ==="
+            "$LIMA" shell "$VM" -- docker exec "$CID" ps auxf 2>&1 | head -40
+          } > /tmp/launch-to-msg-logs/agent-probe.log 2>&1
+          cat /tmp/launch-to-msg-logs/agent-probe.log
+
       - name: collect screenshots + diagnostics
         if: always()
         run: |
