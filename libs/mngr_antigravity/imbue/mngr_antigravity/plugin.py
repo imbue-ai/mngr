@@ -206,6 +206,25 @@ _PLAYWRIGHT_CACHE_SUBPATH_MACOS: Final[tuple[str, ...]] = ("Library", "Caches", 
 _PLAYWRIGHT_CACHE_SUBPATH_LINUX: Final[tuple[str, ...]] = (".cache", "ms-playwright-go")
 _DARWIN_UNAME: Final[str] = "Darwin"
 
+# macOS keychain directory (under ``$HOME``). agy embeds Chromium, whose
+# ``os_crypt`` keeps its "Antigravity Safe Storage" key -- the key that encrypts
+# agy's persisted conversation store -- in the login keychain, which macOS
+# resolves at ``$HOME/Library/Keychains``. Under a relocated per-agent ``$HOME``
+# that directory is absent, so os_crypt finds no keychain and macOS raises a
+# *modal* "A keychain cannot be found to store Antigravity Safe Storage" dialog.
+# That dialog blocks agy's main thread until a human dismisses it, so an
+# unattended run (e.g. the release test, or any non-interactive create) hangs
+# and never persists a turn -- and even interactively it is the popup users hit
+# on every fresh agent. Symlinking the per-agent home's ``Library/Keychains`` to
+# the user's real one restores keychain discovery: agy finds the existing Safe
+# Storage item (it is already in that item's ACL from the user's interactive
+# logins, so no access prompt) and proceeds silently. macOS-only -- Linux has no
+# such keychain (Chromium falls back to its file-based "basic" store with no
+# prompt), exactly the claude-style "straightforward on Linux, keychain on
+# macOS" split. Mirrors ``_provision_playwright_cache`` -- another HOME-relative,
+# machine-shared resource symlinked into the per-agent home.
+_MACOS_KEYCHAINS_SUBPATH: Final[tuple[str, ...]] = ("Library", "Keychains")
+
 
 def _load_antigravity_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_antigravity resources package."""
@@ -488,7 +507,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
            settings.json (copy of the user's settings + workspace trust +
            overrides + the mngr-owned lifecycle statusLine), the onboarding NUX
            seed, the conversation-id capture hook, the oauth token symlink/copy,
-           and the shared playwright-cache symlink.
+           the shared playwright-cache symlink, and -- on macOS -- the
+           ``Library/Keychains`` symlink (restores keychain discovery under the
+           relocated ``$HOME`` so agy's os_crypt never raises a blocking dialog).
         4. Install the transcript scripts and the background-tasks supervisor
            under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
@@ -533,13 +554,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         Provisions the oauth token, settings.json (including the mngr-owned
         lifecycle ``statusLine``), the onboarding NUX seed, the conversation-id
-        capture hook, and the shared playwright-cache symlink.
+        capture hook, the shared playwright-cache symlink, and -- on macOS -- the
+        ``Library/Keychains`` symlink that restores keychain discovery under the
+        relocated ``$HOME`` (see ``_provision_macos_keychain``).
         ``host.write_text_file`` creates intermediate directories. agy-owned
         session dirs (brain/, conversations/) are left intact across re-provision.
         """
         agy_home = self._get_agy_home_dir()
         self._provision_oauth_token(host, host_home, agy_home)
         self._provision_playwright_cache(host, host_home, host_uname, agy_home)
+        self._provision_macos_keychain(host, host_home, host_uname, agy_home)
         base_settings: dict[str, Any] = {}
         if self.agent_config.sync_home_settings:
             user_settings_path = get_antigravity_settings_path(host_home)
@@ -621,8 +645,12 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 
         agy is keyring-first, file-fallback (``ChainedAuth``) and writes the
         token file at login; on Linux (mngr's runtime) there is no OS keyring so
-        the file is the native store, and on macOS it falls back to the file when
-        the keyring write times out (which it does under a relocated ``$HOME``).
+        the file is the native store. On macOS the keyring is the login keychain;
+        ``_provision_macos_keychain`` symlinks it back into the relocated
+        ``$HOME`` so it stays reachable (otherwise agy hits a blocking "keychain
+        cannot be found" dialog), but this token file remains the portable seed
+        that authenticates a fresh agent and shares logins/refreshes across
+        agents regardless of platform.
 
         **Symlink mode (default).** Always create the per-agent
         ``antigravity-oauth-token`` as a symlink to the user's *shared*
@@ -682,6 +710,41 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             host_home.joinpath(*subpath),
             agy_home.joinpath(*subpath),
             ensure_source_parent=True,
+        )
+
+    def _provision_macos_keychain(
+        self, host: OnlineHostInterface, host_home: Path, host_uname: str, agy_home: Path
+    ) -> None:
+        """Symlink the per-agent home's ``Library/Keychains`` to the user's real one (macOS only).
+
+        agy embeds Chromium, whose ``os_crypt`` stores the "Antigravity Safe
+        Storage" key (which encrypts agy's persisted conversation store) in the
+        login keychain that macOS resolves at ``$HOME/Library/Keychains``. The
+        per-agent ``$HOME`` relocation that isolates agy's config also hides that
+        directory, so os_crypt finds no keychain and macOS raises a *modal* "A
+        keychain cannot be found to store Antigravity Safe Storage" dialog that
+        blocks agy until dismissed -- hanging any unattended run, and popping on
+        every fresh agent interactively. Symlinking the directory to the user's
+        real one restores discovery; agy is already in the Safe Storage item's
+        ACL (from interactive logins), so it reads the key with no access prompt.
+        Per-item ACLs still gate every other secret, so this grants agy nothing
+        it did not already have interactively.
+
+        macOS-only (gated on the host's ``uname``, so it is correct for remote
+        hosts too): on Linux there is no such keychain and Chromium falls back to
+        its file-based "basic" store without prompting, so nothing is provisioned
+        -- the claude-style "straightforward on Linux, keychain on macOS" split.
+        Unlike the oauth-token and playwright-cache symlinks, the source
+        (``~/Library/Keychains``) always exists on a real macOS user, so
+        ``ensure_source_parent`` is left off -- we never fabricate an empty
+        keychain dir in the user's real home.
+        """
+        if host_uname != _DARWIN_UNAME:
+            return
+        symlink_on_host(
+            host,
+            host_home.joinpath(*_MACOS_KEYCHAINS_SUBPATH),
+            agy_home.joinpath(*_MACOS_KEYCHAINS_SUBPATH),
         )
 
     def _find_git_source_path(self, concurrency_group: ConcurrencyGroup) -> Path | None:

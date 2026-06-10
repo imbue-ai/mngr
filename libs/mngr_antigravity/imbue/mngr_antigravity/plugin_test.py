@@ -953,6 +953,30 @@ def test_provision_symlinks_playwright_cache_to_shared_host_cache(
     assert Path(os.readlink(dest)) == isolated_home.joinpath(*subpath)
 
 
+def test_provision_symlinks_macos_keychain_into_per_agent_home(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path
+) -> None:
+    """On macOS the per-agent home's Library/Keychains is symlinked to the host's; Linux is a no-op.
+
+    agy's embedded Chromium os_crypt resolves the login keychain at
+    $HOME/Library/Keychains, so the relocated per-agent $HOME hides it and agy
+    blocks on a modal "keychain cannot be found" dialog. The plugin symlinks the
+    directory to the host's so discovery works (macOS only -- Linux has no such
+    keychain and Chromium uses its file-based store). The link points at
+    *host_home*'s Library/Keychains (here the isolated HOME); the target need not
+    exist for the symlink to be created.
+    """
+    agent = antigravity_agent_auto_dismiss
+    _provision(agent)
+    dest = agent._get_agy_home_dir() / "Library" / "Keychains"
+    if is_macos():
+        assert dest.is_symlink()
+        assert Path(os.readlink(dest)) == isolated_home / "Library" / "Keychains"
+    else:
+        assert not dest.exists()
+        assert not dest.is_symlink()
+
+
 # =============================================================================
 # provision: per-agent hooks.json
 # =============================================================================

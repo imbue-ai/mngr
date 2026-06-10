@@ -9,8 +9,10 @@ antigravity authenticates from ``$HOME/.gemini`` (it has no config-dir override 
 plugin relocates ``$HOME`` per agent and shares the oauth token by symlink). The autouse
 ``setup_test_mngr_env`` fixture redirects ``$HOME`` to a temp dir, so this test seeds the
 real shared oauth token and a ``settings.json`` into that redirected home for the plugin
-to find. Everything else agy needs -- HOME relocation, the non-dotted workspace symlink,
-trust seeding, NUX skip -- the plugin handles itself.
+to find. On macOS it also seeds ``Library/Keychains`` (a symlink to the real one) so the
+plugin's keychain symlink resolves -- without it agy's os_crypt blocks on a "keychain
+cannot be found" dialog. Everything else agy needs -- HOME relocation, the non-dotted
+workspace symlink, trust seeding, NUX skip -- the plugin handles itself.
 
 The model is pinned to a Claude model via the seeded ``settings.json`` (agy reads its
 model from settings, so the spaces/parens in the display name never reach a shell): agy's
@@ -33,6 +35,7 @@ import pytest
 from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
@@ -47,6 +50,15 @@ _REAL_GEMINI = Path.home() / ".gemini"
 _REAL_OAUTH_TOKEN = get_antigravity_oauth_token_path(Path.home())
 _REAL_SETTINGS = _REAL_OAUTH_TOKEN.parent / "settings.json"
 _TOP_LEVEL_AUTH_FILES = ("oauth_creds.json", "google_accounts.json")
+
+# Resolved at import time too: the user's real macOS login keychain dir. agy's embedded
+# Chromium os_crypt resolves the keychain at $HOME/Library/Keychains, so under the
+# redirected test HOME it finds none and raises a *blocking* "A keychain cannot be found
+# to store Antigravity Safe Storage" dialog -- hanging the headless run. The plugin's
+# _provision_macos_keychain symlinks the per-agent home's Library/Keychains to *host_home*'s
+# (here the redirected HOME), so we seed that with a symlink to the real dir, exactly as the
+# .gemini auth above is seeded from the real home. macOS-only; Linux has no such keychain.
+_REAL_MACOS_KEYCHAINS = Path.home() / "Library" / "Keychains"
 
 # An agy "models" display name for a Claude model. agy's default Gemini model can hit
 # per-account usage limits; a Claude model is reliable. Seeded into settings.json, so the
@@ -95,6 +107,15 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
         settings = json.loads(_REAL_SETTINGS.read_text()) if _REAL_SETTINGS.exists() else {}
         settings["model"] = _MODEL
         (seeded_token.parent / "settings.json").write_text(json.dumps(settings))
+
+        # macOS only: seed Library/Keychains into the redirected HOME so the plugin's
+        # _provision_macos_keychain (which symlinks host_home's Library/Keychains into the
+        # per-agent home) resolves to the user's real login keychain. Without this, agy's
+        # os_crypt finds no keychain and blocks on a modal dialog (see _REAL_MACOS_KEYCHAINS).
+        if is_macos() and _REAL_MACOS_KEYCHAINS.exists():
+            seeded_keychains = Path(env["HOME"]) / "Library" / "Keychains"
+            seeded_keychains.parent.mkdir(parents=True, exist_ok=True)
+            seeded_keychains.symlink_to(_REAL_MACOS_KEYCHAINS)
 
         work_dir = tmp_path / "work"
         init_git_repo(work_dir, initial_commit=True)
