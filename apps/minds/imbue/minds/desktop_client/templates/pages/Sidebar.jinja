@@ -1,12 +1,12 @@
-{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=0, offset_y=8 #}
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=0, offset_y=4 #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
   content area, the body is the transparent backdrop, and the floating
-  dark teal panel is pinned at a position derived from the caller's
-  trigger geometry. Clicks on the backdrop (anywhere outside the panel)
-  dismiss the modal via /_static/sidebar.js; the Escape key is handled
-  by main.js's modal before-input-event listener (see openModal in
+  panel is pinned at a position derived from the caller's trigger
+  geometry. Clicks on the backdrop (anywhere outside the panel) dismiss
+  the modal via /_static/sidebar.js; the Escape key is handled by
+  main.js's modal before-input-event listener (see openModal in
   electron/main.js), so this page does not install its own Escape
   handler. The panel's height comes from its own flex content -- no JS
   measurement or Electron-side bounds math is needed.
@@ -19,12 +19,12 @@
     top  = trigger_y + trigger_h + offset_y
   Because the chrome view and the modal view share the same window
   coordinate space, the trigger's rect translates directly. The panel
-  uses ``py-1.5`` (vertical-only padding) so each row's ``px-2`` (8px)
-  internal padding lines up exactly with the trigger button's icon
-  offset inside its ``w-8`` shell -- icon columns line up.
+  carries a uniform 4px pad on all sides (``p-1``) with 2px between
+  entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
+  highlight's inset.
 
   Defaults (no query params): anchor just below a 38px-tall element at
-  the top-left of the window, with an 8px gap. That's the right shape
+  the top-left of the window, with a 4px gap. That's the right shape
   for the titlebar's first button without any caller customization.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
@@ -45,7 +45,7 @@
   <div id="sidebar-backdrop" class="fixed inset-0">
     <div id="sidebar-menu"
          style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
-         class="absolute w-[244px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+         class="absolute w-[244px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
       <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
       <SidebarBottom />
     </div>

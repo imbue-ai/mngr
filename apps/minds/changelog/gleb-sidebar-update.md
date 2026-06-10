@@ -1,4 +1,4 @@
-The sidebar is now a floating menu: dark teal panel with rounded corners,
+The sidebar is now a floating menu: dark panel with rounded corners,
 shadow, and a colored dot per workspace, matching the Figma "Space switcher
 menu" design. In Electron the page loads into the shared modal
 WebContentsView (transparent background), so the panel reads as a floating
@@ -56,3 +56,8 @@ The menu's internal spacing was tightened to a uniform grid: 4px padding
 on all four sides of the panel, 2px between every entry, and 2px above
 and below the divider line (the line is now a bare full-width rule that
 takes its spacing from the panel's row gap rather than its own padding).
+
+The menu now sits 4px below the trigger button (down from 8px) -- the
+default vertical anchor offset dropped from 8px to 4px. Its background is
+a flat pure black for now (was the dark-teal #0b292b) while the color
+treatment is being iterated on.

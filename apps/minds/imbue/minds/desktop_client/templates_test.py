@@ -302,7 +302,7 @@ def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
     # "Manage account(s)" / "Log in" entry now lives in the floating sidebar
     # alongside the workspace list and the "New workspace" CTA. The titlebar
     # accent color therefore doesn't have to repaint the account button -- the
-    # sidebar's dark teal background is constant.
+    # sidebar's own dark background is constant.
     html = render_chrome_page()
     assert 'id="user-btn"' not in html
     assert 'id="sidebar-account"' in html
@@ -373,8 +373,9 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     than baked into a server template.
 
     Trigger rect (72, 0, 32, 28) is roughly the macOS sidebar-toggle
-    button (traffic-light-shifted titlebar with a w-8 h-7 button). With
-    offset (0, 8) the menu anchors at left=72+0=72, top=0+28+8=36."""
+    button (traffic-light-shifted titlebar with a w-8 h-7 button). A
+    non-default offset (0, 8) is passed here to prove the value flows
+    through: the menu anchors at left=72+0=72, top=0+28+8=36."""
     html = render_sidebar_page(
         trigger_x=72,
         trigger_y=0,
@@ -387,11 +388,11 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     assert "top:36px" in html
 
     # Defaults (no caller args) anchor below a 38px-tall element at the
-    # top-left with an 8px gap -- right shape for "open the sidebar from
+    # top-left with a 4px gap -- right shape for "open the sidebar from
     # the first titlebar button" without any caller customization.
     html_default = render_sidebar_page()
     assert "left:0px" in html_default
-    assert "top:46px" in html_default
+    assert "top:42px" in html_default
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
