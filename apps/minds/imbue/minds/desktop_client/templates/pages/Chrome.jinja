@@ -75,8 +75,13 @@
      #sidebar-backdrop / #sidebar-menu shape with the /_static/sidebar.js
      renderer. #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
+    {# Left position matches the titlebar's sidebar-toggle button (pl-[72px]
+       on macOS for traffic-light clearance; px-1 = 4px elsewhere) so the
+       menu's icon column lines up directly below the trigger icon. The
+       panel uses py-1.5 only -- each row's px-2 (8px) matches the trigger
+       button's icon offset inside its w-8 shell. #}
     <div id="sidebar-menu"
-         class="absolute left-2 top-[46px] w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+         class="absolute {% if is_mac %}left-[72px]{% else %}left-1{% endif %} top-[46px] w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
       <div id="sidebar-workspaces" class="flex flex-col gap-px"></div>
       <SidebarBottom />
     </div>

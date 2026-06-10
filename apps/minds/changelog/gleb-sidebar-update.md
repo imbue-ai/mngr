@@ -21,3 +21,9 @@ by both the sidebar and the inbox. The sidebar URL (/_chrome/sidebar) is
 loaded into the same modalView that hosts /inbox, so dismissal,
 titlebar-drag suppression, transparent background, and Escape handling
 all come from the existing modal infrastructure.
+
+The menu's left position now tracks the titlebar's sidebar-toggle button:
+shifted by 72px on macOS (to clear the traffic lights) and flush with the
+titlebar's small 4px padding elsewhere. The panel drops its horizontal
+padding so the icon column inside the menu lines up directly below the
+trigger icon in the titlebar.

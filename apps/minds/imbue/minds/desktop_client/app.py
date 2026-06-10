@@ -1797,7 +1797,12 @@ def _handle_chrome_page(
 
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page loaded into the shared modal WebContentsView."""
-    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
+    user_agent = request.headers.get("user-agent", "")
+    is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
+    html = render_sidebar_page(
+        mngr_forward_origin=_get_mngr_forward_origin(request),
+        is_mac=is_mac,
+    )
     return HTMLResponse(content=html)
 
 

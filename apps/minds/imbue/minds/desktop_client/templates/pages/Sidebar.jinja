@@ -1,4 +1,4 @@
-{#def mngr_forward_origin #}
+{#def mngr_forward_origin, is_mac=False #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
@@ -9,6 +9,14 @@
   listener (see openModal in electron/main.js), so this page does not
   install its own Escape handler. The panel's height comes from its own
   flex content -- no JS measurement or Electron-side bounds math is needed.
+
+  ``is_mac`` shifts the menu's left position so the menu's icon column
+  sits directly below the titlebar's sidebar-toggle icon: the titlebar
+  uses ``pl-[72px]`` on macOS (for traffic-light clearance) and ``px-1``
+  (4px) elsewhere, so we mirror those values here. The panel itself uses
+  ``py-1.5`` (vertical-only padding) so each row's ``px-2`` (8px)
+  internal padding lines up exactly with the trigger button's icon offset
+  inside its own ``w-8`` shell.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
@@ -24,13 +32,11 @@
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="sidebar-backdrop" class="fixed inset-0">
-    {# top-[46px] = 38px titlebar + 8px inset. The modal WebContentsView
-       covers the full window (including the titlebar strip) so its
-       transparent backdrop can capture clicks across the whole window,
-       but the menu itself sits below the titlebar to match the Figma
-       and to keep the traffic-light / page-title strip visually intact. #}
+    {# top-[46px] = 38px titlebar + 8px inset. Left position matches the
+       titlebar's sidebar-toggle button so the menu's icon column lines up
+       directly below the trigger icon. #}
     <div id="sidebar-menu"
-         class="absolute top-[46px] left-2 w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+         class="absolute top-[46px] {% if is_mac %}left-[72px]{% else %}left-1{% endif %} w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
       <div id="sidebar-workspaces" class="flex flex-col gap-px"></div>
       <SidebarBottom />
     </div>

@@ -1090,7 +1090,7 @@ def render_chrome_page(
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
+def render_sidebar_page(mngr_forward_origin: str = "", is_mac: bool = False) -> str:
     """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
@@ -1098,10 +1098,16 @@ def render_sidebar_page(mngr_forward_origin: str = "") -> str:
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
+
+    ``is_mac`` shifts the menu's left position to match the titlebar's
+    sidebar-toggle button: traffic-light-shifted (72px) on macOS, flush with
+    the small ``px-1`` titlebar padding (4px) elsewhere. This puts the menu's
+    icon column directly below the trigger icon.
     """
     return CATALOG.render(
         "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
+        is_mac=is_mac,
     )
 
 
