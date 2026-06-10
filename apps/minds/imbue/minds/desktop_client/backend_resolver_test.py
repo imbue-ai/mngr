@@ -405,6 +405,73 @@ def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
     assert resolver.get_workspace_color(AgentId.generate()) is None
 
 
+def test_set_workspace_color_locally_updates_the_cached_label() -> None:
+    """Optimistic write: after a successful CLI mngr label write, the
+    resolver's cached snapshot is updated in place so the next SSE
+    workspaces emit reflects the new color -- without waiting for the
+    ~10s discovery tick to re-emit through ``mngr observe``."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+        )
+    )
+    assert resolver.get_workspace_color(agent) is None
+
+    assert resolver.set_workspace_color_locally(agent, "#0b292b") is True
+    assert resolver.get_workspace_color(agent) == "#0b292b"
+
+
+def test_set_workspace_color_locally_clears_the_malformed_log_marker() -> None:
+    """After a successful write, the previously-logged-as-malformed marker
+    is cleared so a future round-trip with a *different* bad value will
+    log again. (The fix path -- repick from settings -- should leave the
+    log in a useful state for any next failure.)"""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "junk"}),),
+        )
+    )
+    # First read triggers the warning + marks the agent as logged.
+    resolver.get_workspace_color(agent)
+    assert str(agent) in resolver._logged_malformed_color_agents
+
+    resolver.set_workspace_color_locally(agent, "#ffffff")
+    assert str(agent) not in resolver._logged_malformed_color_agents
+
+
+def test_set_workspace_color_locally_returns_false_for_unknown_agent() -> None:
+    resolver = MngrCliBackendResolver()
+    assert resolver.set_workspace_color_locally(AgentId.generate(), "#0b292b") is False
+
+
+def test_set_workspace_color_locally_fires_on_change_callbacks() -> None:
+    """SSE subscribers register an on-change callback to wake on resolver
+    mutations; the optimistic color write must fire it so the chrome
+    repaints within one SSE tick of the settings save."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+        )
+    )
+
+    callback_calls: list[int] = []
+    resolver.add_on_change_callback(lambda: callback_calls.append(1))
+    resolver.set_workspace_color_locally(agent, "#0b292b")
+    assert callback_calls == [1]
+
+
 def test_get_workspace_color_logs_each_malformed_agent_only_once() -> None:
     """Reads happen on every SSE tick; a malformed label must not spam
     the log. Subsequent reads for the same agent stay silent. Uses a

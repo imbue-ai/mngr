@@ -14,6 +14,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
@@ -734,7 +735,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
                     if normalized is None:
                         if str(agent_id) not in self._logged_malformed_color_agents:
                             logger.warning(
-                                "Ignoring malformed color label %r for agent %s; "
+                                "Ignoring malformed color label {!r} for agent {}; "
                                 "rendering as default. Repick in workspace settings to fix.",
                                 raw,
                                 agent_id,
@@ -743,6 +744,42 @@ class MngrCliBackendResolver(BackendResolverInterface):
                         return DEFAULT_WORKSPACE_COLOR
                     return normalized
             return None
+
+    def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
+        """Optimistically update the cached ``color`` label for an agent.
+
+        Called by the settings POST handler after a successful ``mngr label``
+        write so the SSE workspaces payload reflects the new color on the
+        next emit -- without having to wait the ~10s discovery tick for
+        the change to propagate back through ``mngr observe``.
+
+        ``color_hex`` must already be normalized (``#rrggbb`` lowercase);
+        the caller is responsible for validation. Returns True if the
+        snapshot was updated and ``_fire_on_change`` was called, False
+        if the agent is not in the current snapshot (in which case the
+        next discovery emit will pick up the on-disk label anyway).
+        """
+        with self._lock:
+            updated_agents: list[DiscoveredAgent] = []
+            found = False
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    found = True
+                    new_labels = {**agent.labels, "color": color_hex}
+                    new_certified_data = {**agent.certified_data, "labels": new_labels}
+                    updated_agents.append(
+                        agent.model_copy_update(to_update(agent.field_ref().certified_data, new_certified_data))
+                    )
+                else:
+                    updated_agents.append(agent)
+            if not found:
+                return False
+            self._agents_result = self._agents_result.model_copy_update(
+                to_update(self._agents_result.field_ref().discovered_agents, tuple(updated_agents))
+            )
+            self._logged_malformed_color_agents.discard(str(agent_id))
+        self._fire_on_change()
+        return True
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""

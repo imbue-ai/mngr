@@ -127,6 +127,7 @@ from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MindsConfigError
@@ -1627,6 +1628,121 @@ def _handle_destroying_page(
         status=str(record.status).lower(),
     )
     return HTMLResponse(content=html)
+
+
+# -- Workspace color route handler --
+
+
+async def _handle_set_workspace_color_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """POST /api/workspaces/<agent_id>/color: write the per-workspace color label.
+
+    Body: ``{"hex": "<rrggbb>"}``. Lenient: accepts ``#fff`` / ``fff`` /
+    ``#ffffff`` / ``ffffff`` in any case; normalized to ``#rrggbb`` lowercase
+    server-side.
+
+    Error responses (all JSON with an ``error`` discriminant):
+      - 400 ``invalid_hex`` -- the body's hex didn't parse.
+      - 404 ``not_primary`` -- the agent is not a primary workspace
+        (no ``workspace`` / ``is_primary`` label pair, or unknown).
+      - 409 ``stale_provider`` -- the agent's provider's last discovery
+        poll errored, so the host is unreachable and writing the label
+        would not be observable until provider recovery.
+      - 502 ``host_unreachable`` -- ``mngr label`` itself failed (timeout,
+        non-zero exit, exec failure).
+
+    On success, writes ``color=<hex>`` via ``mngr label`` (CLI merge
+    semantics, so other labels are preserved), optimistically updates
+    the resolver's snapshot so the next SSE workspaces tick reflects the
+    new color without waiting for the discovery refresh, and returns
+    ``{"agent_id": ..., "color": "<rrggbb>"}``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        # External (HTTP) input: log at warning level rather than silently
+        # swallowing so a buggy / hostile client's bad bodies are visible.
+        logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": "invalid_hex"}),
+            media_type="application/json",
+        )
+    raw_hex = body.get("hex", "") if isinstance(body, dict) else ""
+    normalized = normalize_workspace_color(str(raw_hex))
+    if normalized is None:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": "invalid_hex"}),
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+
+    # The minds primary-workspace filter is the "workspace" + "is_primary"
+    # label pair (see backend_resolver.list_known_workspace_ids). Color writes
+    # only apply to primary agents; the sibling system-services agent shares
+    # the host but does not own workspace identity.
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return Response(
+            status_code=404,
+            content=json.dumps({"error": "not_primary"}),
+            media_type="application/json",
+        )
+
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
+    if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+        return Response(
+            status_code=409,
+            content=json.dumps({"error": "stale_provider"}),
+            media_type="application/json",
+        )
+
+    mngr_binary: str = request.app.state.mngr_binary
+    mngr_host_dir: Path = request.app.state.mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        # The concurrency group is wired in production (see create_desktop_client
+        # entrypoint); only test paths that explicitly skip it can hit this.
+        logger.warning("No concurrency group available; cannot write color label for {}", parsed_id)
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "host_unreachable", "detail": "concurrency group unavailable"}),
+            media_type="application/json",
+        )
+
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    # `mngr label` (CLI) merges with existing labels; BaseAgent.set_labels at
+    # the API level would full-replace and clobber concurrent writes to other
+    # keys, so we shell out to the CLI to get the merge for free.
+    argv = [mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]
+    try:
+        _run_mngr(concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        logger.warning("mngr label failed for {}: {}", parsed_id, exc)
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "host_unreachable", "detail": str(exc)}),
+            media_type="application/json",
+        )
+
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+        backend_resolver.set_workspace_color_locally(parsed_id, normalized)
+
+    return Response(
+        status_code=200,
+        content=json.dumps({"agent_id": agent_id, "color": normalized}),
+        media_type="application/json",
+    )
 
 
 # -- Telegram setup route handlers --
@@ -3731,6 +3847,9 @@ def create_desktop_client(
     app.get("/api/destroying/{agent_id}/log")(_handle_destroying_log_api)
     app.post("/api/destroying/{agent_id}/dismiss")(_handle_destroying_dismiss_api)
     app.get("/destroying/{agent_id}")(_handle_destroying_page)
+
+    # Workspace color route
+    app.post("/api/workspaces/{agent_id}/color")(_handle_set_workspace_color_api)
 
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
