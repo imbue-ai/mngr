@@ -37,7 +37,7 @@ html {
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--workspace-accent, oklch(85% 0.08 230));
+  background: var(--workspace-accent, #0b292b);
 }
 
 .sidebar-item {
@@ -51,7 +51,7 @@ html {
   bottom: 8px;
   width: 3px;
   border-radius: 2px;
-  background: var(--workspace-accent, oklch(85% 0.08 230));
+  background: var(--workspace-accent, #0b292b);
   opacity: 0.55;
   transition: opacity 100ms;
 }
@@ -61,19 +61,21 @@ html {
 }
 
 .accent-swatch {
-  background: var(--workspace-accent, oklch(85% 0.08 230));
+  background: var(--workspace-accent, #0b292b);
 }
 
 /*
  * Titlebar foreground tokens. ``--titlebar-bg`` and ``--titlebar-fg`` are
  * set by chrome.js on the document root whenever a workspace is active
  * (or cleared back to defaults when none is): ``--titlebar-bg`` is the
- * full-width chrome bar color (an OKLCH workspace accent at 80%/0.1) and
+ * full-width chrome bar color (a ``#rrggbb`` from the workspace's
+ * stored ``color`` label, served via the SSE workspaces payload) and
  * ``--titlebar-fg`` is the contrasting foreground as a space-separated
  * RGB triple ("0 0 0" for dark text on light bars, "255 255 255" for
- * white text on dark bars). Consumers use the ``.titlebar-*`` utility
- * classes below rather than referencing the variables directly so the
- * alpha levels stay consistent across the chrome.
+ * white text on dark bars), computed server-side via WCAG luminance.
+ * Consumers use the ``.titlebar-*`` utility classes below rather than
+ * referencing the variables directly so the alpha levels stay
+ * consistent across the chrome.
  *
  * Why an RGB triple, not a full color: ``rgb(var(--titlebar-fg) / 0.55)``
  * lets every consumer dial in its own alpha for the visual hierarchy

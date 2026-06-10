@@ -33,6 +33,8 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.testing import stub_mngr_host_dir
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -454,17 +456,16 @@ def test_build_workspace_list_emits_black_foreground_for_light_palette_entries()
     assert workspaces[0]["accent_fg"] == "0 0 0"
 
 
-def test_build_workspace_list_falls_back_to_sha_accent_when_color_label_missing() -> None:
-    """Pre-migration workspaces stay on their hash-derived OKLCH accent
-    until the user picks a color (or the migration backfill writes
-    ``confusion``). Falling back keeps the rollout invisible to users
-    who haven't engaged with the picker."""
+def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
+    """Workspaces without a ``color`` label (created before the picker
+    shipped, or backfilled but not yet written through ``mngr label``)
+    render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
+    workspaces get pre-selected in the picker. ``accent_fg`` matches
+    via the same WCAG luminance computation."""
     resolver = MngrCliBackendResolver()
     agent = _make_workspace_agent("imbue_cloud_acct")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)
-    # SHA-derived accent uses the legacy oklch() form.
-    assert workspaces[0]["accent"].startswith("oklch(85% 0.08 ")
-    # Legacy SHA accents are all L=0.85 (light) so black foreground.
-    assert workspaces[0]["accent_fg"] == "0 0 0"
+    assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
+    assert workspaces[0]["accent_fg"] == pick_workspace_foreground(DEFAULT_WORKSPACE_COLOR)

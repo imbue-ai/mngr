@@ -123,7 +123,6 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
-from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
@@ -389,6 +388,7 @@ def _handle_landing_page(
         if telegram_orchestrator is not None:
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
+        agent_accents: dict[str, str] = {}
         for aid in all_agent_ids:
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
@@ -396,12 +396,15 @@ def _handle_landing_page(
             else:
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
+            stored = backend_resolver.get_workspace_color(aid)
+            agent_accents[str(aid)] = stored if stored is not None else DEFAULT_WORKSPACE_COLOR
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
+            agent_accents=agent_accents,
         )
         return HTMLResponse(content=html)
 
@@ -2226,16 +2229,14 @@ def _build_workspace_list(
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries an ``accent`` (CSS color) and ``accent_fg`` (RGB
-    triple for the contrasting titlebar foreground) for the chrome and
-    sidebar to render. ``accent`` is the workspace's stored ``color``
-    label if present (``#rrggbb`` from the user-picked palette or a
-    custom hex); otherwise it falls back to the legacy SHA-derived OKLCH
-    string for backward compatibility while the migration backfill is
-    rolling out. ``accent_fg`` is the WCAG-contrasting foreground for
-    the stored hex, or ``"0 0 0"`` for the legacy SHA-derived case
-    (those are all light L=0.85 backgrounds, so black foreground is
-    correct).
+    Each entry carries an ``accent`` (#rrggbb CSS color) and ``accent_fg``
+    (RGB triple for the contrasting titlebar foreground) for the chrome
+    and sidebar to render. The accent is the workspace's stored
+    ``color`` label (set at create time by phase-5's picker, or via the
+    settings POST endpoint); workspaces that lack the label (i.e. they
+    were created before the picker shipped and the user hasn't repicked
+    yet) get the default workspace color. ``accent_fg`` is the
+    WCAG-contrasting foreground for the resolved hex.
 
     Entries whose provider's latest discovery poll errored carry
     ``is_stale="true"`` so the UI can flag them as
@@ -2250,17 +2251,12 @@ def _build_workspace_list(
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
         stored_color = backend_resolver.get_workspace_color(aid)
-        if stored_color is not None:
-            accent = stored_color
-            accent_fg = pick_workspace_foreground(stored_color)
-        else:
-            accent = workspace_accent(str(aid))
-            accent_fg = "0 0 0"
+        accent = stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR
         entry: dict[str, str] = {
             "id": str(aid),
             "name": ws_name,
             "accent": accent,
-            "accent_fg": accent_fg,
+            "accent_fg": pick_workspace_foreground(accent),
         }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
@@ -3076,20 +3072,18 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
-        accent_key = primary_agent_id_by_ws_name.get(ws_name, ws_name)
-        # Prefer the stored color on the primary agent, falling back to
-        # the SHA-derived accent during the migration rollout (matches
-        # the same precedence used in _build_workspace_list). The
-        # primary id is always a freshly-stringified AgentId from
-        # list_known_workspace_ids, so reparsing through AgentId is
-        # safe and never raises.
+        # Inbox card accent mirrors the homepage tile's accent for the
+        # workspace the request belongs to. ``primary_agent_id_by_ws_name``
+        # comes from the resolver's current snapshot, so the primary id
+        # is always a freshly-stringified AgentId -- reparsing through
+        # AgentId is safe.
         primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
         stored_accent = (
             backend_resolver.get_workspace_color(AgentId(primary_agent_id_str))
             if primary_agent_id_str is not None
             else None
         )
-        accent = stored_accent if stored_accent is not None else workspace_accent(accent_key)
+        accent = stored_accent if stored_accent is not None else DEFAULT_WORKSPACE_COLOR
         cards.append(
             {
                 "id": str(req.event_id),

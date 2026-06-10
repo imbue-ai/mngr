@@ -12,7 +12,6 @@ so neither callers nor tests have to know the templates moved from raw
 Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
-import hashlib
 import html
 import os
 from collections.abc import Mapping
@@ -154,36 +153,6 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
-# -- Per-workspace identity color --
-# See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
-# window.mindsAccent helper consumed by chrome.js and sidebar.js).
-
-# Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue. The accent fills
-# the full-width titlebar (not just a small swatch), so a light /
-# low-saturation tone is needed to read as chrome rather than a saturated
-# highlight.
-_WORKSPACE_L: Final[int] = 85
-_WORKSPACE_C: Final[float] = 0.08
-
-
-@pure
-def workspace_accent(agent_id: str) -> str:
-    """Deterministically map an agent id to a CSS OKLCH color.
-
-    Uses a fixed lightness and chroma (a light, low-saturation tone that
-    reads as a chrome surface across the full-width titlebar) so every
-    workspace accent sits at the same readable level, and only the hue
-    varies. Full 360 degree hue range means collisions are effectively
-    impossible, and OKLCH's perceptual uniformity means close hashes
-    still read as visibly different colors.
-    """
-    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[:4], "big") % 360
-    return f"oklch({_WORKSPACE_L}% {_WORKSPACE_C} {hue})"
-
-
 # -- Page renderers --
 
 
@@ -195,6 +164,7 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    agent_accents: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -220,11 +190,17 @@ def render_landing_page(
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
-    agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    # Workspaces without an entry in agent_accents (caller didn't supply
+    # one, or supplied a partial map) fall back to the default workspace
+    # color so the homepage tile still paints with something readable.
+    effective_accents: dict[str, str] = {}
+    supplied = agent_accents or {}
+    for aid in accessible_agent_ids:
+        effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
-        agent_accents=agent_accents,
+        agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
