@@ -335,10 +335,10 @@ def test_grant_with_unknown_credentials_proceeds_without_invoking_auth_browser(t
 def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Path) -> None:
     # This mirrors a service whose credential latchkey stores but
     # cannot validate: ``credentialStatus=unknown`` with
-    # ``authOptions=["set"]`` (no browser flow). Before the fix this
-    # returned ``NEEDS_MANUAL_CREDENTIALS`` even though credentials
-    # were already in place; the grant must now succeed without any
-    # user-visible re-setup prompt.
+    # ``authOptions=["set"]`` (no browser flow). Treating UNKNOWN as
+    # needs-setup would return ``NEEDS_MANUAL_CREDENTIALS`` even though
+    # credentials are already in place; the grant must succeed without
+    # any user-visible re-setup prompt.
     handler = _build_handler(
         tmp_path,
         credential_status="unknown",
