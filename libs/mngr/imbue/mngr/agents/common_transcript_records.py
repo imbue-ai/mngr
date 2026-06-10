@@ -6,11 +6,14 @@ line is one record whose ``type`` is ``user_message``, ``assistant_message``, or
 ``tool_result``, carrying the shared envelope fields (``timestamp``,
 ``event_id``, ``source``) plus a per-type payload.
 
-This module is the single source of truth for that contract. The reader
-(:mod:`imbue.mngr.cli.transcript`) validates each line against it, and each
-plugin's conformance test asserts its emitter's real output validates here -- so
-the four independently written emitters (two TypeScript, two shell+Python) cannot
-silently drift on the shared fields.
+This module is the single source of truth for that contract. The contract is
+enforced at *emit* time, not read time: each plugin's conformance test asserts its
+emitter's real output validates against this schema, so the five independently
+written emitters (opencode and pi-coding in TypeScript; claude, antigravity, and
+codex in shell+Python) cannot silently drift on the shared fields. The reader
+(:mod:`imbue.mngr.cli.transcript`) deliberately stays tolerant -- it renders
+whatever an agent emitted rather than validating against this schema -- so a
+slightly-off line is still shown rather than dropped.
 
 The schema is deliberately strict on the core contract every record and
 record-type must satisfy, but permissive on *optional* fields that legitimately
