@@ -81,20 +81,18 @@
       margin-bottom: 16px;
       color: #f8fafc;
     }
-    /* Error state */
-    #loading-status {
-      margin-top: 8px;
-      font-size: 12px;
+    /* Quitting state: a status line under the wordmark, shown only while the
+       app is shutting down. Hidden during normal startup loading so that
+       screen is visually unchanged. */
+    .status {
+      display: none;
+      font-size: 14px;
       color: #94a3b8;
-      max-width: 80%;
+      min-height: 18px;
       text-align: center;
-      font-family: "SF Mono", "Fira Code", Menlo, monospace;
-      word-break: break-all;
-      min-height: 16px;
-      user-select: text;
-      -webkit-app-region: no-drag;
     }
-    body.error #loading-status { display: none; }
+    body.quitting .status { display: block; }
+    /* Error state */
     #error-view {
       display: none;
       flex-direction: column;
@@ -166,7 +164,7 @@
     <path d="M69.9316 51.0303C65.3174 51.0303 62.6855 48.2959 62.6855 43.4424V7.58789C62.6855 2.73438 65.3174 0 69.9316 0C74.5459 0 77.1777 2.73438 77.1777 7.58789V43.4424C77.1777 48.2959 74.5459 51.0303 69.9316 51.0303Z" fill="white"/>
     <path d="M6.32324 51.0303C2.29004 51.0303 0 48.6035 0 44.3311V9.50195C0 3.41797 3.34961 0 9.39941 0C14.4922 0 17.1924 2.0166 19.2432 7.38281L27.7881 29.6338H28.0615L36.5723 7.38281C38.623 2.0166 41.3232 0 46.416 0C52.4658 0 55.8154 3.41797 55.8154 9.50195V44.3311C55.8154 48.6035 53.5254 51.0303 49.4922 51.0303C45.459 51.0303 43.1689 48.6035 43.1689 44.3311V21.6016H42.8955L33.0859 46.3135C32.0947 48.8086 30.5225 49.9365 27.959 49.9365C25.3613 49.9365 23.6865 48.7744 22.7295 46.3135L12.9199 21.6016H12.6465V44.3311C12.6465 48.6035 10.3564 51.0303 6.32324 51.0303Z" fill="white"/>
   </svg>
-  <div id="loading-status"></div>
+  <div class="status" id="status-line"></div>
   <div id="error-view">
     <h1>Something went wrong</h1>
     <p class="message" id="error-message">Minds stopped unexpectedly.</p>
@@ -180,6 +178,15 @@
 
   <script>
     var errorView = document.getElementById('error-view');
+    var statusLine = document.getElementById('status-line');
+
+    // Quitting takeover: shell.html is loaded with a `#quitting` hash when a
+    // committed quit flips every window to this page. Reveal the status line and
+    // seed it before any IPC arrives so there's no empty flash.
+    if (location.hash === '#quitting') {
+      document.body.classList.add('quitting');
+      statusLine.textContent = 'Quitting…';
+    }
 
     document.getElementById('retry-btn').addEventListener('click', function() {
       if (window.minds) window.minds.retry();
@@ -194,19 +201,13 @@
     });
 
     if (window.minds) {
-      var loadingStatus = document.getElementById('loading-status');
-      // Warm launches finish well under 10s; only reveal the status line
-      // when the wordmark genuinely looks frozen.
-      var latestStatus = '';
-      var revealed = false;
+      // Drives the status line in the quitting takeover (e.g. "Stopping 2
+      // minds…", "Closing…"). During startup loading the same messages arrive
+      // but the line stays hidden (no `quitting` class), so the loading screen
+      // is unaffected.
       window.minds.onStatusUpdate(function(message) {
-        latestStatus = message || '';
-        if (revealed) loadingStatus.textContent = latestStatus;
+        if (message) statusLine.textContent = message;
       });
-      setTimeout(function() {
-        revealed = true;
-        loadingStatus.textContent = latestStatus;
-      }, 10000);
       window.minds.onErrorDetails(function(data) {
         document.body.classList.add('error');
         errorView.style.display = 'flex';

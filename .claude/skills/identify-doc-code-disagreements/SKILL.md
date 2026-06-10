@@ -6,7 +6,7 @@ description: Identify places in the $1 library where the docs and code disagree
 
 Go gather all the context for the $1 library (per instructions in CLAUDE.md). Be sure to read non_issues.md as well.
 
-Once you've gathered that context, please do the below (and commit when you're finished).
+Once you've gathered that context, please do the below.
 
 Your task is to identify disagreements between the implementation and the documentation in the $1 library.
 

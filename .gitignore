@@ -210,8 +210,9 @@
 **/marimo/_lsp/
 **/__marimo__/
 
-# task folders for local custom claude workflow
-*/*/_tasks/
+# task folders for local custom claude workflow (at any depth, incl. the
+# root-level `dev` project's `dev/_tasks/`, which `*/*/_tasks/` missed)
+**/_tasks/
 **/.sesskey
 
 # Node.js

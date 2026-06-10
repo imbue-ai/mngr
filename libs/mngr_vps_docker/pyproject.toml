@@ -52,9 +52,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Initial threshold; recalibrate once we have a reliable CI measurement
-# of this package's coverage.
-fail_under = 40
+# Floor pinned just below CI-measured coverage; raise incrementally as tests are added.
+fail_under = 45
 omit = [
   "*_test.py",
   "test_*.py",
