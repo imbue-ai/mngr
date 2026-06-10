@@ -164,6 +164,40 @@ def test_help_targets_absent_without_topic_names(completion_cache_dir: Path) -> 
     assert "address" not in cache.help_targets
 
 
+def test_setting_option_names_reference_real_options(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """The recorded setting option names must be real options, and config data must be present.
+
+    ``-S``/``--setting`` is a global common option added by ``add_common_options``;
+    this catches a rename of that option (which would silently break ``-S KEY=VALUE``
+    completion) and confirms the KEY/VALUE data the completer relies on is populated.
+    """
+    write_cli_completions_cache(
+        cli_group=cli, mngr_ctx=temp_mngr_ctx, registered_agent_types=list_registered_agent_types()
+    )
+    cache = _read_cache(completion_cache_dir)
+
+    assert cache.setting_option_names == ["--setting", "-S"]
+
+    # Both forms must actually exist on a command that carries the common options.
+    create_cmd = cli.commands["create"]
+    option_names: set[str] = set()
+    for param in create_cmd.params:
+        if hasattr(param, "opts"):
+            option_names.update(param.opts)
+            option_names.update(param.secondary_opts)
+    for setting_option in cache.setting_option_names:
+        assert setting_option in option_names, (
+            f"setting option {setting_option!r} does not exist on `create`. Available: {sorted(option_names)}"
+        )
+
+    # The KEY=VALUE completer reuses the config key/value data, so it must be populated.
+    assert cache.config_keys, "config_keys is empty; -S key completion would offer nothing"
+    assert cache.config_value_choices, "config_value_choices is empty; -S value completion would offer nothing"
+
+
 def test_every_option_is_classified(completion_cache_dir: Path) -> None:
     """Every CLI --long option must appear in options_by_command in the cache.
 

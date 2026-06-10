@@ -86,6 +86,18 @@ _PLUGIN_NAME_OPTION_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+# Option names whose value is a ``KEY=VALUE`` config override (the ``-S``/
+# ``--setting`` common option). The completer completes their KEY against
+# config_keys and their VALUE against config_value_choices. These are global
+# common options (see ``add_common_options``), so they are recorded once by
+# name rather than per command.
+_SETTING_OPTION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "-S",
+        "--setting",
+    }
+)
+
 # Config key prefixes to exclude from tab completion. These are derived or
 # computed fields that are not meaningful to set directly via `mngr config set`.
 _EXCLUDED_CONFIG_KEY_PREFIXES: Final[frozenset[str]] = frozenset(
@@ -466,6 +478,7 @@ def write_cli_completions_cache(
             positional_completions=positional_completions,
             config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
             help_targets=help_targets,
+            setting_option_names=sorted(_SETTING_OPTION_NAMES),
         )
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME

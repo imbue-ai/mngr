@@ -254,7 +254,7 @@ A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure th
 
 ## Shell completion
 
-`mngr` supports tab completion for commands, options, and agent names in bash and zsh.
+`mngr` supports tab completion for commands, options, agent names, and `-S`/`--setting` config overrides (both the `KEY` and, where the value is constrained, the `VALUE`) in bash and zsh.
 Shell completion is configured automatically by the install script (`scripts/install.sh`).
 
 To set up manually, generate the completion script and append it to your shell rc file:
