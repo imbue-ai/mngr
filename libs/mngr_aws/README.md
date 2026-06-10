@@ -104,9 +104,9 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 Run this once, with credentials that can create security groups, before any developer attempts `mngr create --provider aws`:
 
 ```bash
-uv run mngr aws prepare --region us-east-1
+mngr aws prepare --region us-east-1
 # Or with explicit ingress restriction:
-uv run mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
+mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
 `prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
