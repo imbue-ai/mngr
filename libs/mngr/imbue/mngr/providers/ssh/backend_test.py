@@ -154,6 +154,39 @@ def test_build_provider_instance_with_key_file(tmp_path: Path, temp_mngr_ctx: Mn
     assert instance.hosts["server1"].key_file == key_path
 
 
+def test_build_provider_instance_preserves_known_hosts_file_with_key_file(temp_mngr_ctx: MngrContext) -> None:
+    """When a host sets both ``key_file`` and ``known_hosts_file``, expanding the
+    ``key_file`` path must not drop ``known_hosts_file``.
+
+    Regression test: ``build_provider_instance`` rebuilt ``SSHHostConfig`` while
+    expanding ``key_file`` but omitted ``known_hosts_file``, silently disabling
+    strict host-key checking for any host that configured both. The dynamic-hosts
+    path in ``SSHProviderInstance._read_dynamic_hosts`` already preserves it.
+    """
+    known_hosts_path = Path("/etc/ssh/ssh_known_hosts")
+    config = SSHProviderConfig(
+        hosts={
+            "server1": SSHHostConfig(
+                address="localhost",
+                key_file=Path("~/.ssh/id_ed25519"),
+                known_hosts_file=known_hosts_path,
+            ),
+        },
+    )
+    instance = SSHProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("test"),
+        config=config,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    assert isinstance(instance, SSHProviderInstance)
+    host_config = instance.hosts["server1"]
+    # known_hosts_file must be preserved exactly (strict host-key checking stays on).
+    assert host_config.known_hosts_file == known_hosts_path
+    # key_file must still be expanded (no leading "~").
+    assert host_config.key_file == Path("~/.ssh/id_ed25519").expanduser()
+    assert not str(host_config.key_file).startswith("~")
+
+
 def test_ssh_host_config_defaults() -> None:
     config = SSHHostConfig(address="localhost")
     assert config.address == "localhost"
