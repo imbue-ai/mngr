@@ -185,13 +185,13 @@ def test_user_input_is_converted_to_user_message(state_dir: Path) -> None:
     assert event["source"] == "antigravity/common_transcript"
 
 
-def test_user_input_without_user_request_envelope_drops_event_with_loud_error(state_dir: Path) -> None:
-    """If a future agy version drops the <USER_REQUEST> envelope, surface a loud error and drop the event.
+def test_user_input_without_user_request_envelope_is_used_directly(state_dir: Path) -> None:
+    """Clean USER_INPUT content (no <USER_REQUEST> envelope) is the user's message.
 
-    Silently falling through to the raw content would bake agy's bookkeeping
-    (metadata preamble, future fields) into the user-visible transcript and
-    hide the schema break. Better to drop and shout so the schema mismatch is
-    visible upstream when it happens for the first time.
+    The agy SQLite store (>= 1.0.4, via decode_agy_transcript.py) records the bare typed
+    text in ``CortexStepUserInput.query`` with no envelope, so content without the envelope
+    is the message itself -- not a schema break. (The envelope is still stripped when present;
+    see ``test_user_input_is_converted_to_user_message``.)
     """
     raw = _make_event(
         conv_id="conv-A",
@@ -202,12 +202,12 @@ def test_user_input_without_user_request_envelope_drops_event_with_loud_error(st
     )
     _write_raw_transcript(state_dir, [raw])
 
-    stderr = _run_converter(state_dir)
+    _run_converter(state_dir)
 
-    assert _read_common_events(state_dir) == []
-    assert "USER_INPUT content missing <USER_REQUEST> envelope" in stderr
-    assert "conv=conv-A" in stderr
-    assert "step=0" in stderr
+    events = _read_common_events(state_dir)
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "plain text without envelope"
 
 
 def test_planner_response_without_tool_calls_is_assistant_message(state_dir: Path) -> None:

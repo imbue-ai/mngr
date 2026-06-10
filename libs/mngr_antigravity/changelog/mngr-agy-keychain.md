@@ -16,8 +16,14 @@ Linux, keychain on macOS" split.
 Also added the antigravity end-to-end release test (`test_antigravity_agent_e2e.py`) on the
 shared agent release-lifecycle harness, which this fix unblocks.
 
-Documented a follow-up: the transcript streamer reads the per-conversation JSONL that agy
-wrote through 1.0.3, but agy 1.0.4 (2026-06-01) switched its interactive conversation store
-to a protobuf SQLite `.db`, so the streamer captures nothing on current agy. `dev/README.md`
-records the recovered `.db` protobuf schema (from the binary's embedded descriptors) and a
-repeatable process to re-verify it, as the basis for porting the streamer to read the `.db`.
+Ported the antigravity transcript streamer to agy's new conversation store. agy 1.0.4
+(2026-06-01) switched its interactive store from a per-conversation JSONL transcript (which
+the old streamer tailed, and which agy no longer writes) to a protobuf SQLite `.db`, so the
+streamer was capturing nothing on current agy. `stream_transcript.sh` is now a thin,
+python3-guarded supervisor around a new self-contained decoder (`decode_agy_transcript.py`)
+that reads new steps from each conversation `.db` and emits the same record shape the old
+JSONL had, so the common-transcript converter is unchanged (it now also accepts agy's clean,
+un-enveloped user text). The decoder needs no `protobuf` library or shipped schema -- it is a
+small wire-walk keyed to the field map recovered from the binary's embedded descriptors;
+`dev/README.md` documents that recovered schema and a repeatable process to re-verify it
+after each (roughly weekly) agy release. Tool-call/code-action detail is not yet decoded.

@@ -150,6 +150,9 @@ _DANGEROUSLY_SKIP_PERMISSIONS_FLAG: Final[str] = "--dangerously-skip-permissions
 
 _COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 _RAW_TRANSCRIPT_SCRIPT_NAME: Final[str] = "stream_transcript.sh"
+# The python3 decoder stream_transcript.sh invokes to read agy's SQLite conversation
+# store (agy >= 1.0.4); provisioned alongside the streamer into the commands/ dir.
+_TRANSCRIPT_DECODER_SCRIPT_NAME: Final[str] = "decode_agy_transcript.py"
 
 # Supervisor script provisioned into the agent's commands/ dir; owns the
 # lifecycle of the raw streamer and (when enabled) the common-transcript
@@ -381,13 +384,20 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         return self.agent_config.emit_common_transcript
 
     def get_raw_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the antigravity raw-transcript streamer.
+        """Return the antigravity raw-transcript streamer and its SQLite decoder.
 
-        Always provisioned per :class:`HasTranscriptMixin`: the raw bytes are
-        the source of truth that the common-transcript converter and any
-        future tooling read from.
+        Always provisioned per :class:`HasTranscriptMixin`: the raw records are
+        the source of truth that the common-transcript converter and any future
+        tooling read from. ``stream_transcript.sh`` is the supervisor (python3
+        guard + poll loop); ``decode_agy_transcript.py`` does the actual work of
+        reading new steps from agy's per-conversation SQLite ``.db`` and emitting
+        the JSON records (agy >= 1.0.4 replaced the JSONL transcript the streamer
+        used to tail; see the module docstrings and ``dev/README.md``).
         """
-        return {_RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME)}
+        return {
+            _RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME),
+            _TRANSCRIPT_DECODER_SCRIPT_NAME: _load_antigravity_resource_script(_TRANSCRIPT_DECODER_SCRIPT_NAME),
+        }
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return the antigravity common-transcript converter."""

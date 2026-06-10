@@ -81,18 +81,15 @@ _USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DO
 
 
 def _extract_user_text(content, conv_id, step_index):
-    """Return the inner <USER_REQUEST> text, or None when the envelope is missing.
+    """Return the user's typed text from a USER_INPUT record.
 
-    agy 1.0.0 always wraps USER_INPUT in
-    ``<USER_REQUEST>...</USER_REQUEST>\\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>``.
-    If the envelope is absent, a silent fall-through to the raw content would
-    bake agy's bookkeeping (local-time / model-selection metadata, future
-    fields) into the user-facing transcript without any indication that the
-    converter's contract was violated. We log loudly to stderr (the calling
-    bash surfaces this as a log_warn "convert error: ...") and return None
-    so the caller drops the event; the next agy version that changes the
-    envelope shape will produce an obvious schema-break signal instead of
-    silent garbage.
+    The agy SQLite store (>= 1.0.4, the decode_agy_transcript.py source) records the
+    clean typed text directly in ``CortexStepUserInput.query``, so ``content`` is already
+    the user message. Older agy JSONL wrapped USER_INPUT in
+    ``<USER_REQUEST>...</USER_REQUEST>\\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>``;
+    when that envelope is present (agy could reintroduce it, and historical raw output may
+    still carry it) we keep only its inner text and drop the bookkeeping metadata. A
+    non-string content is a real schema break, so we log it and drop the event.
     """
     if not isinstance(content, str):
         sys.stderr.write(
@@ -100,13 +97,9 @@ def _extract_user_text(content, conv_id, step_index):
         )
         return None
     match = _USER_REQUEST_RE.search(content)
-    if match is None:
-        sys.stderr.write(
-            f"USER_INPUT content missing <USER_REQUEST> envelope for conv={conv_id} step={step_index}; "
-            "dropping event so the schema break is visible upstream\n"
-        )
-        return None
-    return match.group(1)
+    if match is not None:
+        return match.group(1)
+    return content.strip()
 
 
 def _short_value(value):
