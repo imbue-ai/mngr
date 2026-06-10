@@ -532,3 +532,25 @@ def test_read_codex_versions_latest_is_none_when_cache_absent(
     installed, latest = agent._read_codex_versions(agent.host, agent._resolve_user_codex_home(agent.host))
     assert installed == "1.2.3"
     assert latest is None
+
+
+@pytest.mark.parametrize("cache_body", ["{not valid json", "[]", '"0.139.0"', "42"])
+def test_read_codex_versions_latest_is_none_for_unusable_cache(
+    local_provider: LocalProviderInstance, tmp_path: Path, cache_body: str
+) -> None:
+    """A corrupt or non-object version.json yields latest=None without raising.
+
+    `_parse_latest_codex_version` warning-logs a JSON decode error and otherwise
+    returns None for any cache that is not a JSON object with a clean `latest_version`
+    -- the update check then just skips rather than aborting provisioning. `installed`
+    still parses, proving the unusable cache does not poison the whole probe.
+    """
+    agent = _make_codex_agent(
+        CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
+    )
+    user_home = agent._resolve_user_codex_home(agent.host)
+    user_home.mkdir(parents=True, exist_ok=True)
+    (user_home / "version.json").write_text(cache_body)
+    installed, latest = agent._read_codex_versions(agent.host, user_home)
+    assert installed == "1.2.3"
+    assert latest is None
