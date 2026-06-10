@@ -7,6 +7,7 @@ from typing import assert_never
 
 import click
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
@@ -165,13 +166,37 @@ def _output(message: str, output_opts: OutputOptions) -> None:
         write_human_line(message)
 
 
-def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) -> None:
-    """Output the final result."""
+def _output_result(
+    stopped_agents: Sequence[str],
+    failures: Sequence[CleanupFailure],
+    output_opts: OutputOptions,
+) -> None:
+    """Output the final result, including any real cleanup failures.
+
+    Mirrors ``destroy._output_result``: JSON/JSONL output carries the structured
+    ``failures`` list and the cause-specific ``exit_code`` so non-interactive
+    consumers can see which resources were left behind (see
+    specs/cleanup-error-aggregation.md), not just the process exit code.
+    """
     if output_opts.format_template is not None:
         items = [{"name": name} for name in stopped_agents]
         emit_format_template_lines(output_opts.format_template, items)
         return
-    result_data = {"stopped_agents": stopped_agents, "count": len(stopped_agents)}
+    result_data = {
+        "stopped_agents": list(stopped_agents),
+        "count": len(stopped_agents),
+        "failures": [
+            {
+                "category": failure.category.value,
+                "message": failure.message,
+                "agent_name": str(failure.agent_name) if failure.agent_name is not None else None,
+                "host_id": str(failure.host_id) if failure.host_id is not None else None,
+            }
+            for failure in failures
+        ],
+        "failure_count": len(failures),
+        "exit_code": exit_code_for_failures(failures),
+    }
     match output_opts.output_format:
         case OutputFormat.JSON:
             write_json_line(result_data)
@@ -180,6 +205,10 @@ def _output_result(stopped_agents: Sequence[str], output_opts: OutputOptions) ->
         case OutputFormat.HUMAN:
             if stopped_agents:
                 write_human_line("Successfully stopped {} agent(s)", len(stopped_agents))
+            if failures:
+                logger.warning("{} cleanup failure(s) -- resources may remain:", len(failures))
+                for failure in failures:
+                    logger.warning("  - [{}] {}", failure.category.value, failure.message)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -291,7 +320,9 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
                 _output(f"  - {address.agent}", output_opts)
             return
         stopped_host_agents = _stop_hosts_for_addresses(agent_addresses, mngr_ctx, output_opts)
-        _output_result(stopped_host_agents, output_opts)
+        # The --stop-host path raises on a real failure (it does not aggregate
+        # CleanupFailures), so there are never any failures to report here.
+        _output_result(stopped_host_agents, [], output_opts)
         return
 
     # Find agents to stop (RUNNING agents)
@@ -355,11 +386,9 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         now = datetime.now(timezone.utc).isoformat()
         apply_labels(stopped_matches, {"archived_at": now}, mngr_ctx, output_opts)
 
-    # Output final result, then surface any real cleanup failures and exit with a
+    # Output final result (including any real cleanup failures), then exit with a
     # cause-specific code (see specs/cleanup-error-aggregation.md).
-    _output_result(stopped_agents, output_opts)
-    for failure in failures:
-        _output(f"Cleanup failure [{failure.category.value}]: {failure.message}", output_opts)
+    _output_result(stopped_agents, failures, output_opts)
     ctx.exit(exit_code_for_failures(failures))
 
 
