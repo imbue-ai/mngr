@@ -12,8 +12,8 @@ from imbue.mngr.api.testing import created_host
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotNotFoundError
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -44,7 +44,7 @@ def _unique_host_name(prefix: str) -> HostName:
     return HostName(f"{prefix}-{get_short_random_string()}")
 
 
-def _make_agent_for_host(provider: ModalProviderInstance, host: Host) -> AgentInterface:
+def _make_agent_for_host(provider: ModalProviderInstance, host: OnlineHostInterface) -> AgentInterface:
     """Build a minimal real ``BaseAgent`` bound to ``host`` for on_agent_created calls.
 
     ``ModalProviderInstance.on_agent_created`` only reads ``host`` (it creates the
