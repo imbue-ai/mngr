@@ -33,6 +33,7 @@ from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
@@ -71,7 +72,7 @@ class MockOnlineHost(OnlineHostInterface):
     activity_config: ActivityConfig = Field(default_factory=lambda: ActivityConfig(idle_timeout_seconds=3600))
     agents: list[AgentInterface] = Field(default_factory=list)
     discovered_agents: list[DiscoveredAgent] = Field(default_factory=list)
-    ssh_connection_info: tuple[str, str, int, Path | None] | None = Field(default=None)
+    ssh_connection_info: tuple[str, str, int, Path] | None = Field(default=None)
     is_locked: bool = Field(default=False)
     provider_resources: HostResources = Field(default_factory=_default_resources)
     snapshots: list[SnapshotInfo] = Field(default_factory=list)
@@ -194,7 +195,10 @@ class MockOnlineHost(OnlineHostInterface):
     def get_file_mtime(self, path: Path) -> datetime | None:
         raise NotImplementedError()
 
-    def get_ssh_connection_info(self) -> tuple[str, str, int, Path | None] | None:
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        raise NotImplementedError()
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         return self.ssh_connection_info
 
     # --- OnlineHostInterface ---
@@ -258,8 +262,8 @@ class MockOnlineHost(OnlineHostInterface):
     def get_boot_time(self) -> datetime | None:
         return None
 
-    def get_uptime_seconds(self) -> float | None:
-        return None
+    def get_uptime_seconds(self) -> float:
+        return 0.0
 
     def get_provider_resources(self) -> HostResources:
         return self.provider_resources
@@ -317,6 +321,9 @@ class MockOnlineHost(OnlineHostInterface):
         extra_args: str | None = None,
         exclude_git: bool = False,
     ) -> None:
+        raise NotImplementedError()
+
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
         raise NotImplementedError()
 
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:

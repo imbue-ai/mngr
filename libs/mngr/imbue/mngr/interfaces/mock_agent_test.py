@@ -50,6 +50,9 @@ class MockAgent(AgentInterface[AgentTypeConfig]):
     def get_command(self) -> CommandString:
         return self.command
 
+    def set_command(self, command: CommandString) -> None:
+        self.command = command
+
     def get_labels(self) -> dict[str, str]:
         return dict(self.labels)
 
