@@ -106,15 +106,17 @@ def _consume_value_option(words: list[str], option_index: int, end_index: int) -
     continuations (and a trailing lone ``=``) so the whole value is consumed and
     its pieces are not later miscounted as positional arguments.
     """
-    i = option_index + 1  # skip the option name
+    # Skip the option name, then the (first) value word.
+    i = option_index + 1
     if i >= end_index:
         return i
-    i += 1  # skip the (first) value word
-    # In bash a `=`-containing value is split on `=`; stitch the `= X` pieces back on.
+    i += 1
+    # In bash a `=`-containing value is split on `=`; stitch the `= X` pieces back
+    # on (the `=` word break, then the value piece after it).
     while i < end_index and words[i] == "=":
-        i += 1  # the `=` word break
+        i += 1
         if i < end_index:
-            i += 1  # the value piece after `=`
+            i += 1
     return i
 
 

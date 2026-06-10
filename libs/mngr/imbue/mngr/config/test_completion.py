@@ -198,6 +198,37 @@ def test_setting_option_names_reference_real_options(
     assert cache.config_value_choices, "config_value_choices is empty; -S value completion would offer nothing"
 
 
+def test_builtin_agent_type_keys_are_completed_from_schema(
+    completion_cache_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Builtin/registered agent types contribute agent_types.<name>.* keys, not just custom ones.
+
+    These are derived from each type's config *schema*, so a builtin type like
+    ``claude`` (which is not present in the user's config) still completes its
+    settable fields, and constrained fields complete their values
+    (``parent_type`` -> agent type names, bool fields -> true/false).
+    """
+    # A registered builtin type that is NOT present in the user's config. (Plugin
+    # types like claude are not loaded in this test env, so use an explicit
+    # builtin name; get_agent_config_class falls back to the base AgentTypeConfig.)
+    builtin = "my-builtin-agent"
+    assert builtin not in temp_mngr_ctx.config.agent_types
+
+    write_cli_completions_cache(cli_group=cli, mngr_ctx=temp_mngr_ctx, registered_agent_types=[builtin])
+    cache = _read_cache(completion_cache_dir)
+
+    # Its settable fields are offered as keys, derived from the config schema.
+    assert f"agent_types.{builtin}.command" in cache.config_keys
+    assert f"agent_types.{builtin}.parent_type" in cache.config_keys
+
+    # parent_type (an AgentTypeName field) completes to the known agent type names,
+    # which include the registered builtin.
+    parent_type_choices = cache.config_value_choices.get(f"agent_types.{builtin}.parent_type")
+    assert parent_type_choices is not None
+    assert builtin in parent_type_choices
+
+
 def test_options_record_both_forms_and_classify_no_value_options(completion_cache_dir: Path) -> None:
     """options_by_command holds both forms of every option; flag_options holds the no-value ones.
 
