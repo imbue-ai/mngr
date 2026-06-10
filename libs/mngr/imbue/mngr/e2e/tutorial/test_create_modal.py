@@ -52,6 +52,11 @@ def test_create_provider_modal(e2e: E2eSession) -> None:
     assert "my-task" in modal_agent_names, f"Expected 'my-task' among modal agents, got: {modal_agent_names}"
 
 
+# Flaky/slow: provisions a real Claude Code install AND waits for the agent to
+# authenticate and signal readiness before the message can be sent (needs
+# ANTHROPIC_API_KEY in the environment). This is the heaviest claude-on-Modal test
+# and is not validated locally; offload retries flaky tests automatically.
+@pytest.mark.flaky
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -108,6 +113,9 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
     assert "my-task" in modal_agent_names, f"Expected 'my-task' among modal agents, got: {modal_agent_names}"
 
 
+# Flaky/slow: provisions a real Claude Code install on the host, which is slow and
+# not validated locally; offload retries flaky tests automatically.
+@pytest.mark.flaky
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
@@ -198,6 +206,9 @@ def test_create_modal_rsync(e2e: E2eSession) -> None:
     expect(verify.stdout).to_contain("NODE_MODULES_EXCLUDED")
 
 
+# Flaky/slow: provisions a real Claude Code install on the host, which is slow and
+# not validated locally; offload retries flaky tests automatically.
+@pytest.mark.flaky
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
