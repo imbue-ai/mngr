@@ -174,10 +174,7 @@ def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
     no ``authOptions`` at all and we don't actually know (legacy
     fallback: keep the old always-run-browser behaviour).
     """
-    return (
-        LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
-        or not latchkey_service_info.auth_options
-    )
+    return LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options or not latchkey_service_info.auth_options
 
 
 def _json_error(message: str, status_code: int) -> Response:
