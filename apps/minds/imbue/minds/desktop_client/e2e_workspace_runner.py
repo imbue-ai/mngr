@@ -138,6 +138,15 @@ def _current_mngr_branch() -> str | None:
     Returning ``None`` for a detached HEAD lets the FCT resolver skip the
     "branch matching" step rather than asking FCT for a ref named ``HEAD``.
 
+    In CI the checkout is a detached HEAD, so ``git rev-parse --abbrev-ref
+    HEAD`` returns ``HEAD`` and the branch-matching step would never fire --
+    meaning a PR that needs a same-named FCT branch (e.g. one changing the
+    mngr<->FCT config contract) could not be tested against it. GitHub Actions
+    exposes the real branch in the environment, so consult that first:
+    ``GITHUB_HEAD_REF`` is the PR source branch (set only for pull_request
+    events); ``GITHUB_REF_NAME`` is the branch for push events (but a
+    ``<n>/merge`` ref for PRs, which we ignore).
+
     Any failure to invoke git (missing ``.git`` -- e.g. when the runner
     executes inside a Modal sandbox whose source tree was uploaded via
     ``add_local_dir`` and the worktree's ``.git`` file points at a
@@ -146,6 +155,12 @@ def _current_mngr_branch() -> str | None:
     "branch unknown", which routes the caller through the documented
     fall-back to FCT ``main`` rather than crashing the whole run.
     """
+    ci_head_ref = os.environ.get("GITHUB_HEAD_REF")
+    if ci_head_ref:
+        return ci_head_ref
+    ci_ref_name = os.environ.get("GITHUB_REF_NAME")
+    if ci_ref_name and not ci_ref_name.endswith("/merge"):
+        return ci_ref_name
     try:
         result = subprocess.run(
             ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],

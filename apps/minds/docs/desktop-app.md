@@ -58,7 +58,7 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
-- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId, lastWorkspaceAgentId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped. Each window's per-window `lastWorkspaceAgentId` carries the most-recently-opened workspace for that window so its accent paints the titlebar across navigation away from the workspace; it's cleared for matching windows on workspace deletion and for all windows on account sign-out.
 
 ### Environment variables
 
@@ -102,7 +102,7 @@ same shape:
   config.toml             # Optional minds user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
-  window-state.json       # Per-window content URLs, restored on next launch
+  window-state.json       # Per-window content URLs + last-opened workspace, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories

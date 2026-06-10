@@ -154,23 +154,28 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
+# window.mindsAccent helper consumed by chrome.js and sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+# all workspaces so the only axis of variation is the hue. The accent fills
+# the full-width titlebar (not just a small swatch), so a light /
+# low-saturation tone is needed to read as chrome rather than a saturated
+# highlight.
+_WORKSPACE_L: Final[int] = 85
+_WORKSPACE_C: Final[float] = 0.08
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
     """Deterministically map an agent id to a CSS OKLCH color.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Uses a fixed lightness and chroma (a light, low-saturation tone that
+    reads as a chrome surface across the full-width titlebar) so every
+    workspace accent sits at the same readable level, and only the hue
+    varies. Full 360 degree hue range means collisions are effectively
+    impossible, and OKLCH's perceptual uniformity means close hashes
+    still read as visibly different colors.
     """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
     hue = int.from_bytes(digest[:4], "big") % 360
@@ -423,7 +428,6 @@ def render_creating_page(
         "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
-        accent=workspace_accent(str(creation_id)),
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
@@ -1055,7 +1059,6 @@ def render_destroying_page(
         agent_name=agent_name,
         pid=pid,
         status=status,
-        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -1139,7 +1142,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        accent=workspace_accent(agent_id),
     )
 
 
@@ -1177,7 +1179,6 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
-        accent=workspace_accent(agent_id),
     )
 
 
