@@ -166,8 +166,9 @@ class BackendResolverInterface(MutableModel, ABC):
         """Return the workspace color hex for an agent, or None if unset.
 
         Returns a normalized ``#rrggbb`` lowercase string, ``None`` if the
-        agent has no ``color`` label (callers treat None as "needs backfill"),
-        or the default color hex if the stored label is malformed.
+        agent has no ``color`` label (callers fall back to the default
+        workspace color), or the default color hex if the stored label is
+        malformed.
 
         Default implementation returns None. Subclasses with access to
         agent labels should override this.
@@ -809,7 +810,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return the normalized ``#rrggbb`` color label for an agent.
 
         Returns ``None`` when the agent has no ``color`` label (callers
-        treat that as "needs backfill"). Defensively parses the stored
+        fall back to the default workspace color). Defensively parses the stored
         value: if it is non-empty but not a recognized hex literal, logs
         once at WARNING and returns the default workspace color so the
         UI never crashes on a bad label. Mngr itself does not validate

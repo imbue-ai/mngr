@@ -2306,8 +2306,8 @@ def _build_workspace_list(
     Each entry carries an ``accent`` (#rrggbb CSS color) and ``accent_fg``
     (RGB triple for the contrasting titlebar foreground) for the chrome
     and sidebar to render. The accent is the workspace's stored
-    ``color`` label (set at create time by phase-5's picker, or via the
-    settings POST endpoint); workspaces that lack the label (i.e. they
+    ``color`` label (set at create time by the create-form picker, or via
+    the settings POST endpoint); workspaces that lack the label (i.e. they
     were created before the picker shipped and the user hasn't repicked
     yet) get the default workspace color. ``accent_fg`` is the
     WCAG-contrasting foreground for the resolved hex.
@@ -3277,7 +3277,7 @@ def _handle_workspace_settings(
         telegram_state = "active" if telegram_orchestrator.agent_has_telegram(parsed_agent_id) else "pending"
 
     # Pre-fill the color picker with the workspace's stored color (or the
-    # default if the migration backfill hasn't reached it yet). Disable
+    # default when the workspace has no color label yet). Disable
     # the picker controls when the provider that owns this workspace is
     # in error state -- writes against an unreachable host would not be
     # observable until the provider recovers.
