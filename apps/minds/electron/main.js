@@ -333,7 +333,7 @@ function updateBundleBounds(bundle) {
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
-    for (const view of [bundle.contentView, bundle.sidebarView, bundle.modalView]) {
+    for (const view of [bundle.contentView, bundle.modalView]) {
       if (view && !view.webContents.isDestroyed()) {
         view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
       }
@@ -1165,7 +1165,7 @@ function showQuittingInAllWindows() {
     // visible flags) so the full-window chrome view is the only thing on
     // screen, and restoreFromQuittingInAllWindows can bring back exactly what
     // was open if the user backs out of the quit.
-    for (const view of [bundle.sidebarView, bundle.modalView]) {
+    for (const view of [bundle.modalView]) {
       if (view && !view.webContents.isDestroyed()) view.setVisible(false);
     }
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -1200,9 +1200,6 @@ function restoreFromQuittingInAllWindows() {
     bundle.isQuittingState = false;
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
       bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
-    }
-    if (bundle.sidebarView && bundle.sidebarVisible && !bundle.sidebarView.webContents.isDestroyed()) {
-      bundle.sidebarView.setVisible(true);
     }
     if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
       bundle.modalView.setVisible(true);
