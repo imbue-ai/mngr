@@ -62,6 +62,10 @@ class CompletionCacheData(NamedTuple):
     positional_nargs_by_command: dict[str, int | None] = {}
     positional_completions: dict[str, list[list[str]]] = {}
     config_value_choices: dict[str, list[str]] = {}
+    # Option names (e.g. "-S", "--setting") whose value is a ``KEY=VALUE`` config
+    # override. The completer completes their KEY against config_keys and their
+    # VALUE against config_value_choices (the same data behind `mngr config set`).
+    setting_option_names: list[str] = []
     # Candidates for the `mngr help` positional arg: every top-level command name
     # plus every registered help topic key.
     help_targets: list[str] = []

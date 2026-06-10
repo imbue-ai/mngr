@@ -33,6 +33,7 @@ class _CompletionContext(NamedTuple):
     cache: CompletionCacheData
     positional_count: int = 0
     first_positional_word: str | None = None
+    words: tuple[str, ...] = ()
 
 
 def _read_cache() -> CompletionCacheData:
@@ -224,6 +225,7 @@ def _parse_completion_context() -> _CompletionContext | None:
         cache=cache,
         positional_count=positional_count,
         first_positional_word=first_positional_word,
+        words=tuple(words),
     )
 
 
@@ -246,6 +248,15 @@ def _get_completions() -> list[str]:
     ctx = _parse_completion_context()
     if ctx is None:
         return []
+
+    # The ``-S``/``--setting`` KEY=VALUE override is a global common option, so
+    # it is handled ahead of the generic per-command routing below. The helper
+    # returns its candidates already prefix-filtered (the KEY=VALUE token is
+    # split differently by each shell), or None when this is not a setting
+    # context so normal completion proceeds.
+    setting_candidates = _get_setting_candidates(ctx)
+    if setting_candidates is not None:
+        return setting_candidates
 
     candidates: list[str]
 
@@ -304,6 +315,91 @@ def _get_option_value_candidates(choice_key: str, cache: CompletionCacheData) ->
     if choice_key in cache.plugin_name_options:
         return cache.plugin_names
     return []
+
+
+def _setting_key_candidates(key_prefix: str, cache: CompletionCacheData) -> list[str]:
+    """Key-phase candidates for ``-S``/``--setting`` (completing the KEY of KEY=VALUE).
+
+    Keys with a constrained value set are expanded to ``KEY=VALUE`` candidates so
+    that the shared ``KEY=`` prefix is inserted with no trailing space (and a
+    second TAB lists the values). Free-form keys (no constrained values) are
+    emitted bare, since there is nothing to offer after ``=``.
+    """
+    candidates: list[str] = []
+    for key in cache.config_keys:
+        if not key.startswith(key_prefix):
+            continue
+        values = cache.config_value_choices.get(key)
+        if values:
+            candidates.extend(f"{key}={value}" for value in values)
+        else:
+            candidates.append(key)
+    return candidates
+
+
+def _setting_value_candidates(
+    key: str,
+    value_prefix: str,
+    cache: CompletionCacheData,
+    prefix_with_key: bool,
+) -> list[str]:
+    """Value-phase candidates for ``-S``/``--setting`` (completing the VALUE of KEY=VALUE).
+
+    With ``prefix_with_key`` (zsh, where ``KEY=VALUE`` is one word), each value is
+    returned as ``KEY=VALUE`` so the whole word is replaced. Without it (bash,
+    where ``=`` is a word break and only the trailing value word is replaced),
+    the bare values are returned.
+    """
+    matching = [value for value in cache.config_value_choices.get(key, []) if value.startswith(value_prefix)]
+    if prefix_with_key:
+        return [f"{key}={value}" for value in matching]
+    return matching
+
+
+def _get_setting_candidates(ctx: _CompletionContext) -> list[str] | None:
+    """Completion candidates for the ``-S``/``--setting`` KEY=VALUE override option.
+
+    Returns the final (already prefix-filtered) candidate list when the cursor is
+    completing a setting value, or None when this is not a setting context (so the
+    caller falls back to normal completion).
+
+    The ``KEY=VALUE`` token is split differently by each shell, so three shapes
+    are recognised:
+
+    - The option is the previous word (``-S <cursor>`` or ``-S KEY=<cursor>``).
+      This is the key phase in both shells and also the value phase in zsh, which
+      keeps ``KEY=VALUE`` as a single word.
+    - bash treats ``=`` as a word break, so ``KEY=VALPREFIX`` arrives as the
+      separate words ``KEY``, ``=``, ``VALPREFIX``; the standalone ``=`` is the
+      previous word.
+    - bash with the cursor right after ``=`` (``-S KEY=<cursor>``), where the
+      incomplete word is the standalone ``=`` itself.
+    """
+    setting_options = set(ctx.cache.setting_option_names)
+    if not setting_options:
+        return None
+
+    incomplete = ctx.incomplete
+    words = ctx.words
+
+    # Key phase (both shells), or value phase in zsh: the option is the prev word.
+    if ctx.prev_word in setting_options:
+        if "=" in incomplete:
+            key, _, value_prefix = incomplete.partition("=")
+            return _setting_value_candidates(key, value_prefix, ctx.cache, prefix_with_key=True)
+        return _setting_key_candidates(incomplete, ctx.cache)
+
+    # bash value phase with a typed prefix: ``-S KEY = VALPREFIX``.
+    if ctx.prev_word == "=" and ctx.comp_cword >= 3 and words[ctx.comp_cword - 3] in setting_options:
+        key = words[ctx.comp_cword - 2]
+        return _setting_value_candidates(key, incomplete, ctx.cache, prefix_with_key=False)
+
+    # bash value phase with the cursor right after ``=``: ``-S KEY =``.
+    if incomplete == "=" and ctx.comp_cword >= 2 and words[ctx.comp_cword - 2] in setting_options:
+        assert ctx.prev_word is not None
+        return _setting_value_candidates(ctx.prev_word, "", ctx.cache, prefix_with_key=False)
+
+    return None
 
 
 def _resolve_sources(

@@ -1500,3 +1500,188 @@ def test_get_completions_config_set_provider_backend(
     assert "local" in result
     assert "modal" in result
     assert "ssh" in result
+
+
+# =============================================================================
+# -S / --setting (KEY=VALUE config override) completion tests
+# =============================================================================
+
+
+def _setting_cache() -> CompletionCacheData:
+    """A cache wired for ``-S``/``--setting`` completion across commands."""
+    return CompletionCacheData(
+        commands=["create", "destroy"],
+        setting_option_names=["--setting", "-S"],
+        config_keys=["headless", "prefix", "logging.console_level"],
+        config_value_choices={
+            "headless": ["true", "false"],
+            "logging.console_level": ["TRACE", "DEBUG", "BUILD", "INFO", "WARN", "ERROR", "NONE"],
+        },
+    )
+
+
+def test_get_completions_setting_key_phase_valued(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S head<TAB>` expands a valued key to KEY=VALUE candidates.
+
+    The shared ``headless=`` prefix is what lets zsh insert ``KEY=`` with no
+    trailing space and then list the values on the next TAB.
+    """
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless=true", "headless=false"]
+
+
+def test_get_completions_setting_key_phase_valueless(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S pre<TAB>` offers a bare key for a free-form (valueless) field."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S pre", "3")
+
+    result = _get_completions()
+
+    assert result == ["prefix"]
+
+
+def test_get_completions_setting_key_phase_mixed(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S <TAB>` offers expanded valued keys alongside bare valueless keys."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S ", "3")
+
+    result = _get_completions()
+
+    assert "headless=true" in result
+    assert "headless=false" in result
+    assert "prefix" in result
+    assert "logging.console_level=TRACE" in result
+
+
+def test_get_completions_setting_works_on_any_command(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`-S` is a global common option, so it completes on commands other than create too."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr destroy -S head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless=true", "headless=false"]
+
+
+def test_get_completions_setting_long_form(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """The long ``--setting`` form completes the same as ``-S``."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create --setting head", "3")
+
+    result = _get_completions()
+
+    assert result == ["headless=true", "headless=false"]
+
+
+def test_get_completions_setting_value_phase_zsh(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """zsh keeps KEY=VALUE as one word, so the value phase returns KEY=VALUE candidates."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level=", "3")
+
+    result = _get_completions()
+
+    assert result == [
+        "logging.console_level=TRACE",
+        "logging.console_level=DEBUG",
+        "logging.console_level=BUILD",
+        "logging.console_level=INFO",
+        "logging.console_level=WARN",
+        "logging.console_level=ERROR",
+        "logging.console_level=NONE",
+    ]
+
+
+def test_get_completions_setting_value_phase_zsh_with_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """zsh value phase filters by the typed value prefix."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level=D", "3")
+
+    result = _get_completions()
+
+    assert result == ["logging.console_level=DEBUG"]
+
+
+def test_get_completions_setting_value_phase_bash_prefix(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """bash splits on ``=``, so ``-S KEY = VALPREFIX`` returns bare values (only the value word is replaced)."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S logging.console_level = D", "5")
+
+    result = _get_completions()
+
+    assert result == ["DEBUG"]
+
+
+def test_get_completions_setting_value_phase_bash_empty(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """bash with the cursor right after ``=`` (``-S KEY =``) returns all bare values."""
+    _write_command_cache(completion_cache_dir, _setting_cache())
+    set_comp_env("mngr create -S headless =", "4")
+
+    result = _get_completions()
+
+    assert result == ["true", "false"]
+
+
+def test_get_completions_setting_no_options_falls_back(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """An old cache without setting_option_names does not crash and offers nothing for -S."""
+    data = CompletionCacheData(
+        commands=["create"],
+        config_keys=["headless"],
+        config_value_choices={"headless": ["true", "false"]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr create -S head", "3")
+
+    result = _get_completions()
+
+    assert result == []
+
+
+def test_get_completions_setting_does_not_misfire_on_other_option_equals(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A standalone ``=`` after a non-setting option must not trigger value completion."""
+    data = _setting_cache()._replace(
+        options_by_command={"list": ["--format"]},
+        commands=["list"],
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr list --format = jso", "5")
+
+    result = _get_completions()
+
+    assert result == []
