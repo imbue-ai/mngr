@@ -323,7 +323,9 @@ def _build_gateway_start_script(outer_port: int, encryption_key: str, gateway_pa
     )
 
 
-def _ensure_latchkey_gateway_running(host: OuterHostInterface, latchkey_directory: Path, gateway_password: str) -> None:
+def _ensure_latchkey_gateway_running(
+    host: OuterHostInterface, latchkey_directory: Path, gateway_password: str
+) -> None:
     """Start ``latchkey gateway`` on the VPS unless it is already running.
 
     Launches ``LATCHKEY_GATEWAY_PORT=<OUTER_PORT> latchkey gateway`` bound to the
