@@ -363,6 +363,19 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     assert 'id="sidebar-account-label"' in html
 
 
+def test_render_sidebar_page_left_position_tracks_is_mac() -> None:
+    """The floating menu's left position matches the titlebar's
+    sidebar-toggle button: ``left-[72px]`` on macOS (to clear the traffic
+    lights) and ``left-1`` (4px) elsewhere. This pins the menu's icon
+    column directly under the titlebar trigger icon, which is the whole
+    point of plumbing ``is_mac`` through to ``render_sidebar_page``."""
+    html_mac = render_sidebar_page(is_mac=True)
+    html_non_mac = render_sidebar_page(is_mac=False)
+    assert "left-[72px]" in html_mac
+    assert "left-[72px]" not in html_non_mac
+    assert "left-1" in html_non_mac
+
+
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
     html = render_recovery_page(
         agent_id=_AGENT_A,
