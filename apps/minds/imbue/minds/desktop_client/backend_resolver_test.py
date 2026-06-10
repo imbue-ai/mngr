@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -385,8 +386,6 @@ def test_get_workspace_color_recovers_to_default_when_label_malformed() -> None:
     """Mngr does not validate label values; a hand-edited / future-version
     label might be junk. The resolver returns the default workspace color
     rather than crashing the SSE generator."""
-    from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR
-
     resolver = MngrCliBackendResolver()
     host = HostId.generate()
     agent = AgentId.generate()

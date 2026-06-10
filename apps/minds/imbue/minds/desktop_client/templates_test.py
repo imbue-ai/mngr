@@ -18,12 +18,12 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
-from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR
-from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR_NAME
-from imbue.minds.desktop_client.templates import WORKSPACE_PALETTE
-from imbue.minds.desktop_client.templates import normalize_workspace_color
-from imbue.minds.desktop_client.templates import pick_workspace_foreground
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
+from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode

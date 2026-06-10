@@ -15,6 +15,8 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -722,12 +724,6 @@ class MngrCliBackendResolver(BackendResolverInterface):
         label values, so a hand-edited or future-version label might
         carry junk.
         """
-        # Local imports to avoid a circular import with templates.py at
-        # module load (templates imports agent_creator, which transitively
-        # imports backend_resolver).
-        from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR
-        from imbue.minds.desktop_client.templates import normalize_workspace_color
-
         with self._lock:
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:

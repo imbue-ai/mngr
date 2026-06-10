@@ -123,8 +123,8 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
-from imbue.minds.desktop_client.templates import pick_workspace_foreground
 from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
