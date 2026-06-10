@@ -474,7 +474,7 @@ class ProviderInstanceConfig(FrozenModel):
         higher-precedence layer that touches a single field (e.g. a create
         template's ``--setting providers.<name>.is_enabled=true``) from
         silently resetting every other provider field -- like
-        ``is_host_in_docker`` -- back to its model default. Relying on
+        ``is_run_as_root`` -- back to its model default. Relying on
         "override wins unless its value is None" was wrong here: a field whose
         default is a non-None value (a ``bool`` default of ``False``, an empty
         tuple, ...) would clobber the base even when the override never set it.
