@@ -151,4 +151,13 @@ def test_help_markdown_renders_each_section_and_field() -> None:
     assert "**Host fields:**" in markdown
     assert "**Computed and alias fields:**" in markdown
     assert "`host.resource.cpu.count`" in markdown
-    assert "`age` (cel)" in markdown
+
+
+def test_help_markdown_flags_only_cel_only_fields() -> None:
+    """Template-capable fields are unmarked; only the cel-only computed fields are flagged."""
+    markdown = render_catalog_help_markdown()
+    # age/runtime/idle cannot be used in templates, so they carry the marker.
+    assert "`age` `(cel only)`" in markdown
+    # A template-capable field (and the alias `project`) must NOT carry the marker.
+    assert "`name` `(cel only)`" not in markdown
+    assert "`project` `(cel only)`" not in markdown

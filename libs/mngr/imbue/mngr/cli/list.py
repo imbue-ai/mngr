@@ -24,6 +24,8 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.field_catalog import FieldContext
+from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
 from imbue.mngr.cli.field_catalog import render_catalog_help_markdown
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
@@ -985,14 +987,13 @@ def _emit_field_schema(output_opts: OutputOptions) -> None:
         case OutputFormat.JSONL:
             write_json_line({"event": "list_schema", "schema": rows})
         case OutputFormat.HUMAN:
-            for row in rows:
-                write_human_line(
-                    "  {} : {} ({}) - {}",
-                    row["key"],
-                    row["type"],
-                    row["contexts"],
-                    row["description"],
-                )
+            write_human_line(
+                "All fields are usable in --include/--exclude and --sort; "
+                "(cel only) marks fields not usable in --fields/--format:"
+            )
+            for row in build_list_field_catalog():
+                marker = "" if FieldContext.TEMPLATE in row.contexts else " (cel only)"
+                write_human_line("  {} : {}{} - {}", row.key, row.type, marker, row.description)
         case _ as unreachable:
             assert_never(unreachable)
 

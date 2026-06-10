@@ -112,81 +112,77 @@ All agent fields from the "Available Fields" section can be used in filter expre
 
 ## Available Fields
 
-Every field below can be used in CEL expressions for `--include`/`--exclude` and `--sort` (these share one evaluation context, so `cel` covers both).
+Every field below can be used in CEL expressions for `--include`/`--exclude` and `--sort` (which share one evaluation context).
 
-Each field is annotated with the contexts it works in:
-- `cel` - usable in `--include`/`--exclude` and `--sort`
-- `template` - also usable in `--fields` and `--format` template strings
-
-Only the computed fields (age/runtime/idle) are `cel`-only; everything else is both.
+Fields marked `(cel only)` cannot be used in `--fields`/`--format` template strings; all others can. (Only the computed fields age/runtime/idle are `cel`-only.)
 
 **Agent fields:**
-- `id` (cel, template) - Agent ID
-- `name` (cel, template) - Agent name
-- `type` (cel, template) - Agent type (claude, codex, etc.)
-- `command` (cel, template) - Command used to start the agent
-- `work_dir` (cel, template) - Working directory
-- `initial_branch` (cel, template) - Git branch name created for this agent
-- `create_time` (cel, template) - Creation timestamp
-- `start_on_boot` (cel, template) - Whether agent starts on host boot
-- `state` (cel, template) - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
-- `url` (cel, template) - Agent URL (reported)
-- `start_time` (cel, template) - Last start time (reported)
-- `runtime_seconds` (cel, template) - Runtime in seconds
-- `user_activity_time` (cel, template) - Last user activity (reported)
-- `agent_activity_time` (cel, template) - Last agent activity (reported)
-- `idle_seconds` (cel, template) - Idle time in seconds
-- `idle_mode` (cel, template) - Idle detection mode
-- `idle_timeout_seconds` (cel, template) - Idle timeout in seconds
-- `activity_sources` (cel, template) - Activity sources used for idle detection
-- `labels` (cel, template) - Agent labels (key-value pairs)
-- `plugin` (cel, template) - Plugin-specific fields
+- `id` - Agent ID
+- `name` - Agent name
+- `type` - Agent type (claude, codex, etc.)
+- `command` - Command used to start the agent
+- `work_dir` - Working directory
+- `initial_branch` - Git branch name created for this agent
+- `create_time` - Creation timestamp
+- `start_on_boot` - Whether agent starts on host boot
+- `state` - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)
+- `url` - Agent URL (reported)
+- `start_time` - Last start time (reported)
+- `runtime_seconds` - Runtime in seconds
+- `user_activity_time` - Last user activity (reported)
+- `agent_activity_time` - Last agent activity (reported)
+- `idle_seconds` - Idle time in seconds
+- `idle_mode` - Idle detection mode
+- `idle_timeout_seconds` - Idle timeout in seconds
+- `activity_sources` - Activity sources used for idle detection
+- `labels` - Agent labels (key-value pairs)
+- `plugin` - Plugin-specific fields
 
 **Host fields:**
-- `host` (cel, template) - Host information
-- `host.id` (cel, template) - Host ID
-- `host.name` (cel, template) - Host name
-- `host.provider_name` (cel, template) - Provider that owns the host
-- `host.state` (cel, template) - Current host state (RUNNING, STOPPED, etc.)
-- `host.image` (cel, template) - Host image (Docker image name, Modal image ID, etc.)
-- `host.tags` (cel, template) - Metadata tags for the host
-- `host.boot_time` (cel, template) - When the host was last started
-- `host.uptime_seconds` (cel, template) - How long the host has been running
-- `host.resource` (cel, template) - Resource limits for the host
-- `host.resource.cpu` (cel, template) - CPU resources
-- `host.resource.cpu.count` (cel, template) - Number of CPUs allocated to the host
-- `host.resource.cpu.frequency_ghz` (cel, template) - CPU frequency in GHz (None if not reported by provider)
-- `host.resource.memory_gb` (cel, template) - Allocated memory in GB
-- `host.resource.disk_gb` (cel, template) - Allocated disk space in GB (None if not reported)
-- `host.resource.gpu` (cel, template) - GPU resources (None if no GPU allocated)
-- `host.resource.gpu.count` (cel, template) - Number of GPUs allocated to the host
-- `host.resource.gpu.model` (cel, template) - GPU model name (e.g., 'NVIDIA A100')
-- `host.resource.gpu.memory_gb` (cel, template) - GPU memory in GB per GPU
-- `host.ssh` (cel, template) - SSH access details (remote hosts only)
-- `host.ssh.user` (cel, template) - SSH username
-- `host.ssh.host` (cel, template) - SSH hostname
-- `host.ssh.port` (cel, template) - SSH port
-- `host.ssh.key_path` (cel, template) - Path to SSH private key
-- `host.ssh.command` (cel, template) - Full SSH command to connect
-- `host.snapshots` (cel, template) - List of available snapshots
-- `host.is_locked` (cel, template) - Whether the host is currently locked for an operation
-- `host.locked_time` (cel, template) - When the host was locked
-- `host.plugin` (cel, template) - Plugin-defined fields
-- `host.ssh_activity_time` (cel, template) - Last SSH activity time (from host-level activity/ssh file mtime)
-- `host.failure_reason` (cel, template) - Reason for failure if the host failed during creation
+- `host` - Host information
+- `host.id` - Host ID
+- `host.name` - Host name
+- `host.provider_name` - Provider that owns the host
+- `host.state` - Current host state (RUNNING, STOPPED, etc.)
+- `host.image` - Host image (Docker image name, Modal image ID, etc.)
+- `host.tags` - Metadata tags for the host
+- `host.boot_time` - When the host was last started
+- `host.uptime_seconds` - How long the host has been running
+- `host.resource` - Resource limits for the host
+- `host.resource.cpu` - CPU resources
+- `host.resource.cpu.count` - Number of CPUs allocated to the host
+- `host.resource.cpu.frequency_ghz` - CPU frequency in GHz (None if not reported by provider)
+- `host.resource.memory_gb` - Allocated memory in GB
+- `host.resource.disk_gb` - Allocated disk space in GB (None if not reported)
+- `host.resource.gpu` - GPU resources (None if no GPU allocated)
+- `host.resource.gpu.count` - Number of GPUs allocated to the host
+- `host.resource.gpu.model` - GPU model name (e.g., 'NVIDIA A100')
+- `host.resource.gpu.memory_gb` - GPU memory in GB per GPU
+- `host.ssh` - SSH access details (remote hosts only)
+- `host.ssh.user` - SSH username
+- `host.ssh.host` - SSH hostname
+- `host.ssh.port` - SSH port
+- `host.ssh.key_path` - Path to SSH private key
+- `host.ssh.command` - Full SSH command to connect
+- `host.snapshots` - List of available snapshots
+- `host.is_locked` - Whether the host is currently locked for an operation
+- `host.locked_time` - When the host was locked
+- `host.plugin` - Plugin-defined fields
+- `host.ssh_activity_time` - Last SSH activity time (from host-level activity/ssh file mtime)
+- `host.failure_reason` - Reason for failure if the host failed during creation
 
 **Computed and alias fields:**
-- `age` (cel) - Seconds since create_time.
-- `runtime` (cel) - Alias for runtime_seconds.
-- `idle` (cel) - Seconds since the most recent activity across user_activity_time, agent_activity_time, and host.ssh_activity_time (only present when at least one is set).
-- `host.provider` (cel, template) - Alias for host.provider_name (the documented short form).
-- `project` (cel, template) - Alias for labels.project (mirrors the --project filter flag).
+- `age` `(cel only)` - Seconds since create_time.
+- `runtime` `(cel only)` - Alias for runtime_seconds.
+- `idle` `(cel only)` - Seconds since the most recent activity across user_activity_time, agent_activity_time, and host.ssh_activity_time (only present when at least one is set).
+- `host.provider` - Alias for host.provider_name (the documented short form).
+- `project` - Alias for labels.project (mirrors the --project filter flag).
 
 **Dynamic fields:**
-- `labels.$KEY` (cel, template) - A specific agent label value (e.g. labels.project).
-- `plugin.$PLUGIN_NAME.*` (cel, template) - Plugin-defined agent fields (e.g. plugin.chat_history.messages).
-- `host.tags.$KEY` (cel, template) - A specific host label/tag value (e.g. host.tags.env).
-- `host.plugin.$PLUGIN_NAME.*` (cel, template) - Host plugin fields (e.g. host.plugin.aws.iam_user).
+- `labels.$KEY` - A specific agent label value (e.g. labels.project).
+- `plugin.$PLUGIN_NAME.*` - Plugin-defined agent fields (e.g. plugin.chat_history.messages).
+- `host.tags.$KEY` - A specific host label/tag value (e.g. host.tags.env).
+- `host.plugin.$PLUGIN_NAME.*` - Host plugin fields (e.g. host.plugin.aws.iam_user).
 
 **Notes:**
 - You can use Python-style list slicing for list fields (e.g. `host.snapshots[0]` for the first snapshot, `host.snapshots[:3]` for the first 3).

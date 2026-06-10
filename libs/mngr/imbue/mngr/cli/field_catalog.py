@@ -242,13 +242,10 @@ def render_catalog_help_markdown() -> str:
     rows = build_list_field_catalog()
     lines: list[str] = [
         "Every field below can be used in CEL expressions for `--include`/`--exclude` and "
-        "`--sort` (these share one evaluation context, so `cel` covers both).",
+        "`--sort` (which share one evaluation context).",
         "",
-        "Each field is annotated with the contexts it works in:",
-        "- `cel` - usable in `--include`/`--exclude` and `--sort`",
-        "- `template` - also usable in `--fields` and `--format` template strings",
-        "",
-        "Only the computed fields (age/runtime/idle) are `cel`-only; everything else is both.",
+        "Fields marked `(cel only)` cannot be used in `--fields`/`--format` template strings; "
+        "all others can. (Only the computed fields age/runtime/idle are `cel`-only.)",
         "",
     ]
     for section in _SECTION_ORDER:
@@ -257,9 +254,9 @@ def render_catalog_help_markdown() -> str:
             continue
         lines.append(f"**{section.value}:**")
         for row in section_rows:
-            contexts = ", ".join(context.value for context in row.contexts)
+            marker = "" if FieldContext.TEMPLATE in row.contexts else " `(cel only)`"
             description = f" - {row.description}" if row.description else ""
-            lines.append(f"- `{row.key}` ({contexts}){description}")
+            lines.append(f"- `{row.key}`{marker}{description}")
         lines.append("")
     lines.append("**Notes:**")
     lines.append(
