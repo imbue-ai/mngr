@@ -140,10 +140,10 @@ Only the computed fields (age/runtime/idle) are `cel`-only; everything else is b
 - `idle_timeout_seconds` (cel, template) - Idle timeout in seconds
 - `activity_sources` (cel, template) - Activity sources used for idle detection
 - `labels` (cel, template) - Agent labels (key-value pairs)
-- `host` (cel, template) - Host information
 - `plugin` (cel, template) - Plugin-specific fields
 
 **Host fields:**
+- `host` (cel, template) - Host information
 - `host.id` (cel, template) - Host ID
 - `host.name` (cel, template) - Host name
 - `host.provider_name` (cel, template) - Provider that owns the host

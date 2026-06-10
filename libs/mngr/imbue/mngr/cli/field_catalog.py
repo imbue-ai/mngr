@@ -198,7 +198,9 @@ def build_list_field_catalog() -> tuple[FieldCatalogRow, ...]:
     ):
         if _is_discriminator_annotation(annotation):
             continue
-        section = FieldSection.HOST if key.startswith("host.") else FieldSection.AGENT
+        # The bare ``host`` container row has no trailing dot, so match it explicitly
+        # alongside its dotted descendants (host.name, host.resource, ...).
+        section = FieldSection.HOST if key == "host" or key.startswith("host.") else FieldSection.AGENT
         rows.append(
             FieldCatalogRow(
                 key=key,

@@ -35,6 +35,17 @@ def test_catalog_is_derived_from_the_live_model_shape() -> None:
     assert {"host.name", "host.provider_name", "host.resource.cpu.count", "host.ssh.host"} <= keys
 
 
+def test_top_level_host_container_is_a_host_field() -> None:
+    """The bare ``host`` container row is grouped with the host fields, not the agent ones.
+
+    Its key lacks the ``host.`` dotted prefix shared by its descendants, so it must
+    be classified explicitly; otherwise it renders awkwardly at the end of the agent
+    section just before its own children.
+    """
+    rows_by_key = {row.key: row for row in build_list_field_catalog()}
+    assert rows_by_key["host"].section == FieldSection.HOST
+
+
 def test_catalog_omits_the_model_discriminator_tag() -> None:
     """The ``resource_type`` discriminator (Literal['agent']) is not a referenceable field.
 
