@@ -250,7 +250,10 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        full_view = mngr_ctx.config.model_dump(mode="json")
+        # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime
+        # on DockerProviderConfig); without it model_dump serializes providers by
+        # the declared base type and silently drops subclass-only keys.
+        full_view = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
         if opts.all:
             config_data = full_view
         else:
@@ -444,7 +447,10 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         return
 
     # Merged mode: extends are already applied; bare key lookup is sufficient.
-    config_data = mngr_ctx.config.model_dump(mode="json")
+    # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime on
+    # DockerProviderConfig); without it model_dump serializes providers by the
+    # declared base type and silently drops subclass-only keys.
+    config_data = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
     try:
         value = _get_nested_value(config_data, key)
         _emit_config_value(key, value, output_opts)

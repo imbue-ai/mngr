@@ -2,7 +2,7 @@
 
 Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
-and the auto-open behavior for the requests panel.
+and the auto-open behavior for the inbox modal.
 
 The env-selection URL (``connector_url``, ``litellm_proxy_url``) lives in
 the per-tier ``ClientEnvConfig`` loaded via ``--config-file``; this file is
@@ -124,7 +124,12 @@ class MindsConfig(MutableModel):
             self._write_raw(data)
 
     def get_auto_open_requests_panel(self) -> bool:
-        """Return whether the requests panel should auto-open on new requests. Default: True."""
+        """Return whether the inbox should auto-open on new pending requests. Default: True.
+
+        Setting key kept as ``auto_open_requests_panel`` for backward
+        compatibility with existing on-disk configs; "panel" now refers
+        to the inbox modal (the old side panel has been removed).
+        """
         with self._lock:
             data = self._read_raw()
             value = data.get("auto_open_requests_panel")
@@ -133,7 +138,11 @@ class MindsConfig(MutableModel):
             return True
 
     def set_auto_open_requests_panel(self, enabled: bool) -> None:
-        """Set whether the requests panel should auto-open on new requests."""
+        """Set whether the inbox should auto-open on new pending requests.
+
+        Setting key kept as ``auto_open_requests_panel`` for backward
+        compatibility; "panel" now refers to the inbox modal.
+        """
         with self._lock:
             data = self._read_raw()
             data["auto_open_requests_panel"] = enabled

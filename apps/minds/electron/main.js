@@ -26,9 +26,39 @@ app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
+// Gap on the left, right, and bottom of the contentView. Matches
+// browser mode's iframe layout (``left-[4px]`` with ``width:
+// calc(100% - 8px)`` in Chrome.jinja) so Electron and browser modes
+// render the same shape. The top of the contentView is flush with the
+// titlebar's bottom edge; the rounded top corners are revealed by the
+// chromeView painting accent in the cutouts.
+const CONTENT_INSET = 4;
+// Corner radius applied to the contentView. Native ``setBorderRadius``
+// rounds all four corners with the same radius; the cutouts at every
+// corner reveal the chromeView underneath (which paints the accent
+// color everywhere it isn't covered by the contentView), so the visible
+// frame around the contentView is uniformly accent-colored regardless
+// of OS or workspace content background.
+//
+// For the inner content corners to look concentric with the OS's outer
+// window rounding (where one exists), the inner radius should be
+// ``outer_radius - inset``. Calibrated by eye against macOS Tahoe's
+// outer rounding (the Liquid Glass redesign bumped this up significantly
+// from Big Sur-era ~11px) -- 12px with our 4px inset reads as a parallel
+// offset of the window's outer curve. Windows/Linux frameless windows
+// are square (no OS rounding to match) so 12px is a free design choice
+// there -- if we ever wire DWM ``DWMWCP_ROUND`` on Win11 the outer would
+// be ~8px and a smaller inner would be more concentric.
+const CONTENT_CORNER_RADIUS = 12;
 const SIDEBAR_WIDTH = 260;
-const REQUESTS_PANEL_WIDTH = 320;
 const CONTENT_PARTITION = 'persist:workspace-content';
+
+// Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
+// burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
+// re-post the chrome-event multiple times in flight; the inbox shell would
+// queue several /inbox/list fetches and waste backend HTTP load by
+// (open windows) x (events).
+const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
 
 // -- Per-window bundle registry --
 const bundles = new Set();
@@ -45,6 +75,12 @@ let workspaceList = []; // [{id, name, account}]
 // window alone -- the recovery flow kicks in via the system_interface_status
 // event). Never cleared once added; a destroyed workspace's id is dead forever.
 const everSeenDestroying = new Set();
+// Latest per-agent system-interface health (``healthy`` / ``stuck`` /
+// ``restarting`` / ``restart_failed``) as pushed by the chrome SSE's
+// ``system_interface_status`` events. Read by the landing-page Stop handler so
+// it can leave a window that is mid-restart alone (the user is intentionally
+// restarting it there) rather than yanking it out from under them.
+const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -86,6 +122,29 @@ function parseWorkspaceId(url) {
     // state before the subdomain cookie is installed. Recognising it lets
     // findBundleForWorkspace de-dupe clicks during the redirect window.
     const pathMatch = parsed.pathname.match(/^\/goto\/(agent-[a-f0-9]+)(?:\/|$)/i);
+    return pathMatch ? pathMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+// Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
+// minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
+// associate``, ``/sharing/<id>/<service>``, ...). Used ONLY to decide
+// which workspace's accent should tint the titlebar; deliberately not
+// fed into ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace``
+// because those drive workspace uniqueness, and we want the user to be
+// able to open ``/workspace/X/settings`` in one window while another
+// window holds the actual workspace X.
+function parseAccentSourceAgentId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    const pathMatch = parsed.pathname.match(
+      /^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i,
+    );
     return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
@@ -157,7 +216,7 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.sidebarView, b.requestsPanelView, b.modalView];
+    const views = [b.chromeView, b.contentView, b.sidebarView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -175,6 +234,17 @@ function getMostRecentWindow() {
     if (!b.window.isDestroyed()) return b;
   }
   return null;
+}
+
+// Whether ``bundle`` is the only still-open window. The `close` event fires
+// before `closed` (which removes the bundle from the set), so the closing
+// bundle is still counted here; "last" therefore means exactly one live window.
+function isLastLiveWindow(bundle) {
+  let liveCount = 0;
+  for (const b of bundles) {
+    if (!b.window.isDestroyed()) liveCount += 1;
+  }
+  return liveCount <= 1 && !bundle.window.isDestroyed();
 }
 
 function focusBundle(bundle) {
@@ -210,32 +280,92 @@ function updateAllOsTitles() {
   for (const b of bundles) updateOsTitle(b);
 }
 
+// Tear down every live window currently open to ``agentId``. If those windows
+// are the only ones left, navigate them to the home page instead of closing
+// them, so we never close the last window (which would commit an app
+// shutdown). Shared by the workspace-destroyed handler and the landing-page
+// Stop handler. (At most one window exists per workspace, so this affects at
+// most one window in practice.)
+function detachWindowsForWorkspace(agentId) {
+  if (!agentId) return;
+  const affected = [];
+  for (const b of bundles) {
+    if (!b.window.isDestroyed() && b.currentWorkspaceId === agentId) {
+      affected.push(b);
+    }
+  }
+  if (affected.length === 0) return;
+  const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+  for (const b of affected) {
+    if (liveBundleCount - affected.length >= 1) {
+      b.window.close();
+    } else {
+      b.currentWorkspaceId = null;
+      if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+        b.contentView.webContents.loadURL(backendBaseUrl + '/');
+      }
+      updateOsTitle(b);
+      // Notify the chrome renderer that this window is no longer showing a
+      // workspace. The did-navigate handler that fires after the loadURL above
+      // would NOT send this IPC: its diff-guard (`bundle.currentWorkspaceId !==
+      // newAgentId`) sees null !== null and skips. Without this explicit
+      // notification the renderer's `currentTitleAgentId` would stay as the
+      // detached workspace's id, which then blocks the
+      // `last-workspace-agent-id-changed: null` broadcast from clearing the
+      // titlebar accent (the chrome.js handler gates on `currentTitleAgentId`
+      // being falsy).
+      sendCurrentWorkspaceToBundleViews(b);
+    }
+  }
+}
+
 // -- Layout --
 
 function updateBundleBounds(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   const { width, height } = bundle.window.getContentBounds();
 
-  if (bundle.isErrorState || bundle.isLoadingState) {
+  if (bundle.isErrorState || bundle.isLoadingState || bundle.isQuittingState) {
+    // The chrome view takes over the whole window; every other view collapses
+    // to zero so the takeover screen (shell.html) is the only thing visible.
+    // For loading/error the auxiliary views are already absent, so the loop is
+    // a no-op there; the quitting flip leaves them present-but-hidden, so this
+    // guarantees none of them peek out from behind the full-window chrome view.
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      bundle.contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    for (const view of [bundle.contentView, bundle.sidebarView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
     }
     return;
   }
 
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
+    // The chromeView covers the entire window. Its body background is
+    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
+    // (the ``CONTENT_INSET``-wide frame around three sides and the
+    // rounded-corner cutouts at all four corners of the contentView),
+    // the chromeView fills in with the current workspace's accent
+    // color. This mirrors browser mode where the iframe sits inside a
+    // matching body inset that paints the same accent color.
+    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    const rightOffset = bundle.requestsPanelVisible ? REQUESTS_PANEL_WIDTH : 0;
+    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
+    // bottom (top is flush with the titlebar's bottom edge). That gap
+    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
+    // ``createBundleWebContentsViews``) together create the "tucks
+    // under a rounded inset frame" look without needing per-corner
+    // control: all four corners of the contentView are visibly rounded
+    // and the cutouts reveal accent color (the chromeView below),
+    // independent of whatever background the workspace content paints.
     bundle.contentView.setBounds({
-      x: 0,
+      x: CONTENT_INSET,
       y: TITLEBAR_HEIGHT,
-      width: width - rightOffset,
-      height: height - TITLEBAR_HEIGHT,
+      width: width - CONTENT_INSET * 2,
+      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
     });
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
@@ -246,25 +376,20 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
-  if (bundle.requestsPanelView && !bundle.requestsPanelView.webContents.isDestroyed()) {
-    bundle.requestsPanelView.setBounds({
-      x: width - REQUESTS_PANEL_WIDTH,
-      y: TITLEBAR_HEIGHT,
-      width: REQUESTS_PANEL_WIDTH,
-      height: height - TITLEBAR_HEIGHT,
-    });
-  }
-  // The modal overlays the entire content area (everything below the title
-  // bar, including the sidebar and requests panel). The title bar stays
-  // uncovered so window controls and the drag handle remain usable. The
-  // view is transparent, so the dialog's own dim backdrop shows the
-  // workspace behind it.
+  // The modal overlays the entire window (including the title bar) so
+  // the inbox drawer reads as a top-level panel rather than something
+  // nested under the chrome. On macOS the OS-level traffic-light
+  // buttons stay visible (they're floating overlays the system draws);
+  // the in-content window controls used on Windows/Linux are hidden
+  // while the modal is open and reappear on close. The view is
+  // transparent, so the dialog's own dim backdrop shows the workspace
+  // behind it.
   if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.setBounds({
       x: 0,
-      y: TITLEBAR_HEIGHT,
+      y: 0,
       width,
-      height: height - TITLEBAR_HEIGHT,
+      height,
     });
   }
 }
@@ -306,13 +431,37 @@ function createBundleWebContentsViews(win) {
       nodeIntegration: false,
     },
   });
+  // Round all four corners of the contentView so it floats inside a
+  // rounded inset frame painted by the full-window chromeView underneath.
+  // See ``updateBundleBounds`` for how the chromeView covers the entire
+  // window and the contentView is inset on three sides. Note from
+  // Electron docs: ``setBorderRadius`` rounds the RENDERED region, but
+  // the view's bounds rect still captures clicks -- so a click in a
+  // corner cutout hits this contentView, which is fine (the cutouts are
+  // at the corners of the workspace content, not over chrome affordances).
+  contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+  // Pin the contentView's between-load background to white so navigation
+  // between workspace pages never reveals the chromeView's accent color
+  // through the gap. (When the previous page tears down, Electron paints
+  // the view's background color for a frame or two before the next page's
+  // first paint lands; the default background is transparent, which would
+  // briefly show the accent through.)
+  contentView.setBackgroundColor('#ffffff');
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools for dev-time inspection.
+  // Auto-open DevTools for dev-time inspection on both the chrome
+  // (titlebar) view and the workspace content view.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    chromeView.webContents.once('did-finish-load', () => {
+      if (!chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
     contentView.webContents.once('did-finish-load', () => {
-      contentView.webContents.openDevTools({ mode: 'detach' });
+      if (!contentView.webContents.isDestroyed()) {
+        contentView.webContents.openDevTools({ mode: 'detach' });
+      }
     });
   }
 
@@ -336,7 +485,19 @@ function wireBundleWindowEvents(bundle) {
   // so we can still reach the child webContents. BaseWindow does not guarantee
   // destruction of child WebContentsView render processes on its own; leaking
   // them across create/close cycles eventually starves new ones of resources.
-  win.on('close', () => {
+  win.on('close', (event) => {
+    // Closing the LAST window quits the app (the backend shuts down with it),
+    // so route that close through the quit sequence -- which shows the
+    // local-mind shutdown prompt BEFORE the window disappears. If the user
+    // proceeds, the quit sequence sets isShuttingDown and re-closes everything
+    // (this handler then falls through to teardown); if they cancel, the window
+    // stays open. Non-last windows, and closes once a quit is already underway,
+    // fall straight through to normal teardown.
+    if (!isShuttingDown && !isQuitSequenceRunning && getBackendProcess() && isLastLiveWindow(bundle)) {
+      event.preventDefault();
+      runQuitSequence();
+      return;
+    }
     // Snapshot session state on every manual window close: by the time
     // `before-quit` fires on the `window-all-closed` path, every bundle has
     // already been removed from `bundles` by its `closed` handler, so saving
@@ -345,11 +506,11 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
+    if (bundle.inboxListReloadTimer) {
+      clearTimeout(bundle.inboxListReloadTimer);
+      bundle.inboxListReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView, bundle.modalView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -372,15 +533,16 @@ function wireBundleShowLogic(bundle) {
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
-  chromeView.webContents.once('did-finish-load', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  }, 3000);
+  // showInactiveOnFirstShow lets callers (e.g. the startup multi-window restore
+  // loop) surface the window without stealing focus from another bundle.
+  const surface = () => {
+    if (win.isDestroyed() || win.isVisible()) return;
+    if (bundle.showInactiveOnFirstShow) win.showInactive();
+    else win.show();
+  };
+  chromeView.webContents.once('did-finish-load', surface);
+  win.once('ready-to-show', surface);
+  setTimeout(surface, 3000);
 }
 
 function createBundle() {
@@ -393,16 +555,26 @@ function createBundle() {
     contentView,
     sidebarView: null,
     sidebarVisible: false,
-    requestsPanelView: null,
-    requestsPanelVisible: false,
-    requestsPanelReloadTimer: null,
     modalView: null,
     modalVisible: false,
+    modalUrl: null,
+    inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // ``lastWorkspaceAgentId`` is the agent id whose accent should color
+    // THIS window's titlebar even after the user navigates away from the
+    // workspace (e.g. to Home). Distinct from ``currentWorkspaceId``
+    // because that clears on every navigate-to-non-workspace; this only
+    // changes when the user opens a *different* workspace in this window,
+    // or when the workspace is deleted / the user signs out. Persisted in
+    // each window-state.json entry so windows restore with their own
+    // accent rather than a single global one stepping on every window.
+    lastWorkspaceAgentId: null,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
+    isQuittingState: false,
+    showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
   };
@@ -417,7 +589,7 @@ function createBundle() {
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
+    primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
   wireContentViewEvents(bundle, contentView);
@@ -447,6 +619,16 @@ function wireContentViewEvents(bundle, contentView) {
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
       sendCurrentWorkspaceToBundleViews(bundle);
+    }
+    // Tint the titlebar with the workspace's accent on any
+    // workspace-scoped URL, not just the workspace itself: navigating
+    // to ``/workspace/<id>/settings`` or ``/sharing/<id>/<svc>`` is
+    // conceptually still "I'm working on workspace <id>", so the bar
+    // should adopt that accent. Distinct from the narrower
+    // ``parseWorkspaceId`` above which drives workspace uniqueness.
+    const accentAgentId = parseAccentSourceAgentId(url);
+    if (accentAgentId) {
+      updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -590,13 +772,13 @@ function notifyOpenFailed(url) {
   }).show();
 }
 
-// -- Sidebar / requests panel helpers (per-bundle) --
+// -- Sidebar helpers (per-bundle) --
 
-// Sidebar and requests-panel views are created lazily the first time the
-// user toggles them on, then reused for all subsequent toggles via
-// setVisible(true/false). Destroying and recreating a WebContentsView on
-// every click means spawning a fresh render process + preload + loadURL
-// round-trip; on rapid clicks these queue up and take seconds to drain.
+// The sidebar view is created lazily the first time the user toggles it
+// on, then reused for all subsequent toggles via setVisible(true/false).
+// Destroying and recreating a WebContentsView on every click means
+// spawning a fresh render process + preload + loadURL round-trip; on
+// rapid clicks these queue up and take seconds to drain.
 
 function openSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
@@ -613,7 +795,7 @@ function openSidebar(bundle) {
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
       sendCurrentWorkspaceToBundleViews(bundle);
-      primeViewWithCachedChromeState(sidebarView.webContents);
+      primeViewWithCachedChromeState(bundle, sidebarView.webContents);
     });
     if (backendBaseUrl) {
       sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
@@ -641,84 +823,15 @@ function toggleSidebar(bundle) {
   else openSidebar(bundle);
 }
 
-function openRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView) {
-    const panel = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, 'preload.js'),
-        contextIsolation: true,
-        nodeIntegration: false,
-      },
-    });
-    bundle.requestsPanelView = panel;
-    bundle.window.contentView.addChildView(panel);
-    registerShortcutsFor(bundle, panel.webContents);
-    if (backendBaseUrl) {
-      panel.webContents.loadURL(backendBaseUrl + '/_chrome/requests-panel');
-    }
-  } else {
-    bundle.window.contentView.removeChildView(bundle.requestsPanelView);
-    bundle.window.contentView.addChildView(bundle.requestsPanelView);
-    bundle.requestsPanelView.setVisible(true);
-    // The panel's HTML is rendered server-side and doesn't subscribe to SSE,
-    // so its cards go stale while hidden. Refresh on show, and cancel any
-    // debounced SSE-driven reload that was pending so we don't double-load.
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
-    }
-    if (!bundle.requestsPanelView.webContents.isDestroyed()) {
-      bundle.requestsPanelView.webContents.reload();
-    }
-  }
-  bundle.requestsPanelVisible = true;
-  updateBundleBounds(bundle);
-}
-
-function closeRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  bundle.requestsPanelView.setVisible(false);
-  bundle.requestsPanelVisible = false;
-  updateBundleBounds(bundle);
-}
-
-// Coalesce rapid SSE-triggered reloads. A burst of requests events
-// (e.g. count 1 -> 2 -> 3 within a few ms) would otherwise restart the
-// panel load multiple times in flight, potentially preventing it from
-// ever settling on a rendered state, and multiplying backend HTTP load
-// by (open windows) x (events).
-const REQUESTS_PANEL_RELOAD_DEBOUNCE_MS = 50;
-function scheduleRequestsPanelReload(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  if (bundle.requestsPanelReloadTimer) {
-    clearTimeout(bundle.requestsPanelReloadTimer);
-  }
-  bundle.requestsPanelReloadTimer = setTimeout(() => {
-    bundle.requestsPanelReloadTimer = null;
-    if (bundle.window.isDestroyed()) return;
-    if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-    if (bundle.requestsPanelView.webContents.isDestroyed()) return;
-    bundle.requestsPanelView.webContents.reload();
-  }, REQUESTS_PANEL_RELOAD_DEBOUNCE_MS);
-}
-
-function toggleRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (bundle.requestsPanelVisible) closeRequestsPanel(bundle);
-  else openRequestsPanel(bundle);
-}
-
 // -- Modal overlay (per-bundle) --
 //
-// The modal is a full-content-area overlay used for transient dialogs (the
-// permission request page) that should not replace the user's workspace in
-// the content view. Like the sidebar / requests panel it is created lazily
-// and reused via setVisible(true/false). It uses the default session (so it
-// carries the auth cookie, like the chrome / requests-panel views) plus the
-// preload bridge, so the page inside can call `window.minds.closeModal()`.
+// The modal is a full-content-area overlay that hosts the inbox modal and
+// any one-off dialog pages. It does not replace the user's workspace in
+// the content view -- the workspace stays visible behind the dialog's dim
+// backdrop. Created lazily and reused via setVisible(true/false). It uses
+// the default session (so it carries the auth cookie, like the chrome
+// view) plus the preload bridge, so the page inside can call
+// `window.minds.closeModal()`.
 
 function openModal(bundle, url) {
   if (!bundle || bundle.window.isDestroyed() || !url) return;
@@ -743,6 +856,16 @@ function openModal(bundle, url) {
         closeModal(bundle);
       }
     });
+    // Auto-open DevTools for dev-time inspection. Matches the
+    // contentView behavior in createBundleWebContentsViews; gated on
+    // the same env var so a single switch covers both surfaces.
+    if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+      modal.webContents.once('did-finish-load', () => {
+        if (!modal.webContents.isDestroyed()) {
+          modal.webContents.openDevTools({ mode: 'detach' });
+        }
+      });
+    }
   } else {
     // Re-add to the parent to raise to the top of z-order, then make visible.
     bundle.window.contentView.removeChildView(bundle.modalView);
@@ -750,6 +873,17 @@ function openModal(bundle, url) {
     bundle.modalView.setVisible(true);
   }
   bundle.modalVisible = true;
+  bundle.modalUrl = url;
+  // Notify the chrome view that the modal is open so it can drop the
+  // ``-webkit-app-region: drag`` on #minds-titlebar. macOS unions drag
+  // regions across all visible views in a window, so the chrome
+  // titlebar's drag rule otherwise wins over the modal's no-drag in
+  // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+    } catch { /* noop */ }
+  }
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL(url);
   }
@@ -761,17 +895,79 @@ function closeModal(bundle) {
   if (!bundle.modalView || !bundle.modalVisible) return;
   bundle.modalView.setVisible(false);
   bundle.modalVisible = false;
+  bundle.modalUrl = null;
+  // Restore the chrome titlebar's drag region.
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: false });
+    } catch { /* noop */ }
+  }
   // Drop the page so its websockets/timers stop and a stale dialog isn't
   // briefly visible the next time the modal opens.
   if (!bundle.modalView.webContents.isDestroyed()) {
     bundle.modalView.webContents.loadURL('about:blank').catch(() => {});
   }
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+    bundle.inboxListReloadTimer = null;
+  }
+}
+
+function inboxUrlFor(query) {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/inbox' + (query || '');
+}
+
+function isInboxModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible) return false;
+  if (!bundle.modalUrl) return false;
+  // Compare path only -- the query (?selected=) may differ between auto-open
+  // and selection-driven loads.
+  try {
+    const u = new URL(bundle.modalUrl);
+    return u.pathname === '/inbox';
+  } catch {
+    return false;
+  }
+}
+
+function openInbox(bundle, query) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const url = inboxUrlFor(query || '');
+  if (!url) return;
+  openModal(bundle, url);
+}
+
+function toggleInbox(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isInboxModalOpen(bundle)) closeModal(bundle);
+  else openInbox(bundle, '');
+}
+
+// Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
+// doesn't queue several /inbox/list fetches when a burst of requests
+// events arrives in quick succession.
+function scheduleInboxListRefresh(bundle, evt) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!isInboxModalOpen(bundle)) return;
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+  }
+  bundle.inboxListReloadTimer = setTimeout(() => {
+    bundle.inboxListReloadTimer = null;
+    if (!bundle || bundle.window.isDestroyed()) return;
+    if (!bundle.modalView || !bundle.modalVisible) return;
+    if (bundle.modalView.webContents.isDestroyed()) return;
+    try {
+      bundle.modalView.webContents.send('chrome-event', evt);
+    } catch { /* noop */ }
+  }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
 }
 
 function sendCurrentWorkspaceToBundleViews(bundle) {
   if (!bundle) return;
   // Both the titlebar (chrome view) and the sidebar key UI off the current
-  // workspace -- the titlebar uses it to scope the per-agent accent swatch
+  // workspace -- the titlebar uses it to drive the per-agent accent color
   // and the auto-redirect to the recovery page (which only fires when a
   // system_interface_status event matches the currently-displayed agent).
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -779,6 +975,15 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
     bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  // Persist this window's "last opened workspace" so a subsequent
+  // navigation to Home (or any non-workspace URL) keeps the bar tinted in
+  // this workspace's color, and so cold-start restores the same color
+  // before the first ``current-workspace-changed`` event lands. Each
+  // window remembers independently -- opening a workspace in window B
+  // does not repaint window A.
+  if (bundle.currentWorkspaceId) {
+    updateBundleLastWorkspaceAgentId(bundle, bundle.currentWorkspaceId);
   }
 }
 
@@ -801,6 +1006,14 @@ function loadUrlIntoBundleContentView(bundle, url) {
     updateOsTitle(bundle);
     sendCurrentWorkspaceToBundleViews(bundle);
   }
+  // Pre-stamp the accent source the same way, but on the wider
+  // ``parseAccentSourceAgentId`` set -- workspace-scoped settings /
+  // sharing routes paint the bar before their first did-navigate lands
+  // (so the user doesn't see a black flash before the accent applies).
+  const accentAgentId = parseAccentSourceAgentId(url);
+  if (accentAgentId) {
+    updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
+  }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
   }
@@ -816,8 +1029,9 @@ function openOrFocusWorkspace(agentId, url) {
   return openNewWindow(absolute);
 }
 
-function openNewWindow(url) {
+function openNewWindow(url, { showInactive = false } = {}) {
   const bundle = createBundle();
+  if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
   if (bundle.chromeView && backendBaseUrl) {
@@ -846,7 +1060,6 @@ function showErrorInAllWindows(message, details) {
     bundle.isErrorState = true;
 
     if (bundle.sidebarView) closeSidebar(bundle);
-    if (bundle.requestsPanelView) closeRequestsPanel(bundle);
     if (bundle.modalView) closeModal(bundle);
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
@@ -884,6 +1097,12 @@ function prepareAllWindowsForRetry() {
           nodeIntegration: false,
         },
       });
+      // Match the rounding + background applied in
+      // createBundleWebContentsViews so the post-retry contentView keeps
+      // the same tucked-under appearance and doesn't flash the accent
+      // through during in-workspace navigation.
+      contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+      contentView.setBackgroundColor('#ffffff');
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
@@ -914,6 +1133,79 @@ function reloadAllWindowsAfterRetry() {
   }
 }
 
+// -- Quitting takeover --
+//
+// Once a quit has committed (isShuttingDown is set) every open window flips to
+// a full-window "quitting" screen. It reuses shell.html -- the same animated
+// wordmark as the startup loading screen -- loaded with a `#quitting` hash so
+// the page reveals a status line. updateBundleBounds collapses every other view
+// so the chrome view alone fills the window, and stop/teardown progress is
+// pushed to it through the existing `status-update` IPC channel. Iterating an
+// empty `bundles` set makes this a natural no-op for a headless signal quit.
+
+// The most recent status pushed to the quitting page. The `#quitting` hash
+// seeds the page with this anyway, but an update can race ahead of the page
+// load (the first `Stopping N minds…` is sent right after `loadFile`, before
+// the renderer registers its listener), so each quitting screen re-pushes it
+// once it finishes loading -- otherwise that first update would be dropped and
+// the page would sit on `Quitting…` for the whole stop.
+let latestQuittingStatus = 'Quitting…';
+
+function showQuittingInAllWindows() {
+  latestQuittingStatus = 'Quitting…';
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = true;
+    // Hide the auxiliary views (without tearing them down or clearing their
+    // visible flags) so the full-window chrome view is the only thing on
+    // screen, and restoreFromQuittingInAllWindows can bring back exactly what
+    // was open if the user backs out of the quit.
+    for (const view of [bundle.sidebarView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) view.setVisible(false);
+    }
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      const chromeContents = bundle.chromeView.webContents;
+      chromeContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'quitting' });
+      chromeContents.once('did-finish-load', () => {
+        if (!chromeContents.isDestroyed()) chromeContents.send('status-update', latestQuittingStatus);
+      });
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
+// Broadcast a status line to every window currently showing the quitting page.
+function updateQuittingStatus(message) {
+  latestQuittingStatus = message;
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed() || !bundle.isQuittingState) continue;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.send('status-update', message);
+    }
+  }
+}
+
+// Reverse showQuittingInAllWindows. Used when the user backs out of an already
+// committed quit via the "could not be stopped" dialog's "Cancel quit": every
+// window returns to its normal layout with whatever views were open before the
+// flip (their pages were only hidden, never torn down).
+function restoreFromQuittingInAllWindows() {
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = false;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
+      bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    }
+    if (bundle.sidebarView && bundle.sidebarVisible && !bundle.sidebarView.webContents.isDestroyed()) {
+      bundle.sidebarView.setVisible(true);
+    }
+    if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.setVisible(true);
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
 function readLastLogLines(lineCount) {
   try {
     const logPath = path.join(paths.getLogDir(), 'minds.log');
@@ -927,17 +1219,39 @@ function readLastLogLines(lineCount) {
 }
 
 // -- Session state --
+//
+// On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId,
+// lastWorkspaceAgentId }, ...] }`` in ``window-state.json``. The
+// pre-titlebar-accent version of the file was a bare array of window
+// entries (no ``lastWorkspaceAgentId`` field); ``loadSessionState``
+// accepts either shape so existing installs migrate transparently on
+// first read. ``lastWorkspaceAgentId`` is per-window: the agent id whose
+// accent colors that window's titlebar across navigation to Home. Each
+// window remembers its own, so opening workspace B in window 2 does not
+// repaint window 1's titlebar. Cleared on workspace deletion (for
+// matching windows) or account sign-out (all windows).
 
 function loadSessionState() {
   try {
     const p = getSessionStatePath();
-    if (!fs.existsSync(p)) return [];
+    if (!fs.existsSync(p)) return { windows: [] };
     const raw = fs.readFileSync(p, 'utf-8');
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string');
+    // Legacy shape: a bare array of window entries (pre-titlebar-accent).
+    if (Array.isArray(parsed)) {
+      return {
+        windows: parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string'),
+      };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const windows = Array.isArray(parsed.windows)
+        ? parsed.windows.filter((e) => typeof e === 'object' && typeof e.url === 'string')
+        : [];
+      return { windows };
+    }
+    return { windows: [] };
   } catch {
-    return [];
+    return { windows: [] };
   }
 }
 
@@ -954,28 +1268,52 @@ function toRelativeBackendUrl(url) {
 
 function saveSessionState() {
   try {
-    const state = [];
-    for (const b of bundles) {
+    const windows = [];
+    // Iterate in MRU order so entry 0 is the most-recently-focused window.
+    // The startup path applies entry 0's bounds to the loading window before
+    // the loading screen renders, so MRU ordering means the loading window
+    // appears at the user's last-active window's position.
+    for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
       if (!relative) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
-      state.push({
+      windows.push({
         url: relative,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
         height: bounds.height,
         displayId: display ? display.id : null,
+        lastWorkspaceAgentId: b.lastWorkspaceAgentId || null,
       });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(state, null, 2));
+    fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
+  }
+}
+
+// Update a single bundle's ``lastWorkspaceAgentId`` and notify only that
+// bundle's chrome view. Persists to disk via ``saveSessionState`` (skipped
+// during teardown so a late SSE-driven call doesn't overwrite the legitimate
+// pre-teardown snapshot with a partial windows array). No-op when the value
+// isn't actually changing so a stream of duplicate ``current-workspace-changed``
+// transitions (Electron emits one per content navigation) doesn't thrash the
+// file or the IPC. Pass ``null`` to clear (workspace deleted, user signed
+// out, no active workspace).
+function updateBundleLastWorkspaceAgentId(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const normalized = typeof agentId === 'string' && agentId ? agentId : null;
+  if (normalized === bundle.lastWorkspaceAgentId) return;
+  bundle.lastWorkspaceAgentId = normalized;
+  if (!isShuttingDown) saveSessionState();
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('last-workspace-agent-id-changed', normalized);
   }
 }
 
@@ -1027,9 +1365,9 @@ function restoreWindowBounds(bundle, entry) {
 // Every chromeView and sidebarView used to open its own EventSource to
 // /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
 // with a couple of workspace windows + sidebars, ALL subsequent requests
-// (/_chrome/sidebar, /_chrome/requests-panel, home navigation) queue
-// behind SSE streams -- you'd see load-finish latencies creep from 50ms
-// to 8+ seconds. Running one SSE connection in the main process and
+// (/_chrome/sidebar, /inbox/list, home navigation) queue behind SSE
+// streams -- you'd see load-finish latencies creep from 50ms to 8+
+// seconds. Running one SSE connection in the main process and
 // broadcasting events via IPC avoids the exhaustion entirely.
 
 function handleChromeSSEEvent(evt) {
@@ -1060,27 +1398,46 @@ function handleChromeSSEEvent(evt) {
     for (const oldId of oldIds) {
       if (newIds.has(oldId)) continue;
       if (!everSeenDestroying.has(oldId)) continue;
-      const affected = [];
+      detachWindowsForWorkspace(oldId);
+      // Clear the stored accent in any window whose remembered "last
+      // opened" was the destroyed workspace, so the next render of those
+      // titlebars falls back to the dark default chrome rather than
+      // pointing at a workspace that no longer exists.
       for (const b of bundles) {
-        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-          affected.push(b);
-        }
-      }
-      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-      for (const b of affected) {
-        if (liveBundleCount - affected.length >= 1) {
-          b.window.close();
-        } else {
-          b.currentWorkspaceId = null;
-          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-            b.contentView.webContents.loadURL(backendBaseUrl + '/');
-          }
-          updateOsTitle(b);
+        if (b.window.isDestroyed()) continue;
+        if (b.lastWorkspaceAgentId === oldId) {
+          updateBundleLastWorkspaceAgentId(b, null);
         }
       }
     }
 
     updateAllOsTitles();
+  } else if (evt.type === 'system_interface_status') {
+    // Remember each mind's latest health so the Stop handler can leave a
+    // window that is actively restarting alone (see confirm-stop-mind).
+    if (evt.agent_id) {
+      systemInterfaceStatusByAgent.set(String(evt.agent_id), evt.status ? String(evt.status) : '');
+    }
+  } else if (evt.type === 'auth_required') {
+    // Clear every window's stored accent on the authenticated ->
+    // unauthenticated boundary (account sign-out or session expiration).
+    // Without this each window's bar would stay tinted with its
+    // last-opened workspace's color on the sign-in page. The SSE endpoint
+    // emits ``auth_required`` and closes whenever the request is
+    // unauthenticated, so a mid-session sign-out manifests here as:
+    // stream that was delivering ``workspaces`` -> stream closes ->
+    // reconnect after 1.5s -> ``auth_required`` payload.
+    // ``latestChromeState.workspaces`` is only ever set from the
+    // ``workspaces`` branch above, so its non-null state is a stable
+    // "we have been authenticated this session" flag -- gating on it
+    // leaves freshly-hydrated ``bundle.lastWorkspaceAgentId`` values
+    // alone during the cold-start unauthenticated path.
+    if (latestChromeState.workspaces !== null) {
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        updateBundleLastWorkspaceAgentId(b, null);
+      }
+    }
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
   } else if (evt.type === 'requests') {
@@ -1090,9 +1447,9 @@ function handleChromeSSEEvent(evt) {
     // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
     // Diff the pending *set* (ordered ids), not the count, so a swap at
-    // constant size still refreshes the panel. Auto-open keys off a
+    // constant size still refreshes the inbox list. Auto-open keys off a
     // genuinely new id appearing (not a count increase, which is blind to
-    // replacements), so approving/denying never reopens a panel the user
+    // replacements), so approving/denying never reopens an inbox the user
     // closed.
     const prevSet = new Set(prevIds);
     const hasNewRequest = newIds.some((id) => !prevSet.has(id));
@@ -1100,18 +1457,15 @@ function handleChromeSSEEvent(evt) {
     latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
     const shouldAutoOpen = autoOpen && hasNewRequest;
-    // Requests panel HTML is static at load time. Refresh visible panels so
-    // their cards reflect the new pending set whenever it changed, OR open
-    // hidden ones when shouldAutoOpen is set. ``openRequestsPanel`` reloads
-    // the panel itself for the visible-bundle case, so we never need to
-    // schedule a reload on top of an open call. Debounced per-bundle so a
-    // burst of changes coalesces into one reload per panel.
+    // When the inbox modal is already open in a bundle, forward the
+    // chrome-event to its shell JS (debounced) so the master list
+    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
     if (idsChanged || shouldAutoOpen) {
       for (const b of bundles) {
-        if (shouldAutoOpen && !b.requestsPanelVisible) {
-          openRequestsPanel(b);
-        } else {
-          scheduleRequestsPanelReload(b);
+        if (shouldAutoOpen && !isInboxModalOpen(b)) {
+          openInbox(b, '');
+        } else if (isInboxModalOpen(b)) {
+          scheduleInboxListRefresh(b, evt);
         }
       }
     }
@@ -1132,7 +1486,7 @@ function broadcastChromeEvent(evt) {
   }
 }
 
-function primeViewWithCachedChromeState(wc) {
+function primeViewWithCachedChromeState(bundle, wc) {
   if (!wc || wc.isDestroyed()) return;
   if (latestChromeState.workspaces !== null) {
     wc.send('chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
@@ -1145,6 +1499,16 @@ function primeViewWithCachedChromeState(wc) {
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
   });
+  // Re-send modal state to the chrome titlebar in case the modal opened
+  // before chrome.js registered its onModalStateChanged listener (e.g. the
+  // requests panel auto-opens at startup faster than chrome.js loads).
+  // Electron IPC drops events with no listener, so without this replay the
+  // initial open is missed and the titlebar drag region wins over the
+  // modal's no-drag in the y=0..TITLEBAR strip. The sidebar view doesn't
+  // listen for this event so we scope the send to the chrome view.
+  if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
+    wc.send('modal-state-changed', { open: !!bundle.modalVisible });
+  }
 }
 
 function kickChromeSSEReconnect() {
@@ -1163,6 +1527,9 @@ function kickChromeSSEReconnect() {
 async function runChromeSSELoop() {
   // Runs until the app is shutting down. Maintains exactly one SSE
   // connection to /_chrome/events, reconnecting on end/error with backoff.
+  // `_started` tracks whether this loop is currently running so callers can
+  // tell whether it needs to be (re)started -- it is cleared on exit below.
+  runChromeSSELoop._started = true;
   while (!isShuttingDown) {
     if (!backendBaseUrl) {
       await sleepInterruptible(500);
@@ -1222,6 +1589,22 @@ async function runChromeSSELoop() {
     });
     // Brief backoff before reconnecting.
     await sleepInterruptible(1500);
+  }
+  // The loop has exited (isShuttingDown went true). Clear the flag so that if
+  // the user backs out of an already-committed quit, ensureChromeSSELoopRunning
+  // can restart it rather than leaving the titlebar without a live SSE feed.
+  runChromeSSELoop._started = false;
+}
+
+// Guarantee the chrome-events SSE consumer is running. Starts it if it has
+// never run or has exited (e.g. it terminated when a quit committed and the
+// user then backed out); otherwise nudges the existing connection to reconnect.
+// Idempotent and safe to call whenever the app returns to its normal state.
+function ensureChromeSSELoopRunning() {
+  if (!runChromeSSELoop._started) {
+    runChromeSSELoop();
+  } else {
+    kickChromeSSEReconnect();
   }
 }
 
@@ -1300,6 +1683,278 @@ function sleepInterruptible(ms) {
       }
     }, interval);
   });
+}
+
+// ---------- Mind shutdown on quit + landing Stop button ----------
+
+// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+const MIND_HTTP_TIMEOUT_MS = 10000;
+// Timeout for the synchronous command endpoints (single/bulk host stop, state
+// container stop). These block until the underlying ``mngr``/docker command
+// finishes; the server's own per-command ceiling is ~120s, so allow margin
+// above it here so the server-side failure surfaces rather than a client abort.
+const MIND_COMMAND_TIMEOUT_MS = 150000;
+
+// GET /api/minds/running -> { ok, running }. ``running`` is an array of
+// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
+// backend) so the caller can distinguish "nothing running" from "couldn't tell"
+// instead of silently treating a failed check as an empty list.
+function getRunningMinds() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      console.warn('[mind-shutdown] no backend URL; cannot list running minds');
+      resolve({ ok: false, running: [] });
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct running-minds request:', e);
+      resolve({ ok: false, running: [] });
+      return;
+    }
+    let body = '';
+    let settled = false;
+    let statusOk = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] running-minds request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, running: [] });
+    }, MIND_HTTP_TIMEOUT_MS);
+    req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] running-minds returned HTTP ${response.statusCode}`);
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, running: [] }); return; }
+        try {
+          const parsed = JSON.parse(body);
+          settle({ ok: true, running: Array.isArray(parsed.running) ? parsed.running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse running-minds response:', e);
+          settle({ ok: false, running: [] });
+        }
+      });
+      response.on('error', (err) => { console.warn('[mind-shutdown] running-minds response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] running-minds request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    req.end();
+  });
+}
+
+// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// reports the stop succeeded (<400), false otherwise. Used by the single-row
+// landing Stop relay.
+function postMindStop(agentId) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      console.warn('[mind-shutdown] missing agent id or backend URL; cannot stop mind');
+      resolve(false);
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop request:', e);
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    let isOk = false;
+    const settle = () => { if (!settled) { settled = true; resolve(isOk); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop request for ${agentId} timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      isOk = response.statusCode < 400;
+      if (!isOk) console.warn(`[mind-shutdown] stop for ${agentId} returned HTTP ${response.statusCode}`);
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn(`[mind-shutdown] stop response error for ${agentId}:`, err); clearTimeout(timer); settle(); });
+    });
+    req.on('error', (err) => { console.warn(`[mind-shutdown] stop request failed for ${agentId}:`, err); clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
+// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
+// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
+// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// of requested minds the server still sees running after the attempt; ``ok`` is
+// false when the request itself failed (so the caller treats it as "couldn't
+// stop" rather than "all stopped").
+function postStopMinds(agentIds) {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl || !agentIds || agentIds.length === 0) {
+      console.warn('[mind-shutdown] no backend URL or no agent ids; cannot bulk-stop minds');
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
+    let req;
+    try {
+      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    let body = '';
+    let settled = false;
+    let statusOk = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] bulk-stop request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, stillRunning: [] });
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, stillRunning: [] }); return; }
+        try {
+          const parsed = JSON.parse(body);
+          settle({ ok: true, stillRunning: Array.isArray(parsed.still_running) ? parsed.still_running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse bulk-stop response:', e);
+          settle({ ok: false, stillRunning: [] });
+        }
+      });
+      response.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    req.end();
+  });
+}
+
+// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
+// container" (provider bookkeeping) so nothing minds-related is left running
+// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
+function postStopStateContainer() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      console.warn('[mind-shutdown] no backend URL; cannot stop state container');
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolve(); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop-state-container request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      if (response.statusCode >= 400) console.warn(`[mind-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
+// Stop every running mind via one synchronous bulk-stop call (the server runs a
+// single ``mngr stop --stop-host`` over all of them), then decide what to do
+// about any that did not stop. Progress is shown in-page on the quitting
+// takeover screen (which the quit sequence has already flipped to). Returns true
+// to proceed with the quit, false to cancel it. On a failure to stop everything,
+// offers Retry / Quit anyway / Cancel.
+async function stopAllMindsThenDecide(running) {
+  let remaining = running;
+  while (true) {
+    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
+    const { ok, stillRunning } = await postStopMinds(remaining.map((mind) => mind.id));
+    // ``ok`` && empty stillRunning = the server confirms everything is down. A
+    // request-level failure (ok=false) is treated as "could not confirm", so we
+    // fall through to the recovery dialog rather than quit assuming success.
+    if (ok && stillRunning.length === 0) {
+      // Every mind is down; also stop the mngr docker state container so no
+      // minds-related container is left running. Best-effort -- it preserves its
+      // volume and restarts on next use.
+      await postStopStateContainer();
+      return true;
+    }
+    const blocked = stillRunning.length > 0 ? stillRunning : remaining;
+    const names = blocked.map((mind) => mind.name).join(', ');
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
+      defaultId: 2,
+      cancelId: 0,
+      message: blocked.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
+      detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
+    });
+    if (response === 0) return false;
+    if (response === 1) return true;
+    remaining = blocked;
+  }
+}
+
+// On quit, ask whether to shut down any still-running minds. This is the FIRST
+// native prompt and runs BEFORE any window is flipped to the quitting page, so
+// cancelling here leaves the app fully intact with no visual change.
+// Returns a plan: `{ proceed, stop, running }`.
+//   proceed=false           -> user cancelled; stay open.
+//   proceed=true, stop=false -> quit now (no minds, or "Leave running").
+//   proceed=true, stop=true  -> quit and stop `running` after the flip.
+async function promptMindShutdown() {
+  if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
+  const { ok, running } = await getRunningMinds();
+  if (!ok) {
+    // The liveness check itself failed -- don't silently quit leaving minds
+    // running. Surface the uncertainty and let the user decide explicitly.
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', 'Quit anyway'],
+      defaultId: 1,
+      cancelId: 0,
+      message: 'Could not check for running minds',
+      detail: 'Any local minds still running would keep using your computer\'s resources. '
+        + 'Quit anyway (they may keep running in the background), or cancel and stay open.',
+    });
+    if (response === 0) return { proceed: false, stop: false, running: [] };
+    return { proceed: true, stop: false, running: [] };
+  }
+  if (running.length === 0) return { proceed: true, stop: false, running: [] };
+  const names = running.map((mind) => mind.name).join(', ');
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Cancel', 'Leave running', 'Shut down all'],
+    defaultId: 2,
+    cancelId: 0,
+    message: running.length === 1
+      ? '1 local mind is still running'
+      : `${running.length} local minds are still running`,
+    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
+      + 'Shutting them down stops their agents and makes their services inaccessible '
+      + '(your data is preserved and you can start them again).',
+  });
+  if (response === 0) return { proceed: false, stop: false, running: [] };
+  if (response === 1) return { proceed: true, stop: false, running: [] };
+  return { proceed: true, stop: true, running };
 }
 
 function fetchInitialChromeState(timeoutMs = 4000) {
@@ -1465,6 +2120,15 @@ async function onReady() {
   await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
+  // Apply saved bounds before the loading screen renders so the window doesn't
+  // jump from default-centered to its restored position once content loads.
+  // ``loadSessionState`` returns ``{ windows: [...] }`` (see comment above
+  // the function) -- entry 0 is the MRU window, which is the bundle the
+  // loading screen will surface as.
+  const initialSavedState = loadSessionState();
+  if (initialSavedState.windows.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
+  }
   await runStartupSequence(initialBundle);
 }
 
@@ -1573,6 +2237,32 @@ function installApplicationMenu() {
             }
           },
         },
+        {
+          label: 'Toggle Outer Developer Tools',
+          // Opens DevTools (in detached windows so the small surfaces
+          // aren't constrained to an embedded panel) for all of the
+          // bundle's WebContentsViews -- the chrome view (titlebar +
+          // sidebar shell), the workspace content view, and the modal
+          // view if it exists. Equivalent to setting
+          // MINDS_OPEN_DEVTOOLS=1 at startup but on-demand. No
+          // accelerator -- it's a dev-time affordance.
+          //
+          // ``toggleDevTools()`` ignores its options argument, so to
+          // get the detached window we explicitly open / close.
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
+              if (!view) continue;
+              if (view.webContents.isDestroyed()) continue;
+              if (view.webContents.isDevToolsOpened()) {
+                view.webContents.closeDevTools();
+              } else {
+                view.webContents.openDevTools({ mode: 'detach' });
+              }
+            }
+          },
+        },
         { type: 'separator' },
         { role: 'resetZoom' },
         { role: 'zoomIn' },
@@ -1649,14 +2339,10 @@ async function startBackendWithRetry() {
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
-    // Kick off the shared chrome-events SSE consumer (idempotent: only starts once).
-    if (!runChromeSSELoop._started) {
-      runChromeSSELoop._started = true;
-      runChromeSSELoop();
-    } else {
-      // On retry after backend restart, force the live connection to reconnect.
-      kickChromeSSEReconnect();
-    }
+    // Kick off the shared chrome-events SSE consumer (idempotent: starts it if
+    // it isn't already running, otherwise forces a reconnect after a backend
+    // restart).
+    ensureChromeSSELoopRunning();
 
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
@@ -1719,8 +2405,21 @@ async function startBackendWithRetry() {
         ? new Set(workspaceList.map((w) => w.id))
         : null;
       const restorable = authenticated
-        ? filterRestorableUrls(savedState, knownAgentIdsSet)
+        ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
+      // Drop any stored per-window ``lastWorkspaceAgentId`` whose workspace
+      // no longer exists -- otherwise the restored titlebar would paint
+      // with the color of a workspace the user already destroyed.
+      if (knownAgentIdsSet) {
+        for (const entry of restorable) {
+          if (
+            typeof entry.lastWorkspaceAgentId === 'string' &&
+            !knownAgentIdsSet.has(entry.lastWorkspaceAgentId)
+          ) {
+            entry.lastWorkspaceAgentId = null;
+          }
+        }
+      }
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
@@ -1746,13 +2445,47 @@ async function startBackendWithRetry() {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
-        // Restore saved windows with their positions and sizes
+        // Restore saved windows with their positions, sizes, and -- so
+        // each window's titlebar repaints in its own accent on launch --
+        // their ``lastWorkspaceAgentId`` from the persisted entry. The
+        // explicit ``updateBundleLastWorkspaceAgentId`` call (rather than
+        // a direct assignment to ``bundle.lastWorkspaceAgentId``) sends
+        // the matching IPC to the chrome view so the accent is applied
+        // before any ``current-workspace-changed`` event arrives.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
+        if (first.lastWorkspaceAgentId) {
+          updateBundleLastWorkspaceAgentId(initialBundle, first.lastWorkspaceAgentId);
+        }
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        // Open the lesser-MRU windows without stealing focus, so the
+        // MRU-zero window (already focused as initialBundle) stays focused
+        // after restore completes.
+        const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
+          if (entry.lastWorkspaceAgentId) {
+            updateBundleLastWorkspaceAgentId(bundle, entry.lastWorkspaceAgentId);
+          }
+          restoredBundles.push(bundle);
+        }
+        // createBundle unshifts each new bundle to the front of mruWindows,
+        // which reverses the saved order. Re-write the MRU list so
+        // initialBundle stays MRU-zero and the restored windows follow in
+        // their saved (i.e. previously most-recent-first) order, so the next
+        // saveSessionState preserves recency across restarts.
+        mruWindows.length = 0;
+        mruWindows.push(initialBundle, ...restoredBundles);
+        // showInactive() blocks keyboard focus but not z-order: on macOS the
+        // restored windows still surface in front of initialBundle. Re-raise
+        // initialBundle as each restored window appears so it stays on top.
+        const raiseInitial = () => {
+          if (initialBundle && !initialBundle.window.isDestroyed()) initialBundle.window.focus();
+        };
+        for (const bundle of restoredBundles) {
+          if (bundle.window.isVisible()) raiseInitial();
+          else bundle.window.once('show', raiseInitial);
         }
       }
     } else {
@@ -1914,13 +2647,8 @@ ipcMain.on('toggle-sidebar', (event) => {
   toggleSidebar(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-requests-panel', (event) => {
-  toggleRequestsPanel(getBundleFromEvent(event));
-});
-
-ipcMain.on('open-requests-panel', (event) => {
-  const bundle = getBundleFromEvent(event);
-  openRequestsPanel(bundle);
+ipcMain.on('toggle-inbox', (event) => {
+  toggleInbox(getBundleFromEvent(event));
 });
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
@@ -1934,29 +2662,56 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
 
 ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
-  const url = toAbsoluteUrl('/requests/' + eventId);
-  // Open the request in a modal overlay in the window the user clicked from,
-  // rather than navigating its content view. This keeps the user's workspace
-  // exactly as they left it -- closing the dialog returns them to their work
-  // with no context lost, and no window switching.
+  // Open the inbox modal pre-selected on the target request. Keeps the user's
+  // workspace exactly as they left it -- closing the inbox returns them to
+  // their work with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
-  if (sender) openModal(sender, url);
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(eventId));
 });
 
-// Open a permission-request modal on behalf of the (otherwise unprivileged)
-// workspace content view. Only content-relay-preload.js can emit this channel
-// -- the page itself never sees ipcRenderer -- and it does so only for an
-// allowlisted `minds:open-request-modal` postMessage. We re-validate the id
-// here (never trust the renderer) before building the `/requests/<id>` URL,
-// then reuse the same modal path as the requests-panel card click above.
+// Open the inbox modal pre-selected on a request on behalf of the (otherwise
+// unprivileged) workspace content view. Only content-relay-preload.js can
+// emit this channel -- the page itself never sees ipcRenderer -- and it does
+// so only for an allowlisted `minds:open-request-modal` postMessage. We
+// re-validate the id here (never trust the renderer) before building the
+// `/inbox?selected=<id>` URL.
 ipcMain.on('open-request-modal', (event, requestId) => {
   if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
   const sender = getBundleFromEvent(event);
-  if (sender) openModal(sender, toAbsoluteUrl('/requests/' + requestId));
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
 });
 
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
+});
+
+// Native file/directory picker for the file-sharing permission dialog.
+// The inbox modal calls this (via the preload bridge) so the user can
+// pick the path to share. ``options.mode`` is 'file' or 'directory':
+// the dialog exposes separate "Choose file" / "Choose folder" buttons
+// rather than a single combined picker because a dialog can't be both a
+// file and a directory selector on Linux/Windows (Electron would fall
+// back to a directory selector, so picking a file there returns its
+// parent directory). Returns the chosen absolute path, or null when the
+// user cancelled.
+ipcMain.handle('show-file-picker', async (event, options) => {
+  const bundle = getBundleFromEvent(event);
+  const opts = options || {};
+  const property = opts.mode === 'directory' ? 'openDirectory' : 'openFile';
+  const dialogOptions = { properties: [property] };
+  if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
+    dialogOptions.defaultPath = opts.defaultPath;
+  }
+  // Anchor the dialog to the requesting window when we can resolve it so
+  // it behaves as a sheet/modal; fall back to an unparented dialog
+  // otherwise.
+  const result = bundle && bundle.window && !bundle.window.isDestroyed()
+    ? await dialog.showOpenDialog(bundle.window, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+    return null;
+  }
+  return result.filePaths[0];
 });
 
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
@@ -2053,6 +2808,42 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
+// Landing-page Stop button: show a native confirmation, then issue the host
+// stop ourselves. The SSE drives the row from running -> stopped once it lands.
+// Only content-relay-preload.js can emit this channel (for an allowlisted
+// `minds:confirm-stop-mind` postMessage); we re-validate the id here against the
+// same conservative agent-id shape (never trust the renderer).
+ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  const bundle = getBundleFromEvent(event) || getMostRecentWindow();
+  const parentWindow = bundle && !bundle.window.isDestroyed() ? bundle.window : null;
+  const options = {
+    type: 'warning',
+    buttons: ['Cancel', 'Stop mind'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Stop "${name || agentId}"?`,
+    detail: 'Its agents will stop and its services become inaccessible. '
+      + 'Your data is preserved and you can start it again.',
+  };
+  const { response } = parentWindow
+    ? await dialog.showMessageBox(parentWindow, options)
+    : await dialog.showMessageBox(options);
+  if (response !== 1) return;
+  const ok = await postMindStop(agentId);
+  if (!ok) {
+    console.warn(`[mind-shutdown] single-row stop for ${agentId} did not succeed`);
+    return;
+  }
+  // The stop succeeded, so the mind's container is down. Any other window still
+  // open to this mind would observe the now-unreachable system interface, get
+  // redirected to the recovery page, and auto-restart the host -- silently
+  // undoing the stop. Close that window now. Skip it if the mind is mid-restart
+  // (the user is intentionally restarting it in that window).
+  if (systemInterfaceStatusByAgent.get(agentId) === 'restarting') return;
+  detachWindowsForWorkspace(agentId);
+});
+
 ipcMain.on('window-minimize', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.minimize();
@@ -2080,46 +2871,123 @@ ipcMain.on('window-close', (event) => {
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
 });
 
+// Renderer (chrome.js) asks for the persisted last-opened workspace agent id
+// on DOMContentLoaded so the titlebar accent can paint before any
+// ``current-workspace-changed`` event arrives. Per-window: scoped to the
+// caller's bundle, so each window's chrome page sees its own value rather
+// than a single shared one. Writes are driven exclusively from main
+// (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup); there is
+// no renderer-side setter.
+ipcMain.handle('get-last-workspace-agent-id', (event) => {
+  const bundle = getBundleFromEvent(event);
+  return bundle ? bundle.lastWorkspaceAgentId : null;
+});
+
 // -- App lifecycle --
 
 function initiateFullQuit() {
   app.quit();
 }
 
-// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
-// same `before-quit` chain that window-close uses (which already runs
-// `backend.shutdown()`, SIGTERMing the python backend and waiting for
-// uvicorn's graceful exit). Without these handlers Node's default for
-// these signals is to exit immediately, which orphans the python backend
-// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
-// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+// Guards for the quit sequence. ``isQuitSequenceRunning`` prevents the prompt
+// from firing twice (before-quit + window-all-closed can both arrive).
+// ``isHeadlessQuit`` is set by signal handlers so a programmatic shutdown
+// (e.g. ``just minds-stop``) never shows an interactive dialog.
+let isQuitSequenceRunning = false;
+let isHeadlessQuit = false;
+
+// Single async chokepoint for quitting. The order is deliberate:
+//   1. Ask (first native prompt) whether to shut down running local minds.
+//      Cancelling here leaves the app fully intact -- no window has changed yet.
+//   2. Once the user has committed, flip every window to the quitting page so
+//      the teardown delay shows a clear "quitting" state instead of frozen UI.
+//   3. If they chose "Shut down all", stop the local minds with progress rendered
+//      on that page. Backing out there (its native "Cancel quit") restores the
+//      windows and leaves the app running.
+//   4. Tear the backend down and quit.
+async function runQuitSequence() {
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  isQuitSequenceRunning = true;
+
+  let plan = { proceed: true, stop: false, running: [] };
+  try {
+    if (!isHeadlessQuit) {
+      plan = await promptMindShutdown();
+      if (!plan.proceed) {
+        // User cancelled before committing -- stay open, no visual change.
+        isQuitSequenceRunning = false;
+        return;
+      }
+    }
+  } catch (err) {
+    // A failure deciding the prompt must not strand the user unable to quit;
+    // fall through to a normal shutdown.
+    console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
+    plan = { proceed: true, stop: false, running: [] };
+  }
+
+  // The quit is now committed. Flip every open window to the quitting page
+  // (a no-op for a headless quit, which has no interactive UI to update), then
+  // snapshot session state before teardown (the per-window `close` handler
+  // skips saving once isShuttingDown is set).
+  isShuttingDown = true;
+  if (!isHeadlessQuit) showQuittingInAllWindows();
+  if (bundles.size > 0) saveSessionState();
+
+  if (plan.stop && plan.running.length > 0) {
+    let shouldProceed = true;
+    try {
+      shouldProceed = await stopAllMindsThenDecide(plan.running);
+    } catch (err) {
+      // A failure in the stop loop must not strand the user; quit anyway.
+      console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
+    }
+    if (!shouldProceed) {
+      // User backed out via "Cancel quit" after committing -- return the app to
+      // its normal, running state. Clear isShuttingDown FIRST so the restarted
+      // chrome-events SSE loop (which guards on `while (!isShuttingDown)`) does
+      // not immediately exit again; the loop can die during the stop window if
+      // its connection happened to drop while isShuttingDown was set.
+      isShuttingDown = false;
+      restoreFromQuittingInAllWindows();
+      ensureChromeSSELoopRunning();
+      isQuitSequenceRunning = false;
+      return;
+    }
+  }
+
+  updateQuittingStatus('Closing…');
+  await shutdown();
+  app.quit();
+}
+
+// Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
+// same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
+// backend and waiting for uvicorn's graceful exit). Without these handlers
+// Node's default for these signals is to exit immediately, which orphans the
+// python backend and the `mngr forward` / `observe` subprocesses. The `just
+// minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down
+// without showing an interactive local-mind prompt.
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    console.log(`[lifecycle] ${signal} received, requesting quit`);
+    isHeadlessQuit = true;
     app.quit();
   });
 }
 
-app.on('window-all-closed', async () => {
+app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  await shutdown();
-  app.quit();
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  runQuitSequence();
 });
 
-app.on('before-quit', async (event) => {
+app.on('before-quit', (event) => {
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
-  // Capture session state for every open window before teardown. Only save
-  // when bundles is non-empty: on the `window-all-closed` -> `app.quit()`
-  // path, every bundle has already been removed from the Set by its `closed`
-  // handler (and the per-window `close` handler already wrote the last
-  // non-empty snapshot), so saving here would just clobber it with `[]`.
-  if (bundles.size > 0) saveSessionState();
-  if (getBackendProcess() && !isShuttingDown) {
-    isShuttingDown = true;
-    event.preventDefault();
-    await shutdown();
-    app.quit();
-  }
+  // Once the quit sequence has committed (isShuttingDown), let the final
+  // app.quit() proceed untouched. Otherwise intercept: defer the actual quit
+  // until the local-mind prompt + teardown finish (or the user cancels).
+  if (isShuttingDown) return;
+  event.preventDefault();
+  runQuitSequence();
 });

@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-claude"
-version = "0.2.11"
+version = "0.2.12"
 description = "Claude agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.11",
+    "imbue-mngr==0.2.12",
     # anthropic: keep UNPINNED and bump often. Imported for its typed stream-event
     # models, whose `ty` exhaustiveness check only flags new variants on upgrade.
     "anthropic",
@@ -13,7 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "imbue-mngr-modal==0.2.11",
+    "imbue-mngr-modal==0.2.12",
 ]
 
 [project.entry-points.mngr]
@@ -79,8 +79,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Calibrated against measured offload reality (see libs/imbue_common's
-# pyproject.toml for the rationale -- coverage drifts 1-3 points across
-# offload runs of identical code, so a margin below observed coverage
-# is required).
-fail_under = 24
+fail_under = 80

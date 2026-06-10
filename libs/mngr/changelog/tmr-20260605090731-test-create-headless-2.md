@@ -1,2 +1,0 @@
-- Remove the superfluous `@pytest.mark.modal` from the `test_create_headless` e2e release test. The test creates a local command agent and only runs `mngr list`, which never invokes the Modal CLI (the resource guard only tracks Modal CLI invocations in subprocesses, and `mngr list` discovery does not create a Modal environment), so the resource guard correctly flagged the mark as never-invoked.
-- Strengthen `test_create_headless` to verify the headless agent is actually running by exec-ing into its host, instead of only checking that it appears in `mngr list` output.

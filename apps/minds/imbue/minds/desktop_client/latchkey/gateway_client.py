@@ -484,7 +484,7 @@ class LatchkeyGatewayClient(MutableModel):
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
 
-    def approve_permission_request(self, request_id: str) -> None:
+    def approve_permission_request(self, request_id: str, override_path: str | None = None) -> None:
         """Approve the named pending request via the gateway's bundled extension.
 
         Wraps ``POST /permission-requests/approve/<request_id>``. The
@@ -493,6 +493,14 @@ class LatchkeyGatewayClient(MutableModel):
         permissions.json, and removes the pending-request file. Failure
         leaves the request pending so the user can retry.
 
+        ``override_path`` is set only for *file-sharing* requests whose
+        shared path the user edited in the approval dialog before
+        approving. When provided, it is sent as a ``{"path": ...}`` JSON
+        body and the gateway recomputes the file-sharing effect for that
+        path (re-validating it for traversal) instead of using the
+        agent-supplied one. Leaving it ``None`` sends no body, so the
+        gateway applies the precomputed effect verbatim.
+
         Unlike :meth:`delete_permission_request`, ``404`` is *not*
         tolerated here -- approving a request that the gateway has
         forgotten about would silently drop the user's intent on the
@@ -500,9 +508,10 @@ class LatchkeyGatewayClient(MutableModel):
         """
         self.ensure_initialized()
         url = f"{self._require_base_url().rstrip('/')}/permission-requests/approve/{request_id}"
+        json_body = {"path": override_path} if override_path is not None else None
         try:
             with self._one_shot_client() as client:
-                response = client.post(url, headers=self._build_headers())
+                response = client.post(url, headers=self._build_headers(), json=json_body)
         except httpx.HTTPError as e:
             raise self._wrap_transport_error(e, f"POST {url} failed") from e
         if response.status_code >= 400:

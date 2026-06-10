@@ -29,7 +29,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `CardPage` | Centered-card layout for auth flow + form pages. `padding="default"` (`p-10`, auth) or `"form"` (`p-6`, Create); `max_width` is a Tailwind utility. |
 | `Card` | Card surface with `layout`/`padding`/`interactive`/`tag`/`href` props. Pulls `.minds-card` from `tokens.css` for the shared shell. |
 | `Modal` | Overlay dialog with backdrop. Used for confirmation dialogs (Welcome's skip-account prompt, WorkspaceSettings' destroy modal). |
-| `PermissionsDialog` | Full-page permission-request overlay. Composes `PermissionsHeader` + `PermissionsForm` + `PermissionsError`. |
+| `PermissionsHeader` / `PermissionsForm` / `PermissionsError` / `PermissionsManualCredentials` | Composable building blocks for the latchkey permission-request detail fragments (`pages.LatchkeyPredefinedPermission`, `pages.LatchkeyFileSharingPermission`). The surrounding modal chrome lives in the inbox shell (`pages.Inbox`), not in a separate dialog primitive. |
 
 ### Interactive
 
@@ -80,13 +80,14 @@ in sync:
 | `.code-pill` | Inline `<code>` pill (zinc-100 bg, rounded-md, monospace, 0.95em). Match `Sharing.jinja`'s service-name pills. |
 | `.accent-spine` | Vertical workspace-accent stripe on the left edge. Used by Landing project rows + Destroying. |
 | `.sidebar-item` | Sidebar workspace row styling. |
+| `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` / `.titlebar-account` | Accent-aware titlebar foreground utilities. Read `--titlebar-fg` with varying alpha for the title / nav-icon / hover-tint hierarchy; `-danger` keeps the destructive red hover regardless of accent. |
 
 ## Where the shared tokens live
 
 | Source | Contents |
 |---|---|
 | `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_24` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/tokens.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.sidebar-item`, `--shadow-seam`, `--workspace-accent` (via inline style). |
+| `static/tokens.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.sidebar-item`, `.accent-swatch`, `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` / `.titlebar-account`, `--shadow-seam`, `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5

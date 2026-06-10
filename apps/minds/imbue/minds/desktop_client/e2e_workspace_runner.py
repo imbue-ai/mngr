@@ -59,6 +59,11 @@ _FCT_FALLBACK_BRANCH: Final[str] = "main"
 # re-encoding the localhost-origin contract a second time.
 _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
 _CHROME_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/_chrome(?:/|$|\?)")
+# The modal overlay view loads ``/inbox`` (optionally with ``?selected=<id>``)
+# when the inbox modal is shown. Like the chrome views, it lives on the
+# backend origin but is not the content view; exclude it so the runner does
+# not pick it up if the modal has ever been opened.
+_INBOX_PATH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^http://localhost:\d+/inbox(?:/|$|\?)")
 # The agent subdomain URL the create flow redirects to once the workspace's
 # ``system_interface`` is reachable. The desktop client wraps that origin in
 # the mngr_forward plugin, so the port may differ from the bare backend.
@@ -132,6 +137,15 @@ def _current_mngr_branch() -> str | None:
     Returning ``None`` for a detached HEAD lets the FCT resolver skip the
     "branch matching" step rather than asking FCT for a ref named ``HEAD``.
 
+    In CI the checkout is a detached HEAD, so ``git rev-parse --abbrev-ref
+    HEAD`` returns ``HEAD`` and the branch-matching step would never fire --
+    meaning a PR that needs a same-named FCT branch (e.g. one changing the
+    mngr<->FCT config contract) could not be tested against it. GitHub Actions
+    exposes the real branch in the environment, so consult that first:
+    ``GITHUB_HEAD_REF`` is the PR source branch (set only for pull_request
+    events); ``GITHUB_REF_NAME`` is the branch for push events (but a
+    ``<n>/merge`` ref for PRs, which we ignore).
+
     Any failure to invoke git (missing ``.git`` -- e.g. when the runner
     executes inside a Modal sandbox whose source tree was uploaded via
     ``add_local_dir`` and the worktree's ``.git`` file points at a
@@ -140,6 +154,12 @@ def _current_mngr_branch() -> str | None:
     "branch unknown", which routes the caller through the documented
     fall-back to FCT ``main`` rather than crashing the whole run.
     """
+    ci_head_ref = os.environ.get("GITHUB_HEAD_REF")
+    if ci_head_ref:
+        return ci_head_ref
+    ci_ref_name = os.environ.get("GITHUB_REF_NAME")
+    if ci_ref_name and not ci_ref_name.endswith("/merge"):
+        return ci_ref_name
     try:
         result = subprocess.run(
             ["git", "-C", str(_REPO_ROOT), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -415,9 +435,11 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
     """Return the Electron WebContentsView that serves the main content.
 
     Electron's BaseWindow has multiple WebContentsView's (chrome view,
-    content view, requests panel, sidebar). Each is its own CDP page. The
-    content view is the one whose URL is on the backend origin but is NOT
-    rooted at ``/_chrome``. We poll until that page exists because Electron
+    content view, sidebar, and a lazy modal overlay view). Each is its
+    own CDP page. The content view is the one whose URL is on the
+    backend origin and is not one of the chrome-owned surfaces: not
+    rooted at ``/_chrome`` (chrome / sidebar) and not the inbox modal
+    at ``/inbox``. We poll until that page exists because Electron
     spawns the backend asynchronously after launch.
     """
     deadline = time.monotonic() + timeout_seconds
@@ -431,6 +453,8 @@ def _pick_content_page(browser: Browser, timeout_seconds: int) -> Page:
                 if not _BACKEND_ORIGIN_PATTERN.match(url):
                     continue
                 if _CHROME_PATH_PATTERN.match(url):
+                    continue
+                if _INBOX_PATH_PATTERN.match(url):
                     continue
                 logger.info("Picked Electron content page at {}", url)
                 return page

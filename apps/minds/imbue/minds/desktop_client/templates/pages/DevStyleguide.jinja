@@ -61,7 +61,7 @@
         </div>
         <div>
           <p class="text-xl font-semibold text-zinc-900">Standard page heading (h1)</p>
-          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, RequestUnavailable, WorkspaceSettings, Accounts</p>
+          <p class="text-[11px] text-zinc-500 font-mono mt-0.5">text-xl font-semibold -- Landing, Login, AuthError, Destroying, InboxUnavailable, WorkspaceSettings, Accounts</p>
         </div>
         <div>
           <p class="text-lg font-semibold text-zinc-900">Section / modal heading (h2)</p>
@@ -119,17 +119,22 @@
 
     {# Corner-radius ramp. Bare ``rounded`` (Tailwind v3 default = 4px,
        == rounded-md) was banished in favor of explicit ``rounded-md``
-       everywhere for grep-ability. Cards / Modal / PermissionsDialog /
-       RequestUnavailable all use rounded-xl so dialog chrome and card
-       chrome share one shape; rounded-2xl was retired. #}
+       everywhere for grep-ability. ``rounded-xl`` (12px) is shared by
+       cards, modal/dialog chrome, and the chrome content surface that
+       tucks under the colored titlebar (Chrome.jinja's #content-frame)
+       -- the 12px radius matches Electron's ``CONTENT_CORNER_RADIUS``
+       so both browser-mode iframe and Electron WebContentsView render
+       the same shape. ``rounded-2xl`` (16px) has no active site today;
+       it stays on the ramp so future heavier surfaces can reach for it
+       without re-deriving the step. #}
     <section class="mb-12">
       <h2 class="text-lg font-semibold text-zinc-900 mb-1">Corner radius</h2>
       <p class="text-xs text-zinc-500 mb-4">
-        Four steps; each plays one role. Prefer the explicit ``rounded-md``
+        Five steps; each plays one role. Prefer the explicit ``rounded-md``
         over bare ``rounded`` so call sites are grep-able for radius
         rather than for the no-suffix shorthand.
       </p>
-      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div class="bg-white border border-zinc-200 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-md"></div>
           <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-md (4px)</code>
@@ -143,7 +148,12 @@
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-xl"></div>
           <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-xl (12px)</code>
-          <span class="text-[11px] text-zinc-500">cards, modal / dialog chrome</span>
+          <span class="text-[11px] text-zinc-500">cards, modal / dialog chrome, chrome content tuck-under (Chrome.jinja)</span>
+        </div>
+        <div class="flex flex-col items-center text-center">
+          <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-2xl"></div>
+          <code class="text-[11px] font-mono text-zinc-500 mt-1">rounded-2xl (16px)</code>
+          <span class="text-[11px] text-zinc-500">unused (reserved on ramp)</span>
         </div>
         <div class="flex flex-col items-center text-center">
           <div class="w-16 h-16 bg-zinc-200 border border-zinc-300 rounded-full"></div>
@@ -183,25 +193,30 @@
         each example.
       </p>
 
-      {# Titlebar buttons #}
+      {# Titlebar buttons. Demo container paints the full-width accent
+         bar (oklch(85% 0.08 230)) and sets --titlebar-fg to the contrast
+         pick the workspace_accent helper would make for that lightness
+         ("0 0 0", since L=0.85 >= 0.5), so the page title + nav-button
+         glyphs render against the bar exactly as they do in Chrome.jinja. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Titlebar buttons</div>
-        <div class="rounded-lg overflow-hidden border border-zinc-200 bg-zinc-900">
-          <div class="h-[38px] flex items-center select-none border-b border-white/10 px-1">
+        <div class="rounded-lg overflow-hidden border border-zinc-200"
+             style="--titlebar-bg: oklch(85% 0.08 230); --titlebar-fg: 0 0 0;">
+          <div class="h-[38px] flex items-center select-none px-1"
+               style="background-color: var(--titlebar-bg);">
             <div class="flex gap-0.5">
               <TitlebarButton title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
               <TitlebarButton title="Home"><Icon24 name="home" /></TitlebarButton>
               <TitlebarButton title="Back"><Icon24 name="back" /></TitlebarButton>
               <TitlebarButton title="Forward"><Icon24 name="forward" /></TitlebarButton>
             </div>
-            <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
-              <span class="accent-swatch w-2.5 h-2.5 rounded-sm shrink-0"></span>
-              <span class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
+            <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+              <span class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">my-workspace</span>
             </div>
             <TitlebarButton title="Requests" extra="relative"><Icon24 name="messages" /></TitlebarButton>
           </div>
         </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav")</div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="nav") + .titlebar-title (tokens.css)</div>
       </div>
 
       {# Notification badge #}

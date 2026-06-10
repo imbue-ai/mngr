@@ -1,1 +1,0 @@
-Fixed the `test_list_format_json_recap` e2e test (covering `mngr list --format json`): removed an incorrect `@pytest.mark.modal` marker (a bare `mngr list` against an empty environment never invokes Modal, so the resource guard failed the test) and strengthened it to parse the JSON document and assert the documented `agents`/`errors` array structure.

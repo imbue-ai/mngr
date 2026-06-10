@@ -12,11 +12,11 @@ from typing import Final
 
 from loguru import logger
 
+from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
-from imbue.mngr_claude.plugin import get_preserved_sessions_dir_for_host
 from imbue.mngr_claude.stream_json import assistant_text
 from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command
 
@@ -507,10 +507,8 @@ def _has_target_disappeared_past_grace(runtime: _WaitRuntime, now: float) -> boo
 
 def resolve_destroyed_result(target_name: str, location: AgentLocation) -> str:
     """Build the END_TURN payload for an agent that was destroyed before completing."""
-    preserved_dir = get_preserved_sessions_dir_for_host(
-        location.host_dir, AgentName(target_name), AgentId(location.agent_id)
-    )
-    events_path = preserved_dir / "common_transcript" / "events.jsonl"
+    preserved_dir = get_preserved_agent_dir(location.host_dir, AgentName(target_name), AgentId(location.agent_id))
+    events_path = preserved_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
     last_text = ""
     if events_path.exists():
         try:

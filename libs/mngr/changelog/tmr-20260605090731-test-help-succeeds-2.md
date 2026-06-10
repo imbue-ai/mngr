@@ -1,1 +1,0 @@
-Updated the `mngr --help` tutorial line to list current top-level commands (`git`, `clone`) instead of the removed standalone `push`/`pull` commands, which are now `mngr git push`/`mngr git pull`. Added an unhappy-path e2e test verifying that an unknown command fails with a helpful error pointing back to `--help`.

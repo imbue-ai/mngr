@@ -4,6 +4,167 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+- The titlebar now paints the active workspace's accent color across its full width (was: a small swatch next to the page title) and the workspace content below floats inside a 4px inset frame with 12px rounded corners, so the accent reads as a colored frame around the content.
+- Title text, navigation icons, and the account button on the titlebar flip between dark and light foreground based on the accent's lightness, so future user-chosen accent colors (including dark ones) remain legible. The close button keeps its red destructive hover; the requests-badge red dot stays red.
+- The most-recently-opened workspace's accent persists per window across navigation to Home (each window's bar only changes when *that window* opens a different workspace), survives app restarts, and is cleared when the stored workspace is deleted (matching windows only) or the user signs out of their account (all windows). Stored per-entry in `~/.minds/window-state.json` (existing file extended from a bare array to an object).
+- Per-workspace accents are now `oklch(85% 0.08 <hue>)` (was `oklch(65% 0.15 <hue>)`); the same value powers the sidebar item spines and other accent affordances so the whole accent system stays in step. The redundant 3px top stripe on inner workspace pages is removed.
+
+Fix the requests panel X button being unclickable when the panel auto-opens at startup. The modal opened before chrome.js had registered its `onModalStateChanged` listener, so the initial `modal-state-changed: { open: true }` IPC was dropped, the `modal-open` body class never got applied, and the titlebar's drag region intercepted the click. The chrome view's startup state-priming step (`primeViewWithCachedChromeState`, called from `did-finish-load`) now also replays the current modal-open state, alongside the cached workspaces/auth/requests state it already primed.
+
+The startup loading window no longer flashes at the default centered
+position before jumping to its saved location. Saved bounds from the
+previous session are now applied to the initial window before its
+loading screen renders, so the loading view appears in place and no
+visible jump occurs when content loads.
+
+Window state is now persisted in most-recently-focused order, so for
+multi-window users the loading screen opens at the bounds of the last
+window they interacted with (rather than the oldest still-open one).
+The lesser-MRU windows are restored without stealing keyboard focus,
+and the most-recently-focused window is re-raised as each restored
+window appears so it stays on top in the window stack as well.
+
+Added a `FAILED` outcome to the latchkey permission-grant flow. Previously, if
+the browser sign-in (including the one-off `latchkey auth browser-prepare` step)
+failed when a user approved a permission request, the request was auto-denied:
+the agent was told its request was "denied" and the request was removed from the
+pending inbox. Now a failed approval is reported as `FAILED` instead: the request
+stays pending (no response event is written, the agent is not notified), and the
+desktop dialog shows the failure reason so the user can click Approve again to
+retry. Denials remain a separate, explicit user action.
+
+Fixed a bug that broke WebDAV file sharing for macOS users. The `/api/v1/files`
+WebDAV server shares the user's home directory, but on macOS that path
+(`/Users/<name>`) contains uppercase characters. WsgiDAV matches request paths
+against a lowercased copy of each share key yet looks the matched share back up
+by that lowercased string, so any share key with uppercase characters resolved
+to no provider and every request under it returned `404 Not Found: Could not
+find resource provider`. The share is now registered under a lowercased key
+(while the filesystem provider keeps the real, correct-case path), so home-
+directory paths under macOS resolve correctly. Linux users were unaffected
+because `/home/<name>` and `/tmp` are already lowercase.
+
+Added the ability to change the shared path in the file-sharing permission
+dialog before approving. The agent-requested path is now shown in an editable
+field; you can paste a different absolute path or pick one with new
+"Choose file…" / "Choose folder…" buttons that open a native OS file dialog
+(separate file and folder pickers because a single combined picker can't select
+both on Linux/Windows). Approving with an
+edited path retargets the grant to your chosen path -- the access mode the agent
+asked for (read-only vs. read & write) is preserved, and the edited path is
+re-validated for traversal before any grant is written. The buttons appear only
+in the desktop app (they use a native picker); in a plain browser you can still
+paste a path.
+
+The edited path is also validated against the WebDAV mount roots (your home
+directory and the system temp directory) directly in Minds, so a path outside
+those is rejected immediately with a clear message instead of being forwarded to
+the gateway. The dialog gives instant feedback too: Approve stays disabled (and a
+hint appears) while the path field is empty or points outside a shared folder, as
+you type or pick.
+
+# e2e: detect the CI branch so the FCT branch-matching step fires
+
+The Electron e2e workspace runner pairs the current mngr branch with a
+same-named forever-claude-template branch (`resolve_fct_path` step 2), falling
+back to FCT `main` otherwise. In CI the checkout is a detached HEAD, so
+`git rev-parse --abbrev-ref HEAD` returned `HEAD` and the branch-matching step
+never fired -- a PR that changes the mngr<->FCT config contract could only ever
+be tested against FCT `main`. `_current_mngr_branch` now consults GitHub
+Actions' `GITHUB_HEAD_REF` (PR source branch) / `GITHUB_REF_NAME` (push branch,
+ignoring `<n>/merge` refs) before the git fallback, so the FCT branch matching
+works in CI. Other PRs are unaffected (they have no matching FCT branch and
+still use FCT `main`).
+
+## 2026-06-08
+
+Fix `test_create_local_docker_workspace_via_electron` failing on CI (and any host without gVisor). FCT's `[providers.docker]` block now sets `docker_runtime = "runsc"` to harden the local-docker provider, but `runsc` is not installed in GitHub Actions runners, so `docker run --runtime runsc` failed with "unknown or invalid runtime name: runsc" and the workspace never reached the agent navigation URL. The test now sets `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` via `monkeypatch.setenv` -- the exact escape hatch FCT's settings.toml comment names for CI / Modal -- which the Electron child inherits through `_build_electron_env`.
+
+## 2026-06-08
+
+The right-side requests panel is gone: pending permission requests now live
+in an inbox modal opened from the same titlebar bell, with a master/detail
+layout. Opening the inbox no longer resizes or shifts the workspace -- it
+overlays the window the same way the permission dialog already did.
+
+Approving or denying a request keeps the inbox open and auto-advances to
+the next pending item. Browser-mode deep links are now ``/inbox?selected=<id>``
+(the standalone ``/requests/<id>`` page has been removed).
+
+Minds bootstrap now writes the gVisor runtime settings into each per-account
+`[providers.imbue_cloud_<slug>]` block it registers: `docker_runtime = "runsc"`,
+`install_gvisor_runtime = true`, and
+`default_start_args = ["--workdir=/", "--security-opt=no-new-privileges"]`. This
+makes the imbue_cloud slow (rebuild) path run the agent container under gVisor
+with the runsc hardening args, mirroring the forever-claude-template
+`[providers.ovh]` bake settings. No user-visible change to the create flow.
+
+Added a `--no-recycle` flag to `minds pool create` that forwards `--no-recycle`
+to the admin command, forcing a fresh OVH VPS order instead of reclaiming a
+cancelled one (useful for testing the fresh-provision path).
+
+Fixed two JinjaX template bugs where a component tag had a quoted attribute
+containing `{{ ... }}` (which JinjaX forwards literally instead of interpolating):
+the Landing page's settings-gear `<Button onclick="...{{ agent_id }}...">` (which
+navigated to a literal `/workspace/{{ agent_id }}/settings` and then 500'd the
+destroy with "AgentId must start with 'agent-', got '{{ agent_id }}'") and the
+Sharing page's `<Link href="...{{ agent_id }}...">` (dead "open workspace" link).
+Both now use the `attr={{ expr }}` form. Added render regression tests asserting
+no literal `{{` survives in the Landing / Workspace-settings / Sharing pages.
+
+Three fixes to the new-workspace creation flow:
+
+- **Post-login redirect.** After signing in (email/password or OAuth) or finishing email verification, users now land on the new-workspace screen (`/`) when they have no workspaces yet, instead of always being dropped on the account-management page. Returning users who already have workspaces continue to land on `/accounts`. All sign-in paths funnel through a new `/post-login` endpoint that branches on the workspace count.
+- **Leased-host account binding.** Workspaces running on a host leased from Imbue Cloud (provider `imbue_cloud_<account-slug>`) can no longer be disassociated or re-associated to a different account, preventing confusing "account mixing". The settings page shows the bound account with a disabled Disassociate control and an explanatory note, and the associate/disassociate backend routes reject such requests with HTTP 403. Non-leased workspaces are unaffected.
+- **Region preference.** When the create page is opened, minds kicks off a best-effort, non-blocking lookup of the user's IP geolocation (via `ifconfig.co/json`) and stores the nearest OVH-US datacenter (`US-EAST-VA` or `US-WEST-OR`) as a preferred region in `~/.minds/config.toml`. IMBUE_CLOUD workspace creation passes it to `mngr create` as a soft `-b preferred_region=` hint, so a closer host is used when one is free without ever blocking the fast path. The lookup adds no page-load latency and refreshes at most about once per hour per process.
+
+Test infra (not user-visible): made the Electron e2e workspace runner's onboarding step resilient to a Playwright click race -- it now confirms each onboarding question screen actually advanced and retries the click, since `page.click` could land before `creating.js` attached its `.js-next` handlers and silently no-op.
+
+Final fixes to the standardized workspace-create flow:
+
+- Region selection is now explicit. The create form always shows a "Region"
+  control under advanced settings for providers that place a host in a region
+  (Imbue Cloud and Vultr). It defaults to that provider's last-used region (saved
+  per provider in `~/.minds/config.toml`), then a region guessed from your IP
+  geolocation, then a hardcoded default (US-EAST-VA for Imbue Cloud, `ewr` for
+  Vultr). The chosen region is remembered for next time on a successful create.
+  The old, implicit "preferred region" behavior has been removed; geolocation is
+  now fetched once at startup in the background instead of hourly.
+- Backups no longer block workspace creation or get lost on slow hosts. Restic
+  backup setup runs after the workspace is ready, retries for up to ~5 minutes if
+  the host isn't reachable yet, and only notifies you if it ultimately fails.
+- Destroyed workspaces now disappear from the workspace list, and destroying a
+  workspace no longer reports a spurious "failed" once the host is actually gone.
+- The onboarding "initial message" retry budget is raised from 10 minutes to 1
+  hour, so the message still lands on slow-to-start workspaces (e.g. a cold lima
+  create that boots a VM and builds an in-VM image) and when the user takes a
+  while to finish logging in to their AI provider.
+
+Bumped the LIMA launch-mode progress-bar duration estimate from 300s to 600s on
+the workspace creation page: LIMA mode now boots a VM *and* builds the project
+image inside it (the workspace runs in a Docker container in the Lima VM), so a
+cold create takes longer than the old run-directly-in-the-VM path. This only
+affects the creating-page animation, not any hard timeout.
+
+Fixed the dev create-form defaults so they work on any tier, including staging
+and production. The `MINDS_WORKSPACE_GIT_URL` / `_NAME` / `_BRANCH` env vars
+(which point the create form at the operator's local FCT worktree) were
+previously honored only on per-developer dev tiers and silently dropped on the
+shared `minds` / `minds-staging` tiers -- so `just minds-start` against staging
+fell back to the public GitHub FCT on `main`, and local FCT changes could never
+be tested there.
+
+The tier-based gate is replaced with an explicit opt-in: the form honors those
+vars only when `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1` is set in the same
+environment. `just minds-start` and the e2e workspace runner set it; a normal
+end-user `minds run` never does, so a stray `MINDS_WORKSPACE_*` left in the
+operator's shell is ignored on every tier (the safety the tier gate provided,
+now applied uniformly -- and dev tiers no longer honor stray vars by tier alone).
+These defaults point at a local path + dev branch and only make sense for
+local-compute launch modes (Lima / Docker), not IMBUE_CLOUD pool leases.
+
 ## 2026-06-06
 
 Large pass over the desktop client's HTML templates to extract recurring inline Tailwind patterns into JinjaX primitives. The change set is mostly internal -- rendered behavior is preserved -- but a few visual tweaks ride along.

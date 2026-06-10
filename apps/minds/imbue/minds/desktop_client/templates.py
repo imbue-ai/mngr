@@ -91,6 +91,8 @@ _ICONS_24: Final[Mapping[str, str]] = {
     "forward": '<polyline points="9 6 15 12 9 18"/>',
     "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "play": '<polygon points="6 4 20 12 6 20 6 4"/>',
     "settings": (
         '<circle cx="12" cy="12" r="3"/>'
         '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
@@ -154,23 +156,28 @@ CATALOG: Final[Catalog] = _build_catalog()
 
 # -- Per-workspace identity color --
 # See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side (static/chrome.js, static/sidebar.js).
+# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
+# window.mindsAccent helper consumed by chrome.js and sidebar.js).
 
 # Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue.
-_WORKSPACE_L: Final[int] = 65
-_WORKSPACE_C: Final[float] = 0.15
+# all workspaces so the only axis of variation is the hue. The accent fills
+# the full-width titlebar (not just a small swatch), so a light /
+# low-saturation tone is needed to read as chrome rather than a saturated
+# highlight.
+_WORKSPACE_L: Final[int] = 85
+_WORKSPACE_C: Final[float] = 0.08
 
 
 @pure
 def workspace_accent(agent_id: str) -> str:
     """Deterministically map an agent id to a CSS OKLCH color.
 
-    Uses a fixed lightness and chroma so every workspace accent sits at the
-    same readable mid-tone, and only the hue varies. Full 360 degree hue
-    range means collisions are effectively impossible, and OKLCH's
-    perceptual uniformity means close hashes still read as visibly
-    different colors.
+    Uses a fixed lightness and chroma (a light, low-saturation tone that
+    reads as a chrome surface across the full-width titlebar) so every
+    workspace accent sits at the same readable level, and only the hue
+    varies. Full 360 degree hue range means collisions are effectively
+    impossible, and OKLCH's perceptual uniformity means close hashes
+    still read as visibly different colors.
     """
     digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
     hue = int.from_bytes(digest[:4], "big") % 360
@@ -188,6 +195,8 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -214,6 +223,7 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -224,6 +234,8 @@ def render_landing_page(
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
+        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
     )
 
 
@@ -418,7 +430,6 @@ def render_creating_page(
         "pages.Creating",
         agent_id=creation_id,
         status_text=status_text,
-        accent=workspace_accent(str(creation_id)),
         # Drives the client-side time-based progress bar on the loading
         # screen (eases toward ~80% over this duration).
         expected_duration_seconds=expected_creation_duration_seconds(info.launch_mode),
@@ -449,9 +460,58 @@ def render_auth_error_page(message: str) -> str:
     return CATALOG.render("pages.AuthError", message=message)
 
 
-def render_request_unavailable_page(message: str) -> str:
-    """Render the page shown when a request is already resolved or missing."""
-    return CATALOG.render("pages.RequestUnavailable", message=message)
+@pure
+def render_inbox_page(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+    detail_html: str = "",
+    is_empty: bool = False,
+    auto_open: bool = True,
+) -> str:
+    """Render the full inbox modal page served by ``GET /inbox``.
+
+    ``cards`` is the initial left-list content (most-recent-first).
+    ``selected_id`` highlights one card; ``detail_html`` is the
+    pre-rendered right-pane fragment (handler detail, unavailable
+    fragment, or empty). ``is_empty`` is True when there are no
+    pending requests and the layout collapses to a centered message.
+    ``auto_open`` is the initial state of the "Auto-open on new
+    request" checkbox in the inbox header.
+    """
+    return CATALOG.render(
+        "pages.Inbox",
+        cards=cards,
+        selected_id=selected_id,
+        detail_html=detail_html,
+        is_empty=is_empty,
+        auto_open=auto_open,
+    )
+
+
+@pure
+def render_inbox_list_fragment(
+    cards: Sequence[Mapping[str, str]],
+    selected_id: str = "",
+) -> str:
+    """Render the inbox left-list fragment served by ``GET /inbox/list``."""
+    return CATALOG.render("InboxList", cards=cards, selected_id=selected_id)
+
+
+@pure
+def render_inbox_unavailable_fragment(message: str = "") -> str:
+    """Render the inbox right-pane "no longer available" fragment.
+
+    Returned by ``GET /inbox/detail/<id>`` when the id is unknown or
+    already resolved; also innerHTML-swapped into the right pane by the
+    inbox shell JS when an SSE event resolves the currently-selected
+    item.
+
+    ``message`` is an optional supporting sentence rendered under the
+    fragment's heading. When empty (the default), only the heading is
+    shown, so callers that drop the supporting sentence don't end up
+    duplicating the heading.
+    """
+    return CATALOG.render("InboxUnavailable", message=message)
 
 
 # CSS for the recovery page's restart controls, appended to the shared
@@ -1001,7 +1061,6 @@ def render_destroying_page(
         agent_name=agent_name,
         pid=pid,
         status=status,
-        accent=workspace_accent(str(agent_id)),
     )
 
 
@@ -1085,7 +1144,6 @@ def render_sharing_editor(
         redirect_url=redirect_url,
         ws_name=ws_name,
         account_email=account_email,
-        accent=workspace_accent(agent_id),
     )
 
 
@@ -1123,7 +1181,6 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
-        accent=workspace_accent(agent_id),
     )
 
 

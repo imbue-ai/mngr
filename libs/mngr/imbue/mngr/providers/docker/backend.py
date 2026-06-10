@@ -5,6 +5,7 @@ from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -63,19 +64,46 @@ class DockerProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         """Build a Docker provider instance.
 
-        ``is_for_host_creation`` is ignored: the Docker backend has no one-time
-        backend resources to bootstrap.
+        ``is_for_host_creation`` gates whether the singleton state container --
+        the Docker analog of the Modal per-user environment -- may be brought
+        into existence. Only the ``mngr create`` path passes ``True``; for
+        everything else (``mngr list`` / ``mngr gc`` / discovery) it stays
+        ``False``. When the state container does not already exist and
+        ``is_for_host_creation`` is ``False``, this raises ``ProviderEmptyError``
+        so the provider loader skips the docker provider rather than lazily
+        creating a state container just to discover there is nothing to list.
+        ``has_state_container`` raises ``ProviderUnavailableError`` if the Docker
+        daemon is unreachable, which the loader also skips.
         """
-        del is_for_host_creation
         if not isinstance(config, DockerProviderConfig):
             raise MngrError(f"Expected DockerProviderConfig, got {type(config).__name__}")
         host_dir = config.host_dir if config.host_dir is not None else Path("/mngr")
-        return DockerProviderInstance(
+        instance = DockerProviderInstance(
             name=name,
             host_dir=host_dir,
             mngr_ctx=mngr_ctx,
             config=config,
         )
+        if is_for_host_creation:
+            return instance
+        # Read-only construction must not bring the state container into
+        # existence. The emptiness check materializes the instance's Docker
+        # client, but the instance is discarded (never cached) when we raise, so
+        # its close() would never run -- leaking the client connection. Close it
+        # before propagating. has_state_container() raises ProviderUnavailableError
+        # (a MngrError) if the daemon is unreachable.
+        try:
+            state_container_exists = instance.has_state_container()
+        except MngrError:
+            instance.close()
+            raise
+        if not state_container_exists:
+            instance.close()
+            raise ProviderEmptyError(
+                name,
+                "no Docker state container exists yet (nothing has been created on this daemon)",
+            )
+        return instance
 
 
 @hookimpl
