@@ -3,7 +3,10 @@ Restructured the changelog consolidation prompt
 summaries: the concise `CHANGELOG.md` bullets are now generated once per
 project over all of that project's new dated sections (rather than once per
 date, which created cross-date duplicates), followed by a single critical
-"concision pass" that drops non-notable bullets and tightens the rest.
+"concision pass" that drops non-notable bullets and tightens the rest. The
+merging step now also scrutinizes the `Fixed` category, dropping fixes for bugs
+that were both introduced and fixed within the current release window (which
+never reached a released version).
 
 Fixed the nightly changelog consolidation schedule firing at 8 AM Pacific
 instead of midnight. `scripts/setup_changelog_agent.sh` set the cron to

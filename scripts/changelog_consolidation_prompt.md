@@ -100,12 +100,20 @@ the right project's consolidated files.
    category and merge them into the `[Unreleased]` section under
    `### <Category>` subheadings, in the canonical order: Added, Changed,
    Deprecated, Removed, Fixed, Security. Append to any existing bullets
-   under each subheading; do
-   not delete or rewrite pre-existing bullets. (`scripts/release.py`
-   renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
-   and inserts a fresh empty `[Unreleased]` above it, so each
-   project's section accumulates across consolidation runs within a
-   release window.)
+   under each subheading; do not delete or rewrite pre-existing bullets.
+   (`scripts/release.py` renames `[Unreleased]` to `[vX.Y.Z] -
+   YYYY-MM-DD` at release time and inserts a fresh empty `[Unreleased]`
+   above it, so each project's section accumulates across consolidation
+   runs within a release window.)
+
+   Apply special scrutiny to the `Fixed` category: only keep a `Fixed`
+   bullet if it seems to fix a bug that existed in a *prior* release. A
+   bug that was both introduced and fixed within the current release
+   window (i.e. since the last `[vX.Y.Z]` section) never reached a
+   released version, so a `Fixed` entry for it is noise to the changelog
+   reader -- drop it rather than listing it under `Fixed`. Use the
+   project's `UNABRIDGED_CHANGELOG.md` and per-PR entries together with
+   the code to judge whether the bug predates this release.
 
 5. Concision pass: re-read just the `[Unreleased]` section of each
    `CHANGELOG.md` you touched and step back to think critically about
