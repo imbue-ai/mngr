@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Final
 
 from imbue.mngr import hookimpl
@@ -11,7 +10,6 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.ssh.config import SSHHostConfig
 from imbue.mngr.providers.ssh.config import SSHProviderConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 
@@ -72,20 +70,8 @@ Example configuration in mngr.toml:
         if not isinstance(config, SSHProviderConfig):
             raise ConfigStructureError(f"Expected SSHProviderConfig, got {type(config).__name__}")
         host_dir = config.host_dir
-        hosts = config.hosts
-        # Expand key_file paths
-        expanded_hosts: dict[str, SSHHostConfig] = {}
-        for host_name, host_config in hosts.items():
-            if host_config.key_file is not None:
-                expanded_hosts[host_name] = SSHHostConfig(
-                    address=host_config.address,
-                    port=host_config.port,
-                    user=host_config.user,
-                    key_file=Path(host_config.key_file).expanduser(),
-                )
-            else:
-                expanded_hosts[host_name] = host_config
-        hosts = expanded_hosts
+        # Expand each host's key_file path (~ resolution), preserving all other fields.
+        hosts = {host_name: host_config.with_expanded_key_file() for host_name, host_config in config.hosts.items()}
 
         # Resolve dynamic hosts file path
         dynamic_hosts_file = config.dynamic_hosts_file

@@ -65,41 +65,38 @@ is_host_data_volume_exposed = false
 host_data_disk_size = "200GiB"
 ```
 
-## Running the agent in a Docker container in the VM (`is_host_in_docker`)
+## Running the agent as root in the VM (`is_run_as_root`)
 
-By default the agent runs directly inside the Lima VM. With
-`is_host_in_docker=True` the provider instead provisions the VM with only
-Docker + btrfs + an SSH "outer", and runs the agent inside a **Docker
-container** in the VM, built from the project's `Dockerfile` exactly like the
-`docker` and `vps_docker` providers. The point is consistency: every provider
-installs dependencies the same way (one Dockerfile, no `sudo`, always in sync),
-instead of duplicating the Dockerfile's install steps in a Lima-specific
-provisioning script.
+By default the agent runs as the Lima default user (passwordless `sudo`
+available). With `is_run_as_root=true` mngr instead runs the agent **as root**
+inside the VM (uid 0), matching the `docker` / `vps_docker` providers where the
+agent is root inside its container: the agent can `apt install` and write
+anywhere with no `sudo`. The VM itself is the isolation boundary.
 
 How it works:
 
-- mngr treats the **container as the host**: `mngr connect` / `mngr exec` /
-  ssh land inside the container, and Lima forwards the container's sshd out to
-  a unique `127.0.0.1:<port>` on your machine. The VM itself is an "outer"
-  that mngr otherwise does not touch (mirroring how the `vps_docker` provider
-  treats its VPS).
-- This mode **requires** the btrfs additional-disk layout, so it forces
-  `is_host_data_volume_exposed=false`. A per-host btrfs *subvolume* on that
-  disk backs the container's `host_dir`, bind-mounted in as a Docker volume.
-- Consistent backups work from inside the container: the `mngr_vps_docker`
-  snapshot helper is installed in the VM, and the in-container agent triggers
-  `btrfs subvolume snapshot` via the same `/mngr-snapshot` request /
-  `/mngr-snapshots` read contract the other Docker providers use.
-- `mngr stop` powers off the whole VM (freeing local RAM); `start` boots the
-  VM and relaunches the container; `destroy` removes the VM and the disk.
-- The image is built inside the VM via `mngr create ... -b "--file=Dockerfile" -b "."`
-  (same build args as the `docker` provider). Without build args, the
-  `default_image` is pulled instead.
-- Like btrfs mode, offline reads (`mngr event` / `mngr transcript`) against a
-  stopped host do not work until it is started.
+- The provisioning script enables key-based root login (`PermitRootLogin
+  prohibit-password`) and authorizes a mngr-managed root client key; mngr then
+  connects to the VM as root over Lima's normal SSH port. The agent still runs
+  directly in the VM -- there is no nested container.
+- This mode **requires** the btrfs additional-disk layout, so it must be paired
+  with `is_host_data_volume_exposed=false`. Root cannot traverse the
+  9p/reverse-sshfs bind mount the exposed layout uses, so the combination is
+  rejected at config construction.
+- Consistent backups keep working: with `host_dir` on btrfs and the agent
+  running as root, a backup service in the workspace (e.g.
+  forever-claude-template's `host-backup`) takes `btrfs subvolume snapshot`
+  directly -- no snapshot helper or trigger volume is needed.
 
 ```toml
 [providers.lima]
-is_host_in_docker = true
-is_host_data_volume_exposed = false  # required by is_host_in_docker
+is_run_as_root = true
+is_host_data_volume_exposed = false  # required by is_run_as_root
 ```
+
+This is how a workspace gets the **same** dependency setup as a Dockerfile-built
+host: the project ships idempotent setup scripts that its `Dockerfile` runs (for
+the `docker` / `vps_docker` / `ovh` providers) and that the Lima host runs
+directly after the project is synced in (via the create template's agent
+provisioning command). One definition, run the same way everywhere, with the
+agent as root so it never needs `sudo`.
