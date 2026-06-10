@@ -82,6 +82,9 @@ def test_render_workspace_settings_renders_all_palette_swatches() -> None:
     assert 'aria-checked="true"' in html
     # The hex input is pre-filled with the current saved color.
     assert 'value="#0b292b"' in html
+    # A reachable workspace renders no disabled swatch (the counterpart
+    # of the stale test below).
+    assert "disabled></button>" not in html
 
 
 def test_render_workspace_settings_picker_disabled_when_stale() -> None:
@@ -98,8 +101,17 @@ def test_render_workspace_settings_picker_disabled_when_stale() -> None:
         is_stale=True,
     )
     assert 'data-is-stale="true"' in html
-    # Both the input and the swatches carry the disabled attribute.
-    assert "disabled" in html
+    # Every swatch carries the real ``disabled`` attribute (ColorSwatch
+    # renders it last, so a disabled swatch ends ``disabled></button>``).
+    # Checking the attribute -- not just the substring "disabled" -- is
+    # required because the swatch and pill class strings contain the
+    # ``disabled:opacity-40`` utility on every render.
+    assert html.count("disabled></button>") == len(WORKSPACE_PALETTE)
+    # The hex input is disabled too: its tag ends with a standalone
+    # ``disabled`` attribute right before the closing ``>``.
+    hex_input_tag = re.search(r'<input[^>]*id="color-hex-input"[^>]*>', html)
+    assert hex_input_tag is not None
+    assert re.search(r"\sdisabled\s*>$", hex_input_tag.group(0))
 
 
 def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> None:
