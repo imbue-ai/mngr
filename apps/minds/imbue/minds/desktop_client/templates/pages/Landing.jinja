@@ -536,7 +536,7 @@
           {# Precompute row-local strings so the Card invocation stays readable.
              JinjaX component attributes are literal strings by default; the
              ':' prefix turns one into a Python expression. #}
-          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(65% 0.15 230)") ~ ";" %}
+          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(85% 0.08 230)") ~ ";" %}
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
           {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}
