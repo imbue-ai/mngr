@@ -125,10 +125,12 @@ from imbue.mngr_antigravity.antigravity_config import CONVERSATION_IDS_FILENAME
 from imbue.mngr_antigravity.antigravity_config import ROOT_CONVERSATION_FILENAME
 from imbue.mngr_antigravity.antigravity_config import STATUSLINE_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import TRUSTED_WORKSPACES_KEY
+from imbue.mngr_antigravity.antigravity_config import USER_STATUSLINE_COMMAND_FILENAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -551,24 +553,16 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
             self.agent_config.settings_overrides,
             [self._get_agy_workspace_symlink_path()],
         )
-        # Inject the mngr-owned lifecycle statusLine LAST -- after settings_overrides
-        # -- so it wins. This is the one setting mngr does not let settings_overrides
-        # override: RUNNING/WAITING detection and message-submission confirmation
-        # both depend on statusline.sh running, so a user statusLine would break
-        # them (see build_antigravity_statusline_settings). agy allows only one
-        # statusLine command, so we can't keep both; warn (rather than silently
-        # discard) if the user supplied one, in either the synced base settings or
-        # settings_overrides -- both are already merged into per_agent_settings here.
-        user_statusline = per_agent_settings.get("statusLine")
-        if user_statusline is not None:
-            logger.warning(
-                "Antigravity agent {} has a user-provided statusLine ({!r}) that mngr is overriding with "
-                "its lifecycle statusLine. agy allows only one statusLine command, and mngr's drives "
-                "RUNNING/WAITING detection and message-submission confirmation, so it must win. Remove the "
-                "statusLine from your settings/settings_overrides to silence this warning.",
-                self.name,
-                user_statusline,
-            )
+        # The agy statusLine must be mngr's: RUNNING/WAITING detection and
+        # message-submission confirmation both depend on statusline.sh running, and
+        # agy allows only one statusLine command. A user's own statusLine (in the
+        # synced base settings or settings_overrides -- both already merged into
+        # per_agent_settings here) is therefore not the agy statusLine, but it is
+        # *composed* rather than discarded: record its command so statusline.sh runs
+        # it (with the same payload) and appends its output to the rendered row. A
+        # statusLine we can't run as a command (an unknown shape) is dropped with a
+        # warning. Then inject mngr's statusLine LAST so it wins.
+        self._provision_user_statusline_command(host, per_agent_settings.get("statusLine"))
         per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):
@@ -580,6 +574,46 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         hooks_path = get_antigravity_hooks_config_path(agy_home)
         with log_span("Installing antigravity hooks at {}", hooks_path):
             host.write_text_file(hooks_path, serialize_antigravity_hooks(build_antigravity_hooks_config()))
+
+    def _provision_user_statusline_command(self, host: OnlineHostInterface, user_statusline: Any) -> None:
+        """Record a user's own statusLine command for statusline.sh to compose, or clear a stale one.
+
+        ``user_statusline`` is whatever ``statusLine`` the merged per-agent settings
+        carry (from the synced base settings or ``settings_overrides``), or ``None``.
+        When it is a runnable ``{"type": "command", "command": <str>}`` block, its
+        command is written to the per-agent ``user_statusline_command`` file;
+        ``statusline.sh`` runs it (with the same payload) and appends its output to
+        the rendered row, so the user's custom rendering survives alongside mngr's
+        lifecycle statusLine. A statusLine present but not runnable as a command is
+        dropped with a warning (mngr's statusLine must be the agy one regardless).
+        Any stale file from a prior provision is removed so a config that no longer
+        has a user statusLine stops composing one.
+        """
+        command_file = self._get_user_statusline_command_file_path()
+        composable_command = extract_statusline_command(user_statusline)
+        if composable_command is not None:
+            host.write_text_file(command_file, composable_command)
+            return
+        if user_statusline is not None:
+            logger.warning(
+                "Antigravity agent {} has a user-provided statusLine ({!r}) that mngr cannot compose "
+                "with its lifecycle statusLine: only a {{'type': 'command', 'command': <str>}} block is "
+                "runnable. Dropping it (mngr's statusLine drives RUNNING/WAITING and message-submission "
+                "confirmation, so it must be the agy statusLine).",
+                self.name,
+                user_statusline,
+            )
+        host.execute_idempotent_command(f"rm -f {shlex.quote(str(command_file))}", timeout_seconds=5.0)
+
+    def _get_user_statusline_command_file_path(self) -> Path:
+        """Per-agent file holding the user's own statusLine command (for compose).
+
+        Written by ``_provision_user_statusline_command``; read by ``statusline.sh``
+        at ``$MNGR_AGENT_STATE_DIR/{USER_STATUSLINE_COMMAND_FILENAME}``. Lives
+        directly under the agent state dir so the script's expansion and this path
+        resolve to the same file.
+        """
+        return self._get_agent_dir() / USER_STATUSLINE_COMMAND_FILENAME
 
     def _provision_oauth_token(self, host: OnlineHostInterface, host_home: Path, agy_home: Path) -> None:
         """Point the per-agent oauth token at the shared host token (symlink), or copy it.

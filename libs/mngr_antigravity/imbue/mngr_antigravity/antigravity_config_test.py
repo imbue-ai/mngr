@@ -16,6 +16,7 @@ from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_co
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_statusline_settings
 from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
 from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import extract_statusline_command
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
@@ -228,6 +229,31 @@ def test_statusline_settings_emits_command_block() -> None:
             "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"',
         }
     }
+
+
+def test_extract_statusline_command_returns_command_for_command_block() -> None:
+    """A runnable command-type statusLine yields its command string (for compose)."""
+    assert extract_statusline_command({"type": "command", "command": "echo hi"}) == "echo hi"
+
+
+# Each is a statusLine that cannot be run as a shell command, so it is not
+# composable: None; a non-dict; a non-"command" type; a command-type block with a
+# missing, blank, whitespace-only, or non-string command.
+_NON_RUNNABLE_STATUSLINES = [
+    None,
+    "not-a-dict",
+    {"type": "static", "text": "x"},
+    {"type": "command"},
+    {"type": "command", "command": ""},
+    {"type": "command", "command": "   "},
+    {"type": "command", "command": 123},
+]
+
+
+@pytest.mark.parametrize("statusline", _NON_RUNNABLE_STATUSLINES)
+def test_extract_statusline_command_returns_none_for_non_runnable(statusline: Any) -> None:
+    """Anything but a {"type":"command","command":<non-blank str>} block is not composable."""
+    assert extract_statusline_command(statusline) is None
 
 
 # =============================================================================

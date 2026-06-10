@@ -1013,16 +1013,16 @@ def test_provision_settings_json_has_mngr_owned_statusline(
     }
 
 
-def test_provision_statusline_wins_over_settings_overrides_and_warns(
+def test_provision_composes_user_statusline_from_settings_overrides(
     local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
 ) -> None:
-    """A user statusLine in settings_overrides must NOT win -- mngr's is applied last,
-    and mngr warns that it is overriding the user's.
+    """A runnable user statusLine is composed, not discarded: mngr's is the agy
+    statusLine, and the user's command is recorded for statusline.sh to run.
 
-    Lifecycle correctness depends on statusline.sh running, so this is the one
-    setting mngr does not let settings_overrides override. agy allows only one
-    statusLine command, so the user's is discarded; mngr warns rather than doing
-    so silently.
+    agy allows only one statusLine command, and mngr's must be it (lifecycle
+    correctness), so a user's own command-type statusLine is preserved by recording
+    it in the per-agent user_statusline_command file; statusline.sh runs it and
+    appends its output. No warning for this composable case.
     """
     agent = _make_antigravity_agent(
         local_provider,
@@ -1034,17 +1034,44 @@ def test_provision_statusline_wins_over_settings_overrides_and_warns(
     )
     _provision(agent)
     settings = _read_per_agent_settings(agent)
+    # The agy statusLine is mngr's (so agy invokes statusline.sh).
     assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
-    # The override is surfaced, not silently dropped: the warning names statusLine
-    # and quotes the discarded user command.
-    assert any("statusLine" in msg and "echo user-owned" in msg for msg in log_warnings)
+    # ...and the user's command is recorded for statusline.sh to compose.
+    assert agent._get_user_statusline_command_file_path().read_text() == "echo user-owned"
+    # A composable statusLine is preserved, not dropped, so no warning fires.
+    assert not any("statusLine" in msg for msg in log_warnings)
 
 
-def test_provision_does_not_warn_when_no_user_statusline(
+def test_provision_warns_and_drops_non_composable_statusline(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """A statusLine that is not a runnable command block is dropped with a warning.
+
+    Only ``{"type": "command", "command": <str>}`` can be composed; any other shape
+    (here a non-command type) can't be run, so mngr warns and records nothing.
+    """
+    agent = _make_antigravity_agent(
+        local_provider,
+        tmp_path,
+        AntigravityAgentConfig(
+            auto_dismiss_dialogs=True,
+            settings_overrides={"statusLine": {"type": "static", "text": "unsupported"}},
+        ),
+    )
+    _provision(agent)
+    settings = _read_per_agent_settings(agent)
+    assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # Nothing recorded to compose, and the drop is surfaced as a warning.
+    assert not agent._get_user_statusline_command_file_path().exists()
+    assert any("statusLine" in msg for msg in log_warnings)
+
+
+def test_provision_records_no_user_statusline_when_none(
     antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path, log_warnings: list[str]
 ) -> None:
-    """With no user statusLine, mngr injects its own silently (no override warning)."""
+    """With no user statusLine, mngr injects its own with nothing to compose and no warning."""
     _provision(antigravity_agent_auto_dismiss)
+    assert not antigravity_agent_auto_dismiss._get_user_statusline_command_file_path().exists()
     assert not any("statusLine" in msg for msg in log_warnings)
 
 

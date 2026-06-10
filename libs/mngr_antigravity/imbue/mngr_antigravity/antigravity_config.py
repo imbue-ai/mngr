@@ -303,6 +303,15 @@ ROOT_CONVERSATION_FILENAME: str = "root_conversation"
 # resource file under ``resources/``.
 STATUSLINE_SCRIPT_NAME: str = "statusline.sh"
 
+# Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) holding the user's own statusLine
+# command, when they configured one. agy allows only one statusLine command (which
+# must be mngr's, for lifecycle correctness), so to preserve a user's custom
+# rendering ``statusline.sh`` runs this command -- with the same payload on stdin
+# -- and appends its output to the rendered row. Written by the provisioner (see
+# ``plugin._provision_agy_home``); the shell script hardcodes this same literal,
+# so keep them in sync.
+USER_STATUSLINE_COMMAND_FILENAME: str = "user_statusline_command"
+
 # The ``statusLine`` command agy invokes (with the JSON payload on stdin) on
 # every agent-state change. ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
 # invocation time. Unlike the hook scripts, this command's stdout IS rendered
@@ -330,11 +339,32 @@ def build_antigravity_statusline_settings() -> dict[str, Any]:
     submission signal (see the resource script and ``STATUSLINE_SCRIPT_NAME``).
 
     This block is mngr-owned and must be applied *after* (winning over) the
-    user's ``settings_overrides``: lifecycle correctness depends on it, so a user
-    ``statusLine`` override would break RUNNING/WAITING and message submission.
-    It is the one setting mngr does not let ``settings_overrides`` win.
+    user's ``settings_overrides``: lifecycle correctness depends on it, so the agy
+    ``statusLine`` must be mngr's. A user's own ``statusLine`` is not discarded
+    but *composed* -- the provisioner records its command (see
+    ``extract_statusline_command`` and ``USER_STATUSLINE_COMMAND_FILENAME``) and
+    ``statusline.sh`` runs it, appending its output to the rendered row.
     """
     return {"statusLine": {"type": "command", "command": _STATUSLINE_COMMAND}}
+
+
+@pure
+def extract_statusline_command(statusline: Any) -> str | None:
+    """Return the runnable shell command from an agy ``statusLine`` block, or ``None``.
+
+    agy ``statusLine`` blocks are ``{"type": "command", "command": "<shell>"}``.
+    Only that shape can be composed (run by ``statusline.sh``); anything else -- a
+    non-dict, a non-``"command"`` ``type``, or a missing/blank ``command`` -- is
+    not runnable and returns ``None`` (the provisioner then warns and drops it).
+    """
+    if not isinstance(statusline, Mapping):
+        return None
+    if statusline.get("type") != "command":
+        return None
+    command = statusline.get("command")
+    if isinstance(command, str) and command.strip():
+        return command
+    return None
 
 
 @pure

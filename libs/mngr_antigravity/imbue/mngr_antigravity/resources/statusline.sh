@@ -27,7 +27,10 @@
 #      message queued while the agent is already busy is also confirmed; a signal
 #      with no registered waiter is a harmless no-op.
 #   5. Prints a short status string to stdout -- this IS the rendered statusline
-#      (unlike the hook scripts, whose stdout agy treats as injected steps).
+#      (unlike the hook scripts, whose stdout agy treats as injected steps). When
+#      the user configured their own statusLine, its command (recorded by the
+#      provisioner) is run with the same payload and its output appended, so the
+#      user's custom rendering is preserved alongside mngr's.
 #
 # Marker / root-file names are kept in sync with antigravity_config.py. Avoids
 # `set -e` so a malformed payload can't disrupt agy's loop.
@@ -100,4 +103,20 @@ if [ -f "$marker_file" ]; then
 else
     glyph="-"
 fi
-printf '%s %s' "$glyph" "${model:-${agent_state:-agy}}"
+row="$glyph ${model:-${agent_state:-agy}}"
+
+# Compose with the user's own statusLine, if they configured one. agy allows only
+# one statusLine command (which must be mngr's, for lifecycle), so we preserve the
+# user's custom rendering by running their command here -- with the same payload
+# on stdin, exactly as agy would deliver it -- and appending its output. The
+# command was recorded by the provisioner (see USER_STATUSLINE_COMMAND_FILENAME).
+# Guarded so a missing, empty, or failing user command can never break the row or
+# the side-effects above.
+user_cmd_file="$MNGR_AGENT_STATE_DIR/user_statusline_command"
+if [ -s "$user_cmd_file" ]; then
+    user_row=$(printf '%s' "$payload" | bash -c "$(cat "$user_cmd_file")" 2>/dev/null || true)
+    if [ -n "$user_row" ]; then
+        row="$row | $user_row"
+    fi
+fi
+printf '%s' "$row"

@@ -141,3 +141,46 @@ def test_missing_state_dir_fails_loudly(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "MNGR_AGENT_STATE_DIR" in result.stderr
+
+
+def _user_cmd_file(state_dir: Path) -> Path:
+    return state_dir / "user_statusline_command"
+
+
+def test_composes_user_statusline_output(tmp_path: Path) -> None:
+    """When a user statusLine command is recorded, its output is appended to the row.
+
+    The user command receives the same payload on stdin that agy delivers, so it
+    can render from the same fields. Here it just echoes a literal to keep the
+    assertion simple.
+    """
+    _user_cmd_file(tmp_path).write_text("echo USER-PART")
+    result = _run(tmp_path, _payload(agent_state="working"))
+    # mngr's own part is still present (the model), and the user's output is appended.
+    assert _MODEL in result.stdout
+    assert "USER-PART" in result.stdout
+    assert "|" in result.stdout
+
+
+def test_user_statusline_receives_payload_on_stdin(tmp_path: Path) -> None:
+    """The composed user command gets the agy payload on stdin (so it can render from it)."""
+    # `cat` echoes whatever it received on stdin -> proves the payload was piped through.
+    _user_cmd_file(tmp_path).write_text("cat")
+    result = _run(tmp_path, _payload(agent_state="working"))
+    assert _ROOT_CONV in result.stdout
+
+
+def test_empty_user_statusline_file_is_not_composed(tmp_path: Path) -> None:
+    """An empty user_statusline_command file (no command recorded) adds nothing."""
+    _user_cmd_file(tmp_path).write_text("")
+    result = _run(tmp_path, _payload(agent_state="working"))
+    assert "|" not in result.stdout
+
+
+def test_failing_user_statusline_does_not_break_render(tmp_path: Path) -> None:
+    """A user command that exits non-zero / errors can't break mngr's row or side-effects."""
+    _user_cmd_file(tmp_path).write_text("this-command-does-not-exist-xyz")
+    result = _run(tmp_path, _payload(agent_state="working"))
+    # mngr's part still renders and the marker is still maintained.
+    assert _MODEL in result.stdout
+    assert _marker(tmp_path).exists()
