@@ -39,6 +39,7 @@ from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
 from imbue.mngr_kanpan.data_sources.github import _parse_board_page
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_node
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_state
+from imbue.mngr_kanpan.data_sources.github import _summarize_failed_response
 from imbue.mngr_kanpan.data_sources.github import fetch_board
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
@@ -451,6 +452,32 @@ def test_build_prs_from_nodes_dedupes_across_pages() -> None:
     page2_open = _make_pr_node(number=21, head_branch="b1", state="OPEN", repo="org/r")
     prs = _build_prs_from_nodes([page1_closed, page2_open], [("org/r", "b1")], unresolved_ignore_user=None)
     assert prs[("org/r", "b1")].number == 21
+
+
+# === _summarize_failed_response ===
+
+
+def test_summarize_failed_response_prefers_graphql_error_messages() -> None:
+    response = {"data": None, "errors": [{"message": "API rate limit exceeded"}, {"message": "secondary thing"}]}
+    assert _summarize_failed_response(response, stderr_excerpt="ignored") == "API rate limit exceeded; secondary thing"
+
+
+def test_summarize_failed_response_falls_back_to_top_level_message() -> None:
+    response = {"message": "You have exceeded a secondary rate limit"}
+    assert _summarize_failed_response(response, stderr_excerpt="ignored") == "You have exceeded a secondary rate limit"
+
+
+def test_summarize_failed_response_falls_back_to_stderr() -> None:
+    assert _summarize_failed_response({}, stderr_excerpt="gh: HTTP 502") == "stderr: gh: HTTP 502"
+
+
+def test_summarize_failed_response_no_information() -> None:
+    assert _summarize_failed_response({}, stderr_excerpt="") == "no data returned"
+
+
+def test_summarize_failed_response_non_dict() -> None:
+    # A bare JSON array (or other non-object) still yields a usable reason.
+    assert _summarize_failed_response([1, 2, 3], stderr_excerpt="gh: weird") == "stderr: gh: weird"
 
 
 # === fetch_board ===
