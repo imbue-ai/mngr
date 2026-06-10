@@ -1,1 +1,0 @@
-Fixed the e2e test fixture that wrote a duplicate `type = "claude"` key under `[commands.create]` in `settings.local.toml`, which caused every config-loading e2e command to fail with a TOML "Cannot overwrite a value" parse error instead of running. Also strengthened `test_create_with_dirty_tree_fails` to verify no agent is left behind when the clean-working-tree guard aborts.

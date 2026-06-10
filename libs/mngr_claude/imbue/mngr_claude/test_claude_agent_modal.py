@@ -17,15 +17,11 @@ from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import ModalSubprocessTestEnv
 from imbue.mngr.utils.testing import get_short_random_string
 
-
-@pytest.fixture
-def temp_source_dir(tmp_path: Path) -> Path:
-    """Create a temporary source directory for tests."""
-    source_dir = tmp_path / "source"
-    source_dir.mkdir()
-    # Create a simple file so the directory isn't empty
-    (source_dir / "test.txt").write_text("test content")
-    return source_dir
+# The ``temp_source_dir`` fixture is inherited from
+# ``imbue.mngr_modal.conftest`` (registered via ``pytest_plugins``); it
+# creates ``tmp_path/source`` with a ``test.txt`` containing "test content".
+# Do not redefine it here -- a local copy would only duplicate maintenance
+# surface and risk silent drift from the shared definition.
 
 
 def _setup_claude_gitignore(source_dir: Path) -> None:
@@ -263,20 +259,32 @@ def test_claude_agent_provisioning_on_modal(
     4. The agent is created and started successfully
 
     The test uses --dangerously-skip-permissions -p "just say 'hello'" to run
-    a quick, non-interactive claude session. The actual output goes to tmux,
-    so we only verify that the agent was created successfully.
+    a quick, non-interactive claude session, then destroys the agent and
+    asserts a non-empty session JSONL was preserved -- proving claude actually
+    ran on Modal, not merely that provisioning logged the expected strings.
     """
     agent_name = f"test-claude-modal-{get_short_random_string()}"
     _setup_claude_gitignore(temp_source_dir)
 
     result = _create_modal_agent(agent_name, temp_source_dir, modal_subprocess_env)
 
-    # Check that the command succeeded
+    # Check that the command succeeded.
     assert result.returncode == 0, f"CLI failed with stderr: {result.stderr}\nstdout: {result.stdout}"
-    assert "Done." in result.stdout, f"Expected 'Done.' in output: {result.stdout}"
 
-    # Verify that Claude was installed (this message appears in the provisioning output)
-    # This confirms that the claude plugin provisioning hook ran correctly
+    # Destroy the agent so its session files are preserved to the local
+    # host_dir, then assert a non-empty session JSONL exists. This is the
+    # load-bearing check: it can only pass if claude actually started a
+    # session and wrote to it on the Modal host. The provisioning-log
+    # substring below is a secondary, best-effort sanity check.
+    destroy_result = _destroy_modal_agent(agent_name, modal_subprocess_env)
+    assert destroy_result.returncode == 0, (
+        f"Destroy failed with stderr: {destroy_result.stderr}\nstdout: {destroy_result.stdout}"
+    )
+    _assert_sessions_preserved(modal_subprocess_env.host_dir, agent_name)
+
+    # Secondary sanity check: provisioning installed claude. This is an
+    # implementation-detail log string (a reword would break it), so it is
+    # deliberately not the primary assertion.
     combined_output = result.stdout + result.stderr
     assert "Claude installed successfully" in combined_output or "Claude is already installed" in combined_output, (
         f"Expected Claude installation message in output.\nstdout: {result.stdout}\nstderr: {result.stderr}"
