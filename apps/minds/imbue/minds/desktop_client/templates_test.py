@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -17,6 +18,11 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
+from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR_NAME
+from imbue.minds.desktop_client.templates import WORKSPACE_PALETTE
+from imbue.minds.desktop_client.templates import normalize_workspace_color
+from imbue.minds.desktop_client.templates import pick_workspace_foreground
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
@@ -744,6 +750,132 @@ def test_workspace_accent_differs_across_distinct_agent_ids() -> None:
     # space and SHA-256 hashes, a collision between two specific ids is
     # effectively impossible.
     assert workspace_accent(str(_AGENT_A)) != workspace_accent(str(_AGENT_B))
+
+
+# -- Workspace palette + WCAG contrast picker ----------------------------
+#
+# The palette is the user-pickable set of workspace colors (replacing the
+# SHA-derived hues above). Server-side ``WORKSPACE_PALETTE`` is mirrored
+# in static/workspace_accent.js; both halves must agree exactly because
+# the create-form picker and the settings picker render from the JS side
+# while the SSE workspace payload emits from the Python side.
+
+_EXPECTED_PALETTE: Final[dict[str, str]] = {
+    "indifference": "#000000",
+    "confusion": "#0b292b",
+    "courage": "#492222",
+    "envy": "#3c3d06",
+    "peace": "#9fbbd3",
+    "belonging": "#e8a7a8",
+    "energy": "#cecd0c",
+    "strength": "#cfc7b3",
+    "comfort": "#f5d6a0",
+    "inspiration": "#e9ecd9",
+    "clarity": "#fcefd4",
+    "white": "#ffffff",
+}
+
+_WORKSPACE_ACCENT_JS_PATH = (
+    Path(_templates_module.__file__).resolve().parent / "static" / "workspace_accent.js"
+)
+
+
+def test_workspace_palette_matches_expected_entries() -> None:
+    # Pinning the exact entries here so a stray edit to templates.py
+    # (rename / typo / dropped entry) fails loudly.
+    assert dict(WORKSPACE_PALETTE) == _EXPECTED_PALETTE
+
+
+def test_default_workspace_color_is_confusion() -> None:
+    assert DEFAULT_WORKSPACE_COLOR_NAME == "confusion"
+    assert DEFAULT_WORKSPACE_COLOR == WORKSPACE_PALETTE["confusion"]
+    assert DEFAULT_WORKSPACE_COLOR == "#0b292b"
+
+
+def test_workspace_palette_matches_js_mirror() -> None:
+    """Drift guard: ``WORKSPACE_PALETTE`` in templates.py and the
+    ``WORKSPACE_PALETTE`` literal in static/workspace_accent.js must
+    agree exactly. Both halves consume the palette (server side via SSE
+    emit, client side via the picker UI) so any drift will surface as a
+    swatch-vs-titlebar mismatch."""
+    js_content = _WORKSPACE_ACCENT_JS_PATH.read_text()
+    palette_block = re.search(
+        r"var WORKSPACE_PALETTE = \{(?P<body>[^}]+)\}",
+        js_content,
+    )
+    assert palette_block is not None, "WORKSPACE_PALETTE literal not found in workspace_accent.js"
+    js_entries: dict[str, str] = {}
+    for line in palette_block.group("body").splitlines():
+        entry_match = re.match(r"\s*(\w+):\s*'(#[0-9a-f]{6})',?\s*$", line)
+        if entry_match:
+            js_entries[entry_match.group(1)] = entry_match.group(2)
+    assert js_entries == dict(WORKSPACE_PALETTE)
+
+
+@pytest.mark.parametrize(
+    ("hex_color", "expected_foreground"),
+    [
+        # Dark palette entries pick white text.
+        ("#000000", "255 255 255"),  # indifference
+        ("#0b292b", "255 255 255"),  # confusion
+        ("#492222", "255 255 255"),  # courage
+        ("#3c3d06", "255 255 255"),  # envy
+        # Light palette entries pick black text.
+        ("#9fbbd3", "0 0 0"),  # peace
+        ("#e8a7a8", "0 0 0"),  # belonging
+        ("#cecd0c", "0 0 0"),  # energy
+        ("#cfc7b3", "0 0 0"),  # strength
+        ("#f5d6a0", "0 0 0"),  # comfort
+        ("#e9ecd9", "0 0 0"),  # inspiration
+        ("#fcefd4", "0 0 0"),  # clarity
+        ("#ffffff", "0 0 0"),  # white
+        # A few mid-range customs that exercise the threshold.
+        ("#808080", "0 0 0"),  # gray 50 -> luminance 0.216 -> black
+        ("#404040", "255 255 255"),  # gray 25 -> luminance 0.052 -> white
+    ],
+)
+def test_pick_workspace_foreground_chooses_legible_text(
+    hex_color: str, expected_foreground: str
+) -> None:
+    assert pick_workspace_foreground(hex_color) == expected_foreground
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("#ffffff", "#ffffff"),
+        ("ffffff", "#ffffff"),
+        ("#FFFFFF", "#ffffff"),
+        ("FFFFFF", "#ffffff"),
+        ("#fff", "#ffffff"),
+        ("fff", "#ffffff"),
+        ("#FFF", "#ffffff"),
+        ("#0b292b", "#0b292b"),
+        ("0B292B", "#0b292b"),
+        ("  #fff  ", "#ffffff"),
+        ("\tffffff\n", "#ffffff"),
+    ],
+)
+def test_normalize_workspace_color_accepts_lenient_inputs(value: str, expected: str) -> None:
+    assert normalize_workspace_color(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "not-a-hex",
+        "#ff",
+        "#fffff",  # 5 chars in body
+        "#fffffff",  # 7 chars in body
+        "#xyz",
+        "#ffffff80",  # 8 chars (alpha) not supported -- picker doesn't offer alpha
+        "rgb(255, 255, 255)",
+        "ffffffff",
+    ],
+)
+def test_normalize_workspace_color_rejects_malformed_inputs(value: str) -> None:
+    assert normalize_workspace_color(value) is None
 
 
 def test_tokens_css_defines_titlebar_utility_classes() -> None:
