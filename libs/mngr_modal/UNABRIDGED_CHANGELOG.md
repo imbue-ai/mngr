@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
+The new `get_volume_reference_for_host` is wrapped so missing/expired Modal
+credentials surface as the user-friendly `ModalAuthError` (consistent with the
+other provider methods) rather than a raw proxy error, including when reached
+during offline-host construction.
+
+## Remove Modal async-permission-propagation workaround
+
+Modal has fixed the bug on their side where a just-created environment returned
+`modal.exception.PermissionDeniedError` for several seconds (async per-user
+permission propagation) before the creating user could operate on it.
+Read-after-write is now immediate, so the workaround is no longer needed.
+
+Removed from `mngr_modal`:
+
+- The `ModalProxyPermissionDeniedError` retries in
+  `_lookup_persistent_app_with_retry` and `_enter_ephemeral_app_context_with_retry`
+  (`imbue.mngr_modal.backend`); both decorators once again retry only on
+  `ModalProxyNotFoundError`.
+- The `_invoke_modal_sdk_delete_with_retry` test-cleanup helper in `conftest.py`;
+  `_classify_modal_sdk_delete` now invokes the SDK delete callable directly again.
+
 ## 2026-06-08
 
 Standardized mngr_modal's project conftest on `register_plugin_test_fixtures(globals())`

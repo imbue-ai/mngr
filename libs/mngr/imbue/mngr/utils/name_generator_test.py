@@ -1,4 +1,8 @@
-"""Integration tests for the name generator module."""
+"""Unit tests for the name generator module."""
+
+from collections.abc import Callable
+
+import pytest
 
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameStyle
@@ -95,23 +99,26 @@ def test_generate_host_name() -> None:
         assert len(name) > 0
 
 
-def test_generate_agent_name_generates_unique_names() -> None:
-    """Test that generate_agent_name generates unique names across multiple calls."""
-    names = set()
-    for _ in range(10):
-        name = generate_agent_name(AgentNameStyle.ENGLISH)
-        names.add(str(name))
+# Draw many names and require a healthy number of distinct ones. This pins the observable
+# behavior -- the generator actually varies its output over a large space -- without seeding
+# the global RNG or asserting an exact unique count (which would couple the test to the
+# wordlist size and the generator's internal draw order, the "fails for the wrong reason"
+# anti-pattern). The threshold is set so a correct generator essentially never flakes: the
+# smallest space here is the 40-word astronomy host list, and the chance of 50 draws yielding
+# fewer than 10 distinct values is bounded by C(40, 9) * (9/40)**50 ~= 1e-24. It also
+# tolerates wordlist edits -- it holds for any list of more than ~15 words.
+_DRAW_COUNT = 50
+_MIN_DISTINCT = 10
 
-    # With randomness, we expect most names to be unique
-    # Allow for some duplicates due to randomness, but expect at least 5 unique names
-    assert len(names) >= 5
 
+@pytest.mark.parametrize(
+    "make_name",
+    [
+        pytest.param(lambda: generate_agent_name(AgentNameStyle.ENGLISH), id="agent_english"),
+        pytest.param(lambda: generate_host_name(HostNameStyle.ASTRONOMY), id="host_astronomy"),
+    ],
+)
+def test_name_generator_produces_varied_names(make_name: Callable[[], object]) -> None:
+    names = {str(make_name()) for _ in range(_DRAW_COUNT)}
 
-def test_generate_host_name_generates_unique_names() -> None:
-    """Test that generate_host_name generates unique names across multiple calls."""
-    names = set()
-    for _ in range(10):
-        name = generate_host_name(HostNameStyle.ASTRONOMY)
-        names.add(str(name))
-
-    assert len(names) >= 5
+    assert len(names) >= _MIN_DISTINCT

@@ -135,9 +135,10 @@ def build_provider_instance(
     """Build a provider instance using the registered backend.
 
     ``is_for_host_creation`` is forwarded to the backend so that backends with
-    one-time bootstrap resources (currently: the Modal backend's per-user
-    environment) can distinguish create-host construction from construction
-    for read-only / existing-host operations.
+    one-time bootstrap resources (e.g. the Modal backend's per-user environment
+    or the Docker backend's singleton state container) can distinguish
+    create-host construction from construction for read-only / existing-host
+    operations.
     """
     backend_class = get_backend(backend_name)
     obj = backend_class.build_provider_instance(

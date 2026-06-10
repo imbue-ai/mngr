@@ -3,6 +3,7 @@ from pathlib import Path
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ProviderBackendName
 
@@ -17,6 +18,15 @@ class SSHHostConfig(FrozenModel):
     known_hosts_file: Path | None = Field(
         default=None, description="Path to known_hosts file for host key verification"
     )
+
+    def with_expanded_key_file(self) -> "SSHHostConfig":
+        """Return a copy with key_file expanded (~ resolved), or self when no key_file is set."""
+        if self.key_file is None:
+            return self
+        # Update only key_file so every other field (notably known_hosts_file) is preserved.
+        return self.model_copy_update(
+            to_update(self.field_ref().key_file, self.key_file.expanduser()),
+        )
 
 
 class SSHProviderConfig(ProviderInstanceConfig):

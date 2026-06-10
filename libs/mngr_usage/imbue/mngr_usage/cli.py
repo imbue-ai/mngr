@@ -54,8 +54,9 @@ from imbue.mngr_usage.data_types import WindowSnapshot
 
 _NO_DATA_HINT = (
     "No usage data yet -- check that a usage writer plugin is installed in the env "
-    "running `mngr`, and that you've sent a prompt to an agent that (a) was created "
-    "after that plugin was installed and (b) is still alive."
+    "running `mngr`, and that you've sent a prompt to an agent created after that "
+    "plugin was installed. Destroyed agents still count toward usage by default; "
+    "pass --no-preserved to limit the view to live agents."
 )
 
 
@@ -80,6 +81,7 @@ class UsageCliOptions(CommonCliOptions, AgentFilterCliOptions):
     since: str | None
     detail: bool
     provider: tuple[str, ...]
+    preserved: bool
 
 
 @pure
@@ -696,6 +698,14 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
     "for terseness; the per-mode cost lines and window lines are unchanged.",
 )
+@click.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
+    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
+    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
+)
 @add_agent_filter_options
 @optgroup.option(
     "--provider",
@@ -745,6 +755,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
         provider_names=provider_names,
         since_seconds=effective_since,
         now=now,
+        include_preserved=opts.preserved,
     )
 
     # One render model per source (already collapsed in the aggregation pipeline),
@@ -846,6 +857,7 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     timeout: str | None
     interval: str
     since: str | None
+    preserved: bool
 
 
 @usage.command("wait")
@@ -885,6 +897,13 @@ class UsageWaitCliOptions(CommonCliOptions, AgentFilterCliOptions):
     "--provider",
     multiple=True,
     help="Restrict to agents from the given provider(s) (repeatable, e.g. --provider local).",
+)
+@optgroup.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents when evaluating the predicate. "
+    "On by default; pass --no-preserved to consider only live agents.",
 )
 @add_common_options
 @click.pass_context
@@ -934,6 +953,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
                 since_seconds=effective_since,
+                include_preserved=opts.preserved,
             ),
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
@@ -1023,7 +1043,7 @@ def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat)
 CommandHelpMetadata(
     key="usage.wait",
     one_line_description="Block until a usage snapshot matches a CEL predicate",
-    synopsis="mngr usage wait --until CEL [--until CEL ...] [--timeout DURATION] [--interval DURATION] [--since DURATION]",
+    synopsis="mngr usage wait --until CEL [--until CEL ...] [--timeout DURATION] [--interval DURATION] [--since DURATION] [--no-preserved]",
     description="""Polls ``mngr usage`` snapshots until at least one source's CEL
 context satisfies every ``--until`` expression. Composable with shell:
 
