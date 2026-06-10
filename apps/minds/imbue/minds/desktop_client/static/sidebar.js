@@ -22,10 +22,10 @@
   // (workspace row, settings gear, "New workspace", "Manage account(s)" /
   // "Log in", and "Open in new window"). The close happens entirely on the
   // main process side: `navigate-content` and `open-workspace-in-new-window`
-  // in apps/minds/electron/main.js both call closeSidebar(bundle) before
+  // in apps/minds/electron/main.js both call closeModal(bundle) before
   // returning, so the renderer must NOT also send a `toggle-sidebar` IPC
   // here. IPCs from a single renderer are processed FIFO; a follow-up
-  // toggle would see the already-closed sidebar and re-open it.
+  // toggle would see the already-closed modal and re-open it.
   function navigate(url) {
     if (isElectron) window.minds.navigateContent(url);
     else window.location = url;
