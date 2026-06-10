@@ -69,7 +69,14 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     # so the disabled-plugin check (and aliases) can attribute a type to its
     # real owning plugin instead of assuming the type name equals the plugin
     # name. Each result is paired with its registering plugin's name.
-    for registration, plugin_name in _agent_type_registrations_by_plugin(pm):
+    #
+    # Iterate in reversed registration order: registration silently overwrites
+    # on a duplicate type name (last write wins), and pluggy's flattened
+    # ``hook()`` call -- which this loop replaces -- yields results in reversed
+    # registration order. Reversing here preserves that "first-registered
+    # plugin wins on a duplicate type name" precedence (and keeps the recorded
+    # owner consistent with the winning class registration).
+    for registration, plugin_name in reversed(_agent_type_registrations_by_plugin(pm)):
         if registration is not None:
             agent_type_name, agent_class, config_class = registration
             _register_agent_internal(agent_type_name, agent_class, config_class)
