@@ -131,13 +131,29 @@ _FIELD_TYPE_COMPLETION_SOURCES: Final[dict[type, str]] = {
 
 
 def _extract_options_for_command(cmd: click.Command) -> list[str]:
-    """Extract all --long option names from a click command."""
+    """Extract option names from a click command for completion.
+
+    Records every ``--long`` option name (these are the candidates offered when
+    completing ``--``), plus the short ``-x`` form of any *value-taking* option.
+
+    The short value-option forms are needed by the positional-argument counter in
+    the completer (``_count_positional_words``): a value-taking option consumes
+    the following word, so a short option like ``-S KEY=VALUE`` must be recognised
+    to avoid miscounting its value as a positional argument. Flag and ``count``
+    short forms (e.g. ``-v``) consume no value and are recorded separately in
+    flag_options, so they are intentionally excluded here -- recording them as
+    value-taking would make the counter skip the following positional.
+    """
     options: list[str] = []
     for param in cmd.params:
-        if isinstance(param, click.Option):
-            for opt in param.opts + param.secondary_opts:
-                if opt.startswith("--"):
-                    options.append(opt)
+        if not isinstance(param, click.Option):
+            continue
+        takes_value = not param.is_flag and not param.count
+        for opt in param.opts + param.secondary_opts:
+            if opt.startswith("--"):
+                options.append(opt)
+            elif takes_value and opt.startswith("-"):
+                options.append(opt)
     return sorted(options)
 
 

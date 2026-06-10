@@ -1685,3 +1685,55 @@ def test_get_completions_setting_does_not_misfire_on_other_option_equals(
     result = _get_completions()
 
     assert result == []
+
+
+def test_get_completions_short_value_option_does_not_consume_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """A short value option (-S KEY=VALUE) must not be miscounted as a positional argument.
+
+    With -S recorded in options_by_command the counter treats it as value-taking
+    (consuming its KEY=VALUE word), so a later positional (here, the single agent
+    name destroy accepts) is still offered rather than suppressed by the nargs limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting", "-S"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr destroy -S commands.create.connect=false ", "4")
+
+    result = _get_completions()
+
+    assert result == ["my-agent", "other-agent"]
+
+
+def test_get_completions_short_value_option_absent_still_consumes_positional(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Without -S in options_by_command (the old behavior) its value is miscounted, suppressing the positional.
+
+    This pins the contract that recording the short form is what fixes the miscount:
+    when -S is absent, the counter falls back to skipping it alone and counts
+    ``KEY=VALUE`` as the (only) positional, hitting the nargs=1 limit.
+    """
+    data = CompletionCacheData(
+        commands=["destroy"],
+        options_by_command={"destroy": ["--force", "--setting"]},
+        flag_options_by_command={"destroy": ["--force", "-f"]},
+        positional_nargs_by_command={"destroy": 1},
+        positional_completions={"destroy": [["agent_names"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    _write_discovery_events(completion_cache_dir, ["my-agent", "other-agent"])
+    set_comp_env("mngr destroy -S commands.create.connect=false ", "4")
+
+    result = _get_completions()
+
+    assert result == []

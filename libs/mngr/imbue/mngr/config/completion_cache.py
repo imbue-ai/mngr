@@ -44,6 +44,9 @@ class CompletionCacheData(NamedTuple):
     commands: list[str] = []
     aliases: dict[str, str] = {}
     subcommand_by_command: dict[str, list[str]] = {}
+    # Every ``--long`` option name (the candidates for ``--`` completion) plus the
+    # short ``-x`` form of any value-taking option (so the positional-argument
+    # counter knows those options consume the following word).
     options_by_command: dict[str, list[str]] = {}
     flag_options_by_command: dict[str, list[str]] = {}
     option_choices: dict[str, list[str]] = {}
