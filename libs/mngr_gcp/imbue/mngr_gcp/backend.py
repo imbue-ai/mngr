@@ -138,8 +138,8 @@ class GcpProviderBackend(ProviderBackendInterface):
             "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
             "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
             "\n"
-            "Image is taken from the provider config (default_image); per-host image\n"
-            "overrides are not supported via build args.\n"
+            "The GCE VM image is taken from the provider config (default_source_image);\n"
+            "per-host image overrides are not supported via build args.\n"
             "\n"
             "All other build args are passed to 'docker build' on the GCE instance.\n"
             "Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .\n"
@@ -175,7 +175,9 @@ class GcpProviderBackend(ProviderBackendInterface):
             credentials=credentials,
             project_id=project_id,
             zone=config.default_zone,
-            image=config.default_image,
+            # GCE VM source image -- distinct from config.default_image (inherited),
+            # which is the Docker *container* image run inside the VM.
+            image=config.default_source_image,
             machine_type=config.default_machine_type,
             boot_disk_size_gb=config.boot_disk_size_gb,
             boot_disk_type=config.boot_disk_type,

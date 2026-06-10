@@ -30,7 +30,7 @@ def test_backend_build_args_help_mentions_gcp_specific_args() -> None:
     assert "--gcp-machine-type=TYPE" in help_text
     assert "zonal" in help_text
     # Document the per-host-image escape hatch is intentionally absent.
-    assert "Image" in help_text and "default_image" in help_text
+    assert "image" in help_text and "default_source_image" in help_text
 
 
 def test_build_provider_instance_raises_provider_empty_without_project(
@@ -63,7 +63,7 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone=config.default_zone,
-        image=config.default_image,
+        image=config.default_source_image,
         auto_shutdown_minutes=auto_shutdown_minutes,
     )
     return GcpProvider(

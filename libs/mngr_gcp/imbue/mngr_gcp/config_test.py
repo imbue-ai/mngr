@@ -11,7 +11,10 @@ def test_default_config_values() -> None:
     assert config.default_region == "us-west1"
     assert config.default_zone == "us-west1-a"
     assert config.default_machine_type == "e2-small"
-    assert config.default_image == DEFAULT_GCE_IMAGE
+    assert config.default_source_image == DEFAULT_GCE_IMAGE
+    # The inherited base default_image is the Docker *container* image, distinct
+    # from the GCE VM source image -- they must not be conflated.
+    assert config.default_image == "debian:bookworm-slim"
     assert config.boot_disk_size_gb == 30
     assert config.boot_disk_type == "pd-balanced"
     assert config.network == "default"
@@ -51,8 +54,8 @@ def test_validate_zone_in_region_rejects_mismatch() -> None:
         config.validate_zone_in_region()
 
 
-def test_default_image_is_global_ubuntu_family() -> None:
+def test_default_source_image_is_global_ubuntu_family() -> None:
     # GCE image families are global (no per-region map), unlike AWS AMIs. Ubuntu
     # (not Debian) because the stock GCE Debian images do not run cloud-init.
     config = GcpProviderConfig(project_id="p")
-    assert "global/images/family/ubuntu-2204-lts" in config.default_image
+    assert "global/images/family/ubuntu-2204-lts" in config.default_source_image

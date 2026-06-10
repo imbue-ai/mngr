@@ -42,8 +42,8 @@ project_id = "my-gcp-project"      # required; no credential material
 default_region = "us-west1"
 default_zone = "us-west1-a"        # GCE VMs are zonal
 default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
-# default_image defaults to the global Ubuntu 22.04 LTS image family; override only if needed:
-# default_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+# default_source_image (the GCE VM image) defaults to the global Ubuntu 22.04 LTS family; override only if needed:
+# default_source_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
 
 # Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
 # container SSH port of the auto-created firewall rule. Empty default
@@ -103,7 +103,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_region` | `us-west1` | GCE region. Used to validate that the chosen zone belongs to it. |
 | `default_zone` | `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
 | `default_machine_type` | `e2-small` | GCE machine type. |
-| `default_image` | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts` | Source image. GCE image families are global, so no per-region map is needed. Ubuntu (not Debian): the stock GCE Debian images do not run cloud-init, so the `user-data` bootstrap would be silently ignored. |
+| `default_source_image` | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts` | GCE VM boot-disk image (distinct from the base `default_image`, which is the Docker *container* image run inside the VM). GCE image families are global, so no per-region map is needed. Ubuntu (not Debian): the stock GCE Debian images do not run cloud-init, so the `user-data` bootstrap would be silently ignored. |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
 | `boot_disk_type` | `pd-balanced` | Boot disk type (`pd-balanced`, `pd-ssd`, `pd-standard`). |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |

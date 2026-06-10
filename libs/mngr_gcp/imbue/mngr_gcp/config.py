@@ -60,11 +60,14 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         default="e2-small",
         description="Default GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
     )
-    default_image: str = Field(
+    default_source_image: str = Field(
         default=DEFAULT_GCE_IMAGE,
         description=(
-            "Default source image for the boot disk. GCE image families are global, so a single "
-            "string (no per-region map) suffices. Defaults to the latest Debian 12 image family."
+            "Default GCE source image for the VM boot disk (distinct from the base "
+            "``default_image``, which is the Docker *container* image run inside the VM). GCE image "
+            "families are global, so a single string (no per-region map) suffices. Defaults to the "
+            "latest Ubuntu 22.04 LTS family; Ubuntu (not Debian) because the stock GCE Debian images "
+            "do not run cloud-init."
         ),
     )
     boot_disk_size_gb: int = Field(
