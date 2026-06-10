@@ -4,7 +4,8 @@
 
   is_mac controls macOS-specific styling (traffic-light padding, hidden window
   controls). In Electron mode, the iframe and embedded browser-mode sidebar are
-  hidden via JS; the content and sidebar are separate WebContentsViews.
+  hidden via JS; the content is a separate WebContentsView, and the sidebar
+  page is loaded into the shared modal WebContentsView when opened.
 
   mngr_forward_origin is exposed to page-level JS via a data attribute on the
   body so chrome.js can build workspace links that target the plugin's port
