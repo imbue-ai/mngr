@@ -224,6 +224,24 @@ def _get_is_mac(request: Request) -> bool:
     return "Macintosh" in user_agent or "Mac OS" in user_agent
 
 
+def _int_query_param(request: Request, name: str, default: int) -> int:
+    """Read a single integer query param with a fallback when missing or invalid.
+
+    Used by routes that take optional numeric layout hints from the caller
+    (e.g. the sidebar's trigger-anchor params packed into the URL by
+    chrome.js). Lives at module level rather than as a closure inside the
+    handler because the codebase forbids inline functions (see
+    `check_inline_functions` in test_ratchets.py).
+    """
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # -- Auth helpers --
 
 
@@ -1831,24 +1849,14 @@ def _handle_chrome_sidebar(request: Request) -> Response:
     defaults (anchor just below a 38px-tall element at the top-left of the
     window, +8px gap).
     """
-
-    def _int_query(name: str, default: int) -> int:
-        raw = request.query_params.get(name)
-        if raw is None:
-            return default
-        try:
-            return int(raw)
-        except ValueError:
-            return default
-
     html = render_sidebar_page(
         mngr_forward_origin=_get_mngr_forward_origin(request),
-        trigger_x=_int_query("trigger_x", 0),
-        trigger_y=_int_query("trigger_y", 0),
-        trigger_w=_int_query("trigger_w", 0),
-        trigger_h=_int_query("trigger_h", 38),
-        offset_x=_int_query("offset_x", 0),
-        offset_y=_int_query("offset_y", 8),
+        trigger_x=_int_query_param(request, "trigger_x", 0),
+        trigger_y=_int_query_param(request, "trigger_y", 0),
+        trigger_w=_int_query_param(request, "trigger_w", 0),
+        trigger_h=_int_query_param(request, "trigger_h", 38),
+        offset_x=_int_query_param(request, "offset_x", 0),
+        offset_y=_int_query_param(request, "offset_y", 8),
     )
     return HTMLResponse(content=html)
 
