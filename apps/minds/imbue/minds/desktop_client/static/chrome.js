@@ -411,14 +411,24 @@
         // the POST -> mngr label -> SSE round-trip. The cross-machine
         // sync still goes through the normal SSE path; this is just a
         // local-window shortcut.
+        //
+        // Unconditional paint: the settings page sends this with its
+        // own agent id (the workspace whose color was just picked), so
+        // painting the bar for that workspace is always the right call
+        // in this window. Main has already validated the agent-id +
+        // hex shape and only fires this for the *sending bundle's*
+        // chrome view, so a stray sender can't paint someone else's
+        // titlebar. (Earlier draft gated on
+        // ``lastRequestedAccentAgentId``, which failed on settings
+        // pages because /workspace/<id>/settings doesn't fire
+        // ``current-workspace-changed`` -- the persisted
+        // last-workspace id might point at a different workspace.)
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
             fg: typeof data.accent_fg === 'string' ? data.accent_fg : null,
           };
-          if (lastRequestedAccentAgentId === data.agent_id) {
-            applyTitleAccent(data.agent_id);
-          }
+          applyTitleAccent(data.agent_id);
         }
         return;
       }
