@@ -50,7 +50,6 @@ const CONTENT_INSET = 4;
 // there -- if we ever wire DWM ``DWMWCP_ROUND`` on Win11 the outer would
 // be ~8px and a smaller inner would be more concentric.
 const CONTENT_CORNER_RADIUS = 12;
-const SIDEBAR_WIDTH = 260;
 const CONTENT_PARTITION = 'persist:workspace-content';
 
 // Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
