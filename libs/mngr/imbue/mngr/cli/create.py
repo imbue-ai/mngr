@@ -28,6 +28,7 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
@@ -966,8 +967,13 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
+    # Bootstrap first so backends with one-time per-user bootstrap (Modal's
+    # environment) do not raise ProviderEmptyError here on the very first create.
+    # ``api_create`` re-bootstraps the same (cached) instance below; bootstrap is
+    # idempotent, so doing it here too is cheap.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
+        bootstrap_backend_for_host_creation(resolved_target_host.provider, mngr_ctx)
         new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
 
     # Call the API create function

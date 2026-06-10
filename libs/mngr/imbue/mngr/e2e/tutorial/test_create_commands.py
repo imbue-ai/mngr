@@ -11,6 +11,10 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Override the default 10s function timeout: a real create (tmux session +
+# asciinema connect, plus a one-time ttyd install on hosts that lack it)
+# followed by `mngr exec` and `mngr list` routinely exceeds 10s.
+@pytest.mark.timeout(120)
 def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -> None:
     # Use a locally-bound name since we assert on the exact command string below.
     expected_command = "sleep 123456789"
@@ -149,10 +153,26 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
     assert "logs" in window_names, f"Expected 'logs' window, got: {window_names}"
     assert len(window_names) > 2, f"Expected a main agent window in addition to the extras, got: {window_names}"
 
+    # Verify the windows are not just present by name but actually *running* their
+    # configured commands -- that is the whole point of `-w name="cmd"`. Both the
+    # "server" (sleep 99999) and "logs" (sleep 99998) stand-ins should be live
+    # processes on the host, alongside the agent's own main command (sleep 100078).
+    ps_result = e2e.run(
+        "mngr exec my-task 'ps aux'",
+        comment="the extra windows run those commands alongside the agent",
+    )
+    expect(ps_result).to_succeed()
+    expect(ps_result.stdout).to_contain("sleep 99999")
+    expect(ps_result.stdout).to_contain("sleep 99998")
+
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Override the default 10s function timeout: a real create (tmux session +
+# asciinema connect, plus a one-time ttyd install on hosts that lack it)
+# followed by `mngr list` routinely exceeds 10s.
+@pytest.mark.timeout(120)
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -175,6 +195,41 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     parsed = json.loads(list_result.stdout)
     agent_names = [a["name"] for a in parsed["agents"]]
     assert "my-task" in agent_names
+
+
+# Unhappy-path counterpart to test_create_with_no_ensure_clean, sharing the same
+# tutorial block. It verifies the *default* behavior the block describes: without
+# --no-ensure-clean, `mngr create` aborts when the working tree is dirty. The
+# abort fires before any host/tmux/rsync work, so this test carries neither
+# @pytest.mark.tmux nor @pytest.mark.rsync (the resource guard would flag them as
+# never-invoked).
+@pytest.mark.release
+@pytest.mark.timeout(120)
+def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+    # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
+    mngr create my-task --no-ensure-clean
+    # this is particularly useful when, for example, you are in the middle of a merge conflict and you just want the agent to finish it off
+    # it should probably be avoided in general, because it makes it more difficult to merge work later.
+    """)
+    # Dirty the working tree so the default ensure-clean check has something to trip on.
+    e2e.run("touch untracked-file.txt && git add untracked-file.txt", comment="Dirty the working tree")
+
+    # Without --no-ensure-clean, the create must abort because the tree is dirty.
+    result = e2e.run(
+        "mngr create my-task --type command -- sleep 100082",
+        comment="by default, mngr aborts the create command if the working tree has uncommitted changes",
+    )
+    expect(result).to_fail()
+    # The abort message should explain the cause and point at the escape hatch.
+    expect(result.stderr).to_contain("uncommitted changes")
+    expect(result.stderr).to_contain("--no-ensure-clean")
+
+    # The agent must not have been created.
+    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created after the abort")
+    expect(list_result).to_succeed()
+    agent_names = [a["name"] for a in json.loads(list_result.stdout)["agents"]]
+    assert "my-task" not in agent_names, f"Agent should not exist after abort, got: {agent_names}"
 
 
 # No @pytest.mark.modal: this test uses the default local provider. The
@@ -247,3 +302,15 @@ def test_create_with_message(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
+
+    # Verify the message was actually delivered into the agent's tmux pane, not
+    # just that mngr logged "Sending initial message". For a command agent the
+    # message is typed into the main pane (send_message -> tmux literal keys), so
+    # the message text must be visible when we capture that pane.
+    session_name = "mngr_test-my-task"
+    capture_result = e2e.run(
+        f"tmux capture-pane -t {session_name} -p",
+        comment="Verify the initial message was delivered into the agent's pane",
+    )
+    expect(capture_result).to_succeed()
+    expect(capture_result.stdout).to_contain("Do the thing")

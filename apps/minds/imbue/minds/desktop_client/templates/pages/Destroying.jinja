@@ -1,16 +1,14 @@
-{#def agent_id, agent_name, pid, status, accent #}
+{#def agent_id, agent_name, pid, status #}
 {#
   Detail page for an in-flight or recently-completed destroy. Polls
   /api/destroying/<agent_id>/{status,log} to keep its log tail and status
   badge up to date; once status flips to "done" it redirects to /.
 #}
-{% set _body_style = "--workspace-accent: " ~ accent ~ ";" %}
 {% set _scripts %}
 <script src="/_static/destroying.js" defer></script>
 {% endset %}
 <Base title={{ "Destroying: " ~ agent_name }}
-      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased page-workspace"
-      body_style={{ _body_style }}
+      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
     <div id="destroying-page" data-agent-id="{{ agent_id }}" data-pid="{{ pid }}" data-initial-status="{{ status }}">

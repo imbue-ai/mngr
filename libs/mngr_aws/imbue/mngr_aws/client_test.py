@@ -6,7 +6,9 @@ and wraps it in a stubber so each test can declaratively queue expected
 requests and canned responses.
 """
 
+from collections.abc import Generator
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 
@@ -14,6 +16,7 @@ import boto3
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
+from loguru import logger
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
@@ -25,6 +28,20 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
+
+
+@contextmanager
+def _captured_loguru_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru WARNING messages for in-test assertions."""
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 @pytest.fixture()
@@ -121,6 +138,135 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         tags={"mngr-provider": "test", "mngr-host-id": "h1"},
     )
     assert instance_id == VpsInstanceId("i-0abc123def456")
+
+
+def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """``ami_id_override`` (from --aws-ami=) wins over the client's configured default AMI."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-override"}]},
+        # Critical assertion: the override (not the client's default ami-test12345) is sent.
+        expected_params={
+            "ImageId": "ami-override-xyz",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    instance_id = client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+        ami_id_override="ami-override-xyz",
+    )
+    assert instance_id == VpsInstanceId("i-override")
+
+
+def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """When ``ami_id_override`` is None (default), the client's configured AMI flows through."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-default"}]},
+        # The client was built with ami_id="ami-test12345"; that's what should be sent.
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-default")
+
+
+def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """``spot=True`` (from --aws-spot) makes RunInstances see InstanceMarketOptions={MarketType: spot}."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-spot"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "InstanceMarketOptions": {"MarketType": "spot"},
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+        spot=True,
+    ) == VpsInstanceId("i-spot")
+
+
+def test_create_instance_no_spot_omits_instance_market_options(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """``spot=False`` (the default) must NOT emit InstanceMarketOptions; the Stubber asserts on shape.
+
+    The expected_params dict is the *full* set of kwargs sent to RunInstances. If
+    AwsVpsClient.create_instance ever started leaking ``InstanceMarketOptions`` into
+    the on-demand path, this stub would reject the call as a parameter mismatch.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-ondemand"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-ondemand")
 
 
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -418,24 +564,78 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     assert client.ensure_security_group() == "sg-test"
 
 
-def test_ensure_security_group_auto_create_fails_closed_when_no_cidrs() -> None:
-    """AutoCreateSecurityGroup + empty allowed_ssh_cidrs must raise, not create an unreachable SG."""
+def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
+    """Empty allowed_ssh_cidrs creates/reuses the SG with no ingress and logs a warning.
+
+    Mirrors how Vultr/OVH provisioning behaves in this monorepo (no provider-managed firewall);
+    the empty case is a "I'll wire my own ingress later" signal, not a fail-closed gate.
+
+    No ``authorize_security_group_ingress`` calls are issued: real AWS rejects an
+    IpPermission with no source set, so the SG keeps its default of zero ingress rules
+    (which is exactly the documented "wire it yourself" shape). The absence of
+    authorize stubs below is part of the assertion -- the Stubber would raise on any
+    unexpected API call.
+    """
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
         aws_secret_access_key="secret",
         region_name="us-east-1",
     )
     ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
         session=session,
         region="us-east-1",
         ami_id="ami-test",
-        # Explicit default mirroring config.py
-        security_group=AutoCreateSecurityGroup(),
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-empty"),
+        allowed_ssh_cidrs=(),
         stubbed_ec2_client=ec2,
     )
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_security_group()
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-empty", "GroupName": "mngr-aws-empty"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-empty"]}]},
+    )
+    stubber.activate()
+    try:
+        with _captured_loguru_warnings() as warnings:
+            assert client.ensure_security_group() == "sg-empty"
+    finally:
+        stubber.deactivate()
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in warnings)
+
+
+def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at provision time."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test",
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-open"),
+        allowed_ssh_cidrs=("0.0.0.0/0",),
+        stubbed_ec2_client=ec2,
+    )
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-open", "GroupName": "mngr-aws-open"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-open"]}]},
+    )
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.add_response("authorize_security_group_ingress", {})
+    stubber.activate()
+    try:
+        with _captured_loguru_warnings() as warnings:
+            assert client.ensure_security_group() == "sg-open"
+    finally:
+        stubber.deactivate()
+    assert any("0.0.0.0/0" in msg for msg in warnings)
 
 
 def test_ensure_security_group_reuses_existing_sg_when_found(
@@ -513,3 +713,64 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
     assert client.ensure_security_group() == "sg-existing"
+
+
+# =============================================================================
+# resolve_security_group_id (lookup-only; used by create_instance hot path)
+# =============================================================================
+
+
+def test_resolve_security_group_id_returns_preset_id_when_provided(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    client, _stubber = stubbed_client
+    assert client.resolve_security_group_id() == "sg-test"
+
+
+def test_resolve_security_group_id_returns_existing_sg_id_without_authorizing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Lookup-only path: must NOT call authorize_security_group_ingress."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    # If resolve_security_group_id accidentally calls authorize, the stubber
+    # would fail on an unexpected API call -- so the absence of an
+    # authorize_security_group_ingress stub here is part of the assertion.
+    assert client.resolve_security_group_id() == "sg-existing"
+
+
+def test_resolve_security_group_id_raises_with_prepare_hint_when_missing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Missing SG must surface as a clear "run `mngr aws prepare`" error, not a CreateSecurityGroup attempt."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": []},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    with pytest.raises(MngrError, match="mngr aws prepare"):
+        client.resolve_security_group_id()
+
+
+def test_resolve_security_group_id_raises_on_multi_vpc_name_collision(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When the same name exists in multiple VPCs, refuse to guess."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {
+            "SecurityGroups": [
+                {"GroupId": "sg-vpc-a", "GroupName": "mngr-aws-test", "VpcId": "vpc-a"},
+                {"GroupId": "sg-vpc-b", "GroupName": "mngr-aws-test", "VpcId": "vpc-b"},
+            ]
+        },
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    with pytest.raises(MngrError, match="Found 2 security groups"):
+        client.resolve_security_group_id()
