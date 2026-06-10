@@ -2354,9 +2354,12 @@ ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
     },
   });
   const menu = Menu.buildFromTemplate(template);
-  // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
+  // The sidebar runs inside modalView, which covers the full window content
+  // area (x: 0, y: 0). e.clientX / e.clientY from sidebar.js's contextmenu
+  // handler are therefore already in window-content coordinates, which is
+  // what menu.popup({ window, x, y }) expects -- no offset needed.
   const px = Math.round(x || 0);
-  const py = Math.round((y || 0) + TITLEBAR_HEIGHT);
+  const py = Math.round(y || 0);
   menu.popup({ window: bundle.window, x: px, y: py });
 });
 
