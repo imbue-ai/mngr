@@ -386,6 +386,18 @@ def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provid
     return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
+def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
+    """The workspace's stored color hex, or the default for label-less workspaces.
+
+    Workspaces created before the color picker shipped have no ``color``
+    label on disk; every render surface shows them as
+    ``DEFAULT_WORKSPACE_COLOR`` until the user picks a color (which
+    persists the label). This helper is that rule's single home.
+    """
+    stored = backend_resolver.get_workspace_color(agent_id)
+    return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
+
+
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     """Pick the color to preselect in the create form.
 
@@ -396,10 +408,7 @@ def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     falling back to confusion when there are no workspaces yet or every
     palette entry is taken.
     """
-    used: set[str] = set()
-    for aid in backend_resolver.list_active_workspace_ids():
-        stored = backend_resolver.get_workspace_color(aid)
-        used.add(stored if stored is not None else DEFAULT_WORKSPACE_COLOR)
+    used = {_resolved_workspace_color(backend_resolver, aid) for aid in backend_resolver.list_active_workspace_ids()}
     return pick_unused_create_color(used)
 
 
@@ -439,8 +448,7 @@ def _handle_landing_page(
             else:
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
-            stored = backend_resolver.get_workspace_color(aid)
-            agent_accents[str(aid)] = stored if stored is not None else DEFAULT_WORKSPACE_COLOR
+            agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
         shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
         mind_liveness_by_agent_id = {
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
@@ -2324,8 +2332,7 @@ def _build_workspace_list(
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
-        stored_color = backend_resolver.get_workspace_color(aid)
-        accent = stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR
+        accent = _resolved_workspace_color(backend_resolver, aid)
         entry: dict[str, str] = {
             "id": str(aid),
             "name": ws_name,
@@ -3274,8 +3281,7 @@ def _handle_workspace_settings(
     # the picker controls when the provider that owns this workspace is
     # in error state -- writes against an unreachable host would not be
     # observable until the provider recovers.
-    stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
-    current_color = stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR
+    current_color = _resolved_workspace_color(backend_resolver, parsed_agent_id)
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
     is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
@@ -3424,12 +3430,11 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
         # is always a freshly-stringified AgentId -- reparsing through
         # AgentId is safe.
         primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
-        stored_accent = (
-            backend_resolver.get_workspace_color(AgentId(primary_agent_id_str))
+        accent = (
+            _resolved_workspace_color(backend_resolver, AgentId(primary_agent_id_str))
             if primary_agent_id_str is not None
-            else None
+            else DEFAULT_WORKSPACE_COLOR
         )
-        accent = stored_accent if stored_accent is not None else DEFAULT_WORKSPACE_COLOR
         cards.append(
             {
                 "id": str(req.event_id),
