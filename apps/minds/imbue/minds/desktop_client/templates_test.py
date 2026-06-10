@@ -842,11 +842,13 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 
 # -- Workspace palette + WCAG contrast picker ----------------------------
 #
-# The palette is the user-pickable set of workspace colors (replacing the
-# SHA-derived hues above). Server-side ``WORKSPACE_PALETTE`` is mirrored
-# in static/workspace_accent.js; both halves must agree exactly because
-# the create-form picker and the settings picker render from the JS side
-# while the SSE workspace payload emits from the Python side.
+# The palette is the user-pickable set of workspace colors. It lives
+# server-side only (``WORKSPACE_PALETTE`` in workspace_color.py): the
+# pickers render server-side swatches carrying data-color attributes,
+# and the SSE workspaces payload emits the resolved accent/accent_fg.
+# static/workspace_accent.js keeps just the two runtime helpers
+# (normalizeHex / pickForegroundForHex); the guard test below ensures
+# no JS palette mirror gets reintroduced.
 
 # Order is significant: the 10 chromatic colors come first, then the
 # two achromatic neutrals (indifference = black, white) grouped at the
