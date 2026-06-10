@@ -11,10 +11,15 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 # the launched VM); the ADC used by mngr itself is never scoped here.
 DEFAULT_SERVICE_ACCOUNT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/cloud-platform",)
 
-# Global Debian 12 image family. GCE image families are global (unlike AWS
-# AMIs, which are per-region), so a single string suffices -- no per-region
-# map. The family always resolves to the latest published image in the family.
-DEFAULT_GCE_IMAGE: str = "projects/debian-cloud/global/images/family/debian-12"
+# Global Ubuntu 22.04 LTS image family. GCE image families are global (unlike
+# AWS AMIs, which are per-region), so a single string suffices -- no per-region
+# map. Ubuntu (not Debian) is the default deliberately: the stock GCE
+# ``debian-cloud`` images do NOT ship/run cloud-init, so the ``user-data``
+# metadata carrying the mngr bootstrap is silently ignored on them. The GCE
+# Ubuntu LTS images run cloud-init with the GCE datasource, so the shared
+# ``mngr_vps_docker`` cloud-init flow works unchanged. The family always
+# resolves to the latest published image.
+DEFAULT_GCE_IMAGE: str = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
 
 
 class GcpProviderConfig(VpsDockerProviderConfig):

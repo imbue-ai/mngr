@@ -124,10 +124,13 @@ class FakeInstancesClient:
         assert self.get_result is not None, "get_result not set"
         return self.get_result
 
-    def list(self, *, project: str, zone: str, filter: str | None = None) -> list[compute_v1.Instance]:
+    def list(self, *, request: compute_v1.ListInstancesRequest) -> list[compute_v1.Instance]:
+        # Mirror the real google-cloud-compute API: ``filter`` is carried on the
+        # request object, not a flattened kwarg, so a test exercises the same
+        # call shape production uses.
         if self.list_error is not None:
             raise self.list_error
-        self.last_list_filter = filter
+        self.last_list_filter = request.filter or None
         return self.list_result
 
 

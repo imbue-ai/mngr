@@ -51,7 +51,8 @@ def test_validate_zone_in_region_rejects_mismatch() -> None:
         config.validate_zone_in_region()
 
 
-def test_default_image_is_global_debian_family() -> None:
-    # GCE image families are global (no per-region map), unlike AWS AMIs.
+def test_default_image_is_global_ubuntu_family() -> None:
+    # GCE image families are global (no per-region map), unlike AWS AMIs. Ubuntu
+    # (not Debian) because the stock GCE Debian images do not run cloud-init.
     config = GcpProviderConfig(project_id="p")
-    assert "global/images/family/debian-12" in config.default_image
+    assert "global/images/family/ubuntu-2204-lts" in config.default_image

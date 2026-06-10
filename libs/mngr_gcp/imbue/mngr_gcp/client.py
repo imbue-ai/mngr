@@ -34,11 +34,13 @@ from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 # tests do not have to constrain host naming: any agent name works.
 GCP_PYTEST_LAUNCHED_LABEL: Final[str] = "mngr-pytest-launched"
 
-# SSH metadata is injected as ``<user>:<public-key>``. ``debian`` is the
-# default user on the Debian cloud images the provider targets; the shared
-# ``generate_cloud_init_user_data`` copies ``/home/debian/.ssh/authorized_keys``
-# into root's authorized_keys, so mngr's root SSH works with no base change.
-GCE_SSH_USERNAME: Final[str] = "debian"
+# SSH metadata is injected as ``<user>:<public-key>``. ``ubuntu`` is the default
+# user on the GCE Ubuntu LTS images the provider targets (Ubuntu, not Debian,
+# because the stock GCE Debian images do not run cloud-init). The shared
+# ``generate_cloud_init_user_data`` writes the provider key straight into root's
+# authorized_keys and also copies the ``ubuntu`` user's, so mngr's root SSH works
+# regardless of which the guest agent provisions first.
+GCE_SSH_USERNAME: Final[str] = "ubuntu"
 
 _STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "PROVISIONING": VpsInstanceStatus.PENDING,
@@ -436,13 +438,15 @@ class GcpVpsClient(VpsClientInterface):
         name), ``main_ip``, ``state``, and ``tags`` (a list of ``"key=value"``
         strings built from the instance's labels, to mirror Vultr's tag shape).
         """
-        filter_expr = None
+        # ``filter`` is not a flattened kwarg on InstancesClient.list -- it lives
+        # on the request object, so build a ListInstancesRequest explicitly.
+        request = compute_v1.ListInstancesRequest(project=self.project_id, zone=self.zone)
         if provider_tag is not None:
-            filter_expr = f"labels.mngr-provider={to_gce_label_value(provider_tag)}"
+            request.filter = f"labels.mngr-provider={to_gce_label_value(provider_tag)}"
 
         instances: list[dict[str, Any]] = []
         with self._translate_gcp_errors():
-            page_result = self._instances().list(project=self.project_id, zone=self.zone, filter=filter_expr)
+            page_result = self._instances().list(request=request)
             for instance in page_result:
                 main_ip = ""
                 for network_interface in instance.network_interfaces:

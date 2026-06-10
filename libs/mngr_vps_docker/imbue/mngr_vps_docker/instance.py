@@ -874,11 +874,18 @@ class VpsDockerProvider(BaseProviderInstance):
         self._validate_provider_args_for_create()
 
         vps_host_private_key = vps_host_key_path.read_text()
+        # Inject the provider SSH key straight into root via cloud-init (in
+        # addition to the copy-from-default-user step). This removes any reliance
+        # on a cloud image's default-user key landing in root -- notably on GCE,
+        # where the google guest agent provisions the key asynchronously and
+        # races the runcmd copy.
+        _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
             install_gvisor_runtime=self.config.install_gvisor_runtime,
             auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
+            authorized_user_public_key=vps_public_key,
         )
 
         logger.log(

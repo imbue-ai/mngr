@@ -101,10 +101,11 @@ def _find_orphan_test_instances(instances_client: Any, project: str, zone: str) 
     """
     cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
     leaked: list[str] = []
+    request = compute_v1.ListInstancesRequest(
+        project=project, zone=zone, filter=f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
+    )
     try:
-        page_result = instances_client.list(
-            project=project, zone=zone, filter=f"labels.{GCP_PYTEST_LAUNCHED_LABEL}=true"
-        )
+        page_result = instances_client.list(request=request)
         for instance in page_result:
             created_at = datetime.fromisoformat(instance.creation_timestamp)
             if created_at < cutoff:

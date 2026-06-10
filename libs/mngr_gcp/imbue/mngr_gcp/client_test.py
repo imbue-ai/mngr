@@ -114,7 +114,7 @@ def test_create_instance_builds_expected_resource() -> None:
     assert metadata["user-data"] == "#cloud-config\n"
     assert metadata["enable-oslogin"] == "FALSE"
     assert metadata["block-project-ssh-keys"] == "TRUE"
-    assert metadata["ssh-keys"] == "debian:ssh-ed25519 AAAA test"
+    assert metadata["ssh-keys"] == "ubuntu:ssh-ed25519 AAAA test"
     # Labels round-trip the provider/host tags (sanitized) plus created-at.
     assert built.labels["mngr-provider"] == "gcp"
     assert "mngr-created-at" in built.labels
