@@ -7,6 +7,8 @@
   static/tokens.css and fails if either side drifts.
 #}
 {% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/dev_styleguide.js" defer></script>
 {% endset %}
 <Base title="Minds Styleguide" scripts={{ _scripts }}>
@@ -249,31 +251,17 @@
         <div class="mt-0.5 text-[11px] text-zinc-500 font-mono">TitlebarButton.jinja (variant="control", tone="danger" for close)</div>
       </div>
 
-      {# Sidebar items. The sidebar is rendered as a floating menu inside the
-         shared modal WebContentsView (Electron) or as an inline overlay
-         (browser). Each row is built dynamically by static/chrome.js and
-         static/sidebar.js -- the styleguide bakes the class string + a
-         placeholder accent dot inline so the visual catalog stays
-         faithful without needing JS-driven accent assignment. #}
+      {# Sidebar items. The sidebar is a floating menu (shared modal
+         WebContentsView in Electron, inline overlay in browser). Each row
+         is built by the shared window.mindsSidebarRow.buildRow helper; the
+         styleguide renders its samples through that exact builder (see
+         dev_styleguide.js) so this catalog can't drift from the live menu.
+         The empty container below is filled in on load. #}
       <div class="mb-6">
         <div class="text-xs uppercase tracking-wide text-zinc-500 mb-2">Sidebar items</div>
-        <div class="w-[244px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black overflow-hidden">
-          <div class="sidebar-item is-current group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white bg-white/15">
-            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 230);"></span>
-            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">current-workspace</span>
-          </div>
-          <div class="sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/5">
-            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 70);"></span>
-            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">another-workspace</span>
-          </div>
-          <div class="sidebar-item is-stale group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/5">
-            <span class="sidebar-dot w-2.5 h-2.5 rounded-full shrink-0" style="background: oklch(72% 0.12 320);"></span>
-            <span class="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">stale-workspace</span>
-            <span class="sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0"
-                  title="This workspace's provider had a discovery error; its status is unverified (still usable)."></span>
-          </div>
-        </div>
-        <div class="mt-1 text-[11px] text-zinc-500 font-mono">static/sidebar.js + static/chrome.js (rendered dynamically) :: rows are Tailwind utilities + the .sidebar-dot accent circle (sized by Tailwind, colored inline per workspace); SidebarBottom.jinja for the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
+        <div id="styleguide-sidebar-rows"
+             class="w-[244px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black overflow-hidden"></div>
+        <div class="mt-1 text-[11px] text-zinc-500 font-mono">window.mindsSidebarRow.buildRow (sidebar_workspace_row.js) -- the one row builder shared by static/sidebar.js + static/chrome.js; SidebarBottom.jinja supplies the "New workspace" / "Manage account(s)" rows below the workspace list.</div>
       </div>
 
       {# Accent spine #}

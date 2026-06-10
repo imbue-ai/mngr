@@ -414,11 +414,6 @@
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   var lastWorkspaces = [];
 
-  // The 16px stroke icon helpers live in /_static/sidebar_workspace_row.js
-  // (window.mindsSidebarRow) so this file and sidebar.js share one copy of
-  // the SVG path data and button markup.
-  var buildSettingsBtn = window.mindsSidebarRow.buildSettingsBtn;
-
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
     if (!container) return;
@@ -443,38 +438,14 @@
         container.appendChild(header);
       }
       groups[key].forEach(function (w) {
-        var row = document.createElement('div');
-        var isCurrent = w.id === currentTitleAgentId;
-        row.className = 'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white'
-          + (isCurrent ? ' is-current bg-white/15' : ' hover:bg-white/5');
-        row.setAttribute('data-agent-id', w.id);
-        var dot = document.createElement('span');
-        dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';
-        row.appendChild(dot);
-        var label = document.createElement('span');
-        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
-        label.textContent = w.name || w.id;
-        row.appendChild(label);
-        if (w.is_stale) {
-          row.classList.add('is-stale');
-          var staleDot = document.createElement('span');
-          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
-          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
-          row.appendChild(staleDot);
-        }
-        if (isCurrent) {
-          row.appendChild(buildSettingsBtn(w.id));
-        }
-        var accent = typeof w.accent === 'string' ? w.accent : null;
-        if (accent) {
-          dot.style.background = accent;
-          row.style.setProperty('--workspace-accent', accent);
-        } else {
-          getAccent(w.id, function (c) {
-            dot.style.background = c;
-            row.style.setProperty('--workspace-accent', c);
-          });
-        }
+        // Shared row builder. Browser mode has no multi-window concept, so
+        // withOpenNew:false (the current row still gets its settings gear).
+        // Unlike the Electron sidebar (delegated listeners) this view wires
+        // the click per-row, so attach it to the built element.
+        var row = window.mindsSidebarRow.buildRow(w, {
+          isCurrent: w.id === currentTitleAgentId,
+          withOpenNew: false,
+        });
         row.addEventListener('click', function (e) {
           if (e.target.closest('[data-open-settings]')) {
             navigateContent('/workspace/' + w.id + '/settings');

@@ -61,3 +61,11 @@ The menu now sits 4px below the trigger button (down from 8px) -- the
 default vertical anchor offset dropped from 8px to 4px. Its background is
 a flat pure black for now (was the dark-teal #0b292b) while the color
 treatment is being iterated on.
+
+The workspace row is now a single shared builder
+(window.mindsSidebarRow.buildRow) rather than markup duplicated across
+the Electron menu (sidebar.js) and the browser menu (chrome.js). The row
+carries no outer positioning -- spacing is the parent container's flex
+gap -- so it composes cleanly wherever it's dropped in. The styleguide's
+"Sidebar items" sample renders through that same builder, so the catalog
+can't drift from the live menu.

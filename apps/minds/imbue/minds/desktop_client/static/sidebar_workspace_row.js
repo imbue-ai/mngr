@@ -1,15 +1,30 @@
-// Shared icon-button builders for the sidebar workspace rows. Loaded by
-// both Chrome.jinja (browser-mode inline sidebar in chrome.js) and
-// Sidebar.jinja (the sidebar page loaded into the shared modal
-// WebContentsView in sidebar.js) so the 16px stroke icon markup and the
-// workspace-settings gear SVG path live in one place rather than being
-// copy-pasted into every per-page script.
+// The workspace-menu list item, as a single shared builder. ``buildRow``
+// is the one source of truth for a workspace row's markup; the icon-button
+// helpers below are its internals (also exported for any standalone use).
+// Loaded by every surface that shows the row so the markup lives in one
+// place instead of being copy-pasted:
+//   - sidebar.js   -- the Electron menu (modal WebContentsView)
+//   - chrome.js    -- the browser-mode inline menu
+//   - dev_styleguide.js -- the styleguide's "Sidebar items" sample
+//
+// Composability rule: the row carries NO outer positioning (no margin) --
+// spacing between rows is owned by the parent container's flex ``gap``.
+// Callers append the returned element into their own positioned container.
 //
 // Usage:
+//   var row = window.mindsSidebarRow.buildRow(workspace,
+//               { isCurrent: bool, withOpenNew: bool });
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildOpenNewBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId);
+//
+// ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
+// the hover-revealed "open in new window" button (Electron only -- browser
+// mode has no multi-window concept and passes false). ``isCurrent`` marks
+// the row selected (bg + the settings gear, and the open-new icon shown
+// rather than hover-revealed). Event wiring (click / hover / context-menu)
+// is the caller's job -- this builds DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId) {
     var btn = document.createElement('button');
@@ -40,9 +55,73 @@
     return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId);
   }
 
+  function buildRow(workspace, options) {
+    var opts = options || {};
+    var isCurrent = !!opts.isCurrent;
+    var withOpenNew = !!opts.withOpenNew;
+
+    // No outer margin: row-to-row spacing is the parent container's flex
+    // ``gap``, keeping this element positioning-free and composable.
+    var row = document.createElement('div');
+    row.className =
+      'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white'
+      + (isCurrent ? ' is-current bg-white/15' : ' hover:bg-white/5');
+    row.setAttribute('data-agent-id', workspace.id);
+
+    var dot = document.createElement('span');
+    dot.className = 'sidebar-dot w-2.5 h-2.5 rounded-full shrink-0';
+    row.appendChild(dot);
+
+    var label = document.createElement('span');
+    label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
+    label.textContent = workspace.name || workspace.id;
+    row.appendChild(label);
+
+    // Retained-but-unverified workspace (its provider's last discovery poll
+    // errored): show an amber dot. The row stays fully clickable.
+    if (workspace.is_stale) {
+      row.classList.add('is-stale');
+      var staleDot = document.createElement('span');
+      staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
+      staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
+      row.appendChild(staleDot);
+    }
+
+    // Open-in-new icon (Electron only). Always in the DOM but hidden until
+    // hover for non-current rows; shown immediately on the current row
+    // alongside the settings gear (Figma "selected row" treatment). The
+    // hover toggle is the caller's delegated mouseover/mouseout handler.
+    if (withOpenNew) {
+      var openBtn = buildOpenNewBtn(workspace.id);
+      if (isCurrent) openBtn.classList.add('inline-flex');
+      else openBtn.classList.add('hidden');
+      row.appendChild(openBtn);
+    }
+
+    // Per-workspace settings gear: only the current row carries it.
+    if (isCurrent) {
+      row.appendChild(buildSettingsBtn(workspace.id));
+    }
+
+    // Accent: prefer the server-attached value; otherwise resolve it
+    // asynchronously via the shared workspace_accent helper (if loaded).
+    var accent = typeof workspace.accent === 'string' ? workspace.accent : null;
+    if (accent) {
+      dot.style.background = accent;
+      row.style.setProperty('--workspace-accent', accent);
+    } else if (window.mindsAccent) {
+      window.mindsAccent.get(workspace.id, function (c) {
+        dot.style.background = c;
+        row.style.setProperty('--workspace-accent', c);
+      });
+    }
+    return row;
+  }
+
   window.mindsSidebarRow = {
     buildIconButton: buildIconButton,
     buildOpenNewBtn: buildOpenNewBtn,
     buildSettingsBtn: buildSettingsBtn,
+    buildRow: buildRow,
   };
 })();
