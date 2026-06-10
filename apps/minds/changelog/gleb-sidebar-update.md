@@ -45,3 +45,9 @@ checked whether the *inbox* was open, so it would load the inbox over an
 open sidebar). When a menu is up, the request surfaces via the live
 titlebar badge instead, and auto-opens once the menu is dismissed and
 the next request arrives.
+
+On macOS the titlebar's left padding grew from 72px to 76px so the first
+titlebar button's hover highlight clears the window's traffic lights with
+a little more breathing room. The workspace menu follows automatically
+(it anchors to that button's measured position), so no menu-side change
+was needed.
