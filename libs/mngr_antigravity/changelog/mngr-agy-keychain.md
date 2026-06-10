@@ -26,4 +26,7 @@ JSONL had, so the common-transcript converter is unchanged (it now also accepts 
 un-enveloped user text). The decoder needs no `protobuf` library or shipped schema -- it is a
 small wire-walk keyed to the field map recovered from the binary's embedded descriptors;
 `dev/README.md` documents that recovered schema and a repeatable process to re-verify it
-after each (roughly weekly) agy release. Tool-call/code-action detail is not yet decoded.
+after each (roughly weekly) agy release. Assistant tool calls (name + args) are decoded too,
+so they surface on assistant messages. (Tool *results* are not yet captured as `tool_result`
+events: agy records command output in step types the converter does not map, and file-edit
+`CODE_ACTION` steps do not occur in practice -- a follow-up if needed.)

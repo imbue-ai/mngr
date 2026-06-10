@@ -70,11 +70,25 @@ def user_step(query: str, *, status: int = STATUS_DONE, seconds: int = 0) -> byt
     return step_blob(14, status, source=SOURCE_USER_EXPLICIT, seconds=seconds, content_field=19, content=inner)
 
 
-def assistant_step(response: str, *, thinking: str = "", status: int = STATUS_DONE, seconds: int = 0) -> bytes:
-    """A PLANNER_RESPONSE step (type 15) with ``response`` (f20.f1) and optional ``thinking`` (f20.f3)."""
+def assistant_step(
+    response: str,
+    *,
+    thinking: str = "",
+    tool_calls: tuple[tuple[str, str], ...] = (),
+    status: int = STATUS_DONE,
+    seconds: int = 0,
+) -> bytes:
+    """A PLANNER_RESPONSE step (type 15).
+
+    ``response`` is f20.f1, ``thinking`` f20.f3, and each ``(name, args)`` in ``tool_calls``
+    is a repeated ChatToolCall (f20.f7) with name (f2) and args (f3).
+    """
     inner = _len_field(1, response.encode())
     if thinking:
         inner += _len_field(3, thinking.encode())
+    for name, args in tool_calls:
+        call = _len_field(2, name.encode()) + _len_field(3, args.encode())
+        inner += _len_field(7, call)
     return step_blob(15, status, source=SOURCE_MODEL, seconds=seconds, content_field=20, content=inner)
 
 

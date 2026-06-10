@@ -47,6 +47,10 @@ _USER_INPUT_RESPONSE = 2
 # CortexStepPlannerResponse
 _PLANNER_RESPONSE_TEXT = 1
 _PLANNER_THINKING = 3
+_PLANNER_TOOL_CALLS = 7
+# ChatToolCall (exa.codeium_common_pb): f1 call id, f2 name, f3 args (a JSON string).
+_TOOL_CALL_NAME = 2
+_TOOL_CALL_ARGS = 3
 # CortexStepErrorMessage: f1 carries the surfaced text (best-effort).
 _ERROR_MESSAGE_TEXT = 1
 
@@ -167,6 +171,15 @@ def _first_message(blob: bytes, field_number: int) -> bytes | None:
     return bytes(value) if isinstance(value, (bytes, bytearray)) else None
 
 
+def _all_messages(blob: bytes, field_number: int) -> list[bytes]:
+    """Return every length-delimited (sub-message) value for a repeated field, in order."""
+    return [
+        bytes(value)
+        for field, _wire, value in _iter_fields(blob)
+        if field == field_number and isinstance(value, (bytes, bytearray))
+    ]
+
+
 def _first_varint(blob: bytes, field_number: int) -> int | None:
     value = _first(blob, field_number)
     return value if isinstance(value, int) else None
@@ -214,6 +227,14 @@ def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: by
             thinking = _first_str(planner, _PLANNER_THINKING)
             if thinking:
                 record["thinking"] = thinking
+            # tool_calls is a repeated ChatToolCall; common_transcript.sh reads name + args
+            # (args may be a JSON string, which its _short_value renders as-is).
+            tool_calls = [
+                {"name": _first_str(call, _TOOL_CALL_NAME), "args": _first_str(call, _TOOL_CALL_ARGS)}
+                for call in _all_messages(planner, _PLANNER_TOOL_CALLS)
+            ]
+            if tool_calls:
+                record["tool_calls"] = tool_calls
     elif step_type == _TYPE_ERROR_MESSAGE:
         error = _first_message(payload, _STEP_ERROR_MESSAGE)
         if error is not None:

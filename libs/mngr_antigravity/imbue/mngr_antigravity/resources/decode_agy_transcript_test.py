@@ -56,6 +56,23 @@ def test_decode_planner_response_includes_thinking() -> None:
     assert record["thinking"] == "hmm"
 
 
+def test_decode_planner_response_extracts_tool_calls() -> None:
+    blob = _assistant_step(
+        "running it",
+        tool_calls=(("run_command", '{"CommandLine":"uv --version"}'), ("read_file", '{"path":"x"}')),
+    )
+    record = dat.decode_step(_CONV, 3, 15, 3, blob)
+    assert record["tool_calls"] == [
+        {"name": "run_command", "args": '{"CommandLine":"uv --version"}'},
+        {"name": "read_file", "args": '{"path":"x"}'},
+    ]
+
+
+def test_decode_planner_response_without_tool_calls_omits_the_key() -> None:
+    record = dat.decode_step(_CONV, 2, 15, 3, _assistant_step("just text"))
+    assert "tool_calls" not in record
+
+
 def test_decode_unknown_type_falls_back_to_numeric_name() -> None:
     record = dat.decode_step(_CONV, 1, 21, 3, _step(21, 3, source=2))
     assert record["type"] == "STEP_TYPE_21"
