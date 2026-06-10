@@ -115,17 +115,20 @@ def _gcp_release_test_firewall_prepared(
     instance only lives for the test and is then destroyed.
 
     Runs against an opted-in test ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``)
-    and an isolated ``HOME`` so the subprocess doesn't load the developer's real
-    mngr *profile* (``$HOME/.mngr/profiles/.../settings.toml``), which the pytest
-    guard rejects. This session-scoped fixture runs before the per-test HOME
-    isolation, so it must isolate HOME itself; ``CLOUDSDK_CONFIG`` is pinned to
-    the real gcloud config so ADC still resolves under the swapped HOME (mirrors
-    what ``conftest.setup_test_mngr_env`` does for the per-test subprocesses).
+    and an isolated mngr home (``MNGR_HOST_DIR`` + ``HOME``) so the subprocess
+    doesn't load the developer's real mngr *profile*
+    (``$MNGR_HOST_DIR/profiles/.../settings.toml``), which the pytest guard
+    rejects. This session-scoped fixture runs before the per-test host-dir
+    isolation, so it must isolate the host dir itself; ``CLOUDSDK_CONFIG`` is
+    pinned to the real gcloud config so ADC still resolves under the swapped HOME
+    (mirrors what ``conftest.setup_test_mngr_env`` does for the per-test
+    subprocesses).
     """
     settings_dir = tmp_path_factory.mktemp("gcp_prepare_settings")
     _write_release_settings(settings_dir, gcp_release_test_project)
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
+    env["MNGR_HOST_DIR"] = str(tmp_path_factory.mktemp("gcp_prepare_mngr_home"))
     env["HOME"] = str(tmp_path_factory.mktemp("gcp_prepare_home"))
     if "GOOGLE_APPLICATION_CREDENTIALS" not in env:
         env["CLOUDSDK_CONFIG"] = env.get("CLOUDSDK_CONFIG") or str(Path.home() / ".config" / "gcloud")
