@@ -280,7 +280,7 @@ class GcpVpsClient(VpsClientInterface):
             return self.firewall_target_tag
         raise MngrError(
             f"GCP firewall rule {self.firewall_name!r} does not exist in project {self.project_id!r}. "
-            f"Run `uv run mngr gcp prepare --project {self.project_id}` once to create it "
+            f"Run `mngr gcp prepare --project {self.project_id}` once to create it "
             "(needs compute.firewalls.create), then retry the create with your usual "
             "instance-create-only credentials. The rule targets the configured firewall_target_tag "
             f"({self.firewall_target_tag!r}); every instance is tagged with it."
