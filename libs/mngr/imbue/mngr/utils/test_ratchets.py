@@ -298,7 +298,11 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(8))
+    # The two casts in agents/agent_registry.py annotate pluggy's untyped
+    # HookImpl.function() (typed as returning `object`): to pair each
+    # agent-type / alias registration with its owning plugin we iterate
+    # hookimpls, the same pattern already used in api/create.py.
+    rc.check_cast_usage(_DIR, snapshot(10))
 
 
 def test_prevent_assert_isinstance() -> None:
