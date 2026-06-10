@@ -1368,8 +1368,9 @@ function primeViewWithCachedChromeState(bundle, wc) {
   // requests panel auto-opens at startup faster than chrome.js loads).
   // Electron IPC drops events with no listener, so without this replay the
   // initial open is missed and the titlebar drag region wins over the
-  // modal's no-drag in the y=0..TITLEBAR strip. The sidebar view doesn't
-  // listen for this event so we scope the send to the chrome view.
+  // modal's no-drag in the y=0..TITLEBAR strip. The modal's hosted pages
+  // (sidebar, inbox) don't listen for this event, so we scope the send to
+  // the chrome view.
   if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
     wc.send('modal-state-changed', { open: !!bundle.modalVisible });
   }
