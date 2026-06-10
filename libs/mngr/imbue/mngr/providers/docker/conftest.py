@@ -8,10 +8,11 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_cleanup
-from imbue.mngr.providers.docker.testing import remove_all_containers_by_prefix
+from imbue.mngr.providers.docker.testing import remove_all_containers_by_prefix_via_cli
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import run_mngr_subprocess
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 
 
 @pytest.fixture
@@ -24,9 +25,15 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
     """Create a subprocess test environment for Docker tests.
 
     On teardown, destroys all agents created by this test via ``mngr destroy``,
-    then force-removes ALL Docker containers whose name starts with the test
-    prefix.  This catches both host containers and state containers even when
-    ``mngr destroy`` fails or the test is interrupted.
+    then force-removes ALL Docker containers (and volumes) whose name starts
+    with the test prefix.  This catches both host containers and state
+    containers even when ``mngr destroy`` fails or the test is interrupted.
+
+    Cleanup uses the docker CLI (not the in-process SDK): the resource guard
+    keeps ``_PYTEST_GUARD_PHASE`` at "call" through teardown, and these
+    subprocess tests are marked ``docker`` but not ``docker_sdk``, so an
+    SDK-based cleanup would be guard-blocked and silently leak the state
+    container.
     """
     host_dir = tmp_path / "docker-test-hosts"
     host_dir.mkdir()
@@ -36,6 +43,10 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
         prefix=prefix,
         host_dir=host_dir,
     )
+    # Register the prefix so the session-end safety net can attribute any
+    # leaked state container (named "<prefix>docker-state-<user_id>") to this
+    # worker and fail the suite if the teardown below fails to remove it.
+    worker_docker_state_prefixes.append(prefix)
     yield env
 
     # Destroy all agents created during the test.
@@ -51,11 +62,12 @@ def docker_subprocess_env(tmp_path: Path) -> Generator[dict[str, str], None, Non
     except (subprocess.TimeoutExpired, subprocess.SubprocessError, json.JSONDecodeError, OSError):
         pass
 
-    # Force-remove ALL Docker containers whose name starts with the test
-    # prefix.  Even if ``mngr destroy`` missed a container (e.g. the test
-    # was interrupted, or destroy failed silently), we still remove it here.
-    # Subprocess tests use the default provider name "docker".
-    remove_all_containers_by_prefix(prefix, provider_name="docker")
+    # Force-remove ALL Docker containers (and volumes) whose name starts with
+    # the test prefix.  Even if ``mngr destroy`` missed a container (e.g. the
+    # test was interrupted, or destroy failed silently), we still remove it
+    # here.  Uses the docker CLI because the SDK is guard-blocked through
+    # teardown for these docker-but-not-docker_sdk tests (see docstring).
+    remove_all_containers_by_prefix_via_cli(prefix)
 
 
 @pytest.fixture
