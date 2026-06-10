@@ -802,3 +802,59 @@ jobs:
           # Pre-test reset on the NEXT run also cleans, this is belt+braces.
           # All steps are best-effort; we never want cleanup to fail the job.
           bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true
+
+  # Vanilla `macos-latest` cold-launch smoke: the same binary the `build`
+  # job produced (or cache-hit) gets installed on a fresh GHA-hosted Mac
+  # and asserted via the macos-launch Playwright spec. Runs in parallel
+  # with `verify` (both consume the build artifact, neither blocks the
+  # other), and the workflow's overall status is red if either fails.
+  # Folded in from the old standalone `minds-macos-launch.yml`, which
+  # had to download via the auto-updater (latest *released* binary, not
+  # this SHA's) and went stale every time the spec moved ahead of the
+  # released build.
+  macos_launch:
+    needs: [build]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+      - name: install minds.app from the build job's artifact
+        run: |
+          TMP=$(mktemp -d)
+          curl -fSL --silent --show-error -o "$TMP/minds.zip" "${{ needs.build.outputs.app_zip_url }}"
+          unzip -q -d "$TMP" "$TMP/minds.zip"
+          sudo cp -R "$TMP/Minds.app" /Applications/Minds.app
+          sudo xattr -dr com.apple.quarantine /Applications/Minds.app || true
+          defaults read /Applications/Minds.app/Contents/Info.plist CFBundleVersion
+      - name: setup node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - name: setup pnpm
+        run: npm install -g pnpm@10.33.4 && pnpm --version
+      - name: pnpm install (apps/minds dev deps incl. playwright)
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+      - name: run macos-launch spec
+        working-directory: apps/minds
+        run: |
+          # Headless on CI; the spec asserts DOM state and the chrome
+          # iframe sources -- no display dependency. `html` reporter writes
+          # a browsable report with embedded screenshots and traces;
+          # Playwright skips opening it when stdout isn't a TTY (CI is fine).
+          pnpm exec playwright test \
+            --config=test/e2e/playwright.config.js \
+            macos-launch.spec.js \
+            --reporter=list,html
+      - name: upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-launch-playwright-report-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            apps/minds/test-results/
+            apps/minds/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
