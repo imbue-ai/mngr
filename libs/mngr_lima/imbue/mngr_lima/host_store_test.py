@@ -164,31 +164,25 @@ def test_lima_host_config_btrfs_mode_round_trips(tmp_path: Path) -> None:
     assert loaded.config.host_data_disk_name == "mngr-abc123-data"
 
 
-def test_lima_host_config_docker_mode_defaults() -> None:
-    """A LimaHostConfig defaults to direct-in-VM mode (is_host_in_docker False)
-    with no container fields, so pre-docker-mode records behave unchanged."""
+def test_lima_host_config_run_as_root_defaults_to_false() -> None:
+    """A LimaHostConfig defaults to the non-root agent user, so pre-existing
+    records (which lack the field) behave unchanged."""
     config = LimaHostConfig(instance_name="mngr-test")
-    assert config.is_host_in_docker is False
-    assert config.container_name is None
-    assert config.container_host_port is None
-    assert config.base_image is None
+    assert config.is_run_as_root is False
 
 
-def test_lima_host_config_docker_mode_round_trips(tmp_path: Path) -> None:
-    """docker-mode hosts persist the container name/forwarded-port/image and the
-    is_host_in_docker flag, and the values survive a write/read cycle."""
+def test_lima_host_config_run_as_root_round_trips(tmp_path: Path) -> None:
+    """run-as-root hosts persist the is_run_as_root flag alongside the btrfs
+    layout, and the values survive a write/read cycle."""
     store = _make_store(tmp_path)
     host_id = HostId.generate()
     record = HostRecord(
         certified_host_data=_make_certified_data(host_id),
         config=LimaHostConfig(
-            instance_name="mngr-docker-test",
+            instance_name="mngr-root-test",
             is_host_data_volume_exposed=False,
             host_data_disk_name="mngr-abc123-data",
-            is_host_in_docker=True,
-            container_name="mngr-docker-test",
-            container_host_port=49152,
-            base_image="mngr-build-host-abc123",
+            is_run_as_root=True,
         ),
     )
     store.write_host_record(record)
@@ -197,10 +191,7 @@ def test_lima_host_config_docker_mode_round_trips(tmp_path: Path) -> None:
     loaded = store.read_host_record(host_id)
     assert loaded is not None
     assert loaded.config is not None
-    assert loaded.config.is_host_in_docker is True
-    assert loaded.config.container_name == "mngr-docker-test"
-    assert loaded.config.container_host_port == 49152
-    assert loaded.config.base_image == "mngr-build-host-abc123"
+    assert loaded.config.is_run_as_root is True
 
 
 def test_lima_host_config_legacy_record_defaults_to_bind_mount(tmp_path: Path) -> None:

@@ -28,11 +28,6 @@ def _parse_jsonl_events(stdout: str) -> list[dict[str, object]]:
     return events
 
 
-def _parse_jsonl_events(stdout: str) -> list[dict]:
-    """Parse the JSONL output of ``mngr event`` into a list of event objects."""
-    return [json.loads(line) for line in stdout.splitlines() if line.strip()]
-
-
 def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
     # Use the default (local) provider, matching the provider-agnostic tutorial.
     # A local agent runs inside a local tmux session (`tmux` mark) and rsyncs its
@@ -128,7 +123,17 @@ def test_event_tail(e2e: E2eSession) -> None:
         mngr event my-task --tail 20
     """)
     _create_my_task(e2e, 100703)
-    expect(e2e.run("mngr event my-task --tail 20", comment="show only the last 20 events")).to_succeed()
+    result = e2e.run("mngr event my-task --tail 20", comment="show only the last 20 events")
+    expect(result).to_succeed()
+    # A freshly created `sleep` command agent may not have produced any events
+    # yet, so we don't require output. But whatever --tail emits must respect its
+    # contract: at most 20 events, each a JSONL object carrying the four
+    # guaranteed fields (event_id, timestamp, source, type).
+    events = _parse_jsonl_events(result.stdout)
+    assert len(events) <= 20, f"--tail 20 returned {len(events)} events:\n{result.stdout}"
+    for event in events:
+        for field in _GUARANTEED_EVENT_FIELDS:
+            assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
 
 # Creating a local command agent (rsync + tmux) plus reading its events takes
@@ -150,11 +155,23 @@ def test_event_head(e2e: E2eSession) -> None:
     # yet, so we don't require output. But whatever --head emits must respect
     # its contract: at most 10 events, each a JSONL object carrying the four
     # guaranteed fields (event_id, timestamp, source, type).
-    lines = [line for line in result.stdout.splitlines() if line.strip()]
-    assert len(lines) <= 10, f"--head 10 returned {len(lines)} events:\n{result.stdout}"
-    for line in lines:
-        event = json.loads(line)
-        assert {"event_id", "timestamp", "source", "type"} <= event.keys(), f"event missing guaranteed fields: {line}"
+    events = _parse_jsonl_events(result.stdout)
+    assert len(events) <= 10, f"--head 10 returned {len(events)} events:\n{result.stdout}"
+    for event in events:
+        for field in _GUARANTEED_EVENT_FIELDS:
+            assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
+
+    # --head selects the FIRST events; the full stream is a superset whose
+    # leading prefix matches --head exactly. Verify --head returns the earliest
+    # events (not the tail) by comparing against the unfiltered stream.
+    unfiltered = e2e.run("mngr event my-task", comment="read the full unfiltered event stream")
+    expect(unfiltered).to_succeed()
+    all_events = _parse_jsonl_events(unfiltered.stdout)
+    head_ids = [event["event_id"] for event in events]
+    all_ids = [event["event_id"] for event in all_events]
+    assert head_ids == all_ids[: len(head_ids)], (
+        f"--head 10 must return the leading prefix of the full stream; got {head_ids!r} vs {all_ids!r}"
+    )
 
 
 # Unhappy path for the --head block: --head and --tail select opposite ends of
@@ -175,6 +192,9 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
     )
     expect(result).to_fail()
     expect(result.stderr).to_contain("Cannot specify both --head and --tail")
+    # The conflict is rejected during argument validation, before any events are
+    # read, so nothing should be emitted to stdout.
+    expect(result.stdout).to_be_empty()
 
 
 @pytest.mark.rsync
@@ -227,3 +247,6 @@ def test_event_include_filter_rejects_invalid_cel(e2e: E2eSession) -> None:
     )
     expect(result).to_fail()
     expect(result.stderr).to_contain("Invalid include filter expression")
+    # "Fail loudly" also means it must not silently leak events: a rejected
+    # filter produces no event output on stdout at all.
+    expect(result.stdout).to_be_empty()
