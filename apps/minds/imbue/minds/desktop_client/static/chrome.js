@@ -58,7 +58,8 @@
   //
   // The titlebar background and contrasting foreground are driven by three
   // CSS variables set on the document root:
-  //   --workspace-accent  the OKLCH color (also consumed by sidebar spines etc.)
+  //   --workspace-accent  the workspace's #rrggbb accent (also consumed by
+  //                       sidebar spines etc.)
   //   --titlebar-bg       the same color, used by the titlebar background
   //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
   //                       contrasting foreground; titlebar-* utility classes
