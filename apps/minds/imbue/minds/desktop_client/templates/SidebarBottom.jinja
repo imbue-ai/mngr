@@ -7,6 +7,11 @@
   ids (#sidebar-new-workspace and #sidebar-account) are wired up in
   chrome.js and sidebar.js respectively; the #sidebar-account-label span is
   updated by both scripts when the auth status changes.
+
+  These three elements are direct flex children of #sidebar-menu (JinjaX
+  inlines the component), so the panel's ``gap-0.5`` (2px) supplies the
+  spacing between every entry -- including the 2px above and below the
+  bare divider line, which therefore needs no padding of its own.
 #}
 <button id="sidebar-new-workspace"
         type="button"
@@ -17,9 +22,7 @@
   </svg>
   <span>New workspace</span>
 </button>
-<div class="px-2 py-1.5">
-  <div class="h-px bg-white/10"></div>
-</div>
+<div class="h-px bg-white/10"></div>
 <button id="sidebar-account"
         type="button"
         class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/10 bg-transparent border-0 text-left"

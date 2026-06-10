@@ -51,3 +51,8 @@ titlebar button's hover highlight clears the window's traffic lights with
 a little more breathing room. The workspace menu follows automatically
 (it anchors to that button's measured position), so no menu-side change
 was needed.
+
+The menu's internal spacing was tightened to a uniform grid: 4px padding
+on all four sides of the panel, 2px between every entry, and 2px above
+and below the divider line (the line is now a bare full-width rule that
+takes its spacing from the panel's row gap rather than its own padding).
