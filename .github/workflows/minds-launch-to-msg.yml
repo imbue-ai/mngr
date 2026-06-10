@@ -20,15 +20,21 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
+      force:
+        description: 'Bypass the skip-if-unchanged check. Schedule-triggered runs skip when the (mngr main HEAD, FCT main HEAD) pair matches the last green run; dispatch-triggered runs ignore the check entirely.'
+        type: boolean
+        required: false
+        default: false
   # Twice-daily health check against the heads of both repos: 09:00 PDT
   # (16:00 UTC) so a morning failure surfaces at the start of the workday,
   # and 21:00 PDT (04:00 UTC) so an evening failure is caught before the
   # next workday opens. The cron only fires from the default branch --
   # this file has to be merged to mngr `main` first for the schedule to
   # activate (GitHub Actions ignores schedule triggers defined only on
-  # feature branches). Defaults: commit_sha = mngr main HEAD at trigger
-  # time (github.sha), template_ref = `main`, skip_slack_flow = false
-  # (exercise the latchkey + slack-mock path).
+  # feature branches). The `check_should_run` job below skips the rest
+  # of the pipeline when neither mngr nor FCT main HEAD has moved since
+  # the last green run, so the worst-case "nothing changed" cost is one
+  # free Linux job emitting `should_run=false`.
   schedule:
     - cron: '0 16 * * *'  # 09:00 PDT / 08:00 PST
     - cron: '0 4 * * *'   # 21:00 PDT / 20:00 PST
@@ -37,9 +43,103 @@ concurrency:
   group: mac-runner
   cancel-in-progress: false
 
+# `actions: write` lets `update_marker` use the default GITHUB_TOKEN to
+# call `gh variable set LAUNCH_TO_MSG_LAST_PAIR_KEY`. Read-only `vars`
+# context (`vars.LAUNCH_TO_MSG_LAST_PAIR_KEY`) doesn't need a permission,
+# only the write does.
+permissions:
+  contents: read
+  actions: write
+
 jobs:
+  # Free Linux job that decides whether the rest of the pipeline runs.
+  # Fingerprints the (mngr main HEAD, FCT main HEAD) pair and compares
+  # to the `LAUNCH_TO_MSG_LAST_PAIR_KEY` variable updated by the last
+  # green run. Schedule-triggered runs skip when nothing has moved;
+  # dispatch-triggered runs always run unless `force` was set (and even
+  # then we always recompute the pair key so `update_marker` records it
+  # on success).
+  check_should_run:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      pair_key:   ${{ steps.check.outputs.pair_key }}
+      mngr_sha:   ${{ steps.check.outputs.mngr_sha }}
+      fct_sha:    ${{ steps.check.outputs.fct_sha }}
+    steps:
+      - name: compute (mngr, FCT) pair key and compare to marker
+        id: check
+        env:
+          LAST_PAIR_KEY: ${{ vars.LAUNCH_TO_MSG_LAST_PAIR_KEY }}
+        run: |
+          set -euo pipefail
+          # Resolve the mngr ref we're going to verify. workflow_dispatch
+          # passes inputs.commit_sha (possibly empty); fall back to
+          # github.sha which, for schedule, is the default branch HEAD.
+          MNGR_REF='${{ inputs.commit_sha }}'
+          if [[ -z "$MNGR_REF" ]]; then
+            MNGR_REF='${{ github.sha }}'
+          fi
+          # If the input is a branch or tag name (not a 40-char SHA),
+          # resolve it against the mngr repo so the pair key fingerprint
+          # is stable across reruns at the same HEAD.
+          if [[ ! "$MNGR_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            MNGR_SHA=$(git ls-remote 'https://github.com/${{ github.repository }}.git' \
+              "refs/heads/$MNGR_REF" "refs/tags/$MNGR_REF" | head -1 | awk '{print $1}')
+          else
+            MNGR_SHA="$MNGR_REF"
+          fi
+          # Same dance for FCT: dispatch lets you override the ref; cron
+          # falls through to `main`.
+          FCT_REF='${{ inputs.template_ref }}'
+          if [[ -z "$FCT_REF" ]]; then
+            FCT_REF='main'
+          fi
+          FCT_REPO_URL='${{ inputs.template_url }}'
+          if [[ -z "$FCT_REPO_URL" ]]; then
+            FCT_REPO_URL='https://github.com/imbue-ai/forever-claude-template'
+          fi
+          if [[ ! "$FCT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" \
+              "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" | head -1 | awk '{print $1}')
+          else
+            FCT_SHA="$FCT_REF"
+          fi
+          if [[ -z "$MNGR_SHA" || -z "$FCT_SHA" ]]; then
+            echo "::error::failed to resolve refs -- MNGR_SHA='$MNGR_SHA' FCT_SHA='$FCT_SHA'"
+            exit 1
+          fi
+          PAIR_KEY=$(printf '%s:%s' "$MNGR_SHA" "$FCT_SHA" | shasum -a 256 | awk '{print $1}')
+          {
+            echo "mngr_sha=$MNGR_SHA"
+            echo "fct_sha=$FCT_SHA"
+            echo "pair_key=$PAIR_KEY"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Pair-key fingerprint"
+            echo "- mngr: \`$MNGR_SHA\`"
+            echo "- FCT:  \`$FCT_SHA\`"
+            echo "- pair_key: \`$PAIR_KEY\`"
+            echo "- last green pair_key: \`${LAST_PAIR_KEY:-<unset>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Skip when the pair hasn't moved since the last green run AND
+          # the caller didn't ask to bypass via `force`. Applies to both
+          # schedule and dispatch -- dispatch with the same pair as the
+          # last green run is almost always wasted CI; `force=true` makes
+          # the intent explicit when re-verification is wanted (e.g.
+          # after a runner reset).
+          if [[ "$PAIR_KEY" == "$LAST_PAIR_KEY" \
+             && "${{ inputs.force }}" != "true" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "- decision: **skip** (pair unchanged since last green; set force=true to bypass)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "- decision: **run**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
-    # commit_sha is required at the dispatch level, so build always runs.
+    needs: [check_should_run]
+    if: needs.check_should_run.outputs.should_run == 'true'
     # The job's `check for existing ToDesktop build` step short-circuits
     # `pnpm dist` (the 15-min ToDesktop sign + notarize) when a clean
     # ready build for this SHA already exists; otherwise it packages
@@ -280,12 +380,12 @@ jobs:
           if-no-files-found: ignore
 
   verify:
-    needs: [build]
-    # Build always runs (commit_sha is required); verify gates on it
-    # succeeding. On build failure verify is skipped; the build job's own
-    # `upload build log` step uses always() so the dist log artifact is
-    # preserved either way.
-    if: ${{ needs.build.result == 'success' }}
+    needs: [check_should_run, build]
+    # Skip when `check_should_run` told us to short-circuit (pair
+    # unchanged) AND only run when build actually succeeded -- on build
+    # failure verify is skipped; the build job's own `upload build log`
+    # step uses always() so the dist log artifact is preserved either way.
+    if: needs.check_should_run.outputs.should_run == 'true' && needs.build.result == 'success'
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 40
     env:
@@ -813,7 +913,8 @@ jobs:
   # this SHA's) and went stale every time the spec moved ahead of the
   # released build.
   macos_launch:
-    needs: [build]
+    needs: [check_should_run, build]
+    if: needs.check_should_run.outputs.should_run == 'true'
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -858,3 +959,33 @@ jobs:
             apps/minds/playwright-report/
           retention-days: 7
           if-no-files-found: ignore
+
+  # Record the (mngr main HEAD, FCT main HEAD) pair we just verified
+  # green so the next run can skip if nothing has moved. Only runs when
+  # BOTH downstream jobs (verify + macos_launch) succeeded -- a partial
+  # green doesn't move the marker, so the next slot retries automatically.
+  update_marker:
+    needs: [check_should_run, verify, macos_launch]
+    if: needs.verify.result == 'success' && needs.macos_launch.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: store pair key for next-run skip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+        run: |
+          set -euo pipefail
+          # `gh variable set` requires repo admin via the workflow's
+          # `permissions: actions: write` (declared at the workflow level).
+          # If GitHub's permission model differs in the future, the
+          # workflow surfaces the error here loudly rather than silently
+          # leaving the marker stale.
+          gh variable set LAUNCH_TO_MSG_LAST_PAIR_KEY \
+            --repo '${{ github.repository }}' \
+            --body "$PAIR_KEY"
+          {
+            echo "## Marker updated"
+            echo "- LAUNCH_TO_MSG_LAST_PAIR_KEY -> \`$PAIR_KEY\`"
+            echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
+            echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
