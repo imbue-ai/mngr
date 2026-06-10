@@ -1587,8 +1587,22 @@ async def amain() -> int:
 
             await browser.close()
             minds_proc.terminate()
+            # The new "quitting" takeover (Electron app shows a quitting page
+            # and animates through backend teardown before exit) makes a
+            # graceful SIGTERM exit take longer than the previous splash-only
+            # path; 30s covers it. If the previous instance is still alive
+            # when we launch the new one, macOS's single-instance lock turns
+            # the second launch into a no-op (the new process immediately
+            # fires before-quit and exits without ever creating a window),
+            # leaving the e2e timing out at "no Electron windows 30s after
+            # relaunch". SIGKILL the holdout so the lock releases.
             with contextlib.suppress(Exception):
-                minds_proc.wait(timeout=15)
+                minds_proc.wait(timeout=30)
+            if minds_proc.poll() is None:
+                logger.info("[relaunch] minds_proc still alive after SIGTERM; SIGKILL")
+                with contextlib.suppress(Exception):
+                    minds_proc.kill()
+                    minds_proc.wait(timeout=10)
             # Sweep orphan mngr forward / latchkey gateway processes that
             # the Electron shutdown chain sometimes leaves alive holding
             # :8421. Without this, the new launch can land on a stale
