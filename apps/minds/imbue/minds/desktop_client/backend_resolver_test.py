@@ -554,6 +554,86 @@ def test_get_host_state_returns_known_state_and_none_otherwise() -> None:
     assert resolver.get_host_state(HostId.generate()) is None
 
 
+def _resolver_with_host_state(host: HostId, agent: AgentId, state: HostState | None) -> MngrCliBackendResolver:
+    """A resolver carrying one workspace on ``host`` with the given discovery host state."""
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): state} if state is not None else {},
+        )
+    )
+    return resolver
+
+
+def test_host_state_override_wins_over_discovery_then_drops_on_agreement() -> None:
+    """An optimistic override masks discovery until the next snapshot agrees, then is dropped."""
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+
+    # Discovery still says RUNNING, but the user just stopped it.
+    resolver.set_host_state_override(host, HostState.STOPPED)
+    assert resolver.get_host_state(host) is HostState.STOPPED
+
+    # A fresh discovery snapshot that agrees (STOPPED) confirms and drops the override.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.STOPPED},
+        )
+    )
+    assert resolver.get_host_state(host) is HostState.STOPPED
+    # Override is gone: a later discovery-only flip back to RUNNING is reflected, unmasked.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.RUNNING},
+        )
+    )
+    assert resolver.get_host_state(host) is HostState.RUNNING
+
+
+def test_clear_host_state_override_reverts_to_discovery() -> None:
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+    resolver.set_host_state_override(host, HostState.STOPPED)
+
+    resolver.clear_host_state_override(host)
+
+    assert resolver.get_host_state(host) is HostState.RUNNING
+
+
+def test_host_state_override_fires_on_change_on_set_and_clear() -> None:
+    host = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    changes: list[None] = []
+    resolver.add_on_change_callback(lambda: changes.append(None))
+
+    resolver.set_host_state_override(host, HostState.STOPPED)
+    # Clearing an absent override is a no-op (no extra fire); clearing a present one fires.
+    resolver.clear_host_state_override(HostId.generate())
+    resolver.clear_host_state_override(host)
+
+    assert len(changes) == 2
+
+
+def test_host_state_override_does_not_affect_active_workspace_filtering() -> None:
+    """The override only ever holds RUNNING/STOPPED, so it can't change the DESTROYED-only filter."""
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+
+    resolver.set_host_state_override(host, HostState.STOPPED)
+
+    # A stopped (overridden) host is still an active workspace -- only DESTROYED drops it.
+    assert resolver.list_active_workspace_ids() == (agent,)
+
+
 def test_parse_agents_from_json_extracts_host_state() -> None:
     """mngr list --format json carries host.state, which parsing surfaces per host id."""
     json_output = json.dumps(

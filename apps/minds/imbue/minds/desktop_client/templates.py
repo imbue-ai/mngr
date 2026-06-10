@@ -92,6 +92,8 @@ _ICONS_24: Final[Mapping[str, str]] = {
     "forward": '<polyline points="9 6 15 12 9 18"/>',
     "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "play": '<polygon points="6 4 20 12 6 20 6 4"/>',
     "settings": (
         '<circle cx="12" cy="12" r="3"/>'
         '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
@@ -165,6 +167,8 @@ def render_landing_page(
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
     agent_accents: dict[str, str] | None = None,
+    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -197,6 +201,7 @@ def render_landing_page(
     supplied = agent_accents or {}
     for aid in accessible_agent_ids:
         effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
+    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -207,6 +212,8 @@ def render_landing_page(
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
+        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
     )
 
 

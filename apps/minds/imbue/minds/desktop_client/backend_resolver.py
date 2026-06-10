@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
@@ -109,9 +110,27 @@ class BackendResolverInterface(MutableModel, ABC):
         """Return the last-known lifecycle state of a host, or None if unknown.
 
         Default implementation has no host-state data and returns None.
-        Subclasses fed by discovery should override this.
+        Subclasses fed by discovery should override this. Implementations may
+        return a short-lived optimistic override set via
+        :meth:`set_host_state_override` ahead of discovery catching up.
         """
         return None
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override a host's state until discovery confirms it.
+
+        Lets a UI-initiated lifecycle action (e.g. a Start/Stop click) flip
+        :meth:`get_host_state` immediately instead of waiting for the next
+        discovery snapshot. The override is dropped once discovery agrees with
+        it or a short TTL elapses. Default implementation is a no-op (resolvers
+        without discovery host state have nothing to override).
+        """
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id`` (e.g. after a failed action).
+
+        Default implementation is a no-op.
+        """
 
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
@@ -450,6 +469,21 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
 # -- MngrCliBackendResolver --
 
 
+# How long an optimistic host-state override is trusted before discovery is
+# believed instead. A UI lifecycle action's command has already returned by the
+# time the override is set, so the next discovery snapshot (~10s) normally
+# confirms it well within this window; the TTL only bounds how long a *stuck*
+# discovery (e.g. a provider erroring) can keep showing a stale optimistic state.
+_HOST_STATE_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
+
+
+class _HostStateOverride(FrozenModel):
+    """A short-lived optimistic host state set by a UI-initiated lifecycle action."""
+
+    state: HostState = Field(description="The optimistic state to report until discovery confirms it")
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -485,6 +519,12 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
+    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action,
+    # masking discovery in ``get_host_state`` until discovery agrees or the TTL
+    # elapses. Guarded by _lock. Only ever holds a real RUNNING/STOPPED-style
+    # transition the user just triggered -- never DESTROYED -- so it cannot affect
+    # the DESTROYED-only filtering in ``list_active_workspace_ids``.
+    _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
@@ -567,11 +607,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
+            self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
+
+    def _sweep_host_state_overrides_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> None:
+        """Drop optimistic overrides that the fresh snapshot has confirmed or that have expired.
+
+        Keeps the override map bounded to genuinely-still-pending overrides (so a
+        host that has since left discovery never lingers) without firing on-change
+        itself -- the surrounding ``update_agents`` already fires once. Must be
+        called with ``self._lock`` held.
+        """
+        now = time.monotonic()
+        for host_id_str in tuple(self._host_state_override_by_host_id):
+            override = self._host_state_override_by_host_id[host_id_str]
+            discovery_state = discovery_state_by_host_id.get(host_id_str)
+            if (
+                discovery_state == override.state
+                or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
 
     def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
@@ -702,9 +761,41 @@ class MngrCliBackendResolver(BackendResolverInterface):
             )
 
     def get_host_state(self, host_id: HostId) -> HostState | None:
-        """Return the last-known lifecycle state of a host from discovery, or None."""
+        """Return the host's lifecycle state, preferring a fresh optimistic override.
+
+        Discovery is authoritative: an optimistic override (set by a UI-initiated
+        Start/Stop) wins only until discovery agrees with it or its TTL elapses, at
+        which point it is dropped here and discovery is returned. Returns None when
+        neither an override nor discovery knows the host.
+        """
+        host_id_str = str(host_id)
         with self._lock:
-            return self._agents_result.host_state_by_host_id.get(str(host_id))
+            discovery_state = self._agents_result.host_state_by_host_id.get(host_id_str)
+            override = self._host_state_override_by_host_id.get(host_id_str)
+            if override is None:
+                return discovery_state
+            if (
+                discovery_state == override.state
+                or (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
+                return discovery_state
+            return override.state
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""
+        with self._lock:
+            self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
+                state=state, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id``; fires on-change only if one was present."""
+        with self._lock:
+            existed = self._host_state_override_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace label value for an agent, or None."""
