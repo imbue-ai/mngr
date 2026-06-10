@@ -6,6 +6,7 @@
 #}
 {% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
 {% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
 <script>
   (function() {
     var configureToggle = document.getElementById('configure-toggle');
@@ -41,6 +42,25 @@
     // aria-checked CSS attribute selector in tokens.css) tracks.
     var colorInput = document.getElementById('create-color-input');
     var colorSwatches = document.querySelectorAll('#create-color-picker .color-swatch');
+    function previewCreateAccent(hex) {
+      // No workspace yet, so route through the freeform preview path:
+      // content-relay-preload validates + forwards to main + main
+      // forwards to this bundle's chrome view as
+      // ``freeform_accent_preview``, which sets the CSS variables
+      // directly. Naturally cleared by the next navigation event
+      // (submit -> ``current-workspace-changed`` repaints from the new
+      // workspace; cancel -> last-workspace fallback repaints).
+      if (typeof hex !== 'string') return;
+      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
+        ? window.mindsAccent.pickForegroundForHex(hex)
+        : null;
+      if (!fg) return;
+      window.postMessage({
+        type: 'minds:preview-freeform-accent',
+        accent: hex,
+        accentFg: fg,
+      }, '*');
+    }
     function selectColorSwatch(hex) {
       colorInput.value = hex;
       for (var i = 0; i < colorSwatches.length; i++) {
@@ -49,6 +69,7 @@
           colorSwatches[i].getAttribute('data-color') === hex ? 'true' : 'false'
         );
       }
+      previewCreateAccent(hex);
     }
     for (var i = 0; i < colorSwatches.length; i++) {
       (function (sw) {
@@ -57,6 +78,10 @@
         });
       })(colorSwatches[i]);
     }
+    // Paint the initial default-color preview on load so the bar
+    // shows the form's pre-selected color even before the user clicks
+    // (matches the "what you see on submit" expectation).
+    previewCreateAccent(colorInput.value);
 
     var accountSelect = document.getElementById('account_id');
     var launchSelect = document.getElementById('launch_mode');

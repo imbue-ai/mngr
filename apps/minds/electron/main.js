@@ -2709,6 +2709,23 @@ ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
   });
 });
 
+// Create-form picker freeform preview: no workspace exists yet, so this
+// paints the chrome CSS variables directly. The next navigation event
+// (create succeeds -> ``current-workspace-changed`` fires for the new
+// workspace; or cancel -> back to last-workspace via the existing
+// fallback) repaints the bar through the regular accent path.
+ipcMain.on('preview-freeform-accent', (event, accent, accentFg) => {
+  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
+  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  bundle.chromeView.webContents.send('chrome-event', {
+    type: 'freeform_accent_preview',
+    accent,
+    accent_fg: accentFg,
+  });
+});
+
 // Native file/directory picker for the file-sharing permission dialog.
 // The inbox modal calls this (via the preload bridge) so the user can
 // pick the path to share. ``options.mode`` is 'file' or 'directory':

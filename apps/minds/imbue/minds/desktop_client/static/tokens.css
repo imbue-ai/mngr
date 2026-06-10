@@ -249,6 +249,21 @@ html {
 }
 
 /*
+ * Create-form swatches are smaller (w-6 h-6 = 24px) than the
+ * workspace-settings ones (34px); the same 2px rim eats too much of
+ * the visible color area at that size, so override to a 1px rim there.
+ */
+#create-color-picker .color-swatch {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+#create-color-picker .color-swatch[aria-checked="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb;
+}
+
+/*
  * Hex-input pill (workspace settings page). Sits inline with the
  * color swatches and mimics one visually: same height + the same 2px
  * black-25% inset shadow as a "rim", pill-shaped via rounded-full on

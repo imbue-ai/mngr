@@ -67,4 +67,17 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('preview-workspace-accent', agentId, accent, accentFg);
     return;
   }
+  // Create-form color picker: there's no workspace yet, so we can't
+  // route through the per-agent cache. This path paints the chrome
+  // CSS variables directly for the duration of the create flow; a
+  // subsequent navigation event repaints from whatever the new
+  // displayed/last workspace is.
+  if (data.type === 'minds:preview-freeform-accent') {
+    const accent = data.accent;
+    const accentFg = data.accentFg;
+    if (typeof accent !== 'string' || !ACCENT_HEX_PATTERN.test(accent)) return;
+    if (typeof accentFg !== 'string' || !ACCENT_FG_PATTERN.test(accentFg)) return;
+    ipcRenderer.send('preview-freeform-accent', accent, accentFg);
+    return;
+  }
 });

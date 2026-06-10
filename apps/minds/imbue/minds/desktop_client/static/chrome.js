@@ -404,6 +404,19 @@
 
   function handleChromeEvent(data) {
     try {
+      if (data.type === 'freeform_accent_preview') {
+        // Create-form preview: no workspace yet, so there's no agentId
+        // to key the cache by. Paint the CSS variables directly; the
+        // next regular navigation/SSE event will overwrite them.
+        if (data.accent) {
+          document.documentElement.style.setProperty('--workspace-accent', data.accent);
+          document.documentElement.style.setProperty('--titlebar-bg', data.accent);
+          if (data.accent_fg) {
+            document.documentElement.style.setProperty('--titlebar-fg', data.accent_fg);
+          }
+        }
+        return;
+      }
       if (data.type === 'workspace_accent_preview') {
         // Optimistic single-workspace cache update + repaint, emitted by
         // main.js when the settings page in this bundle picks a color.
