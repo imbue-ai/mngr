@@ -187,6 +187,16 @@ COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.
 _CREDENTIAL_STORE_KEY: str = "cli_auth_credentials_store"
 _CREDENTIAL_STORE_FILE: str = "file"
 
+# Disable codex's startup update check. On launch (including ``codex resume``)
+# codex otherwise shows a BLOCKING "Update available! ... 1. Update now / 2. Skip
+# / 3. Skip until next version" prompt that intercepts the composer -- which would
+# misdirect mngr's first pasted message into the menu (and an Enter could even
+# select "Update now", running ``brew upgrade``). Updates are the user's concern,
+# not the agent's, so we always turn this off. (config-reference:
+# "Check for Codex updates on startup (set to false only when updates are
+# centrally managed)".)
+_CHECK_FOR_UPDATE_KEY: str = "check_for_update_on_startup"
+
 PROJECTS_KEY: str = "projects"
 TRUST_LEVEL_KEY: str = "trust_level"
 TRUST_LEVEL_TRUSTED: str = "trusted"
@@ -261,9 +271,11 @@ def build_codex_config(
 ) -> dict[str, Any]:
     """Build a per-agent ``config.toml`` body (low -> high precedence).
 
-    1. The fixed credential-store pin (``cli_auth_credentials_store = "file"``)
-       and the ``[notice]`` suppressors -- always present so shared auth works
-       and the first launch is silent.
+    1. The fixed pins -- the credential store (``cli_auth_credentials_store =
+       "file"``), the startup update check off (``check_for_update_on_startup =
+       false``, so the blocking update prompt never intercepts the first
+       message), and the ``[notice]`` suppressors -- always present so shared
+       auth works and the first launch is silent.
     2. ``model`` / ``model_reasoning_effort`` / ``sandbox_mode`` /
        ``approval_policy`` -- each written only when not ``None`` (``None`` leaves
        codex's own default in force). ``model`` is intentionally not defaulted
@@ -277,7 +289,12 @@ def build_codex_config(
 
     Returns a plain dict; ``serialize_codex_config`` renders it as TOML.
     """
-    config: dict[str, Any] = {_CREDENTIAL_STORE_KEY: _CREDENTIAL_STORE_FILE}
+    config: dict[str, Any] = {
+        _CREDENTIAL_STORE_KEY: _CREDENTIAL_STORE_FILE,
+        # Always off: the blocking startup update prompt would intercept the
+        # first message (see the constant's comment).
+        _CHECK_FOR_UPDATE_KEY: False,
+    }
     if model is not None:
         config["model"] = model
     if model_reasoning_effort is not None:

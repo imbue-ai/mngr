@@ -65,6 +65,9 @@ def test_build_codex_config_always_pins_the_file_credential_store() -> None:
         config_overrides={},
     )
     assert config["cli_auth_credentials_store"] == "file"
+    # The blocking startup update prompt is always disabled so it can't intercept
+    # the first message.
+    assert config["check_for_update_on_startup"] is False
     assert config["notice"] == {
         "hide_full_access_warning": True,
         "hide_world_writable_warning": True,
