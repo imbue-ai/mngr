@@ -245,7 +245,7 @@ def test_ports_are_integers() -> None:
 
 def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, tmp_path)
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
     assert len(_stub(outer).recorded) == 1
     command = _stub(outer).recorded[0].command
     # Gateway binds OUTER_PORT on loopback, with counting disabled, and the
@@ -258,6 +258,9 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     # latchkey remains the single owner of credential refresh.
     assert "LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1" in command
     assert "LATCHKEY_ENCRYPTION_KEY=" in command
+    # The desktop-derived shared password is injected so the VPS gateway
+    # accepts the same agent traffic the local gateway does.
+    assert "LATCHKEY_GATEWAY_LISTEN_PASSWORD=shared-password" in command
     assert "nohup latchkey gateway" in command
     # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the
     # shell running this very script). Records $! after launching.
@@ -281,14 +284,14 @@ def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     key_path.write_text("my-test-key-abc123")
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, tmp_path)
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
     assert "LATCHKEY_ENCRYPTION_KEY=my-test-key-abc123" in _stub(outer).recorded[0].command
 
 
 def test_ensure_latchkey_gateway_running_raises_on_failure(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
     with pytest.raises(RemoteGatewayError, match="command not found"):
-        _ensure_latchkey_gateway_running(outer, tmp_path)
+        _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
 
 
 def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container() -> None:
@@ -376,7 +379,12 @@ def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
 def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name="mngr-ws-1"))
     provision_remote_gateway(
-        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+        outer,
+        host_id=HostId(),
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        latchkey_directory=tmp_path,
+        gateway_password="shared-password",
     )
     commands = "\n\n".join(r.command for r in _stub(outer).recorded)
     # Install latchkey, run the gateway, find the container, mint+authorize a
@@ -395,7 +403,12 @@ def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path
     outer = cast(OuterHostInterface, _StubOuter(container_name=""))
     with pytest.raises(RemoteGatewayError, match="No container labeled"):
         provision_remote_gateway(
-            outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+            outer,
+            host_id=HostId(),
+            container_ssh_user="root",
+            container_ssh_port=2222,
+            latchkey_directory=tmp_path,
+            gateway_password="shared-password",
         )
 
 
@@ -404,6 +417,11 @@ def test_provision_remote_gateway_is_noop_on_local_outer_host(tmp_path: Path) ->
     # provisioned -- we don't apt/npm-install latchkey on the user's computer.
     outer = cast(OuterHostInterface, _StubOuter(is_local=True))
     provision_remote_gateway(
-        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+        outer,
+        host_id=HostId(),
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        latchkey_directory=tmp_path,
+        gateway_password="shared-password",
     )
     assert _stub(outer).recorded == []

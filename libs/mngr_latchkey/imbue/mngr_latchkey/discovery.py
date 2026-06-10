@@ -311,6 +311,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     container_ssh_user=ssh_info.user,
                     container_ssh_port=ssh_info.port,
                     latchkey_directory=self.latchkey.latchkey_directory,
+                    gateway_password=self.latchkey.derive_gateway_password(),
                 )
                 # Initial sync for the freshly-provisioned host, reusing the
                 # open outer connection: permissions first, then credentials.
