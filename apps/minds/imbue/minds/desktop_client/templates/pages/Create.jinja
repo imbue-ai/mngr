@@ -78,10 +78,20 @@
         });
       })(colorSwatches[i]);
     }
-    // Paint the initial default-color preview on load so the bar
-    // shows the form's pre-selected color even before the user clicks
-    // (matches the "what you see on submit" expectation).
-    previewCreateAccent(colorInput.value);
+    // Paint the initial default-color preview so the bar shows the
+    // form's pre-selected color even before the user clicks (matches
+    // the "what you see on submit" expectation). Deferred to
+    // DOMContentLoaded: this inline IIFE runs during parsing, before
+    // the deferred workspace_accent.js has executed, so window.mindsAccent
+    // (which previewCreateAccent needs for pickForegroundForHex) isn't
+    // ready yet. DOMContentLoaded fires after deferred scripts run.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () {
+        previewCreateAccent(colorInput.value);
+      });
+    } else {
+      previewCreateAccent(colorInput.value);
+    }
 
     var accountSelect = document.getElementById('account_id');
     var launchSelect = document.getElementById('launch_mode');
