@@ -32,8 +32,7 @@ relative paths always resolve against the host directory.""",
     ),
     see_also=(
         ("exec", "Execute a shell command on an agent's host"),
-        ("push", "Push files or git commits to an agent"),
-        ("pull", "Pull files or git commits from an agent"),
+        ("rsync", "Rsync files between local and a remote host or agent"),
         ("event", "View agent and host event files"),
     ),
 ).register()

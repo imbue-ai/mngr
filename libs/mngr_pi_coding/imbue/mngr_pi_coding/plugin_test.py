@@ -1,6 +1,9 @@
 """Unit tests for the pi-coding plugin."""
 
+import inspect
 import json
+import os
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,7 @@ from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
 from imbue.mngr_pi_coding.plugin import _INBOX_FILE_NAME
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
+from imbue.mngr_pi_coding.plugin import _PI_NPM_PACKAGE
 from imbue.mngr_pi_coding.plugin import _SESSION_FILE_NAME
 from imbue.mngr_pi_coding.plugin import _SESSION_STARTED_SENTINEL_NAME
 from imbue.mngr_pi_coding.plugin import _inbox_append_command
@@ -42,10 +46,16 @@ from imbue.mngr_pi_coding.plugin import register_agent_type
 
 
 class _StubHost(FakeHost):
-    """FakeHost that stubs specific commands and provides get_env_var."""
+    """FakeHost that stubs specific commands, records them, and provides get_env_var.
+
+    Kept local to this test module for now; if another plugin needs the same
+    substring-command-stub + env-var behavior it should be promoted onto the
+    shared FakeHost in imbue.mngr.api.testing.
+    """
 
     command_results: dict[str, CommandResult] = {}
     env_vars: dict[str, str] = {}
+    executed_commands: list[str] = []
 
     def _execute_command(
         self,
@@ -55,6 +65,7 @@ class _StubHost(FakeHost):
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
+        self.executed_commands.append(command)
         for pattern, result in self.command_results.items():
             if pattern in command:
                 return result
@@ -109,20 +120,6 @@ def _setup_home_pi(tmp_path: Path) -> Path:
     return tmp_path / "home"
 
 
-@pytest.fixture()
-def pi_agent(tmp_path: Path) -> PiCodingAgent:
-    """Create a minimally-configured PiCodingAgent for testing."""
-    agent = PiCodingAgent.__new__(PiCodingAgent)
-    object.__setattr__(agent, "agent_config", PiCodingAgentConfig())
-    object.__setattr__(agent, "host", _fake_host(tmp_path))
-    object.__setattr__(agent, "id", AgentId.generate())
-    object.__setattr__(agent, "name", AgentName("test-pi"))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir(exist_ok=True)
-    object.__setattr__(agent, "work_dir", work_dir)
-    return agent
-
-
 # =============================================================================
 # PiCodingAgentConfig tests
 # =============================================================================
@@ -156,6 +153,16 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
 # =============================================================================
 # PiCodingAgent method tests
 # =============================================================================
+
+
+def test_pi_coding_agent_is_concrete_and_instantiable() -> None:
+    # PiCodingAgent subclasses BaseAgent directly (not InteractiveTuiAgent) and must
+    # implement every abstract method it inherits (e.g. assemble_command,
+    # get_expected_process_name, send_message) or it could not be instantiated to
+    # create agents. inspect.isabstract is the observable property that guards this;
+    # the actual behavior of those methods is exercised by the other unit tests here
+    # and by the release e2e.
+    assert inspect.isabstract(PiCodingAgent) is False
 
 
 def test_get_expected_process_name_returns_pi(pi_agent: PiCodingAgent) -> None:
@@ -198,14 +205,40 @@ def test_get_provision_file_transfers_returns_empty(pi_agent: PiCodingAgent, tmp
 # =============================================================================
 
 
-def test_on_before_provisioning_completes_without_credentials(pi_agent: PiCodingAgent, tmp_path: Path) -> None:
-    """Verify on_before_provisioning completes (with warning) when no API credentials are found."""
-    _setup_home_pi(tmp_path)
+def test_on_before_provisioning_warns_when_no_credentials(
+    pi_agent: PiCodingAgent,
+    tmp_path: Path,
+    log_warnings: list[str],
+) -> None:
+    """on_before_provisioning warns when no API credentials are found anywhere."""
+    # _has_api_credentials_available reads Path.home()/.pi/agent/auth.json; the autouse
+    # setup_test_mngr_env fixture points HOME at tmp_path, which has no auth.json.
     host = _stub_host(tmp_path, is_local=False)
     options = _make_options()
     mngr_ctx = _make_test_mngr_ctx(tmp_path)
 
     pi_agent.on_before_provisioning(host, options, mngr_ctx)
+
+    assert any("No API credentials detected" in message for message in log_warnings)
+
+
+def test_on_before_provisioning_does_not_warn_when_auth_file_present(
+    pi_agent: PiCodingAgent,
+    tmp_path: Path,
+    log_warnings: list[str],
+) -> None:
+    """on_before_provisioning stays silent when ~/.pi/agent/auth.json holds credentials."""
+    # HOME is redirected to tmp_path by the autouse setup_test_mngr_env fixture.
+    pi_auth_dir = tmp_path / ".pi" / "agent"
+    pi_auth_dir.mkdir(parents=True)
+    (pi_auth_dir / "auth.json").write_text('{"anthropic": {"type": "api_key"}}')
+    host = _stub_host(tmp_path, is_local=False)
+    options = _make_options()
+    mngr_ctx = _make_test_mngr_ctx(tmp_path)
+
+    pi_agent.on_before_provisioning(host, options, mngr_ctx)
+
+    assert not any("No API credentials detected" in message for message in log_warnings)
 
 
 # =============================================================================
@@ -225,7 +258,9 @@ def test_setup_local_config_dir_symlinks_auth(tmp_path: Path, pi_agent: PiCoding
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
 
-    assert (config_dir / "auth.json").is_symlink()
+    auth_link = config_dir / "auth.json"
+    assert auth_link.is_symlink()
+    assert Path(os.readlink(auth_link)) == home / ".pi" / "agent" / "auth.json"
 
 
 def test_setup_remote_config_dir_copies_auth(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
@@ -256,7 +291,9 @@ def test_setup_local_config_dir_symlinks_settings(tmp_path: Path, pi_agent: PiCo
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
 
-    assert (config_dir / "settings.json").is_symlink()
+    settings_link = config_dir / "settings.json"
+    assert settings_link.is_symlink()
+    assert Path(os.readlink(settings_link)) == home / ".pi" / "agent" / "settings.json"
 
 
 def test_setup_local_config_dir_skips_settings_when_disabled(
@@ -293,9 +330,15 @@ def test_setup_local_config_dir_symlinks_resource_dirs(
 
     pi_agent._setup_local_config_dir(host, config, config_dir, home)
 
-    assert (config_dir / "skills").is_symlink()
-    assert (config_dir / "prompts").is_symlink()
-    assert (config_dir / "agents").is_symlink()
+    skills_link = config_dir / "skills"
+    prompts_link = config_dir / "prompts"
+    agents_link = config_dir / "agents"
+    assert skills_link.is_symlink()
+    assert prompts_link.is_symlink()
+    assert agents_link.is_symlink()
+    assert Path(os.readlink(skills_link)) == home / ".pi" / "agent" / "skills"
+    assert Path(os.readlink(prompts_link)) == home / ".pi" / "agent" / "prompts"
+    assert Path(os.readlink(agents_link)) == home / ".pi" / "agent" / "agents"
 
 
 def test_setup_remote_config_dir_copies_settings(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
@@ -368,7 +411,7 @@ def test_provision_raises_when_pi_not_installed_locally(tmp_path: Path, pi_agent
         pi_agent.provision(host, options, mngr_ctx)
 
 
-def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+def test_provision_auto_installs_on_remote(tmp_path: Path, make_pi_agent: Callable[..., PiCodingAgent]) -> None:
     host = _stub_host(
         tmp_path,
         is_local=False,
@@ -379,8 +422,7 @@ def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAge
         },
     )
     config = PiCodingAgentConfig(check_installation=True, sync_auth=False, sync_home_settings=False)
-    object.__setattr__(pi_agent, "agent_config", config)
-    object.__setattr__(pi_agent, "host", host)
+    agent = make_pi_agent(agent_config=config, host=host)
     options = _make_options()
     # is_auto_approve so the workspace-trust gate proceeds silently (the autouse
     # HOME redirect keeps the global trust write inside the test's temp home).
@@ -389,7 +431,11 @@ def test_provision_auto_installs_on_remote(tmp_path: Path, pi_agent: PiCodingAge
     # The trust gate resolves the git source via the concurrency group, which
     # must be active (it is during real provisioning).
     with mngr_ctx.concurrency_group:
-        pi_agent.provision(host, options, mngr_ctx)
+        agent.provision(host, options, mngr_ctx)
+
+    # The install branch must actually run: provision would otherwise complete
+    # silently (the only other command, mkdir -p, also succeeds) without installing pi.
+    assert any(f"npm install -g {_PI_NPM_PACKAGE}" in command for command in host.executed_commands)
 
 
 def test_provision_raises_when_remote_install_disabled(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
