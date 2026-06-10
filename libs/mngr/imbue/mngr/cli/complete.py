@@ -97,6 +97,29 @@ def _is_flag_option(word: str, flag_options: list[str]) -> bool:
     return all(f"-{ch}" in flag_options for ch in word[1:])
 
 
+def _consume_value_option(words: list[str], option_index: int, end_index: int) -> int:
+    """Return the index just past a value-taking option at ``option_index`` and its value.
+
+    The option consumes the following word (its value). In zsh that value is a
+    single word (e.g. ``KEY=VALUE``); bash treats ``=`` as a word break, so the
+    value arrives split as ``KEY``, ``=``, ``VALUE``. Coalesce any such ``= X``
+    continuations (and a trailing lone ``=``) so the whole value is consumed and
+    its pieces are not later miscounted as positional arguments.
+    """
+    # Skip the option name, then the (first) value word.
+    i = option_index + 1
+    if i >= end_index:
+        return i
+    i += 1
+    # In bash a `=`-containing value is split on `=`; stitch the `= X` pieces back
+    # on (the `=` word break, then the value piece after it).
+    while i < end_index and words[i] == "=":
+        i += 1
+        if i < end_index:
+            i += 1
+    return i
+
+
 def _count_positional_words(
     words: list[str],
     start_index: int,
@@ -108,7 +131,7 @@ def _count_positional_words(
 
     Walks the words, skipping option names and their values:
     - Flag options (consume 1 word)
-    - Value-taking options (consume 2 words: the option name + its value)
+    - Value-taking options (consume the option name + its value)
     Everything else is counted as a positional word.
     """
     all_options_set = set(all_options)
@@ -121,8 +144,8 @@ def _count_positional_words(
                 # Flag option: consumes only itself
                 i += 1
             elif word in all_options_set:
-                # Known value-taking option: consumes itself and the next word
-                i += 2
+                # Known value-taking option: consumes itself and its value
+                i = _consume_value_option(words, i, end_index)
             else:
                 # Unknown option-like word: conservatively skip it alone.
                 # We cannot tell whether it takes a value, but skipping just
@@ -155,7 +178,7 @@ def _find_first_positional_word(
             if _is_flag_option(word, flag_options):
                 i += 1
             elif word in all_options_set:
-                i += 2
+                i = _consume_value_option(words, i, end_index)
             else:
                 i += 1
         else:

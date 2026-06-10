@@ -417,7 +417,7 @@ def test_config_list_schema_preserves_generic_type_parameters(
 ) -> None:
     """`mngr config list --schema` should render parameterised generics with their args.
 
-    Regression test: ``render_annotation`` (in cli/model_schema) previously
+    Regression test: ``render_annotation`` (in utils/model_schema) previously
     returned just ``"list"`` for ``list[str]`` (via ``__name__``), losing the
     type parameter -- which
     defeats the schema's purpose of telling users what values a setting takes.
