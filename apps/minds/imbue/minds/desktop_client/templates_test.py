@@ -345,12 +345,12 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
-    # The floating-menu wrapper id sidebar.js's ResizeObserver targets to
-    # push the measured menu height to the Electron main process over the
-    # ``set-sidebar-height`` IPC. A transparent sidebar WebContentsView sized
-    # past the menu would silently absorb clicks intended for the workspace
-    # content underneath; the height report is what keeps clicks falling
-    # through.
+    # The floating-menu wrapper id. The sidebar WebContentsView covers the
+    # full content area and acts as a modal: sidebar.js compares click
+    # targets against ``#sidebar-menu`` to distinguish clicks inside the
+    # floating panel (let the menu's own handlers run) from clicks on the
+    # transparent backdrop outside it (close the sidebar). Renaming or
+    # dropping this id breaks the click-outside-to-close behavior.
     assert 'id="sidebar-menu"' in html
     # SidebarBottom.jinja is rendered inside the floating menu in both
     # Chrome.jinja (browser mode) and Sidebar.jinja (Electron sidebar
