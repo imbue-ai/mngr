@@ -218,7 +218,7 @@ def _get_is_mac(request: Request) -> bool:
     """Return True if the request's User-Agent indicates macOS.
 
     Used by templates that gate macOS-specific styling (traffic-light
-    padding, hidden window controls, sidebar-menu left offset).
+    padding, hidden window controls).
     """
     user_agent = request.headers.get("user-agent", "")
     return "Macintosh" in user_agent or "Mac OS" in user_agent
