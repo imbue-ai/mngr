@@ -9,15 +9,14 @@ on par with the `claude` and `antigravity` agent types.
 
 ## How it works
 
-Codex is architecturally the closest CLI to Claude Code, so this plugin follows the
-`mngr_claude` shape. See `specs/agent-plugin-parity/codex-investigation.md` in the monorepo
-for the full, source-verified investigation behind each decision.
+See `specs/agent-plugin-parity/codex-investigation.md` in the monorepo for the full,
+source-verified investigation behind each decision.
 
 - **Per-agent isolation via `CODEX_HOME`.** Codex resolves its whole
   config/auth/session/hook tree from `CODEX_HOME` (default `~/.codex`). Each agent gets its
   own `CODEX_HOME` under the agent state dir, injected only on the codex process
-  (`env CODEX_HOME=...`), leaving the user's real `$HOME` untouched. No `$HOME` relocation,
-  no workspace symlink (codex accepts the dotted `~/.mngr/...` cwd).
+  (`env CODEX_HOME=...`), leaving the user's real `$HOME` untouched. codex accepts the
+  dotted `~/.mngr/...` cwd, so there is no workspace symlink either.
 - **Shared auth.** The per-agent `auth.json` is a symlink to the user's shared
   `~/.codex/auth.json`. Codex writes that file in place and reloads-before-refreshing, so
   one login authenticates every agent and token refreshes propagate. `config.toml` pins
@@ -57,7 +56,26 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
 - `auto_dismiss_dialogs` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
+- `check_for_updates` — when `true`, check at provision whether the codex CLI is outdated
+  and surface it (see "Updates" below). Default: `true`.
+- `auto_update` — when `true`, run `codex update` automatically when an update is available,
+  without prompting. Default: `false`.
 - `emit_common_transcript` — emit the common-schema transcript. Default: `true`.
+
+### Updates
+
+mngr pins `check_for_update_on_startup = false` in the per-agent `config.toml`, because codex's
+own "Update available!" prompt is **blocking** and would intercept the first message mngr sends
+(an Enter could even select "Update now"). mngr surfaces updates itself instead: at provision it
+compares `codex --version` against the `latest_version` codex last recorded in its own
+`~/.codex/version.json` (no network call — codex refreshes that file on its own throttled
+schedule during your normal codex use). When codex is outdated it, in order of precedence: runs
+`codex update` if `auto_update` is set; otherwise prompts to update now if interactive; otherwise
+logs a non-blocking notice. `codex update` self-detects the install method (it runs
+`brew upgrade --cask codex` for a brew install, `npm i -g` for npm, the curl installer for
+standalone), so mngr needs no per-method logic. Updating is optional — an outdated codex still
+runs — so a declined prompt or a non-interactive run never blocks agent creation, and `--yes`
+does **not** trigger a global upgrade (only the explicit `auto_update` opt-in does).
 
 ### Model note
 
@@ -87,9 +105,20 @@ the streaming snapshot, and installation/version management.
 
 This agent drives the codex **TUI** by `tmux send-keys` (paste + Enter), with banner-poll
 readiness. That works, but it's fragile (screen-scraping) and codex's `SessionStart` fires
-lazily, so there's no clean pre-input readiness signal. Codex offers a much cleaner surface we
-should adopt in a **follow-up** as a *second* agent type (mirroring `mngr_claude`'s
-`claude` + `headless_claude`): the **app-server**.
+lazily, so there's no clean pre-input readiness signal. Codex offers a much cleaner surface to
+drive programmatically -- the **app-server** -- and a second agent type built on it is a planned
+follow-up (mirroring `mngr_claude`'s `claude` + `headless_claude` split).
+
+We built the TUI agent **first**, though, for a concrete reason: like `claude -p`, the app-server
+does not have full feature parity with the interactive TUI on a ChatGPT-subscription login. The
+backend gates some `*-codex` models on the **client identity** (the `originator`, derived from the
+app-server's `initialize` `clientInfo.name`) -- the first-party TUI presents as `codex-tui` and is
+entitled to them; a programmatic app-server client identifying honestly as mngr is not. The only
+way to close that gap is to spoof the TUI identity, which OpenAI's terms disallow (see "client
+identity" below). So the TUI agent is how you get full `*-codex` model access on a ChatGPT login
+today, and the app-server variant is a *complement* for the cases where the identity gap is
+acceptable (API-key auth, which carries the full entitlement; or only models the honest identity
+already gets) -- not a replacement.
 
 ### What it would give us
 - **Programmatic messaging instead of tmux paste.** `codex app-server` speaks a JSON-RPC

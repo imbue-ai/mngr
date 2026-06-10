@@ -1,12 +1,9 @@
 """Read/write helpers for the OpenAI Codex CLI (``codex``) under a per-agent ``CODEX_HOME``.
 
-Unlike Antigravity (which forces a per-agent ``$HOME`` relocation), the Codex
-CLI exposes a first-class config-dir override env var, ``CODEX_HOME`` (default
-``~/.codex``). That is the preferred isolation shape -- the same one
-``mngr_claude`` uses via ``CLAUDE_CONFIG_DIR`` -- so ``mngr_codex`` points each
-agent at its own ``CODEX_HOME`` under the agent state dir and leaves the user's
-real ``$HOME`` untouched. Codex resolves its entire config/auth/session/hook
-tree from ``CODEX_HOME``:
+The Codex CLI exposes a first-class config-dir override env var, ``CODEX_HOME``
+(default ``~/.codex``). ``mngr_codex`` points each agent at its own ``CODEX_HOME``
+under the agent state dir and leaves the user's real ``$HOME`` untouched. Codex
+resolves its entire config/auth/session/hook tree from ``CODEX_HOME``:
 
     <CODEX_HOME>/
       config.toml        # model, approval, sandbox, trust, notices (mngr-owned)
@@ -52,6 +49,7 @@ plugin (see ``CodexAgent._ensure_source_repo_trusted``).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -69,7 +67,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 
 # Per-agent ``CODEX_HOME`` under the agent state dir. Codex resolves its whole
 # config/auth/session/hook tree from here (set via the ``CODEX_HOME`` env var on
-# the codex process). Mirrors ``mngr_claude``'s per-agent ``CLAUDE_CONFIG_DIR``.
+# the codex process).
 CODEX_HOME_RELATIVE_PATH: tuple[str, ...] = ("plugin", "codex", "home")
 
 _CONFIG_FILENAME: str = "config.toml"
@@ -79,6 +77,8 @@ _HOOKS_FILENAME: str = "hooks.json"
 # marker file exists (it auto-writes one on a fresh home with no sessions, but
 # seeding it makes the silent-launch behavior explicit and order-independent).
 _PERSONALITY_MIGRATION_FILENAME: str = ".personality_migration"
+# codex maintains this update-cache file itself (see ``get_codex_version_cache_path``).
+_VERSION_CACHE_FILENAME: str = "version.json"
 
 
 def get_codex_home(agent_state_dir: Path) -> Path:
@@ -104,6 +104,21 @@ def get_codex_hooks_path(codex_home: Path) -> Path:
 def get_codex_personality_migration_path(codex_home: Path) -> Path:
     """Return the ``.personality_migration`` NUX-skip marker path under ``codex_home``."""
     return codex_home / _PERSONALITY_MIGRATION_FILENAME
+
+
+def get_codex_version_cache_path(codex_home: Path) -> Path:
+    """Return codex's own ``version.json`` update-cache path under ``codex_home``.
+
+    Codex maintains this file itself: ``{"latest_version": "0.139.0",
+    "last_checked_at": "...", "dismissed_version": null}``. ``latest_version`` is the
+    newest release codex last fetched -- it always records the true latest, even when
+    up to date -- so mngr reads the *user's real* ``~/.codex/version.json`` to learn the
+    latest version with no network call (codex refreshes it on its own throttled ~20h
+    schedule during the user's direct codex use). Note a per-agent ``CODEX_HOME`` with
+    ``check_for_update_on_startup = false`` never writes one, which is why we read the
+    shared home, not the agent's.
+    """
+    return codex_home / _VERSION_CACHE_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -158,17 +173,16 @@ SET_ACTIVE_MARKER_SCRIPT_NAME: str = "set_active_marker.sh"
 CLEAR_ACTIVE_MARKER_SCRIPT_NAME: str = "clear_active_marker.sh"
 SUBAGENT_STARTED_SCRIPT_NAME: str = "subagent_started.sh"
 SUBAGENT_STOPPED_SCRIPT_NAME: str = "subagent_stopped.sh"
-# Shared POSIX-sh helper sourced by the four lifecycle hooks (mngr_codex-owned,
-# like the way the other scripts source mngr_log.sh). Defines the marker state
-# paths, the mkdir-based lock, and the recompute that enforces the invariant.
+# Shared POSIX-sh helper sourced by the four lifecycle hooks. Defines the marker
+# state paths, the mkdir-based lock, and the recompute that enforces the invariant.
 MARKER_STATE_LIB_SCRIPT_NAME: str = "codex_marker_state.sh"
 BACKGROUND_TASKS_SCRIPT_NAME: str = "codex_background_tasks.sh"
 RAW_TRANSCRIPT_SCRIPT_NAME: str = "stream_transcript.sh"
 COMMON_TRANSCRIPT_SCRIPT_NAME: str = "common_transcript.sh"
 
-# Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers,
-# matching the conventions the other plugins use: raw bytes under ``logs/`` and
-# the agent-agnostic common transcript under ``events/``.
+# Output locations (under ``$MNGR_AGENT_STATE_DIR``) for the transcript layers:
+# raw bytes under ``logs/`` and the agent-agnostic common transcript under
+# ``events/``.
 RAW_TRANSCRIPT_OUTPUT_RELATIVE: str = "logs/codex_transcript/events.jsonl"
 COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.jsonl"
 
@@ -186,6 +200,16 @@ COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.
 # so we pin it explicitly for cross-platform robustness.
 _CREDENTIAL_STORE_KEY: str = "cli_auth_credentials_store"
 _CREDENTIAL_STORE_FILE: str = "file"
+
+# Disable codex's startup update check. On launch (including ``codex resume``)
+# codex otherwise shows a BLOCKING "Update available! ... 1. Update now / 2. Skip
+# / 3. Skip until next version" prompt that intercepts the composer -- which would
+# misdirect mngr's first pasted message into the menu (and an Enter could even
+# select "Update now", running ``brew upgrade``). Updates are the user's concern,
+# not the agent's, so we always turn this off. (config-reference:
+# "Check for Codex updates on startup (set to false only when updates are
+# centrally managed)".)
+_CHECK_FOR_UPDATE_KEY: str = "check_for_update_on_startup"
 
 PROJECTS_KEY: str = "projects"
 TRUST_LEVEL_KEY: str = "trust_level"
@@ -261,9 +285,11 @@ def build_codex_config(
 ) -> dict[str, Any]:
     """Build a per-agent ``config.toml`` body (low -> high precedence).
 
-    1. The fixed credential-store pin (``cli_auth_credentials_store = "file"``)
-       and the ``[notice]`` suppressors -- always present so shared auth works
-       and the first launch is silent.
+    1. The fixed pins -- the credential store (``cli_auth_credentials_store =
+       "file"``), the startup update check off (``check_for_update_on_startup =
+       false``, so the blocking update prompt never intercepts the first
+       message), and the ``[notice]`` suppressors -- always present so shared
+       auth works and the first launch is silent.
     2. ``model`` / ``model_reasoning_effort`` / ``sandbox_mode`` /
        ``approval_policy`` -- each written only when not ``None`` (``None`` leaves
        codex's own default in force). ``model`` is intentionally not defaulted
@@ -277,7 +303,12 @@ def build_codex_config(
 
     Returns a plain dict; ``serialize_codex_config`` renders it as TOML.
     """
-    config: dict[str, Any] = {_CREDENTIAL_STORE_KEY: _CREDENTIAL_STORE_FILE}
+    config: dict[str, Any] = {
+        _CREDENTIAL_STORE_KEY: _CREDENTIAL_STORE_FILE,
+        # Always off: the blocking startup update prompt would intercept the
+        # first message (see the constant's comment).
+        _CHECK_FOR_UPDATE_KEY: False,
+    }
     if model is not None:
         config["model"] = model
     if model_reasoning_effort is not None:
@@ -295,7 +326,7 @@ def build_codex_config(
         config[PROJECTS_KEY] = projects
 
     # Shallow merge: a top-level override key replaces the built-in value
-    # wholesale (matching mngr_claude/antigravity ``*_overrides`` semantics).
+    # wholesale.
     for key, value in config_overrides.items():
         config[key] = value
     return config
@@ -367,6 +398,68 @@ def is_project_trusted(config: Mapping[str, Any], project_path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Update check (codex's version.json)
+# ---------------------------------------------------------------------------
+
+# Key under which codex records the newest release it has seen, in version.json.
+_VERSION_CACHE_LATEST_KEY: str = "latest_version"
+
+# A clean numeric-dotted semver (e.g. ``0.138.0``). Anything with a pre-release or
+# build suffix (``0.139.0-rc.1``) is deliberately treated as unparseable so we never
+# raise a spurious update notice -- this mirrors codex's own conservative ``is_newer``,
+# which returns "unknown" for non-numeric versions.
+_CLEAN_SEMVER_RE = re.compile(r"\A\d+(?:\.\d+)*\Z")
+
+
+def parse_codex_cli_version(version_output: str) -> str | None:
+    """Extract the bare semver from ``codex --version`` output (``codex-cli 0.138.0`` -> ``0.138.0``).
+
+    Returns the first whitespace-delimited token that is a clean numeric-dotted
+    semver, or None if there is none (e.g. an empty result when codex is not
+    installed, or a source/pre-release build). None just means the caller skips the
+    update check rather than risk a false notice.
+    """
+    for token in version_output.split():
+        if _CLEAN_SEMVER_RE.match(token):
+            return token
+    return None
+
+
+def extract_latest_codex_version(version_cache: Mapping[str, Any]) -> str | None:
+    """Return the ``latest_version`` from a parsed codex ``version.json``, or None.
+
+    None if the key is missing or is not a clean semver string. The caller decodes
+    the JSON (surfacing any decode error at warning level); this pure helper only
+    pulls and validates the field.
+    """
+    latest = version_cache.get(_VERSION_CACHE_LATEST_KEY)
+    if not isinstance(latest, str):
+        return None
+    return latest if _CLEAN_SEMVER_RE.match(latest) else None
+
+
+def is_codex_update_available(installed_version: str, latest_version: str) -> bool:
+    """Return True iff ``latest_version`` is strictly newer than ``installed_version``.
+
+    Both are parsed as integer tuples (so ``0.10.0`` > ``0.9.0``); any unparseable
+    input yields False -- no false-positive notice -- mirroring codex's conservative
+    ``is_newer``.
+    """
+    installed = _parse_semver_tuple(installed_version)
+    latest = _parse_semver_tuple(latest_version)
+    if installed is None or latest is None:
+        return False
+    return latest > installed
+
+
+def _parse_semver_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse a clean numeric-dotted semver into an int tuple, or None if not clean."""
+    if not _CLEAN_SEMVER_RE.match(version):
+        return None
+    return tuple(int(part) for part in version.split("."))
+
+
+# ---------------------------------------------------------------------------
 # hooks.json
 # ---------------------------------------------------------------------------
 
@@ -390,9 +483,8 @@ def build_codex_hooks_config() -> dict[str, Any]:
     ordering guarantee and no ``fullyIdle`` signal -- the marker is recomputed
     under a lock from two pieces of tracked state (a root-turn flag and one file
     per in-flight subagent) so it stays present until the root turn **and** every
-    subagent are done. We therefore DO hook ``SubagentStart``/``SubagentStop``
-    now (to track in-flight subagents), correcting the earlier design that left
-    subagents unhooked.
+    subagent are done. ``SubagentStart``/``SubagentStop`` are hooked so that the
+    in-flight subagents can be tracked.
 
     * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
       ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root

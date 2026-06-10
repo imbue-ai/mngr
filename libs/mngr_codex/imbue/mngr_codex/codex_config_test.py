@@ -18,13 +18,17 @@ from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
+from imbue.mngr_codex.codex_config import extract_latest_codex_version
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
 from imbue.mngr_codex.codex_config import get_codex_hooks_path
 from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
+from imbue.mngr_codex.codex_config import get_codex_version_cache_path
+from imbue.mngr_codex.codex_config import is_codex_update_available
 from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.codex_config import merge_project_trust
+from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
@@ -47,6 +51,54 @@ def test_path_helpers_address_the_codex_home_tree() -> None:
     assert get_codex_auth_path(home) == home / "auth.json"
     assert get_codex_hooks_path(home) == home / "hooks.json"
     assert get_codex_personality_migration_path(home) == home / ".personality_migration"
+    assert get_codex_version_cache_path(home) == home / "version.json"
+
+
+# =============================================================================
+# Update-check helpers (codex's version.json)
+# =============================================================================
+
+
+def test_parse_codex_cli_version_extracts_the_bare_semver() -> None:
+    assert parse_codex_cli_version("codex-cli 0.138.0") == "0.138.0"
+    assert parse_codex_cli_version("codex-cli 0.139.0\n") == "0.139.0"
+    # A bare version (no leading program name) still parses.
+    assert parse_codex_cli_version("1.2.3") == "1.2.3"
+
+
+def test_parse_codex_cli_version_returns_none_when_absent_or_unclean() -> None:
+    # Empty output (codex not installed -> the probe captured nothing).
+    assert parse_codex_cli_version("") is None
+    assert parse_codex_cli_version("   \n") is None
+    # A pre-release / build-tagged version is treated as unparseable (conservative,
+    # like codex's own is_newer), so we skip rather than risk a false notice.
+    assert parse_codex_cli_version("codex-cli 0.139.0-rc.1") is None
+
+
+def test_extract_latest_codex_version_reads_the_cache_field() -> None:
+    cache = {"latest_version": "0.139.0", "last_checked_at": "2026-06-09T07:49:30Z", "dismissed_version": None}
+    assert extract_latest_codex_version(cache) == "0.139.0"
+
+
+def test_extract_latest_codex_version_returns_none_for_missing_or_unclean() -> None:
+    assert extract_latest_codex_version({}) is None
+    assert extract_latest_codex_version({"latest_version": None}) is None
+    assert extract_latest_codex_version({"latest_version": 139}) is None
+    assert extract_latest_codex_version({"latest_version": "0.139.0-rc.1"}) is None
+
+
+def test_is_codex_update_available_compares_numeric_semver() -> None:
+    assert is_codex_update_available("0.138.0", "0.139.0") is True
+    assert is_codex_update_available("0.139.0", "0.139.0") is False
+    assert is_codex_update_available("0.139.0", "0.138.0") is False
+    # Compared as integer tuples, so 0.10.0 is newer than 0.9.0 (a string compare
+    # would get this wrong).
+    assert is_codex_update_available("0.9.0", "0.10.0") is True
+
+
+def test_is_codex_update_available_is_false_for_unparseable_input() -> None:
+    assert is_codex_update_available("not-a-version", "0.139.0") is False
+    assert is_codex_update_available("0.138.0", "") is False
 
 
 # =============================================================================
@@ -65,6 +117,9 @@ def test_build_codex_config_always_pins_the_file_credential_store() -> None:
         config_overrides={},
     )
     assert config["cli_auth_credentials_store"] == "file"
+    # The blocking startup update prompt is always disabled so it can't intercept
+    # the first message.
+    assert config["check_for_update_on_startup"] is False
     assert config["notice"] == {
         "hide_full_access_warning": True,
         "hide_world_writable_warning": True,

@@ -202,7 +202,7 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     mngr create my-task codex
     """)
     # codex is a real agent-type plugin (imbue-mngr-codex), not a command-driven
-    # stub, so it can no longer be faked with a `command` override. This Modal host
+    # stub, so it cannot be faked with a `command` override. This Modal host
     # has no codex binary or auth, so the agent is created *without launching it*
     # (--no-auto-start), auto-approving the workspace-trust prompt (-y). That keeps
     # the tutorial command (`mngr create my-task codex`) honest while verifying the

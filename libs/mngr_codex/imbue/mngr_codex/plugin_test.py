@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from datetime import datetime
 from datetime import timezone
@@ -47,6 +48,8 @@ def test_codex_agent_config_has_correct_defaults() -> None:
     assert config.sandbox_mode == "workspace-write"
     assert config.auto_allow_permissions is False
     assert config.auto_dismiss_dialogs is False
+    assert config.check_for_updates is True
+    assert config.auto_update is False
     assert config.config_overrides == {}
     assert config.emit_common_transcript is True
 
@@ -310,7 +313,7 @@ def test_provision_sets_approval_never_when_auto_allow(local_provider: LocalProv
 
 
 # =============================================================================
-# Trust / hook-bypass consent (mirrors mngr_claude / antigravity)
+# Trust / hook-bypass consent
 # =============================================================================
 
 
@@ -365,3 +368,167 @@ def test_auto_dismiss_dialogs_persists_trust_without_optin_ctx(
     agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_dismiss_dialogs=True))
     _provision(agent)
     assert is_project_trusted(_read_user_codex_config(agent), str(agent.work_dir.resolve()))
+
+
+# =============================================================================
+# Update check / auto-update
+# =============================================================================
+
+
+class _CodexUpdateRan(Exception):
+    """Raised by a test override to signal that `codex update` would have run."""
+
+
+class _CodexUpdatePrompted(Exception):
+    """Raised by a test override to signal that the interactive update prompt was shown."""
+
+
+class _OutdatedCodexAgent(CodexAgent):
+    """Reports a fixed outdated (installed, latest) and records an update via a sentinel.
+
+    Overriding `_read_codex_versions` keeps the decision tests off any real codex
+    binary or version.json; `_run_codex_update` raises so a test can assert whether
+    the update path was taken.
+    """
+
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        return ("0.138.0", "0.139.0")
+
+    def _run_codex_update(self, host: object, installed: str, latest: str) -> None:
+        raise _CodexUpdateRan()
+
+
+class _OutdatedPromptYesAgent(_OutdatedCodexAgent):
+    def _prompt_user_to_update_codex(self, installed: str, latest: str) -> bool:
+        return True
+
+
+class _OutdatedPromptNoAgent(_OutdatedCodexAgent):
+    def _prompt_user_to_update_codex(self, installed: str, latest: str) -> bool:
+        return False
+
+
+class _OutdatedPromptRaisesAgent(_OutdatedCodexAgent):
+    """Prompt raises, so a test can assert the prompt is NOT consulted."""
+
+    def _prompt_user_to_update_codex(self, installed: str, latest: str) -> bool:
+        raise _CodexUpdatePrompted()
+
+
+class _UpToDateCodexAgent(_OutdatedCodexAgent):
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        return ("0.139.0", "0.139.0")
+
+
+class _UnknownVersionCodexAgent(_OutdatedCodexAgent):
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        return (None, None)
+
+
+class _ProbeRaisesCodexAgent(CodexAgent):
+    """`_read_codex_versions` raises, so a test can assert it is never called."""
+
+    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
+        raise AssertionError("the version probe should not run when the check is disabled")
+
+
+def _check_update(agent: CodexAgent) -> None:
+    # user_codex_home is irrelevant in the decision tests (the probe is overridden).
+    agent._maybe_check_for_codex_update(agent.host, agent.work_dir, agent.mngr_ctx)
+
+
+def test_auto_update_runs_codex_update_without_prompting(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """auto_update applies the update directly and never consults the interactive prompt."""
+    agent = _make_codex_agent(
+        _OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True), is_interactive=True
+    )
+    with pytest.raises(_CodexUpdateRan):
+        _check_update(agent)
+
+
+def test_interactive_prompt_yes_runs_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_codex_agent(
+        _OutdatedPromptYesAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
+    )
+    with pytest.raises(_CodexUpdateRan):
+        _check_update(agent)
+
+
+def test_interactive_prompt_no_does_not_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A declined prompt falls through to the non-blocking notice -- no update, no abort."""
+    agent = _make_codex_agent(
+        _OutdatedPromptNoAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
+    )
+    _check_update(agent)
+
+
+def test_non_interactive_only_notifies(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """Non-interactive: never prompt and never mutate the global install -- just notify."""
+    agent = _make_codex_agent(_OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig())
+    _check_update(agent)
+
+
+def test_auto_approve_does_not_trigger_global_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """`--yes` clears blocking prerequisites but does NOT opt into a heavy global upgrade."""
+    agent = _make_codex_agent(
+        _OutdatedPromptRaisesAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(),
+        is_interactive=True,
+        is_auto_approve=True,
+    )
+    _check_update(agent)
+
+
+def test_up_to_date_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    agent = _make_codex_agent(_UpToDateCodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True))
+    _check_update(agent)
+
+
+def test_unknown_version_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """An undeterminable version (codex absent / no cache) skips the check entirely."""
+    agent = _make_codex_agent(_UnknownVersionCodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True))
+    _check_update(agent)
+
+
+def test_disabled_check_skips_the_probe(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """With both check_for_updates and auto_update off, the version probe never runs."""
+    agent = _make_codex_agent(
+        _ProbeRaisesCodexAgent, local_provider, tmp_path, CodexAgentConfig(check_for_updates=False)
+    )
+    _check_update(agent)
+
+
+def test_read_codex_versions_parses_installed_and_cached(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """The real probe parses `codex --version` and the version.json cache over the host.
+
+    Uses a fake `command` (`sh -c 'echo ...'` ignores the appended --version) so the
+    test needs no real codex binary; the cache is a real file under the user's home.
+    """
+    agent = _make_codex_agent(
+        CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
+    )
+    user_home = agent._resolve_user_codex_home(agent.host)
+    user_home.mkdir(parents=True, exist_ok=True)
+    (user_home / "version.json").write_text(
+        json.dumps({"latest_version": "1.3.0", "last_checked_at": "2026-06-09T00:00:00Z", "dismissed_version": None})
+    )
+    installed, latest = agent._read_codex_versions(agent.host, user_home)
+    assert installed == "1.2.3"
+    assert latest == "1.3.0"
+
+
+def test_read_codex_versions_latest_is_none_when_cache_absent(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    agent = _make_codex_agent(
+        CodexAgent, local_provider, tmp_path, CodexAgentConfig(command=CommandString("sh -c 'echo codex-cli 1.2.3'"))
+    )
+    installed, latest = agent._read_codex_versions(agent.host, agent._resolve_user_codex_home(agent.host))
+    assert installed == "1.2.3"
+    assert latest is None

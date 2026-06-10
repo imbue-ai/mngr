@@ -14,7 +14,7 @@
 #
 # Restart dead children, clean them up on exit, and dedup via pidfile so
 # concurrent re-runs (e.g. agent restart) don't pile up watchers racing on the
-# same offset files and output file. Mirrors antigravity_background_tasks.sh.
+# same offset files and output file.
 #
 # Usage: codex_background_tasks.sh <tmux_session_name>
 #
