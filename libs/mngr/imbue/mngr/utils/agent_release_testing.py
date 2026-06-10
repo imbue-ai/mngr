@@ -35,13 +35,14 @@ import json
 import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
-from dataclasses import dataclass
-from dataclasses import field
+from functools import partial
 from pathlib import Path
 from typing import Any
 from typing import Callable
 
 import pytest
+from pydantic import BaseModel
+from pydantic import ConfigDict
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr.utils.polling import poll_until
@@ -56,8 +57,7 @@ _RUNNING_TIMEOUT_SECONDS = 90.0
 _LIFECYCLE_TIMEOUT_SECONDS = 150.0
 
 
-@dataclass(frozen=True)
-class AgentReleaseContext:
+class AgentReleaseContext(BaseModel):
     """Per-run plumbing produced by a profile's ``setup`` and consumed by the harness.
 
     ``env`` is how the harness invokes ``mngr`` (via ``profile.run_mngr``); ``workspace``
@@ -65,13 +65,16 @@ class AgentReleaseContext:
     profile); ``host_dir`` is the isolated ``MNGR_HOST_DIR`` the harness reads the agent's
     state (marker + transcript) out of. ``teardown`` runs in a ``finally`` after destroy --
     a profile uses it to tear down anything ``setup`` allocated (e.g. a private tmux
-    server), and it must be safe to call even if setup half-failed.
+    server); it must be safe to call even if setup half-failed, and is omitted when the
+    profile has nothing to tear down.
     """
+
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     env: Mapping[str, str]
     workspace: Path
     host_dir: Path
-    teardown: Callable[[], None] = field(default=lambda: None)
+    teardown: Callable[[], None] | None = None
 
 
 class AgentReleaseProfile(abc.ABC):
@@ -144,6 +147,23 @@ def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+# Predicates over the current common-transcript records. Module-level (bound with
+# functools.partial at the call sites) so the polling has no nested closures.
+def _records_satisfy(host_dir: Path, subdir: str, predicate: Callable[[list[dict[str, Any]]], bool]) -> bool:
+    return predicate(_read_common_records(host_dir, subdir))
+
+
+def _seed_turn_captured(records: list[dict[str, Any]], secret: str, forces_tool_call: bool) -> bool:
+    has_user_secret = any(r["type"] == "user_message" and secret in str(r.get("content", "")) for r in records)
+    has_assistant = any(r["type"] == "assistant_message" for r in records)
+    has_tool = (not forces_tool_call) or any(r["type"] == "tool_result" for r in records)
+    return has_user_secret and has_assistant and has_tool
+
+
+def _assistant_recalled_secret(records: list[dict[str, Any]], secret: str) -> bool:
+    return any(r["type"] == "assistant_message" and secret in str(r.get("text", "")) for r in records)
+
+
 def _wait_for_records(
     host_dir: Path,
     subdir: str,
@@ -153,17 +173,15 @@ def _wait_for_records(
     description: str,
 ) -> list[dict[str, Any]]:
     """Poll the common transcript until ``predicate`` holds; return the records (or fail)."""
-    last: list[list[dict[str, Any]]] = [[]]
-
-    def _ready() -> bool:
-        last[0] = _read_common_records(host_dir, subdir)
-        return predicate(last[0])
-
-    if not poll_until(condition=_ready, timeout=timeout, poll_interval=2.0):
+    found = poll_until(
+        condition=partial(_records_satisfy, host_dir, subdir, predicate), timeout=timeout, poll_interval=2.0
+    )
+    records = _read_common_records(host_dir, subdir)
+    if not found:
         raise AssertionError(
-            f"{description} within {timeout}s. Last transcript:\n{json.dumps(last[0], indent=2)[:4000]}"
+            f"{description} within {timeout}s. Last transcript:\n{json.dumps(records, indent=2)[:4000]}"
         )
-    return last[0]
+    return records
 
 
 def _assert_records_conform(records: list[dict[str, Any]]) -> None:
@@ -214,17 +232,12 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
                 condition=_marker_path(host_dir).exists, timeout=_RUNNING_TIMEOUT_SECONDS, poll_interval=0.2
             ), "active marker never appeared -> agent never reported RUNNING"
 
-        # 3. The seed turn must be captured: user_message carries the secret, plus a reply.
-        def _seed_captured(records: list[dict[str, Any]]) -> bool:
-            has_user_secret = any(r["type"] == "user_message" and secret in str(r.get("content", "")) for r in records)
-            has_assistant = any(r["type"] == "assistant_message" for r in records)
-            has_tool = (not profile.forces_tool_call) or any(r["type"] == "tool_result" for r in records)
-            return has_user_secret and has_assistant and has_tool
-
+        # 3. The seed turn must be captured: user_message carries the secret, plus a reply
+        #    (and a tool_result when the agent was asked to use a tool).
         records = _wait_for_records(
             host_dir,
             subdir,
-            _seed_captured,
+            partial(_seed_turn_captured, secret=secret, forces_tool_call=profile.forces_tool_call),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description="seed turn was not captured",
         )
@@ -260,9 +273,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         post = _wait_for_records(
             host_dir,
             subdir,
-            lambda records: any(
-                r["type"] == "assistant_message" and secret in str(r.get("text", "")) for r in records
-            ),
+            partial(_assistant_recalled_secret, secret=secret),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description=f"agent did not recall the secret {secret!r} after stop/start (resume failed)",
         )
@@ -277,4 +288,5 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         try:
             profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         finally:
-            ctx.teardown()
+            if ctx.teardown is not None:
+                ctx.teardown()

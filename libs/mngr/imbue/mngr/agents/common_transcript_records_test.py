@@ -216,7 +216,8 @@ def test_missing_envelope_field_is_rejected() -> None:
 
 def test_wrong_type_for_required_field_is_rejected() -> None:
     record = dict(_VALID_RECORDS["pi_tool_result"])
-    record["is_error"] = "nope"  # must be bool
+    # is_error must be a bool, not a string.
+    record["is_error"] = "nope"
     error = validate_common_transcript_record(record)
     assert error is not None and "is_error" in error
 
@@ -230,6 +231,7 @@ def test_unknown_record_type_is_rejected() -> None:
 
 def test_tool_call_requires_its_fields() -> None:
     record = dict(_VALID_RECORDS["pi_assistant"])
-    record["tool_calls"] = [{"tool_name": "bash"}]  # missing tool_call_id + input_preview
+    # A tool_call missing tool_call_id + input_preview must be rejected.
+    record["tool_calls"] = [{"tool_name": "bash"}]
     error = validate_common_transcript_record(record)
     assert error is not None and "tool_calls" in error
