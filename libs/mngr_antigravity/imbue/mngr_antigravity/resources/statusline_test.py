@@ -4,11 +4,14 @@ agy invokes this on every agent-state change, piping a JSON payload on stdin
 (`agent_state`, `conversation_id`, `model`, ...). The script maintains the
 `active` marker BaseAgent reads for RUNNING/WAITING (active iff `agent_state` is
 a busy state -- a denylist excluding idle/initializing/authenticating/empty),
-records the root `conversation_id` for resume, fires the tmux submission signal
-when busy, and prints the rendered statusline to stdout. The tests pin: marker
-set when working / cleared on idle/initializing/authenticating, root_conversation
-written from conversation_id and not clobbered by empty/garbage payloads, stdout
-renders, and loud failure on a missing state dir. (`tmux wait-for` is
+records the root `conversation_id` for resume, and fires the tmux submission
+signal when busy. mngr's statusLine is lifecycle-only and prints nothing of its
+own (agy already shows working/idle), so stdout is empty unless a user statusLine
+is composed, in which case the row is that command's output verbatim. The tests
+pin: marker set when working / cleared on idle/initializing/authenticating,
+root_conversation written from conversation_id and not clobbered by empty/garbage
+payloads, an empty row with no user statusLine (the user's output verbatim when
+one is composed), and loud failure on a missing state dir. (`tmux wait-for` is
 `|| true`-guarded, so it is a no-op without a usable TMUX in tests.)
 """
 
