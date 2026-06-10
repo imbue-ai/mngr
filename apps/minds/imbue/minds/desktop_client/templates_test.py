@@ -331,7 +331,7 @@ def _window_controls_classes(html: str) -> str:
     The wrapper is the ``<div>`` that holds the min/max/close buttons; it is
     the element immediately preceding ``id="min-btn"``.
     """
-    match = re.search(r'<div class="([^"]*)">\s*<button id="min-btn"', html)
+    match = re.search(r'<div class="([^"]*)">\s*<button[^>]*\bid="min-btn"', html)
     assert match is not None, "could not locate the window-controls wrapper div"
     return match.group(1)
 
