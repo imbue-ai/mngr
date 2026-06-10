@@ -45,6 +45,7 @@ def test_build_provider_instance_returns_docker_provider_instance(temp_mngr_ctx:
         name=ProviderInstanceName("test-docker"),
         config=config,
         mngr_ctx=temp_mngr_ctx,
+        is_for_host_creation=True,
     )
     assert isinstance(instance, DockerProviderInstance)
 
@@ -55,6 +56,7 @@ def test_build_provider_instance_with_custom_host_dir(temp_mngr_ctx: MngrContext
         name=ProviderInstanceName("test-docker"),
         config=config,
         mngr_ctx=temp_mngr_ctx,
+        is_for_host_creation=True,
     )
     assert instance.host_dir == Path("/custom/dir")
 
@@ -65,6 +67,7 @@ def test_build_provider_instance_uses_default_host_dir(temp_mngr_ctx: MngrContex
         name=ProviderInstanceName("test-docker"),
         config=config,
         mngr_ctx=temp_mngr_ctx,
+        is_for_host_creation=True,
     )
     assert instance.host_dir == Path("/mngr")
 
@@ -75,6 +78,7 @@ def test_build_provider_instance_uses_name(temp_mngr_ctx: MngrContext) -> None:
         name=ProviderInstanceName("my-docker"),
         config=config,
         mngr_ctx=temp_mngr_ctx,
+        is_for_host_creation=True,
     )
     assert instance.name == ProviderInstanceName("my-docker")
 
