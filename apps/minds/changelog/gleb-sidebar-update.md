@@ -58,10 +58,10 @@ on all four sides of the panel, 2px between every entry, and 2px above
 and below the divider line (the line is now a bare full-width rule that
 takes its spacing from the panel's row gap rather than its own padding).
 
-The menu now sits 4px below the trigger button (down from 8px) -- the
-default vertical anchor offset dropped from 8px to 4px. Its background is
-a flat pure black for now (was the dark-teal #0b292b) while the color
-treatment is being iterated on.
+The menu is anchored 2px left of and 2px below the trigger button's
+bottom-left corner (anchor offset (-2, 2)). Its background is a flat pure
+black for now (was the dark-teal #0b292b) while the color treatment is
+being iterated on.
 
 The workspace row is now a single shared builder
 (window.mindsSidebarRow.buildRow) rather than markup duplicated across

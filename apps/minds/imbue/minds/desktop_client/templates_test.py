@@ -387,12 +387,13 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     assert "left:72px" in html
     assert "top:36px" in html
 
-    # Defaults (no caller args) anchor below a 38px-tall element at the
-    # top-left with a 4px gap -- right shape for "open the sidebar from
+    # Defaults (no caller args) anchor a 38px-tall element at the top-left,
+    # nudged 2px left (offset_x=-2 -> 0 + -2) and 2px below it
+    # (offset_y=2 -> 0 + 38 + 2) -- right shape for "open the sidebar from
     # the first titlebar button" without any caller customization.
     html_default = render_sidebar_page()
-    assert "left:0px" in html_default
-    assert "top:42px" in html_default
+    assert "left:-2px" in html_default
+    assert "top:40px" in html_default
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:

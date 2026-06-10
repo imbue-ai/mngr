@@ -1103,8 +1103,8 @@ def render_sidebar_page(
     trigger_y: int = 0,
     trigger_w: int = 0,
     trigger_h: int = 38,
-    offset_x: int = 0,
-    offset_y: int = 4,
+    offset_x: int = -2,
+    offset_y: int = 2,
 ) -> str:
     """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
@@ -1120,8 +1120,8 @@ def render_sidebar_page(
     (``offset_x``, ``offset_y``). The menu's top-left lands at the trigger's
     bottom-left + offset. The chrome view and the modal view share window
     coordinate space, so the rect translates directly. Defaults (no query
-    params) anchor just below a 38px-tall element at the top-left of the
-    window with a 4px gap -- right for the titlebar's first button.
+    params) anchor a 38px-tall element at the top-left of the window,
+    nudged 2px left and 2px below it -- right for the titlebar's first button.
     """
     return CATALOG.render(
         "pages.Sidebar",

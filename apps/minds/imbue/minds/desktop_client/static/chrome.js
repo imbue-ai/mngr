@@ -51,9 +51,9 @@
   // ``sidebarOpen`` is intentionally browser-mode-only -- in Electron
   // the main process owns visibility (see toggleSidebar / openModal /
   // closeModal in electron/main.js).
-  var SIDEBAR_OFFSET_X = 0;
-  // 4px gap below the trigger button's bottom edge.
-  var SIDEBAR_OFFSET_Y = 4;
+  // Nudge 2px left of the trigger's left edge, and sit 2px below its bottom.
+  var SIDEBAR_OFFSET_X = -2;
+  var SIDEBAR_OFFSET_Y = 2;
   var sidebarOpen = false;
   function computeSidebarAnchor() {
     var btn = document.getElementById('sidebar-toggle');

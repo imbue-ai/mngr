@@ -1,4 +1,4 @@
-{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=0, offset_y=4 #}
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-2, offset_y=2 #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
@@ -23,8 +23,8 @@
   entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
   highlight's inset.
 
-  Defaults (no query params): anchor just below a 38px-tall element at
-  the top-left of the window, with a 4px gap. That's the right shape
+  Defaults (no query params): anchor a 38px-tall element at the top-left
+  of the window, nudged 2px left and 2px below it. That's the right shape
   for the titlebar's first button without any caller customization.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js

@@ -1846,8 +1846,8 @@ def _handle_chrome_sidebar(request: Request) -> Response:
     / ``offset_x`` / ``offset_y``) come from the caller (chrome.js packs the
     sidebar-toggle button's getBoundingClientRect + a caller-chosen offset into
     the URL). Missing or unparseable params fall back to render_sidebar_page's
-    defaults (anchor just below a 38px-tall element at the top-left of the
-    window, +4px gap).
+    defaults (a 38px-tall element at the top-left of the window, nudged 2px
+    left and 2px below it).
     """
     html = render_sidebar_page(
         mngr_forward_origin=_get_mngr_forward_origin(request),
@@ -1855,8 +1855,8 @@ def _handle_chrome_sidebar(request: Request) -> Response:
         trigger_y=_int_query_param(request, "trigger_y", 0),
         trigger_w=_int_query_param(request, "trigger_w", 0),
         trigger_h=_int_query_param(request, "trigger_h", 38),
-        offset_x=_int_query_param(request, "offset_x", 0),
-        offset_y=_int_query_param(request, "offset_y", 4),
+        offset_x=_int_query_param(request, "offset_x", -2),
+        offset_y=_int_query_param(request, "offset_y", 2),
     )
     return HTMLResponse(content=html)
 
