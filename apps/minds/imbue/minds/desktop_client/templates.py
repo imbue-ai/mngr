@@ -1077,7 +1077,8 @@ def render_chrome_page(
     workspace links that target the plugin's port directly.
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
-    and sidebar are handled by separate WebContentsViews.
+    is handled by a separate WebContentsView, and the sidebar page is loaded into
+    the shared modal WebContentsView when opened.
     """
     return CATALOG.render(
         "pages.Chrome",
