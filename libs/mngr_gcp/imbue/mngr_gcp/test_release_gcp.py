@@ -65,8 +65,46 @@ def gcp_release_test_project() -> str:
     return project
 
 
+def _write_release_settings(settings_dir: Path, project: str) -> None:
+    """Write the release-test ``settings.toml`` into ``settings_dir``.
+
+    Shared by the prepare fixture and the per-test settings fixture so both the
+    ``mngr gcp prepare`` and ``mngr create`` subprocesses load the same opted-in
+    config. ``is_allowed_in_pytest = true`` is required because the subprocesses
+    inherit ``PYTEST_CURRENT_TEST`` and mngr refuses to load any config that does
+    not opt in -- without it, a developer machine with a real mngr profile would
+    fail before any GCP call.
+    """
+    (settings_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n"
+        "\n[providers.gcp]\n"
+        'backend = "gcp"\n'
+        f'project_id = "{project}"\n'
+        f'default_region = "{GCP_DEFAULT_REGION}"\n'
+        f'default_zone = "{GCP_DEFAULT_ZONE}"\n'
+        # Self-delete via max_run_duration if pytest is killed before the
+        # per-test cleanup runs.
+        f"auto_shutdown_minutes = {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
+        # Open the firewall to the public internet so the test SSH connection
+        # (from the developer laptop / CI runner) works without caller-IP
+        # discovery. Production callers must pick a tight CIDR; the instance only
+        # lives for the duration of the test and is then destroyed.
+        'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
+        # Disable other remote providers so the create-host preflight doesn't
+        # trip on them looking for credentials.
+        "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.aws]\nis_enabled = false\n"
+        "\n[providers.vultr]\nis_enabled = false\n"
+        "\n[providers.ovh]\nis_enabled = false\n"
+        "\n[providers.imbue_cloud]\nis_enabled = false\n"
+    )
+
+
 @pytest.fixture(scope="session")
-def _gcp_release_test_firewall_prepared(gcp_release_test_project: str) -> None:
+def _gcp_release_test_firewall_prepared(
+    gcp_release_test_project: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
     """Run ``mngr gcp prepare`` once per test session before any lifecycle test.
 
     ``create_instance`` no longer auto-creates the firewall on the hot path (so
@@ -75,7 +113,22 @@ def _gcp_release_test_firewall_prepared(gcp_release_test_project: str) -> None:
     to run prepare once so subsequent creates can resolve the rule. ``0.0.0.0/0``
     is used so the test SSH connection works without caller-IP discovery; the
     instance only lives for the test and is then destroyed.
+
+    Runs against an opted-in test ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``)
+    and an isolated ``HOME`` so the subprocess doesn't load the developer's real
+    mngr *profile* (``$HOME/.mngr/profiles/.../settings.toml``), which the pytest
+    guard rejects. This session-scoped fixture runs before the per-test HOME
+    isolation, so it must isolate HOME itself; ``CLOUDSDK_CONFIG`` is pinned to
+    the real gcloud config so ADC still resolves under the swapped HOME (mirrors
+    what ``conftest.setup_test_mngr_env`` does for the per-test subprocesses).
     """
+    settings_dir = tmp_path_factory.mktemp("gcp_prepare_settings")
+    _write_release_settings(settings_dir, gcp_release_test_project)
+    env = os.environ.copy()
+    env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
+    env["HOME"] = str(tmp_path_factory.mktemp("gcp_prepare_home"))
+    if "GOOGLE_APPLICATION_CREDENTIALS" not in env:
+        env["CLOUDSDK_CONFIG"] = env.get("CLOUDSDK_CONFIG") or str(Path.home() / ".config" / "gcloud")
     cmd = [
         "uv",
         "run",
@@ -89,7 +142,7 @@ def _gcp_release_test_firewall_prepared(gcp_release_test_project: str) -> None:
         "--allowed-ssh-cidr",
         "0.0.0.0/0",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
     assert result.returncode == 0, (
         f"`mngr gcp prepare` failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
@@ -109,32 +162,7 @@ def gcp_test_settings_dir(
     Using ``MNGR_PROJECT_CONFIG_DIR`` to point the subprocess at this settings
     file keeps the test-only TTL out of production code paths.
     """
-    (tmp_path / "settings.toml").write_text(
-        # Opt this config past the pytest guard: the ``mngr create`` subprocess
-        # inherits ``PYTEST_CURRENT_TEST`` and refuses to load any config that
-        # does not set this. Top-level key, so it must precede the first table.
-        "is_allowed_in_pytest = true\n"
-        "\n[providers.gcp]\n"
-        'backend = "gcp"\n'
-        f'project_id = "{gcp_release_test_project}"\n'
-        f'default_region = "{GCP_DEFAULT_REGION}"\n'
-        f'default_zone = "{GCP_DEFAULT_ZONE}"\n'
-        # Self-delete via max_run_duration if pytest is killed before the
-        # per-test cleanup runs.
-        f"auto_shutdown_minutes = {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
-        # Open the firewall to the public internet so the test SSH connection
-        # (from the developer laptop / CI runner) works without caller-IP
-        # discovery. Production callers must pick a tight CIDR; the instance only
-        # lives for the duration of the test and is then destroyed.
-        'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
-        # Disable other remote providers so the create-host preflight doesn't
-        # trip on them looking for credentials.
-        "\n[providers.modal]\nis_enabled = false\n"
-        "\n[providers.aws]\nis_enabled = false\n"
-        "\n[providers.vultr]\nis_enabled = false\n"
-        "\n[providers.ovh]\nis_enabled = false\n"
-        "\n[providers.imbue_cloud]\nis_enabled = false\n"
-    )
+    _write_release_settings(tmp_path, gcp_release_test_project)
     yield tmp_path
 
 
