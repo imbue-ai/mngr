@@ -53,6 +53,7 @@ from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
+from imbue.mngr_latchkey.store import list_host_permissions_paths
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -537,17 +538,9 @@ def ensure_minds_schema_in_existing_host_files(plugin_data_dir: Path) -> int:
     ``permissions.mjs`` extension does not race with us. Returns the
     number of files actually rewritten.
     """
-    hosts_dir = plugin_data_dir / "hosts"
-    if not hosts_dir.is_dir():
-        return 0
     expected_schemas = {key: _AGENT_BASELINE_PERMISSIONS.schemas[key] for key in _MINDS_SCHEMA_KEYS}
     migrated = 0
-    for host_dir in hosts_dir.iterdir():
-        if not host_dir.is_dir():
-            continue
-        path = host_dir / "latchkey_permissions.json"
-        if not path.is_file():
-            continue
+    for path in list_host_permissions_paths(plugin_data_dir):
         try:
             raw = path.read_text()
         except OSError as e:
