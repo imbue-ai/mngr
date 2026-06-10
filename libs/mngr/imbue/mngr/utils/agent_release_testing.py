@@ -35,7 +35,6 @@ import json
 import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
-from functools import partial
 from pathlib import Path
 from typing import Any
 from typing import Callable
@@ -147,12 +146,8 @@ def _read_common_records(host_dir: Path, subdir: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-# Predicates over the current common-transcript records. Module-level (bound with
-# functools.partial at the call sites) so the polling has no nested closures.
-def _records_satisfy(host_dir: Path, subdir: str, predicate: Callable[[list[dict[str, Any]]], bool]) -> bool:
-    return predicate(_read_common_records(host_dir, subdir))
-
-
+# Predicates over the current common-transcript records. Module-level (the call sites
+# adapt them to poll_until's no-arg condition with a small lambda).
 def _seed_turn_captured(records: list[dict[str, Any]], secret: str, forces_tool_call: bool) -> bool:
     has_user_secret = any(r["type"] == "user_message" and secret in str(r.get("content", "")) for r in records)
     has_assistant = any(r["type"] == "assistant_message" for r in records)
@@ -174,7 +169,7 @@ def _wait_for_records(
 ) -> list[dict[str, Any]]:
     """Poll the common transcript until ``predicate`` holds; return the records (or fail)."""
     found = poll_until(
-        condition=partial(_records_satisfy, host_dir, subdir, predicate), timeout=timeout, poll_interval=2.0
+        condition=lambda: predicate(_read_common_records(host_dir, subdir)), timeout=timeout, poll_interval=2.0
     )
     records = _read_common_records(host_dir, subdir)
     if not found:
@@ -237,7 +232,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         records = _wait_for_records(
             host_dir,
             subdir,
-            partial(_seed_turn_captured, secret=secret, forces_tool_call=profile.forces_tool_call),
+            lambda records: _seed_turn_captured(records, secret, profile.forces_tool_call),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description="seed turn was not captured",
         )
@@ -273,7 +268,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         post = _wait_for_records(
             host_dir,
             subdir,
-            partial(_assistant_recalled_secret, secret=secret),
+            lambda records: _assistant_recalled_secret(records, secret),
             timeout=_RESPONSE_TIMEOUT_SECONDS,
             description=f"agent did not recall the secret {secret!r} after stop/start (resume failed)",
         )
