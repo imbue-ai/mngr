@@ -7,6 +7,8 @@ import yaml
 from loguru import logger
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_DIGEST_AARCH64
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_DIGEST_X86_64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
@@ -25,6 +27,21 @@ def _get_default_image_url(
     if machine in ("aarch64", "arm64"):
         return config_image_url_aarch64 or DEFAULT_IMAGE_URL_AARCH64
     return config_image_url_x86_64 or DEFAULT_IMAGE_URL_X86_64
+
+
+def _get_default_image_digest_for_url(image_url: str) -> str | None:
+    """Return the pinned content digest for ``image_url`` when known.
+
+    A non-None digest lets lima skip its HEAD-revalidation round trip and
+    boot straight from the cached file when the upstream image host is
+    unreachable. Only matched against the default URLs; a custom or
+    config-overridden URL gets None (i.e. lima's pre-digest behavior).
+    """
+    if image_url == DEFAULT_IMAGE_URL_AARCH64:
+        return DEFAULT_IMAGE_DIGEST_AARCH64
+    if image_url == DEFAULT_IMAGE_URL_X86_64:
+        return DEFAULT_IMAGE_DIGEST_X86_64
+    return None
 
 
 def _get_arch_string() -> str:
@@ -113,13 +130,16 @@ def generate_default_lima_yaml(
         root_authorized_public_key=root_authorized_public_key,
     )
 
+    image_entry: dict = {
+        "location": image_url,
+        "arch": arch,
+    }
+    image_digest = _get_default_image_digest_for_url(image_url)
+    if image_digest is not None:
+        image_entry["digest"] = image_digest
+
     config: dict = {
-        "images": [
-            {
-                "location": image_url,
-                "arch": arch,
-            },
-        ],
+        "images": [image_entry],
         "portForwards": port_forwards,
         # Provision required packages if not in the image
         "provision": [
