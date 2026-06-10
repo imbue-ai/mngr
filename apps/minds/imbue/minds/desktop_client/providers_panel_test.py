@@ -415,8 +415,8 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
 #
 # These assert the SSE workspaces payload carries the stored color and
 # the WCAG-derived foreground triple. Pre-migration workspaces (no
-# ``color`` label) still fall back to the SHA-derived OKLCH accent so
-# the rollout doesn't visually break existing workspaces.
+# ``color`` label) fall back to ``DEFAULT_WORKSPACE_COLOR`` so the
+# rollout doesn't visually break existing workspaces.
 
 
 def _make_workspace_agent_with_color(color_hex: str) -> DiscoveredAgent:
