@@ -994,7 +994,8 @@ _INDIFFERENCE = WORKSPACE_PALETTE["indifference"]
 
 
 def test_pick_unused_create_color_defaults_to_confusion_when_none_used() -> None:
-    # No workspaces yet -> confusion (not the first palette entry).
+    # No workspaces yet -> the named default (confusion, which also leads
+    # the palette).
     assert pick_unused_create_color(set()) == _CONFUSION
 
 
@@ -1017,7 +1018,7 @@ def test_pick_unused_create_color_skips_to_next_unused() -> None:
 def test_pick_unused_create_color_ignores_custom_colors() -> None:
     # A custom (non-palette) color in use doesn't block any palette pick;
     # with a custom color the set is non-empty so the first palette entry
-    # (confusion, which now leads the palette) is returned.
+    # (confusion) is returned.
     assert pick_unused_create_color({"#123456"}) == _CONFUSION
 
 
