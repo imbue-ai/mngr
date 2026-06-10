@@ -17,6 +17,7 @@ from imbue.minds.desktop_client import recovery_probe as _recovery_probe
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import LOG_SENTINEL
+from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import _build_mngr_host_state_argv
 from imbue.minds.desktop_client.app import _build_mngr_start_argv
 from imbue.minds.desktop_client.app import _build_mngr_stop_argv
@@ -25,7 +26,6 @@ from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _destroying_agent_ids
 from imbue.minds.desktop_client.app import _run_restart_sequence
 from imbue.minds.desktop_client.app import _ssh_command_for_agent
-from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
