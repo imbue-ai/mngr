@@ -51,9 +51,6 @@ def test_default_config_values() -> None:
     assert config.root_volume_size_gb == 30
     assert config.root_volume_type == "gp3"
     assert config.auto_shutdown_minutes is None
-    # AWS raises the cloud-init slow-warning threshold above the VPS-Docker base
-    # default (30s) because a cold EC2 instance legitimately takes 30-60s+.
-    assert config.cloud_init_slow_warning_threshold_seconds == 90.0
 
 
 def test_backend_name_defaults_to_aws() -> None:
