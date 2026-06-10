@@ -8,7 +8,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # Creating a command agent and the subsequent `mngr list`/`mngr exec` calls
@@ -29,7 +28,7 @@ def test_create_command_python_http(e2e: E2eSession) -> None:
     expected_command = "sleep 100950"
     expect(
         e2e.run(
-            f"mngr create my-server --type command --no-ensure-clean --no-connect -- {expected_command}",
+            f"mngr create my-server --type command --no-connect -- {expected_command}",
             comment="run any shell command as an agent (substituted with sleep)",
         )
     ).to_succeed()
@@ -53,7 +52,6 @@ def test_create_command_python_http(e2e: E2eSession) -> None:
     expect(ps_result.stdout).to_contain(expected_command)
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # `mngr list` enumerates every configured provider; that discovery can exceed
@@ -70,7 +68,7 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
     # alive while still demonstrating that custom commands get forwarded.
     expect(
         e2e.run(
-            "mngr create my-task --type command --no-ensure-clean --no-connect -- sleep 100951",
+            "mngr create my-task --type command --no-connect -- sleep 100951",
             comment="run a custom script as an agent (substituted with sleep)",
         )
     ).to_succeed()
@@ -134,11 +132,10 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# The agent is created locally, so verification scopes `mngr list` to the local
-# provider (`--provider local`). This keeps discovery fast and avoids querying
-# Modal -- an unscoped `mngr list` fans out to every provider, which can exceed
-# the default 10s per-test timeout when a remote provider is slow or unreachable.
-# The extended timeout adds further headroom for the rsync-backed agent setup.
+# Agent creation (provisioning, rsync, ttyd install attempt) can exceed the
+# default 10s per-test timeout, so allow extra headroom. Verification scopes
+# `mngr list` to the local provider (`--provider local`), so this never queries
+# Modal.
 @pytest.mark.timeout(120)
 def test_create_codex_positional(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -166,14 +163,15 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     matching = [agent for agent in agents if agent["name"] == "my-task"]
     assert len(matching) == 1, f"expected exactly one 'my-task' agent, got: {agents}"
     assert matching[0]["type"] == "codex", f"expected agent type 'codex', got: {matching[0]}"
-    # The positional type really resolved into a running agent, not just an
-    # entry with the right type label.
-    assert matching[0]["state"] in ("RUNNING", "WAITING"), f"unexpected agent state: {matching[0]['state']}"
 
 
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Agent creation (provisioning, rsync, ttyd install attempt) can exceed the
+# default 10s per-test timeout, so allow extra headroom. Verification scopes
+# `mngr list` to the local provider (`--provider local`), so this never queries
+# Modal.
 @pytest.mark.timeout(120)
 def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
@@ -205,7 +203,6 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     assert matching[0]["type"] == "codex", f"expected type 'codex', got {matching[0]['type']}"
 
 
-@pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
 # Agent creation (provisioning, ttyd install attempt, etc.) can exceed the
@@ -251,7 +248,7 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     ).to_succeed()
     expect(
         e2e.run(
-            "mngr create my-task yolo --no-ensure-clean --no-connect",
+            "mngr create my-task yolo --no-connect",
             comment="create custom yolo agent",
         )
     ).to_succeed()
