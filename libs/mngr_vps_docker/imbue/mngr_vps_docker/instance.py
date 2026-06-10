@@ -414,12 +414,16 @@ class VpsDockerProvider(BaseProviderInstance):
         return self._instances_cache
 
     def _validate_provider_args_for_create(self) -> None:
-        """Hook called by ``_provision_vps`` immediately before ``create_instance``.
+        """Hook called by ``create_host`` before the first provider write.
 
         Default no-op. Subclasses override to enforce provider-specific
-        pre-create invariants (e.g. AWS's pytest-only "must have
-        auto_shutdown_minutes set" guard) at the natural moment in the
-        lifecycle, instead of piggy-backing on a property accessor.
+        pre-create invariants (e.g. GCP's firewall-rule existence, AWS's
+        pytest-only "must have auto_shutdown_minutes set" guard). It runs before
+        any provider API write -- in particular before the SSH key upload and
+        instance creation -- so a failed precondition surfaces cleanly with no
+        leaked resources and no cleanup path. Keep these checks cheap (local
+        state or a single read-only API call); anything expensive runs on every
+        ``mngr create``.
         """
 
     # =========================================================================
@@ -658,6 +662,14 @@ class VpsDockerProvider(BaseProviderInstance):
         if parsed.docker_build_args:
             ensure_depot_token_available(self.config.builder)
 
+        # Provider-specific pre-create checks (e.g. GCP's firewall-rule
+        # existence, AWS's pytest auto-shutdown guard). Run before the first
+        # provider write (the SSH key upload just below) so a failed
+        # precondition -- like a missing `mngr gcp prepare` firewall rule --
+        # surfaces cleanly: no instance created, no SSH key uploaded, and no
+        # "Host creation failed, attempting cleanup..." path.
+        self._validate_provider_args_for_create()
+
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
 
@@ -876,12 +888,11 @@ class VpsDockerProvider(BaseProviderInstance):
         """Provision a VPS, wait for it to boot, and wait for Docker to install.
 
         Returns (vps_instance_id, vps_ip).
-        """
-        # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
-        # have auto_shutdown_minutes set" guard). Runs before any API call so
-        # a failed check leaves no leaked resources.
-        self._validate_provider_args_for_create()
 
+        Provider-specific pre-create checks (``_validate_provider_args_for_create``)
+        already ran in ``create_host`` before the first provider write, so by the
+        time we get here the create preconditions are known to hold.
+        """
         vps_host_private_key = vps_host_key_path.read_text()
         # Inject the provider SSH key straight into root via cloud-init (in
         # addition to the copy-from-default-user step). This removes any reliance
