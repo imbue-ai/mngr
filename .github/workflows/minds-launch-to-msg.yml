@@ -286,6 +286,13 @@ jobs:
       - name: pnpm dist (build + upload to ToDesktop)
         id: dist
         if: steps.existing.outputs.url == ''
+        # 45 min covers a healthy cold build (~15-25 min observed) plus
+        # tail latency on Apple's notarization service. When ToDesktop's
+        # signing wedges (silent stall mid-notarize, e.g. run
+        # 27310529771), failing here at 45 surfaces the wedge instead of
+        # consuming the job-level 60-min budget and starving the cancel
+        # step of time to tear the build down.
+        timeout-minutes: 45
         working-directory: apps/minds
         # build.js::bundleLatchkey smoke-tests the bundled CLI via
         # `latchkey --version`. Latchkey tries to read/init an encryption
