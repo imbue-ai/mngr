@@ -160,10 +160,10 @@ def _resolve_agent_type_name(
     means nothing was supplied anywhere. ``is_type_explicit`` is True only
     when the user passed ``--type`` on the command line.
 
-    ``available_agent_types`` is the union of plugin-registered agent type
-    names (``list_registered_agent_types()``) and user-config-defined ones
-    (``mngr_ctx.config.agent_types`` keys). Used only to make the error
-    message concrete; never affects which value is returned.
+    ``available_agent_types`` is every name the user may pass for the type:
+    plugin-registered types, user-config-defined types, and registered
+    aliases (i.e. ``list_selectable_agent_type_names(config)``). Used only to
+    make the error message concrete; never affects which value is returned.
 
     Precedence:
       1. an explicitly-set ``--type`` flag (``is_type_explicit`` is True),
