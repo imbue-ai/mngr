@@ -164,16 +164,25 @@ def test_ensure_latchkey_installed_falls_back_to_stdout_when_stderr_empty() -> N
 
 
 def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
-    """Build a fake ``latchkey`` whose ``auth re-encrypt`` records the requested services.
+    """Build a fake ``latchkey`` covering ``services info --offline`` and ``auth re-encrypt``.
 
-    Writes the destination file as JSON recording the requested service
-    names, so ``sync_credentials`` can be exercised end-to-end without a
-    real (and as-yet-hypothetical) ``auth re-encrypt`` implementation.
+    ``services info <svc> --offline`` reports ``missing`` for any service
+    named in the ``FAKE_MISSING_SERVICES`` env var (comma-separated) and
+    ``valid`` otherwise. ``auth re-encrypt`` writes the destination file
+    as JSON recording the requested service names. Together these let
+    ``sync_credentials`` be exercised end-to-end without a real (and
+    as-yet-hypothetical) ``auth re-encrypt`` implementation.
     """
     script = tmp_path / "fake-latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import json, sys\n"
+        "import json, os, sys\n"
+        'if sys.argv[1:3] == ["services", "info"]:\n'
+        "    service = sys.argv[3]\n"
+        "    missing = os.environ.get('FAKE_MISSING_SERVICES', '').split(',')\n"
+        "    status = 'missing' if service in missing else 'valid'\n"
+        "    print(json.dumps({'credentialStatus': status}))\n"
+        "    sys.exit(0)\n"
         'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
         "rest = sys.argv[4:]\n"
         "services = rest[1:] if rest[:1] == ['--services'] else []\n"
@@ -193,13 +202,17 @@ def _latchkey_with_fake_reencrypt(tmp_path: Path) -> Latchkey:
     )
 
 
+def _grant_permissions(latchkey: Latchkey, host_id: HostId, rules_json: str) -> None:
+    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey.latchkey_directory), host_id)
+    permissions_path.parent.mkdir(parents=True)
+    permissions_path.write_text(rules_json)
+
+
 def test_sync_credentials_ships_only_services_the_host_is_granted(tmp_path: Path) -> None:
     latchkey = _latchkey_with_fake_reencrypt(tmp_path)
     host_id = HostId.generate()
     # Grant the host the slack scope; the catalog maps ``slack-api`` -> ``slack``.
-    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey.latchkey_directory), host_id)
-    permissions_path.parent.mkdir(parents=True)
-    permissions_path.write_text('{"rules": [{"slack-api": ["slack-read-all"]}]}')
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
 
     sync_credentials(outer, latchkey, host_id)
@@ -214,30 +227,77 @@ def test_sync_credentials_ships_only_services_the_host_is_granted(tmp_path: Path
     assert written[0].is_atomic is True
 
 
-def test_sync_credentials_ships_empty_subset_for_deny_all_host(tmp_path: Path) -> None:
+def test_sync_credentials_excludes_services_without_stored_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     latchkey = _latchkey_with_fake_reencrypt(tmp_path)
     host_id = HostId.generate()
-    # No permissions file -> deny-all -> no services shipped.
+    # Grant both slack and github (github-rest-api -> github in the catalog).
+    _grant_permissions(
+        latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}, {"github-rest-api": ["any"]}]}'
+    )
+    # Slack is granted but has no stored credentials; it must be dropped.
+    monkeypatch.setenv("FAKE_MISSING_SERVICES", "slack")
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
 
     sync_credentials(outer, latchkey, host_id)
 
     written = _stub(outer).written
     assert len(written) == 1
-    assert json.loads(written[0].content.decode("utf-8"))["services"] == []
+    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["github"]
+
+
+def test_sync_credentials_clears_remote_store_for_deny_all_host(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # No permissions file -> deny-all -> nothing to ship; the remote store is cleared.
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    assert _stub(outer).written == []
+    rm_commands = [r.command for r in _stub(outer).recorded if r.command.startswith("rm -f")]
+    assert rm_commands == ["rm -f /root/.latchkey/credentials.json.enc"]
+
+
+def test_sync_credentials_clears_remote_store_when_all_services_lack_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
+    # The only granted service has no stored credentials -> nothing to ship.
+    monkeypatch.setenv("FAKE_MISSING_SERVICES", "slack")
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    assert _stub(outer).written == []
+    assert any(r.command.startswith("rm -f") for r in _stub(outer).recorded)
 
 
 def test_sync_credentials_raises_when_reencrypt_fails(tmp_path: Path) -> None:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     failing_binary = tmp_path / "fake-latchkey"
-    failing_binary.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    # ``services info`` succeeds (so the granted service is kept), but
+    # ``auth re-encrypt`` fails so we exercise the export-failure path.
+    failing_binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        'if sys.argv[1:3] == ["services", "info"]:\n'
+        "    print(json.dumps({'credentialStatus': 'valid'}))\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
     failing_binary.chmod(0o755)
     latchkey = Latchkey(latchkey_directory=latchkey_directory, latchkey_binary=str(failing_binary))
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
 
     with pytest.raises(RemoteGatewayError, match="export filtered latchkey credentials"):
-        sync_credentials(outer, latchkey, HostId.generate())
+        sync_credentials(outer, latchkey, host_id)
 
 
 def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_path: Path) -> None:

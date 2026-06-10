@@ -777,17 +777,21 @@ class Latchkey(MutableModel):
         readable by the same gateway -- and the same derived password /
         permissions-override JWTs -- as the canonical store.
 
-        ``--services`` is always passed explicitly (even with an empty
-        list), so the export is always filtered rather than defaulting to
-        the full store: a deny-all host gets an empty ``--services`` and
-        therefore an empty copy. This is why the caller resolves the
-        host's granted services first; the only credentials that ever
-        reach a host are the ones its permissions actually allow.
+        ``service_names`` must be non-empty: ``--services`` requires at
+        least one service, and an empty bundle is meaningless. The caller
+        resolves the host's granted services (and drops the ones with no
+        stored credentials) first, and handles the "nothing to ship" case
+        itself rather than calling this with an empty set. The only
+        credentials that ever reach a host are the ones its permissions
+        allow and that are actually stored.
 
         Raises:
-            LatchkeyError: if the binary cannot be launched or the
-                ``re-encrypt`` command exits non-zero.
+            LatchkeyError: if ``service_names`` is empty, the binary
+                cannot be launched, or the ``re-encrypt`` command exits
+                non-zero.
         """
+        if not service_names:
+            raise LatchkeyError("export_credentials_subset requires at least one service; got an empty set")
         env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         # Sorted for a deterministic command line (stable logs / tests);
         # the set of services is order-independent.
@@ -816,7 +820,7 @@ class Latchkey(MutableModel):
 
     # -- Service introspection -----------------------------------------------
 
-    def services_info(self, service_name: str) -> LatchkeyServiceInfo:
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         """Run ``latchkey services info <service>`` and return the parsed output.
 
         Latchkey emits pretty-printed JSON to stdout; we parse it and pull
@@ -825,13 +829,22 @@ class Latchkey(MutableModel):
         string) yields a service info with ``CredentialStatus.UNKNOWN`` and
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
+
+        When ``is_offline`` is set, ``--offline`` is passed so latchkey
+        reports the *stored* credential state without any network
+        validation -- enough to tell ``MISSING`` (nothing stored) from a
+        present credential, which is all the credential-export filter
+        needs and avoids a per-service network round-trip.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        command = [self.latchkey_binary, "services", "info", service_name]
+        if is_offline:
+            command.append("--offline")
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
                 result = cg.run_process_to_completion(
-                    command=[self.latchkey_binary, "services", "info", service_name],
+                    command=command,
                     timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,

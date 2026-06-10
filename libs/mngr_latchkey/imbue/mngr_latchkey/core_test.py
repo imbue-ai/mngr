@@ -618,16 +618,17 @@ def test_export_credentials_subset_passes_sorted_services_and_reuses_key(tmp_pat
     assert payload["reused_key"] is True
 
 
-def test_export_credentials_subset_with_no_services_writes_empty_subset(tmp_path: Path) -> None:
-    """A deny-all host yields an export with no services."""
+def test_export_credentials_subset_rejects_empty_service_set(tmp_path: Path) -> None:
+    """``--services`` requires at least one service, so an empty set is refused."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     destination = tmp_path / "subset.json.enc"
 
-    manager.export_credentials_subset(destination, frozenset())
-
-    assert json.loads(destination.read_text())["services"] == []
+    with pytest.raises(LatchkeyError, match="at least one service"):
+        manager.export_credentials_subset(destination, frozenset())
+    # Nothing was written: we never invoked the binary.
+    assert not destination.exists()
 
 
 def test_export_credentials_subset_raises_on_failure(tmp_path: Path) -> None:
@@ -1333,6 +1334,26 @@ def test_services_info_passes_latchkey_directory_through(tmp_path: Path) -> None
     latchkey.services_info("slack")
 
     assert report_path.read_text() == str(latchkey_dir)
+
+
+def test_services_info_offline_passes_offline_flag(tmp_path: Path) -> None:
+    report_path = tmp_path / "argv_report"
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"open({str(report_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'credentialStatus': 'valid'}))\n"
+    )
+    script.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+
+    latchkey.services_info("slack", is_offline=True)
+    assert json.loads(report_path.read_text()) == ["services", "info", "slack", "--offline"]
+
+    # Without the flag, ``--offline`` is absent.
+    latchkey.services_info("slack")
+    assert json.loads(report_path.read_text()) == ["services", "info", "slack"]
 
 
 def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:

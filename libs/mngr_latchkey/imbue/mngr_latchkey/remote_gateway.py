@@ -18,6 +18,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -226,25 +227,80 @@ def _services_allowed_for_host(latchkey_directory: Path, host_id: HostId) -> fro
         raise RemoteGatewayError(f"Failed to resolve allowed services for host {host_id}: {e}") from e
 
 
+def _services_with_stored_credentials(latchkey: Latchkey, service_names: frozenset[str]) -> frozenset[str]:
+    """Narrow ``service_names`` to those that actually have credentials stored.
+
+    A service can be granted by a host's permissions yet have no
+    credentials in the store (the user never set them up). Asking
+    ``latchkey auth re-encrypt`` to bundle such a service would fail, so
+    each candidate is probed with ``latchkey services info <service>
+    --offline`` and dropped when its credential status is ``MISSING``.
+    The offline probe reports stored state without a network round-trip.
+    Non-``MISSING`` states (``VALID`` / ``INVALID`` / ``UNKNOWN``) are
+    kept: the credentials exist (or their state is indeterminate), so the
+    re-encrypt can include them.
+    """
+    present: set[str] = set()
+    for service_name in sorted(service_names):
+        status = latchkey.services_info(service_name, is_offline=True).credential_status
+        if status is CredentialStatus.MISSING:
+            logger.debug("Service {} has no stored credentials; excluding it from the bundle", service_name)
+        else:
+            present.add(service_name)
+    return frozenset(present)
+
+
+def _remove_remote_credentials(host: OuterHostInterface, remote_path: Path) -> None:
+    """Remove the VPS credential store (idempotent) so no stale credentials linger.
+
+    Used when a host ends up with nothing to ship (deny-all, or every
+    granted service lacks stored credentials). ``rm -f`` never errors on a
+    missing file, so this is a no-op on first provisioning and a cleanup
+    on a later sync that revoked the host's last credential.
+    """
+    result = host.execute_idempotent_command(
+        f"rm -f {shlex.quote(str(remote_path))}", timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to clear latchkey credentials on VPS {}: {}".format(
+                host.get_name(), result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
 def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
     """Ship a host-scoped subset of the local latchkey credentials onto the VPS.
 
     Rather than copying the full desktop credential store verbatim, this
     resolves the canonical services the host's permissions actually grant
-    (via :func:`_services_allowed_for_host`), then re-encrypts a copy
-    containing *only* those services' credentials with the *same*
-    encryption key (:meth:`Latchkey.export_credentials_subset`). The
-    filtered copy is written to ``~/.latchkey/credentials.json.enc`` on
-    the VPS. Keeping the same key means the VPS gateway's derived password
-    and the agents' permissions-override JWTs keep validating; shipping
-    only the granted services means a VPS compromise cannot leak
+    (via :func:`_services_allowed_for_host`), drops the ones with no
+    stored credentials (via :func:`_services_with_stored_credentials`),
+    then re-encrypts a copy containing *only* those services' credentials
+    with the *same* encryption key
+    (:meth:`Latchkey.export_credentials_subset`). The filtered copy is
+    written to ``~/.latchkey/credentials.json.enc`` on the VPS. Keeping
+    the same key means the VPS gateway's derived password and the agents'
+    permissions-override JWTs keep validating; shipping only the granted,
+    actually-stored services means a VPS compromise cannot leak
     credentials the agent was never permitted to use.
+
+    When nothing is left to ship (deny-all host, or every granted service
+    lacks stored credentials), the remote store is removed instead, since
+    ``re-encrypt`` requires at least one service.
 
     Raises :class:`RemoteGatewayError` if resolving the services, the
     re-encrypt, or reading the filtered copy fails.
     """
-    service_names = _services_allowed_for_host(latchkey.latchkey_directory, host_id)
+    granted = _services_allowed_for_host(latchkey.latchkey_directory, host_id)
+    service_names = _services_with_stored_credentials(latchkey, granted)
     remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
+    if not service_names:
+        with log_span(
+            "Clearing latchkey credentials on VPS {} (nothing to ship for host {})", host.get_name(), host_id
+        ):
+            _remove_remote_credentials(host, remote_path)
+        return
     with tempfile.TemporaryDirectory(prefix="mngr-latchkey-creds-") as tmpdir:
         subset_path = Path(tmpdir) / _CREDENTIALS_FILENAME
         try:
