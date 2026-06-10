@@ -141,6 +141,38 @@ def test_install_completion_auto_writes_shim_and_managed_files(
     assert rc.read_text().count(COMPLETION_SHIM_MARKER) == 1
 
 
+def test_install_completion_replaces_old_self_contained_block(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Installing migrates an old self-contained completion function to the managed shim.
+
+    The byte-identical old block is removed and the shim is added (so `mngr extras
+    completion` cleans up the stale function rather than leaving it orphaned).
+    """
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    rc = tmp_path / ".zshrc"
+    old_block = (
+        "_mngr_complete() {\n"
+        "    local -a completions\n"
+        "    (( ! $+commands[mngr] )) && return 1\n"
+        '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
+        ' /some/python -m imbue.mngr.cli.complete)"})\n'
+        "    compadd -U -V unsorted -a completions\n"
+        "}\n"
+        "compdef _mngr_complete mngr"
+    )
+    rc.write_text(f"# config\n{old_block}\n")
+
+    def _status() -> tuple[bool, str, Path]:
+        return (COMPLETION_SHIM_MARKER in rc.read_text(), "zsh", rc)
+
+    assert _install_completion(auto=True, status_fn=_status) is True
+
+    text = rc.read_text()
+    assert COMPLETION_SHIM_MARKER in text
+    # The old self-contained function is gone (migrated to the shim).
+    assert "compadd -U -V unsorted -a completions" not in text
+    assert "# config" in text
+
+
 def test_install_completion_skips_without_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Without an interactive terminal, _install_completion skips and returns False.
 

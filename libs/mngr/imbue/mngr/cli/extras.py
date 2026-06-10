@@ -22,6 +22,7 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
 from imbue.mngr.cli.complete import generate_completion_shim
+from imbue.mngr.cli.complete import strip_legacy_completion_block
 from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
@@ -134,8 +135,17 @@ def _install_completion(
     # when the shim is already installed.
     write_managed_completion_scripts()
 
+    rc_text = rc_path.read_text() if rc_path.exists() else ""
+    cleaned_text, removed_legacy = strip_legacy_completion_block(rc_text)
+
     if configured:
-        write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
+        # The managed shim is already installed; just tidy up an old self-contained
+        # block if one is left over (and byte-matches a form we generated).
+        if removed_legacy:
+            rc_path.write_text(cleaned_text)
+            write_human_line("Removed the old completion block from {} (managed shim already present)", rc_path)
+        else:
+            write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
         return True
 
     if not auto:
@@ -146,12 +156,15 @@ def _install_completion(
             write_human_line("Skipping shell completion.")
             return False
 
-    script = _generate_completion_script(shell_type)
+    shim = _generate_completion_script(shell_type)
+    if cleaned_text and not cleaned_text.endswith("\n"):
+        cleaned_text += "\n"
+    rc_path.write_text(f"{cleaned_text}\n{shim}\n")
 
-    with rc_path.open("a") as f:
-        f.write(f"\n{script}\n")
-
-    write_human_line("Shell completion enabled in {}", rc_path)
+    if removed_legacy:
+        write_human_line("Replaced the old completion block with the managed shim in {}", rc_path)
+    else:
+        write_human_line("Shell completion enabled in {}", rc_path)
     return True
 
 

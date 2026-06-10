@@ -11,6 +11,7 @@ Invoked as: python -m imbue.mngr.cli.complete {zsh|bash}
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -652,6 +653,72 @@ def generate_completion_shim(shell: str) -> str:
     if shell == "zsh":
         return generate_zsh_shim()
     return generate_bash_shim()
+
+
+# The exact self-contained completion functions that mngr generated *before* the
+# managed-shim model -- the ``{python_path}`` token marks the only install-specific
+# part. ``strip_legacy_completion_block`` removes such a block from a user's rc
+# only when it matches one of these byte-for-byte (modulo that path), so migrating
+# to the shim never touches a hand-edited completion. (Listed forms: the released
+# function, and the segment-drilling form that preceded the shim on this branch.)
+_LEGACY_COMPLETION_FUNCTION_TEMPLATES: Final[tuple[str, ...]] = (
+    # zsh, released (pre-segment-drilling)
+    """_mngr_complete() {
+    local -a completions
+    (( ! $+commands[mngr] )) && return 1
+    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) {python_path} -m imbue.mngr.cli.complete)"})
+    compadd -U -V unsorted -a completions
+}
+compdef _mngr_complete mngr""",
+    # zsh, segment-drilling (preceded the shim on this branch)
+    """_mngr_complete() {
+    local -a completions branches leaves
+    (( ! $+commands[mngr] )) && return 1
+    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) {python_path} -m imbue.mngr.cli.complete)"})
+    local c
+    for c in $completions; do
+        if [[ $c == *. ]]; then branches+=$c; else leaves+=$c; fi
+    done
+    compadd -U -S '' -V unsorted -a branches
+    compadd -U -V unsorted -a leaves
+}
+compdef _mngr_complete mngr""",
+    # bash, released (pre-segment-drilling)
+    """_mngr_complete() {
+    local IFS=$'\\n'
+    COMPREPLY=($(COMP_WORDS="${COMP_WORDS[*]}" COMP_CWORD="$COMP_CWORD" {python_path} -m imbue.mngr.cli.complete))
+}
+complete -o default -F _mngr_complete mngr""",
+    # bash, segment-drilling (preceded the shim on this branch)
+    """_mngr_complete() {
+    local IFS=$'\\n'
+    COMPREPLY=($(COMP_WORDS="${COMP_WORDS[*]}" COMP_CWORD="$COMP_CWORD" {python_path} -m imbue.mngr.cli.complete))
+    if [[ ${#COMPREPLY[@]} -eq 1 && ${COMPREPLY[0]} == *. ]]; then
+        compopt -o nospace
+    fi
+}
+complete -o default -F _mngr_complete mngr""",
+)
+
+
+def strip_legacy_completion_block(rc_text: str) -> tuple[str, bool]:
+    """Remove an old self-contained mngr completion block from rc text, if it matches a known form.
+
+    Returns ``(new_text, removed)``. A block is removed only when it is
+    byte-for-byte one of ``_LEGACY_COMPLETION_FUNCTION_TEMPLATES`` (with any baked
+    python path), so a hand-edited or unrecognised completion is left untouched.
+    Surrounding blank lines are collapsed so the rc stays tidy.
+    """
+    for template in _LEGACY_COMPLETION_FUNCTION_TEMPLATES:
+        prefix, separator, suffix = template.partition("{python_path}")
+        if not separator:
+            continue
+        # The path is the only variable part of the line; everything else must match.
+        pattern = r"\n*" + re.escape(prefix) + r"[^\n]*" + re.escape(suffix) + r"\n*"
+        new_text, count = re.subn(pattern, "\n", rc_text, count=1)
+        if count:
+            return new_text, True
+    return rc_text, False
 
 
 def _atomic_write_text(path: Path, content: str) -> None:

@@ -19,6 +19,7 @@ from imbue.mngr.cli.complete import generate_bash_shim
 from imbue.mngr.cli.complete import generate_zsh_script
 from imbue.mngr.cli.complete import generate_zsh_shim
 from imbue.mngr.cli.complete import get_managed_completion_script_path
+from imbue.mngr.cli.complete import strip_legacy_completion_block
 from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
@@ -1968,3 +1969,63 @@ def test_maybe_warn_stale_completion_silent_for_current_shim(
 
     _maybe_warn_stale_completion()
     assert capsys.readouterr().err == ""
+
+
+# =============================================================================
+# Legacy completion block removal (migration to the managed shim)
+# =============================================================================
+
+
+_LEGACY_ZSH_BLOCK = """_mngr_complete() {
+    local -a completions
+    (( ! $+commands[mngr] )) && return 1
+    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1)) /home/u/.venv/bin/python3 -m imbue.mngr.cli.complete)"})
+    compadd -U -V unsorted -a completions
+}
+compdef _mngr_complete mngr"""
+
+
+def test_strip_legacy_completion_block_removes_known_block() -> None:
+    """A byte-identical old completion block (any python path) is removed, surrounding text kept."""
+    rc = f"# my config\nexport FOO=1\n\n{_LEGACY_ZSH_BLOCK}\n\nalias x=y\n"
+
+    new_text, removed = strip_legacy_completion_block(rc)
+
+    assert removed is True
+    assert "_mngr_complete" not in new_text
+    assert "export FOO=1" in new_text
+    assert "alias x=y" in new_text
+
+
+def test_strip_legacy_completion_block_keeps_hand_edited_block() -> None:
+    """A block that is not byte-identical to a known form (hand-edited) is left untouched."""
+    # Any byte difference from the known template (here, dropping ``-V unsorted``)
+    # means it is not auto-removed.
+    edited = _LEGACY_ZSH_BLOCK.replace("compadd -U -V unsorted -a completions", "compadd -U -a completions")
+    rc = f"# config\n{edited}\n"
+
+    new_text, removed = strip_legacy_completion_block(rc)
+
+    assert removed is False
+    assert new_text == rc
+
+
+def test_strip_legacy_completion_block_no_block() -> None:
+    """rc with no mngr completion is returned unchanged."""
+    rc = "# just some config\nexport FOO=1\n"
+
+    new_text, removed = strip_legacy_completion_block(rc)
+
+    assert removed is False
+    assert new_text == rc
+
+
+def test_strip_legacy_completion_block_does_not_touch_the_shim() -> None:
+    """The managed shim itself is not a legacy block, so it is preserved."""
+    shim = generate_zsh_shim()
+    rc = f"# config\n{shim}\n"
+
+    new_text, removed = strip_legacy_completion_block(rc)
+
+    assert removed is False
+    assert COMPLETION_SHIM_MARKER in new_text
