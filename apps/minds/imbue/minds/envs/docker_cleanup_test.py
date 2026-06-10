@@ -10,6 +10,8 @@ from imbue.minds.envs.docker_cleanup import cleanup_env_state_container
 from imbue.minds.envs.docker_cleanup import read_profile_user_id
 from imbue.minds.envs.docker_cleanup import remove_state_container
 from imbue.minds.envs.docker_cleanup import state_container_name
+from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
+from imbue.minds.envs.docker_cleanup import stop_state_container
 from imbue.minds.envs.primitives import DevEnvName
 
 
@@ -76,6 +78,14 @@ def test_cleanup_env_state_container_skips_when_user_id_unresolved(
     cleanup_env_state_container(DevEnvName("staging"), parent_concurrency_group=_root_cg)
 
 
+def test_stop_active_env_state_container_skips_when_user_id_unresolved(
+    tmp_path: Path, _root_cg: ConcurrencyGroup
+) -> None:
+    # No mngr profile under the given host dir -> user_id can't be resolved ->
+    # returns False without targeting (or stopping) anything.
+    assert stop_active_env_state_container(mngr_host_dir=tmp_path / "mngr", parent_concurrency_group=_root_cg) is False
+
+
 @pytest.mark.acceptance
 @pytest.mark.docker
 @pytest.mark.timeout(60)
@@ -128,3 +138,68 @@ def test_remove_state_container_removes_real_container_and_volume(_root_cg: Conc
         is_checked_after=False,
     )
     assert inspect_volume.returncode != 0
+
+
+@pytest.mark.acceptance
+@pytest.mark.docker
+@pytest.mark.timeout(60)
+def test_stop_state_container_absent_is_noop(_root_cg: ConcurrencyGroup) -> None:
+    # A guaranteed-absent container name must not raise.
+    stop_state_container(
+        container_name=f"minds-doesnotexist-docker-state-{uuid4().hex}",
+        parent_concurrency_group=_root_cg,
+    )
+
+
+@pytest.mark.acceptance
+@pytest.mark.docker
+@pytest.mark.timeout(120)
+def test_stop_state_container_stops_without_removing(_root_cg: ConcurrencyGroup) -> None:
+    name = f"minds-test-docker-state-{uuid4().hex}"
+    create = _root_cg.run_process_to_completion(
+        command=[
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            name,
+            "-v",
+            f"{name}:/mngr-state",
+            "alpine:latest",
+            "sh",
+            "-c",
+            "tail -f /dev/null",
+        ],
+        timeout=60.0,
+        is_checked_after=False,
+    )
+    assert create.returncode == 0, create.stderr
+    try:
+        stop_state_container(container_name=name, parent_concurrency_group=_root_cg)
+
+        # The container still EXISTS (not removed) but is no longer running, and
+        # its backing volume is preserved.
+        running = _root_cg.run_process_to_completion(
+            command=["docker", "inspect", "-f", "{{.State.Running}}", name],
+            timeout=60.0,
+            is_checked_after=False,
+        )
+        assert running.returncode == 0, running.stderr
+        assert running.stdout.strip() == "false"
+        volume = _root_cg.run_process_to_completion(
+            command=["docker", "volume", "inspect", name],
+            timeout=60.0,
+            is_checked_after=False,
+        )
+        assert volume.returncode == 0
+    finally:
+        _root_cg.run_process_to_completion(
+            command=["docker", "rm", "-f", name],
+            timeout=60.0,
+            is_checked_after=False,
+        )
+        _root_cg.run_process_to_completion(
+            command=["docker", "volume", "rm", name],
+            timeout=60.0,
+            is_checked_after=False,
+        )
