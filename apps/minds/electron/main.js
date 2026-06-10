@@ -764,7 +764,8 @@ function openModal(bundle, url) {
     // and the current workspace id pushed before it can fall behind. The
     // inbox renders its initial list server-side, but the sidebar reuses
     // the SSE-driven ``workspaces`` event for first paint, so without this
-    // prime it would flash "No projects" until the next SSE push arrives.
+    // prime an existing workspace list would only appear after the next SSE
+    // push arrives.
     modal.webContents.on('did-finish-load', () => {
       if (modal.webContents.isDestroyed()) return;
       if (modal.webContents.getURL() === 'about:blank') return;

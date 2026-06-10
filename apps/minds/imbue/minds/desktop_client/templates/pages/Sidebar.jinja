@@ -24,11 +24,14 @@
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="sidebar-backdrop" class="fixed inset-0">
+    {# top-[46px] = 38px titlebar + 8px inset. The modal WebContentsView
+       covers the full window (including the titlebar strip) so its
+       transparent backdrop can capture clicks across the whole window,
+       but the menu itself sits below the titlebar to match the Figma
+       and to keep the traffic-light / page-title strip visually intact. #}
     <div id="sidebar-menu"
-         class="absolute top-2 left-2 w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
-      <div id="sidebar-workspaces" class="flex flex-col gap-px">
-        <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
-      </div>
+         class="absolute top-[46px] left-2 w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-px"></div>
       <SidebarBottom />
     </div>
   </div>

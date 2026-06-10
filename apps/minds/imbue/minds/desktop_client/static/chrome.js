@@ -393,13 +393,7 @@
     var container = document.getElementById('sidebar-workspaces');
     if (!container) return;
     container.textContent = '';
-    if (!workspaces || workspaces.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'px-2 py-2 text-xs text-zinc-400 text-center';
-      empty.textContent = 'No projects';
-      container.appendChild(empty);
-      return;
-    }
+    if (!workspaces || workspaces.length === 0) return;
     var groups = {};
     workspaces.forEach(function (w) {
       var key = w.account || 'Private';
