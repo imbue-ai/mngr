@@ -4,11 +4,16 @@ from datetime import datetime
 from enum import auto
 from typing import Annotated
 from typing import Any
+from typing import Final
 from typing import Literal
 
 from loguru import logger
 from pydantic import Field
 from pydantic import TypeAdapter
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
@@ -25,10 +30,40 @@ from imbue.mngr_kanpan.data_source import FIELD_PR
 from imbue.mngr_kanpan.data_source import FIELD_REPO_PATH
 from imbue.mngr_kanpan.data_source import FIELD_UNRESOLVED
 from imbue.mngr_kanpan.data_source import FieldValue
+from imbue.mngr_kanpan.data_source import KanpanDataSourceError
 from imbue.mngr_kanpan.data_source import now_utc
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import DataSourceConfig
+
+# GitHub's search connection caps `first` at 100 results per page, and the
+# search API as a whole returns at most the first 1000 results (10 pages) for
+# any one query. We paginate with cursors up to that ceiling.
+_SEARCH_PAGE_SIZE: Final[int] = 100
+_MAX_SEARCH_PAGES: Final[int] = 10
+
+# A page request that comes back with no usable JSON body (HTTP 403 secondary
+# rate limit, 5xx, transient network blip) is retried a few times with
+# exponential backoff before we give up on it. Each retry re-requests the *same*
+# page cursor, so pages already fetched are never re-fetched.
+_PAGE_FETCH_ATTEMPTS: Final[int] = 3
+_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS: Final[float] = 1.0
+_PAGE_RETRY_MIN_WAIT_SECONDS: Final[float] = 1.0
+_PAGE_RETRY_MAX_WAIT_SECONDS: Final[float] = 8.0
+_STDERR_EXCERPT_LENGTH: Final[int] = 200
+
+
+class GitHubBoardFetchError(KanpanDataSourceError):
+    """Raised when a board page request fails at the transport level.
+
+    Covers cases where `gh api graphql` returns no usable JSON body -- an HTTP
+    403 secondary rate limit, a 5xx, or a transient network failure. These are
+    worth a short backoff and a retry of the same page, unlike a primary
+    `RATE_LIMITED` GraphQL error (which carries a JSON body and needs a
+    multi-minute wait, so it is surfaced rather than retried inline).
+    """
+
+    ...
 
 
 class PrState(UpperCaseStrEnum):
@@ -202,36 +237,131 @@ class FetchBoardResult(FrozenModel):
     errors: tuple[str, ...] = Field(default=(), description="Per-repo or top-level errors surfaced from gh / GraphQL.")
 
 
+class _BoardPage(FrozenModel):
+    """One page of the cursor-paginated board search response."""
+
+    nodes: tuple[dict[str, Any], ...] = Field(description="Raw PullRequest nodes returned on this page")
+    errors: tuple[str, ...] = Field(description="GraphQL error messages surfaced on this page")
+    has_next_page: bool = Field(description="Whether GitHub reports a further page after this one")
+    end_cursor: str | None = Field(description="Cursor to pass as `after` to fetch the next page, if any")
+
+
 def fetch_board(
     cg: ConcurrencyGroup,
     repo_branches: Sequence[tuple[str, str]],
     unresolved_ignore_user: str | None = None,
 ) -> FetchBoardResult:
-    """Fetch every PR the kanpan board needs in one `gh api graphql` call."""
+    """Fetch every PR the kanpan board needs, paging through `gh api graphql`.
+
+    GitHub caps a single search page at 100 results, so when more than 100 PRs
+    match (e.g. >100 agents) we follow the `pageInfo` cursor and accumulate
+    every page. Pages already fetched are kept even if a later page fails, so a
+    failure on page N never re-fetches pages 1..N-1.
+    """
     if not repo_branches:
         return FetchBoardResult(prs={})
 
-    graphql = _build_board_graphql(repo_branches)
-    try:
-        proc = cg.run_process_in_background(
-            ["gh", "api", "graphql", "-f", f"query={graphql}"],
-            timeout=30,
-            is_checked_by_group=False,
+    all_nodes: list[dict[str, Any]] = []
+    errors: list[str] = []
+    cursor: str | None = None
+    is_page_limit_exceeded = False
+
+    for page_number in range(1, _MAX_SEARCH_PAGES + 1):
+        graphql = _build_board_graphql(repo_branches, after=cursor)
+        try:
+            response = _run_board_query_with_retry(cg, graphql)
+        except (ProcessError, OSError) as e:
+            logger.debug("Failed to launch gh api graphql: {}", e)
+            errors.append(f"gh api graphql failed: {e}")
+            break
+        except GitHubBoardFetchError as e:
+            logger.debug("gh api graphql page failed after {} attempts: {}", _PAGE_FETCH_ATTEMPTS, e)
+            errors.append(f"gh api graphql page failed after {_PAGE_FETCH_ATTEMPTS} attempts: {e}")
+            break
+
+        page = _parse_board_page(response)
+        errors.extend(page.errors)
+        all_nodes.extend(page.nodes)
+
+        if not page.has_next_page or page.end_cursor is None:
+            break
+        cursor = page.end_cursor
+        if page_number == _MAX_SEARCH_PAGES:
+            is_page_limit_exceeded = True
+
+    if is_page_limit_exceeded:
+        errors.append(
+            f"too many matching PRs: GitHub's search API returned more than "
+            f"{_MAX_SEARCH_PAGES * _SEARCH_PAGE_SIZE} results (its hard cap); some agents may render "
+            "'Create PR' instead of their merged PR"
         )
-        proc.wait()
-    except (ProcessError, OSError) as e:
-        logger.debug("Failed to launch gh api graphql: {}", e)
-        return FetchBoardResult(prs={}, errors=(f"gh api graphql failed: {e}",))
 
-    # `gh api graphql` exits non-zero whenever the response contains a
-    # GraphQL `errors[]` array, but stdout still carries the full
-    # `{data, errors}` JSON. Always parse stdout and inspect `errors[]`;
-    # never rely on the exit code alone.
-    return _parse_board_response(proc.read_stdout(), repo_branches, unresolved_ignore_user)
+    prs = _build_prs_from_nodes(all_nodes, repo_branches, unresolved_ignore_user)
+    return FetchBoardResult(prs=prs, errors=tuple(errors))
 
 
-def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
-    """Build the GraphQL document that fetches every requested (repo, branch).
+@retry(
+    retry=retry_if_exception_type(GitHubBoardFetchError),
+    stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
+    wait=wait_exponential(
+        multiplier=_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS,
+        min=_PAGE_RETRY_MIN_WAIT_SECONDS,
+        max=_PAGE_RETRY_MAX_WAIT_SECONDS,
+    ),
+    reraise=True,
+)
+def _run_board_query_with_retry(cg: ConcurrencyGroup, graphql: str) -> dict[str, Any]:
+    """Run one board page query, retrying transport-level failures with backoff.
+
+    Returns the parsed GraphQL response envelope. A successful search always
+    carries a `data.s` object (even when it matched nothing); the absence of
+    one means the request failed at the transport level -- an unparseable body,
+    an HTTP 403 secondary rate limit (whose REST-style error body has no
+    `data.s`), a primary `RATE_LIMITED` error (which nulls out `data`), or a
+    5xx. Those are worth a short backoff and a retry of this same page; pages
+    already fetched are never re-fetched.
+    """
+    proc = cg.run_process_in_background(
+        ["gh", "api", "graphql", "-f", f"query={graphql}"],
+        timeout=30,
+        is_checked_by_group=False,
+    )
+    # `gh api graphql` exits non-zero whenever the response carries a GraphQL
+    # `errors[]` array, but stdout still holds the full `{data, errors}` JSON;
+    # never rely on the exit code alone -- inspect the body instead.
+    proc.wait()
+    stdout = proc.read_stdout()
+    stderr_excerpt = proc.read_stderr().strip()[:_STDERR_EXCERPT_LENGTH]
+    try:
+        response = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Failed to parse gh api graphql output, retrying page: {} (stderr: {})", e, stderr_excerpt)
+        raise GitHubBoardFetchError(f"gh api graphql returned no JSON body (stderr: {stderr_excerpt})") from e
+
+    if not isinstance(response, dict) or not isinstance((response.get("data") or {}).get("s"), dict):
+        detail = _summarize_failed_response(response, stderr_excerpt)
+        logger.warning("gh api graphql returned no search result, retrying page: {}", detail)
+        raise GitHubBoardFetchError(f"gh api graphql returned no search result ({detail})")
+    return response
+
+
+@pure
+def _summarize_failed_response(response: Any, stderr_excerpt: str) -> str:
+    """Build a short, human-readable reason for a page request that returned no search result."""
+    if isinstance(response, dict):
+        graphql_messages = [
+            err["message"] for err in response.get("errors") or () if isinstance(err, dict) and "message" in err
+        ]
+        if graphql_messages:
+            return "; ".join(graphql_messages)
+        top_level_message = response.get("message")
+        if isinstance(top_level_message, str) and top_level_message:
+            return top_level_message
+    return f"stderr: {stderr_excerpt}" if stderr_excerpt else "no data returned"
+
+
+def _build_board_graphql(repo_branches: Sequence[tuple[str, str]], after: str | None = None) -> str:
+    """Build the GraphQL document that fetches one page of every requested (repo, branch).
 
     GitHub's search query syntax treats multiple `repo:` and `head:`
     qualifiers within a single `search()` call as OR, which is the
@@ -239,11 +369,9 @@ def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
     single `search()` cover every (repo, branch) pair without aliasing
     one subquery per pair.
 
-    `first: 100` is GitHub's hard per-page cap. The board only renders
-    PRs whose branch matches an active agent, so even on busy monorepos
-    the matched set is bounded by the agent count -- which is typically
-    well under 100. `hasNextPage` is surfaced as an error if it ever
-    trips, so we'd notice before silently dropping data.
+    `first: 100` is GitHub's hard per-page cap. When the matched set exceeds
+    one page, the caller follows `pageInfo.endCursor` and re-invokes this with
+    `after` set to fetch subsequent pages.
     """
     repos = sorted({rb[0] for rb in repo_branches})
     branches = sorted({rb[1] for rb in repo_branches})
@@ -252,9 +380,10 @@ def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
     search_query = f"type:pr author:@me ({repo_clause}) ({branch_clause})"
     # json.dumps gives a properly escaped, double-quoted GraphQL string literal.
     quoted_search = json.dumps(search_query)
+    after_clause = f", after: {json.dumps(after)}" if after is not None else ""
 
     return f"""query KanpanBoard {{
-  s: search(query: {quoted_search}, type: ISSUE_ADVANCED, first: 100) {{
+  s: search(query: {quoted_search}, type: ISSUE_ADVANCED, first: {_SEARCH_PAGE_SIZE}{after_clause}) {{
     nodes {{
       ... on PullRequest {{
         number
@@ -265,7 +394,7 @@ def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
         state
         mergeable
         statusCheckRollup {{ state }}
-        reviewThreads(first: 100) {{
+        reviewThreads(first: {_SEARCH_PAGE_SIZE}) {{
           nodes {{
             isResolved
             comments(last: 1) {{ nodes {{ author {{ login }} }} }}
@@ -275,43 +404,47 @@ def _build_board_graphql(repo_branches: Sequence[tuple[str, str]]) -> str:
         repository {{ nameWithOwner }}
       }}
     }}
-    pageInfo {{ hasNextPage }}
+    pageInfo {{ hasNextPage endCursor }}
   }}
 }}
 """
 
 
-def _parse_board_response(
-    stdout: str,
-    repo_branches: Sequence[tuple[str, str]],
-    unresolved_ignore_user: str | None,
-) -> FetchBoardResult:
-    """Parse the GraphQL response. Always returns a FetchBoardResult.
+def _parse_board_page(response: dict[str, Any]) -> _BoardPage:
+    """Extract one page's nodes, cursor, and any partial errors from a parsed response.
 
-    Robust to: partial GraphQL errors (data + errors both present), null
-    nodes (returned for non-PullRequest matches in ISSUE_ADVANCED searches),
-    repository fields missing (defensive), multiple PRs per branch.
+    Robust to partial GraphQL errors (data + errors both present) and null
+    nodes (returned for non-PullRequest matches in ISSUE_ADVANCED searches).
+    The response is guaranteed to carry a `data.s` object by the caller.
     """
     errors: list[str] = []
-
-    try:
-        response = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.warning("Failed to parse gh api graphql output: {}", e)
-        return FetchBoardResult(prs={}, errors=(f"gh api graphql parse error: {e}",))
-
     for err in response.get("errors") or ():
         message = err.get("message", "unknown GraphQL error") if isinstance(err, dict) else str(err)
         errors.append(message)
 
     search_result = (response.get("data") or {}).get("s") or {}
-    nodes = search_result.get("nodes") or []
+    # Drop null nodes here so downstream consumers only ever see dict nodes.
+    nodes = tuple(node for node in (search_result.get("nodes") or []) if isinstance(node, dict))
 
+    page_info = search_result.get("pageInfo") or {}
+    end_cursor = page_info.get("endCursor")
+    return _BoardPage(
+        nodes=nodes,
+        errors=tuple(errors),
+        has_next_page=bool(page_info.get("hasNextPage")),
+        end_cursor=end_cursor if isinstance(end_cursor, str) else None,
+    )
+
+
+def _build_prs_from_nodes(
+    nodes: Sequence[dict[str, Any]],
+    repo_branches: Sequence[tuple[str, str]],
+    unresolved_ignore_user: str | None,
+) -> dict[tuple[str, str], PrInfo]:
+    """Reduce the accumulated PullRequest nodes to one PrInfo per requested (repo, branch)."""
     requested = set(repo_branches)
     by_key: dict[tuple[str, str], list[PrInfo]] = {}
     for node in nodes:
-        if not isinstance(node, dict):
-            continue
         repo = (node.get("repository") or {}).get("nameWithOwner")
         branch = node.get("headRefName")
         if not isinstance(repo, str) or not isinstance(branch, str):
@@ -325,15 +458,7 @@ def _parse_board_response(
     # If multiple PRs share the same head branch (e.g. closed-then-reopened),
     # prefer OPEN > MERGED > CLOSED to match what kanpan used to do via
     # `_build_pr_branch_index`.
-    prs: dict[tuple[str, str], PrInfo] = {key: max(cands, key=_pr_state_rank) for key, cands in by_key.items()}
-
-    if (search_result.get("pageInfo") or {}).get("hasNextPage"):
-        errors.append(
-            f"too many matching PRs to fit in a single page (asked about {len(repo_branches)} (repo, branch) "
-            "pairs, hit the GraphQL `first: 100` cap); some agents may render 'Create PR' instead of their merged PR"
-        )
-
-    return FetchBoardResult(prs=prs, errors=tuple(errors))
+    return {key: max(cands, key=_pr_state_rank) for key, cands in by_key.items()}
 
 
 def _parse_pr_node(node: dict[str, Any], unresolved_ignore_user: str | None) -> PrInfo:
