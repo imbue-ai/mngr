@@ -23,7 +23,6 @@ from imbue.mngr.primitives import OutputFormat
 _DEFAULT_OPTS = MessageCliOptions(
     agents=(),
     agent_list=(),
-    all_agents=False,
     message_content=None,
     message_file=None,
     on_error="continue",
@@ -44,7 +43,6 @@ def test_message_cli_options_has_expected_fields() -> None:
     opts = MessageCliOptions(
         agents=("agent1", "agent2"),
         agent_list=(AgentAddress(agent=AgentName("agent3")),),
-        all_agents=False,
         message_content="Hello",
         message_file=None,
         on_error="continue",
@@ -60,7 +58,6 @@ def test_message_cli_options_has_expected_fields() -> None:
     )
     assert opts.agents == ("agent1", "agent2")
     assert opts.agent_list == (AgentAddress(agent=AgentName("agent3")),)
-    assert opts.all_agents is False
     assert opts.message_content == "Hello"
     assert opts.message_file is None
 
@@ -148,55 +145,20 @@ def test_message_nonexistent_agent(
     assert "No agents found" in result.output
 
 
-def test_message_all_does_not_require_named_agent(
+def test_message_no_all_flag(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`--all` is a valid target on its own: no named agent is required.
-
-    With no agents discovered it is a no-op that succeeds, rather than raising
-    the "Must specify at least one agent" error that bare invocations get.
-    """
-    result = cli_runner.invoke(
-        message,
-        ["--all", "-m", "hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert "Must specify at least one agent" not in result.output
-    assert "No agents found" in result.output
-
-
-def test_message_all_short_flag_is_accepted(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """The `-a` short form of `--all` parses (regression test for the tutorial)."""
-    result = cli_runner.invoke(
-        message,
-        ["-a", "-m", "hello"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert "No such option" not in result.output
-    assert "No agents found" in result.output
-
-
-def test_message_all_conflicts_with_named_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """`--all` cannot be combined with explicit agent names."""
-    result = cli_runner.invoke(
-        message,
-        ["my-agent", "--all", "-m", "hello"],
-        obj=plugin_manager,
-        catch_exceptions=True,
-    )
-    assert result.exit_code != 0
-    assert "Cannot specify both agent names and --all" in result.output
+    """`--all` and `-a` are no longer accepted; users pipe ids from `mngr list` instead."""
+    for argv in (["--all", "-m", "hello"], ["-a", "-m", "hello"]):
+        result = cli_runner.invoke(
+            message,
+            argv,
+            obj=plugin_manager,
+            catch_exceptions=True,
+        )
+        assert result.exit_code != 0
+        assert "No such option" in result.output
 
 
 # =============================================================================

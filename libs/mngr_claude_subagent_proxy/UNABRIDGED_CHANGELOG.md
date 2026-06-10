@@ -4,6 +4,15 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Updated the destroyed-agent fallback to read the preserved common transcript from its new
+location. Preserved Claude sessions now mirror the agent state directory under
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/`, so the common transcript is read from
+`preserved/<name>--<id>/events/claude/common_transcript/events.jsonl` (via the shared
+`get_preserved_agent_dir` helper) instead of the former
+`plugin/mngr_claude/preserved_sessions/<name>--<id>/common_transcript/events.jsonl`.
+
 ## 2026-06-08
 
 Standardized this plugin's test setup on `register_plugin_test_fixtures(globals())`
