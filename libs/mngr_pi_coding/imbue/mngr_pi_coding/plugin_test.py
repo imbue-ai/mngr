@@ -155,11 +155,12 @@ def test_pi_coding_agent_config_merge_with_override() -> None:
 
 
 def test_pi_coding_agent_is_concrete_and_instantiable() -> None:
-    # PiCodingAgent must implement every abstract method of InteractiveTuiAgent
-    # (notably _send_enter_and_validate) or it could not be instantiated to create
-    # agents. inspect.isabstract is the observable property that guards this; the
-    # actual behavior of _send_enter_and_validate (delegating to
-    # send_enter_best_effort over tmux) is exercised only via manual verification.
+    # PiCodingAgent subclasses BaseAgent directly (not InteractiveTuiAgent) and must
+    # implement every abstract method it inherits (e.g. assemble_command,
+    # get_expected_process_name, send_message) or it could not be instantiated to
+    # create agents. inspect.isabstract is the observable property that guards this;
+    # the actual behavior of those methods is exercised by the other unit tests here
+    # and by the release e2e.
     assert inspect.isabstract(PiCodingAgent) is False
 
 
