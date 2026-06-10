@@ -75,6 +75,14 @@ from imbue.mngr.utils.polling import wait_for
 # list only contains IDs from tests run by THIS worker.
 worker_test_ids: list[str] = []
 
+# Track the mngr prefixes under which this worker's docker fixtures may have
+# created a singleton state container. Each xdist worker is a separate process,
+# so this only holds prefixes from THIS worker's tests. The session cleanup uses
+# it to attribute leaked state containers to us (and fail), as opposed to
+# containers from other concurrent workers/sessions (which it can only
+# warn-and-clean). Mirrors worker_test_ids.
+worker_docker_state_prefixes: list[str] = []
+
 # Track Modal app names that were created during tests for cleanup verification.
 # This enables detection of leaked apps that weren't properly cleaned up.
 worker_modal_app_names: list[str] = []

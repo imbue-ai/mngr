@@ -75,6 +75,7 @@ def render_file_sharing_permission_dialog(
     file_path: str,
     access: str,
     access_human_label: str,
+    allowed_roots_json: str = "[]",
     mngr_forward_origin: str = "",
 ) -> str:
     """Render the file-sharing permission detail fragment.
@@ -89,6 +90,11 @@ def render_file_sharing_permission_dialog(
     human-readable rendering (``"read-only"`` / ``"read & write"``)
     used in the fragment body.
 
+    ``allowed_roots_json`` is a JSON array of the absolute WebDAV mount
+    roots (home + temp); the dialog embeds it so the inbox shell can give
+    instant client-side feedback (and disable Approve) when the edited
+    path falls outside them, mirroring the server-side check.
+
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
@@ -101,6 +107,7 @@ def render_file_sharing_permission_dialog(
         file_path=file_path,
         access=access,
         access_human_label=access_human_label,
+        allowed_roots_json=allowed_roots_json,
         display_name=file_path,
         mngr_forward_origin=mngr_forward_origin,
     )
