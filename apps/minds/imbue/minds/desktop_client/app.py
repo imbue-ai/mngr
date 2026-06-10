@@ -398,6 +398,18 @@ def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_
     return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
 
 
+def _color_for_new_workspace(raw_color: object) -> str:
+    """Lenient parse of a create request's submitted color, with default fallback.
+
+    The create form posts the picker's hidden ``color`` input and the
+    JSON API accepts an optional ``color`` field. A missing or malformed
+    value (e.g. the browser ate the input) must not reject the whole
+    create request -- the new workspace just gets the default color.
+    """
+    normalized = normalize_workspace_color(str(raw_color).strip())
+    return normalized if normalized is not None else DEFAULT_WORKSPACE_COLOR
+
+
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
     """Pick the color to preselect in the create form.
 
@@ -946,13 +958,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
-    # Color picker hidden input. Lenient parse + default fallback so a
-    # malformed value (e.g. browser ate the input) doesn't reject the
-    # whole form -- new workspaces just get the default color.
-    color_raw = str(form.get("color", "")).strip()
-    color = normalize_workspace_color(color_raw) if color_raw else None
-    if color is None:
-        color = DEFAULT_WORKSPACE_COLOR
+    color = _color_for_new_workspace(form.get("color", ""))
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -1186,10 +1192,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
-    color_raw = str(body.get("color", "")).strip()
-    color = normalize_workspace_color(color_raw) if color_raw else None
-    if color is None:
-        color = DEFAULT_WORKSPACE_COLOR
+    color = _color_for_new_workspace(body.get("color", ""))
     if not git_url:
         return Response(
             status_code=400,
