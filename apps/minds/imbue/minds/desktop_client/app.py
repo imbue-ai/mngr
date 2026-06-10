@@ -6,6 +6,7 @@ import shlex
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Collection
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
@@ -50,6 +51,7 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
@@ -370,6 +372,18 @@ def _handle_authenticate(
         samesite="lax",
     )
     return response
+
+
+def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provider_names: Collection[str]) -> bool:
+    """True when the agent's provider's most recent discovery poll errored.
+
+    Such a workspace is "stale": it was retained from prior state, so its
+    host is unreachable (or at least unverified) until the provider
+    recovers. Callers build ``errored_provider_names`` once from
+    ``backend_resolver.get_provider_errors()`` -- as a set when checking
+    many agents -- and reuse it across calls.
+    """
+    return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
 
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
@@ -1755,7 +1769,7 @@ async def _handle_set_workspace_color_api(
 
     info = backend_resolver.get_agent_display_info(parsed_id)
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+    if _is_workspace_provider_errored(info, errored_provider_names):
         return Response(
             status_code=409,
             content=json.dumps({"error": "stale_provider"}),
@@ -2321,7 +2335,7 @@ def _build_workspace_list(
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
         # unverified rather than confirmed healthy.
-        if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+        if _is_workspace_provider_errored(info, errored_provider_names):
             entry["is_stale"] = "true"
         liveness = liveness_by_agent_id.get(str(aid))
         if liveness is not None:
@@ -3263,7 +3277,7 @@ def _handle_workspace_settings(
     stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
     current_color = stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
-    is_stale = info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
+    is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
     html = render_workspace_settings(
         agent_id=agent_id,
