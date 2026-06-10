@@ -3,7 +3,6 @@ from __future__ import annotations
 import pluggy
 
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.default_plugins import codex_agent
 from imbue.mngr.agents.default_plugins import command_agent
 from imbue.mngr.agents.default_plugins import headless_command_agent
 from imbue.mngr.config.agent_class_registry import list_registered_agent_class_types
@@ -46,9 +45,9 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     # import-linter contract).
     set_orphan_agent_class(BaseAgent)
 
-    # Register built-in agent type classes (each has a hookimpl static method)
-    # Claude-based agent types are registered via entry points from the mngr_claude plugin
-    pm.register(codex_agent, name="codex")
+    # Register built-in agent type classes (each has a hookimpl static method).
+    # Agent-type plugins (claude, codex, antigravity, ...) are registered via
+    # setuptools entry points from their own packages (e.g. imbue-mngr-codex).
     pm.register(command_agent, name="command")
     pm.register(headless_command_agent, name="headless_command")
 
