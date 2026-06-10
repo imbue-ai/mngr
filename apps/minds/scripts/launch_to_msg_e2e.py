@@ -1705,19 +1705,26 @@ async def _advance_approval(
     if decision not in ("approve", "deny"):
         raise E2EFailure(f"_advance_approval: decision must be approve|deny, got {decision!r}")
     snap_stage0, snap_stage1, snap_stage2_pre, snap_stage2_post = snap_prefix_pair
-    # Stage 0: click Requests button to open the panel (skipped if
-    # panel already auto-opened).
+    # The "permission panel" was refactored into an inbox modal whose
+    # WebContentsView serves /inbox; the master/detail split lives in
+    # one page (left list = .inbox-card, right detail loads via
+    # /inbox/detail/<id> fragment and contains the Approve/Deny form).
+    # Stage 0 waits for /inbox (it auto-opens on new pending requests by
+    # default, see MindsConfig.get_auto_open_requests_panel). Stage 1
+    # clicks the inbox card for the slack request to load the detail
+    # fragment. Stage 2 clicks Approve / Deny within the same page.
     if stage == 0:
-        # Check if requests-panel window already exists.
+        # Check if the inbox modal already auto-opened.
         panel = None
         for w in all_pages(ctx):
             with contextlib.suppress(Exception):
-                if "/_chrome/requests-panel" in w.url:
+                if "/inbox" in w.url:
                     panel = w
                     break
         if panel is not None:
-            logger.info("requests-panel auto-opened; advancing to stage 1")
+            logger.info("inbox modal auto-opened; advancing to stage 1")
             state["stage"] = 1
+            await snap_page(panel, snap_stage0)
             return
         # Wait for the agent to emit its request signal first. Case-fold
         # because Claude rephrases the message each run (eg "Waiting"
@@ -1735,12 +1742,15 @@ async def _advance_approval(
         ):
             # Not ready yet.
             return
-        # Find the Requests button on any window.
+        # Auto-open should fire on the SSE-pushed pending-set update; if
+        # it hasn't fired after a couple of polls, hit /inbox/toggle on
+        # the chrome titlebar as a fallback (the inbox icon's aria-label
+        # is "Inbox"; the old `button[title="Requests"]` is gone).
         for w in all_pages(ctx):
             try:
-                btn = w.locator('button[title="Requests"]')
+                btn = w.locator('button[aria-label="Inbox"], button[title="Inbox"]')
                 if await btn.count() > 0 and await btn.first.is_visible():
-                    logger.info("clicking Requests button")
+                    logger.info("clicking Inbox titlebar trigger")
                     await snap_page(w, snap_stage0)
                     await btn.first.click()
                     state["stage"] = 1
@@ -1748,24 +1758,27 @@ async def _advance_approval(
             except Exception:
                 pass
 
-    # Stage 1: click the slack entry in the requests-panel.
+    # Stage 1: click the slack entry in the inbox left list.
     elif stage == 1:
         panel = None
         for w in all_pages(ctx):
             with contextlib.suppress(Exception):
-                if "/_chrome/requests-panel" in w.url:
+                if "/inbox" in w.url:
                     panel = w
                     break
         if panel is None:
             return
-        for sel in ("text=/slack/i", "text=/permission/i", "li", "button"):
+        # Prefer the slack-named .inbox-card; fall back to the first
+        # selectable card if there's only one pending request.
+        for sel in (
+            '.inbox-card:has-text("slack")',
+            '.inbox-card:has-text("Slack")',
+            ".inbox-card",
+        ):
             try:
                 loc = panel.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
-                    txt = (await loc.inner_text()).strip().lower()
-                    if txt in ("close", "cancel", "back", "requests"):
-                        continue
-                    logger.info("clicking permission entry via {!r}", sel)
+                    logger.info("clicking inbox card via {!r}", sel)
                     await snap_page(panel, snap_stage1)
                     await loc.click()
                     state["stage"] = 2
@@ -1773,47 +1786,59 @@ async def _advance_approval(
             except Exception:
                 pass
 
-    # Stage 2: click Approve or Deny in the per-request detail window.
+    # Stage 2: click Approve or Deny in the inbox detail pane (same /inbox page).
     elif stage == 2:
-        button_text = "Approve" if decision == "approve" else "Deny"
+        if decision == "approve":
+            button_selectors = (
+                "#permissions-approve-btn:not([disabled])",
+                'button:has-text("Approve"):not([disabled])',
+            )
+        else:
+            button_selectors = ('button:has-text("Deny")',)
         for w in all_pages(ctx):
             try:
-                if "/requests/" not in w.url:
+                if "/inbox" not in w.url:
                     continue
-                btn = w.locator(f'button:has-text("{button_text}")').first
-                if await btn.count() > 0 and await btn.is_visible():
-                    logger.info("clicking {}", button_text)
-                    await snap_page(w, snap_stage2_pre)
-                    await btn.click()
-                    state["stage"] = 3
-                    # Snap a beat later. For approve the per-request page
-                    # stays open ("Approved"); for deny the window closes
-                    # so fall back to the chat window.
-                    await asyncio.sleep(2)
-                    snap_target = w
-                    if decision == "deny":
-                        chat_after = await find_chat_window(ctx)
-                        if chat_after is not None:
-                            snap_target = chat_after
+                btn = None
+                for bsel in button_selectors:
+                    candidate = w.locator(bsel).first
+                    if await candidate.count() > 0 and await candidate.is_visible():
+                        btn = candidate
+                        break
+                if btn is None:
+                    continue
+                logger.info("clicking {} button on inbox detail", decision)
+                await snap_page(w, snap_stage2_pre)
+                await btn.click()
+                state["stage"] = 3
+                # Snap a beat later. For approve the inbox shows the
+                # browser-launch / success notice; for deny the inbox
+                # closes back to the chat window.
+                await asyncio.sleep(2)
+                snap_target = w
+                if decision == "deny":
+                    chat_after = await find_chat_window(ctx)
+                    if chat_after is not None:
+                        snap_target = chat_after
+                with contextlib.suppress(Exception):
+                    await snap_page(snap_target, snap_stage2_post)
+                if decision == "approve":
+                    # Surface latchkey-side authorisation failures
+                    # immediately rather than waiting DRIVE_SLACK_TIMEOUT
+                    # seconds for a timeout. The post-approve page renders
+                    # the error banner verbatim; parse the visible text
+                    # and raise so CI fails on the actual signal, not a
+                    # timeout that happens to coincide.
                     with contextlib.suppress(Exception):
-                        await snap_page(snap_target, snap_stage2_post)
-                    if decision == "approve":
-                        # Surface latchkey-side authorisation failures
-                        # immediately rather than waiting DRIVE_SLACK_TIMEOUT
-                        # seconds for a timeout. The post-approve page renders
-                        # the error banner verbatim; parse the visible text
-                        # and raise so CI fails on the actual signal, not a
-                        # timeout that happens to coincide.
-                        with contextlib.suppress(Exception):
-                            body_text = await w.evaluate("document.body.innerText")
-                            if "Authorization failed" in body_text or "No browser configured" in body_text:
-                                raise E2EFailure(
-                                    f"{snap_stage2_post} shows authorization failure: "
-                                    + body_text.replace("\n", " | ")[:400]
-                                )
-                    # Kicks are sent from the main poll loop after a
-                    # KICK_DELAY settle period; see slack-flow loop.
-                    return
+                        body_text = await w.evaluate("document.body.innerText")
+                        if "Authorization failed" in body_text or "No browser configured" in body_text:
+                            raise E2EFailure(
+                                f"{snap_stage2_post} shows authorization failure: "
+                                + body_text.replace("\n", " | ")[:400]
+                            )
+                # Kicks are sent from the main poll loop after a
+                # KICK_DELAY settle period; see slack-flow loop.
+                return
             except Exception:
                 pass
 
