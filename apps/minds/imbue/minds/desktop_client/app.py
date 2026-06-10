@@ -1782,7 +1782,11 @@ async def _handle_set_workspace_color_api(
     # keys, so we shell out to the CLI to get the merge for free.
     argv = [mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]
     try:
-        _run_mngr(concurrency_group, argv, env)
+        # This route is async (it awaits the JSON body), so the blocking
+        # subprocess must run in the threadpool -- calling it inline would
+        # stall the event loop (SSE, proxying, every other route) for the
+        # duration of the ``mngr label`` run.
+        await asyncio.get_running_loop().run_in_executor(None, _run_mngr, concurrency_group, argv, env)
     except MngrCommandError as exc:
         logger.warning("mngr label failed for {}: {}", parsed_id, exc)
         return Response(
