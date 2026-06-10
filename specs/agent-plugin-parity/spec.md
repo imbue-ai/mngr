@@ -977,6 +977,8 @@ Check the binary is present and optionally install/pin a version.
   integration is written to *tolerate* old/new event shapes (it handles both `session.status`
   and the deprecated `session.idle`). Version pinning / install management is a natural
   follow-up.
+- **codex**: none yet -- assumes `codex` is on PATH, with no version pinning. A natural
+  follow-up, like opencode.
 
 ### R. Workspace path quirks
 
@@ -989,6 +991,9 @@ Some CLIs reject mngr's dotted work-dir path (`~/.mngr/worktrees/...`).
 - **claude**: no such issue.
 - **opencode**: no such issue -- the work dir is passed (URL-encoded) as the session-create
   `?directory=` query, with no dotted-segment rejection, so no symlink workaround is needed.
+- **codex**: no such issue -- codex accepts the dotted `~/.mngr/worktrees/...` path as its cwd
+  (`assemble_command` just `cd`s into the real work dir, `plugin.py:545`), so no symlink
+  workaround is needed.
 
 **Questions**: Does the CLI accept a dotted (`~/.mngr/...`) path as its cwd/workspace?
 
@@ -1000,6 +1005,8 @@ which defaults to the command basename. Override if the binary's process name di
 - **claude**: `"claude"`. **antigravity**: `"agy"` (`plugin.py:325`). **pi-coding**: `"pi"`.
   **opencode**: `"opencode"` (`plugin.py:208`) -- both `opencode serve` and `opencode attach`
   report `opencode`, and the foreground `attach` client is what lifecycle detection keys off.
+  **codex**: `"codex"` (`plugin.py:231`) -- a single Rust binary; `ps`/tmux show the literal
+  name, matching the command basename, but it is overridden explicitly for clarity.
 
 ### T. Extra agent subtypes
 
@@ -1007,7 +1014,12 @@ which defaults to the command basename. Override if the binary's process name di
 SKILL.md / different launch mode: `code-guardian`, `fixme-fairy` (both
 `SkillProvisionedAgent`), and `headless_claude` (`claude --print`, streams from
 `stdout.jsonl`). A port doesn't need these for baseline parity but the pattern
-(`SkillProvisionedAgent`, `BaseHeadlessAgent`) is available to reuse.
+(`SkillProvisionedAgent`, `BaseHeadlessAgent`) is available to reuse. codex documents a
+deferred second agent type in this spirit: an **app-server-backed** variant driving `codex
+app-server` over JSON-RPC (programmatic messaging + a `codex --remote` TUI viewer + clean
+`initialize`-based readiness) -- mirroring claude's `claude` + `headless_claude` split -- with
+its design and an OpenAI-ToS caveat (identify honestly, no `codex-tui` spoofing) recorded in the
+plugin README.
 
 ### U. Test scaffold
 
@@ -1135,7 +1147,9 @@ tests or lost first messages.
   should be offered by default? A bare config-shell stub usually predates real support with a
   catalog entry that lacks the signal check and `is_recommended`, so re-check both when a stub
   graduates to a real port. (opencode's entry now carries an `opencode --version`
-  `OpenCodeSignalCheck` and `is_recommended=True`, `plugin_catalog.py:62`,`:128`.)
+  `OpenCodeSignalCheck` and `is_recommended=True`, `plugin_catalog.py:62`,`:128`; codex's
+  likewise carries a `codex --version` `CodexSignalCheck`, `package_name = "imbue-mngr-codex"`,
+  and `is_recommended=True`, `plugin_catalog.py:68`,`:143`.)
 - [ ] Is the package publishable -- i.e. *not* listed in `UNPUBLISHED_PACKAGES` -- so the
   release tooling and `mngr extras` will actually offer it?
 
@@ -1153,5 +1167,8 @@ tests or lost first messages.
 - Reference plugins: `libs/mngr_claude/`, `libs/mngr_antigravity/` (the antigravity README
   is the single best worked example -- it documents each parity decision inline)
 - Other real ports: `libs/mngr_pi_coding/` (in-process extension), `libs/mngr_opencode/`
-  (client-server / HTTP-driven, in-process server plugin)
-- Stub: `libs/mngr/imbue/mngr/agents/default_plugins/codex_agent.py`
+  (client-server / HTTP-driven, in-process server plugin), `libs/mngr_codex/` (third shell-hooks
+  port; async-subagent gating; see its README and
+  `specs/agent-plugin-parity/codex-investigation.md` for the source-verified investigation)
+- Remaining bare `BaseAgent` shells (no named CLI behind them): the built-in `command` /
+  `headless_command` types in `libs/mngr/imbue/mngr/agents/default_plugins/`
