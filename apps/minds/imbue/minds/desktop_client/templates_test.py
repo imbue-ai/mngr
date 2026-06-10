@@ -22,6 +22,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
@@ -931,6 +932,50 @@ def test_normalize_workspace_color_accepts_lenient_inputs(value: str, expected: 
 )
 def test_normalize_workspace_color_rejects_malformed_inputs(value: str) -> None:
     assert normalize_workspace_color(value) is None
+
+
+# -- pick_unused_create_color --------------------------------------------
+#
+# The create form preselects the first palette color not already used by
+# an existing workspace, falling back to confusion when nothing is in use
+# yet or every palette entry is taken.
+
+_PALETTE_HEXES: Final[tuple[str, ...]] = tuple(WORKSPACE_PALETTE.values())
+_CONFUSION = WORKSPACE_PALETTE["confusion"]
+_INDIFFERENCE = WORKSPACE_PALETTE["indifference"]
+
+
+def test_pick_unused_create_color_defaults_to_confusion_when_none_used() -> None:
+    # No workspaces yet -> confusion (not the first palette entry).
+    assert pick_unused_create_color(set()) == _CONFUSION
+
+
+def test_pick_unused_create_color_returns_confusion_when_all_used() -> None:
+    assert pick_unused_create_color(set(_PALETTE_HEXES)) == _CONFUSION
+
+
+def test_pick_unused_create_color_returns_first_unused_in_palette_order() -> None:
+    # Confusion is used (e.g. one label-less workspace renders as confusion);
+    # the first unused palette entry in order is indifference (#000000).
+    assert pick_unused_create_color({_CONFUSION}) == _INDIFFERENCE
+
+
+def test_pick_unused_create_color_skips_to_next_unused() -> None:
+    # indifference + confusion taken -> next palette entry is courage.
+    assert pick_unused_create_color({_INDIFFERENCE, _CONFUSION}) == WORKSPACE_PALETTE["courage"]
+
+
+def test_pick_unused_create_color_ignores_custom_colors() -> None:
+    # A custom (non-palette) color in use doesn't block any palette pick;
+    # with a custom color the set is non-empty so the first palette entry
+    # (indifference) is returned, not confusion.
+    assert pick_unused_create_color({"#123456"}) == _INDIFFERENCE
+
+
+def test_pick_unused_create_color_is_case_insensitive() -> None:
+    # Uppercased used colors still match palette entries.
+    used = {_CONFUSION.upper()}
+    assert pick_unused_create_color(used) == _INDIFFERENCE
 
 
 def test_tokens_css_defines_titlebar_utility_classes() -> None:

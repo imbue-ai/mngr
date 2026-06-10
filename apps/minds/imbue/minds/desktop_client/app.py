@@ -135,6 +135,7 @@ from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_toke
 from imbue.minds.desktop_client.webdav import create_webdav_app
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.envs.docker_cleanup import DockerCleanupError
 from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
@@ -371,6 +372,23 @@ def _handle_authenticate(
     return response
 
 
+def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
+    """Pick the color to preselect in the create form.
+
+    Gathers the colors currently in use across active workspaces (a
+    label-less workspace counts as using ``DEFAULT_WORKSPACE_COLOR``,
+    since that's what it renders as) and asks
+    ``pick_unused_create_color`` for the first unused palette entry --
+    falling back to confusion when there are no workspaces yet or every
+    palette entry is taken.
+    """
+    used: set[str] = set()
+    for aid in backend_resolver.list_active_workspace_ids():
+        stored = backend_resolver.get_workspace_color(aid)
+        used.add(stored if stored is not None else DEFAULT_WORKSPACE_COLOR)
+    return pick_unused_create_color(used)
+
+
 def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -455,6 +473,7 @@ def _handle_landing_page(
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        color=_suggested_create_color(backend_resolver),
     )
     return HTMLResponse(content=html)
 
@@ -953,6 +972,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             backup_api_key_env=backup_api_key_env,
             has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
+            color=color,
         )
         return HTMLResponse(content=html_body, status_code=status)
 
@@ -1052,6 +1072,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 def _handle_create_page(
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Show the create form page (GET /create)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -1075,6 +1096,7 @@ def _handle_create_page(
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        color=_suggested_create_color(backend_resolver),
     )
     return HTMLResponse(content=html)
 

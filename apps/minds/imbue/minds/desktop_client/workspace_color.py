@@ -17,6 +17,7 @@ stay in lockstep.
 """
 
 import re
+from collections.abc import Collection
 from collections.abc import Mapping
 from typing import Final
 
@@ -59,6 +60,30 @@ DEFAULT_WORKSPACE_COLOR: Final[str] = WORKSPACE_PALETTE[DEFAULT_WORKSPACE_COLOR_
 _FOREGROUND_LUMINANCE_THRESHOLD: Final[float] = 0.179
 
 _HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+@pure
+def pick_unused_create_color(used_colors: Collection[str]) -> str:
+    """Pick the color to preselect in the create form.
+
+    Returns ``DEFAULT_WORKSPACE_COLOR`` (confusion) when nothing is in
+    use yet (no workspaces) or when every palette entry is already
+    taken; otherwise returns the first palette entry (in palette order)
+    not present in ``used_colors``. Custom (non-palette) colors in
+    ``used_colors`` simply don't match any palette entry, so they never
+    block a palette pick.
+
+    ``used_colors`` should hold normalized ``#rrggbb`` lowercase hexes
+    (the form the resolver + ``normalize_workspace_color`` emit); the
+    comparison is case-insensitive regardless.
+    """
+    normalized_used = {c.lower() for c in used_colors}
+    if not normalized_used:
+        return DEFAULT_WORKSPACE_COLOR
+    for hex_value in WORKSPACE_PALETTE.values():
+        if hex_value not in normalized_used:
+            return hex_value
+    return DEFAULT_WORKSPACE_COLOR
 
 
 @pure
