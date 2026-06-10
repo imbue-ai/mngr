@@ -561,8 +561,8 @@ jobs:
             echo
             echo "=== VM: $VM ==="
             echo "=== docker ps inside VM ==="
-            "$LIMA" shell "$VM" -- docker ps -a 2>&1 | head -20
-            CID=$("$LIMA" shell "$VM" -- docker ps -q 2>/dev/null | head -1)
+            "$LIMA" shell "$VM" -- sudo docker ps -a 2>&1 | head -20
+            CID=$("$LIMA" shell "$VM" -- sudo docker ps -q 2>/dev/null | head -1)
             if [ -z "$CID" ]; then
               echo "(no docker container)"
               exit 0
@@ -570,25 +570,25 @@ jobs:
             echo
             echo "=== container: $CID ==="
             echo "=== docker exec ss -tlnp ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" ss -tlnp 2>&1 | head -30
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ss -tlnp 2>&1 | head -30
             echo
             echo "=== tmux list-sessions inside container ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" tmux list-sessions 2>&1 | head -20
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-sessions 2>&1 | head -20
             echo
             echo "=== tmux capture-pane svc-system_interface ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
             echo
             echo "=== tmux capture-pane svc-bootstrap ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" tmux capture-pane -t svc-bootstrap -p 2>&1 | tail -40
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-bootstrap -p 2>&1 | tail -40
             echo
             echo "=== /var/log/cloud-init-output.log tail (VM) ==="
             "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
             echo
             echo "=== curl localhost:1234 from container (system_interface default port) ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" curl -s -m 3 http://localhost:1234/health 2>&1 | head -5
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" curl -s -m 3 http://localhost:1234/health 2>&1 | head -5
             echo
             echo "=== ps inside container ==="
-            "$LIMA" shell "$VM" -- docker exec "$CID" ps auxf 2>&1 | head -40
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ps auxf 2>&1 | head -40
           } > /tmp/launch-to-msg-logs/agent-probe.log 2>&1
           cat /tmp/launch-to-msg-logs/agent-probe.log
 
