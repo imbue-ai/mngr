@@ -4,20 +4,32 @@ on:
   workflow_dispatch:
     inputs:
       commit_sha:
-        description: 'REQUIRED. Commit SHA (or branch / tag) to verify. The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
-        required: true
+        description: 'Commit SHA (or branch / tag) to verify. Empty -> mngr main HEAD at trigger time (matches the scheduled-cron behavior). The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
+        required: false
+        default: ''
       skip_slack_flow:
         description: 'Skip the slack-permission-flow Playwright step.'
         type: boolean
         required: false
         default: false
       template_ref:
-        description: "REQUIRED. forever-claude-template ref (branch / tag / SHA) the agent is created from. Required because agent runtime behavior is a function of (minds binary, FCT template); a moving default would make runs irreproducible the same way an unset commit_sha did. Pass the FALLBACK_BRANCH tag (e.g. `v0.2.35`) for the production path, `main` for the user-default path, or a specific SHA for replay."
-        required: true
+        description: "forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> `main`. Pass the FALLBACK_BRANCH tag (e.g. `v0.3.0`) for the production path, `main` for the user-default path, or a specific SHA for replay. Agent runtime behavior is a function of (minds binary, FCT template); pin both for reproducible replays."
+        required: false
+        default: ''
       template_url:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
+  # Daily health check against the heads of both repos. Runs at 14:00 UTC
+  # (07:00 PDT / 06:00 PST), so a failure surfaces at the start of the
+  # workday rather than overnight. The cron only fires from the default
+  # branch -- this file has to be merged to mngr `main` first for the
+  # schedule to activate (GitHub Actions ignores schedule triggers
+  # defined only on feature branches). Defaults: commit_sha = mngr main
+  # HEAD at trigger time (github.sha), template_ref = `main`,
+  # skip_slack_flow = false (exercise the latchkey + slack-mock path).
+  schedule:
+    - cron: '0 14 * * *'
 
 concurrency:
   group: mac-runner
@@ -75,10 +87,10 @@ jobs:
             exit 1
           fi
           echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
-      - name: checkout @ ${{ inputs.commit_sha }}
+      - name: checkout @ ${{ inputs.commit_sha || github.sha }}
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.commit_sha }}
+          ref: ${{ inputs.commit_sha || github.sha }}
       - name: setup node
         uses: actions/setup-node@v6
         with:
@@ -105,7 +117,7 @@ jobs:
         run: |
           FULL_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
           echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
-          echo "Resolved input ${{ inputs.commit_sha }} -> $FULL_SHA"
+          echo "Resolved input ${{ inputs.commit_sha || github.sha }} -> $FULL_SHA"
       - name: check for existing ToDesktop build matching this commit
         id: existing
         working-directory: apps/minds
@@ -233,7 +245,7 @@ jobs:
           {
             echo "## Build result ($SRC)"
             echo ""
-            echo "- commit: \`${{ inputs.commit_sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
+            echo "- commit: \`${{ inputs.commit_sha || github.sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
             echo "- build_id: \`${BID:-<none>}\`"
             echo "- url: ${URL:-<none>}"
             echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
@@ -308,9 +320,9 @@ jobs:
             exit 1
           fi
           if [[ "$REUSED" == "true" ]]; then
-            SRC='reused build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
+            SRC='reused build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
           else
-            SRC='fresh build (commit ${{ inputs.commit_sha }}, build_id ${{ needs.build.outputs.build_id }})'
+            SRC='fresh build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
           fi
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "Verifying: $URL"
@@ -475,7 +487,7 @@ jobs:
         id: fct_sha
         env:
           FCT_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/forever-claude-template' }}
-          FCT_REF:      ${{ inputs.template_ref }}
+          FCT_REF:      ${{ inputs.template_ref || 'main' }}
         run: |
           set -euo pipefail
           # `git ls-remote` returns "<sha>\t<full-ref>"; first line for
@@ -522,7 +534,7 @@ jobs:
           # for audit. Moving refs (e.g. `main`) thus float between runs --
           # the trade-off is "must clone-able" vs "must be byte-identical".
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref }}
+          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref || 'main' }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
