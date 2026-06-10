@@ -120,7 +120,8 @@ def prepare(
         raise click.ClickException(str(e)) from e
     if not client.project_id:
         raise click.ClickException(
-            "No GCP project resolved. Pass --project, or set [providers.gcp] project_id in settings.toml."
+            "No GCP project resolved. Pass --project, or run "
+            "'mngr config set providers.gcp.project_id <your-project>' to set it."
         )
     try:
         target_tag = client.ensure_firewall()
