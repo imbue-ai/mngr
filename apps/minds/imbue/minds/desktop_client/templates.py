@@ -1091,7 +1091,7 @@ def render_chrome_page(
 
 @pure
 def render_sidebar_page(mngr_forward_origin: str = "") -> str:
-    """Render the standalone sidebar page for the Electron sidebar WebContentsView.
+    """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
