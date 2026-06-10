@@ -1067,6 +1067,23 @@ def test_tokens_css_accent_fallback_is_default_workspace_color() -> None:
     assert f"var(--workspace-accent, {DEFAULT_WORKSPACE_COLOR})" in css
 
 
+def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
+    """The SHA-derived OKLCH accent system is gone: workspace accents are
+    stored ``#rrggbb`` hexes, and every fallback / demo surface paints
+    the palette default. Scan the template and static-asset trees so a
+    lingering (or reintroduced) ``oklch(`` literal fails loudly; any
+    future legitimate oklch use should be a conscious decision recorded
+    by updating this guard."""
+    client_root = Path(_templates_module.__file__).resolve().parent
+    offenders = [
+        str(path.relative_to(client_root))
+        for directory in (client_root / "templates", client_root / "static")
+        for path in sorted(directory.rglob("*"))
+        if path.suffix in (".jinja", ".js", ".css") and "oklch(" in path.read_text()
+    ]
+    assert offenders == []
+
+
 def test_notice_renders_each_variant() -> None:
     variants_to_class = {
         "info": "bg-blue-50",
