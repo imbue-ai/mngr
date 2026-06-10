@@ -44,10 +44,16 @@ the right project's consolidated files.
    the synthetic dev bucket (the same directory that holds the project's
    `changelog/` entries dir).
 
-3. For each `SECTION <project> <date>` line: read that section's bullets
-   from the project's `UNABRIDGED_CHANGELOG.md` (the section sits
-   between `## <date>` and the next `## ` line) and generate a few
-   concise, human-friendly bullets for that project's `CHANGELOG.md`.
+3. The `SECTION` lines may include several dates for the same project.
+   Process them **one project at a time**, not one section at a time: for
+   each project that has at least one `SECTION` line, read the bullets
+   from *all* of that project's new date sections in its
+   `UNABRIDGED_CHANGELOG.md` (each section sits between its `## <date>`
+   heading and the next `## ` line), pool them, and from that pooled set
+   generate a few concise, human-friendly bullets for that project's
+   `CHANGELOG.md`. Summarizing the whole pool at once — rather than per
+   date — means a single user-visible change yields a single bullet even
+   when several entries (possibly across different days) touched it.
    Each bullet MUST start with one of these Keep-a-Changelog categories
    followed by `: ` and the description, e.g.:
 
@@ -60,8 +66,6 @@ the right project's consolidated files.
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
    internal refactors or doc edits that don't fit the other categories.
-   Merge near-duplicate bullets (within the same project) if they
-   describe the same user-visible effect.
 
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
@@ -92,9 +96,9 @@ the right project's consolidated files.
    broken for that project; emit a `failed` JSON object with "missing
    [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and stop.
 
-   Group the bullets you generated in step 3 for that project (across
-   all dates for that project) by category and merge them into the
-   `[Unreleased]` section under `### <Category>` subheadings, in the
+   Group the bullets you generated in step 3 for that project by
+   category and merge them into the `[Unreleased]` section under
+   `### <Category>` subheadings, in the
    canonical order: Added, Changed, Deprecated, Removed, Fixed,
    Security. Append to any existing bullets under each subheading; do
    not delete or rewrite pre-existing bullets. (`scripts/release.py`
@@ -103,37 +107,30 @@ the right project's consolidated files.
    project's section accumulates across consolidation runs within a
    release window.)
 
-5. Merge pass: re-read just the `[Unreleased]` section of each
-   `CHANGELOG.md` you touched and merge any bullets that describe the
-   same user-visible change within that project into a single bullet.
-   (You already merged near-duplicates per date in step 3; this is a
-   second look now that every date's bullets for the project sit
-   together, which surfaces overlaps that weren't visible one section
-   at a time.)
+5. Concision pass: re-read just the `[Unreleased]` section of each
+   `CHANGELOG.md` you touched and step back to think critically about
+   what actually matters to a reader of *this* project's changelog. For
+   each bullet, decide which part of the change is genuinely important
+   for that audience to see -- re-applying the notable-only test from
+   step 3 -- then drop any bullet that isn't notable and cut the
+   secondary detail from the ones that stay, so each bullet conveys only
+   what matters about the change. If two bullets still describe the same
+   user-visible change, merge them. Finally, phrase every surviving
+   bullet as concisely as you can: cut filler words, keep the names of
+   changed APIs/files, and confirm each bullet is in the exact
+   `- <Category>: <description>` format with a valid category prefix.
 
-6. Concision pass: for each `[Unreleased]` section you touched, step
-   back and think critically about what actually matters to a reader of
-   *this* project's changelog. For each bullet, decide which part of the
-   change is genuinely important for that audience to see -- re-applying
-   the notable-only test from step 3 -- then drop any bullet that isn't
-   notable and cut the secondary detail from the ones that stay, so each
-   bullet conveys only what matters about the change. Finally, phrase
-   every surviving bullet as concisely as you can: cut filler words,
-   keep the names of changed APIs/files, and confirm each bullet is in
-   the exact `- <Category>: <description>` format with a valid category
-   prefix.
-
-7. Configure git: `git config user.email "bot@imbue.com"`,
+6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.
 
-8. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
+7. Capture today's date in Pacific time: `RUN_DATE=$(TZ=America/Los_Angeles
    date +%Y-%m-%d)`. This identifies *when this consolidation run
    happened*, distinct from the per-entry `## YYYY-MM-DD` section
    headings in each `UNABRIDGED_CHANGELOG.md` (which identify when each
    entry was written). `git add -A` and `git commit -m "Consolidate
    changelog entries (run <RUN_DATE>)"`.
 
-9. Run a changelog accuracy review on the bullets you just added, to
+8. Run a changelog accuracy review on the bullets you just added, to
    guard against stale or inaccurate entries. Spawn one or more
    `general-purpose` reviewer subagents (fresh contexts, so they review
    the bullets with eyes that did not write them), using the Task tool,
@@ -159,7 +156,7 @@ the right project's consolidated files.
    retry it if that seems worthwhile; either way, do NOT fail the whole
    run on its account -- the consolidation commit is still valid.
 
-10. Capture the current branch name with `BRANCH=$(git rev-parse
+9. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
@@ -167,7 +164,7 @@ the right project's consolidated files.
    contains only this run's commits (the consolidation commit plus any
    per-project accuracy-review correction commits).
 
-11. Open a PR with `gh pr create --base main`. Title: `Changelog
+10. Open a PR with `gh pr create --base main`. Title: `Changelog
    consolidation (run <RUN_DATE>)`. Body: describe this automated
    changelog consolidation run (run <RUN_DATE>); what else to surface --
    e.g. anything notable the accuracy reviewers reported -- is up to you.
