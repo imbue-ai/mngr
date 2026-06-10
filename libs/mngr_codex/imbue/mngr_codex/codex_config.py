@@ -52,6 +52,7 @@ plugin (see ``CodexAgent._ensure_source_repo_trusted``).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -79,6 +80,8 @@ _HOOKS_FILENAME: str = "hooks.json"
 # marker file exists (it auto-writes one on a fresh home with no sessions, but
 # seeding it makes the silent-launch behavior explicit and order-independent).
 _PERSONALITY_MIGRATION_FILENAME: str = ".personality_migration"
+# codex maintains this update-cache file itself (see ``get_codex_version_cache_path``).
+_VERSION_CACHE_FILENAME: str = "version.json"
 
 
 def get_codex_home(agent_state_dir: Path) -> Path:
@@ -104,6 +107,21 @@ def get_codex_hooks_path(codex_home: Path) -> Path:
 def get_codex_personality_migration_path(codex_home: Path) -> Path:
     """Return the ``.personality_migration`` NUX-skip marker path under ``codex_home``."""
     return codex_home / _PERSONALITY_MIGRATION_FILENAME
+
+
+def get_codex_version_cache_path(codex_home: Path) -> Path:
+    """Return codex's own ``version.json`` update-cache path under ``codex_home``.
+
+    Codex maintains this file itself: ``{"latest_version": "0.139.0",
+    "last_checked_at": "...", "dismissed_version": null}``. ``latest_version`` is the
+    newest release codex last fetched -- it always records the true latest, even when
+    up to date -- so mngr reads the *user's real* ``~/.codex/version.json`` to learn the
+    latest version with no network call (codex refreshes it on its own throttled ~20h
+    schedule during the user's direct codex use). Note a per-agent ``CODEX_HOME`` with
+    ``check_for_update_on_startup = false`` never writes one, which is why we read the
+    shared home, not the agent's.
+    """
+    return codex_home / _VERSION_CACHE_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +399,68 @@ def is_project_trusted(config: Mapping[str, Any], project_path: str) -> bool:
         return False
     entry = projects_raw.get(project_path)
     return isinstance(entry, Mapping) and entry.get(TRUST_LEVEL_KEY) == TRUST_LEVEL_TRUSTED
+
+
+# ---------------------------------------------------------------------------
+# Update check (codex's version.json)
+# ---------------------------------------------------------------------------
+
+# Key under which codex records the newest release it has seen, in version.json.
+_VERSION_CACHE_LATEST_KEY: str = "latest_version"
+
+# A clean numeric-dotted semver (e.g. ``0.138.0``). Anything with a pre-release or
+# build suffix (``0.139.0-rc.1``) is deliberately treated as unparseable so we never
+# raise a spurious update notice -- this mirrors codex's own conservative ``is_newer``,
+# which returns "unknown" for non-numeric versions.
+_CLEAN_SEMVER_RE = re.compile(r"\A\d+(?:\.\d+)*\Z")
+
+
+def parse_codex_cli_version(version_output: str) -> str | None:
+    """Extract the bare semver from ``codex --version`` output (``codex-cli 0.138.0`` -> ``0.138.0``).
+
+    Returns the first whitespace-delimited token that is a clean numeric-dotted
+    semver, or None if there is none (e.g. an empty result when codex is not
+    installed, or a source/pre-release build). None just means the caller skips the
+    update check rather than risk a false notice.
+    """
+    for token in version_output.split():
+        if _CLEAN_SEMVER_RE.match(token):
+            return token
+    return None
+
+
+def extract_latest_codex_version(version_cache: Mapping[str, Any]) -> str | None:
+    """Return the ``latest_version`` from a parsed codex ``version.json``, or None.
+
+    None if the key is missing or is not a clean semver string. The caller decodes
+    the JSON (surfacing any decode error at warning level); this pure helper only
+    pulls and validates the field.
+    """
+    latest = version_cache.get(_VERSION_CACHE_LATEST_KEY)
+    if not isinstance(latest, str):
+        return None
+    return latest if _CLEAN_SEMVER_RE.match(latest) else None
+
+
+def is_codex_update_available(installed_version: str, latest_version: str) -> bool:
+    """Return True iff ``latest_version`` is strictly newer than ``installed_version``.
+
+    Both are parsed as integer tuples (so ``0.10.0`` > ``0.9.0``); any unparseable
+    input yields False -- no false-positive notice -- mirroring codex's conservative
+    ``is_newer``.
+    """
+    installed = _parse_semver_tuple(installed_version)
+    latest = _parse_semver_tuple(latest_version)
+    if installed is None or latest is None:
+        return False
+    return latest > installed
+
+
+def _parse_semver_tuple(version: str) -> tuple[int, ...] | None:
+    """Parse a clean numeric-dotted semver into an int tuple, or None if not clean."""
+    if not _CLEAN_SEMVER_RE.match(version):
+        return None
+    return tuple(int(part) for part in version.split("."))
 
 
 # ---------------------------------------------------------------------------

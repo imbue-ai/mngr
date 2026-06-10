@@ -57,7 +57,26 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
 - `auto_dismiss_dialogs` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
+- `check_for_updates` — when `true`, check at provision whether the codex CLI is outdated
+  and surface it (see "Updates" below). Default: `true`.
+- `auto_update` — when `true`, run `codex update` automatically when an update is available,
+  without prompting. Default: `false`.
 - `emit_common_transcript` — emit the common-schema transcript. Default: `true`.
+
+### Updates
+
+mngr pins `check_for_update_on_startup = false` in the per-agent `config.toml`, because codex's
+own "Update available!" prompt is **blocking** and would intercept the first message mngr sends
+(an Enter could even select "Update now"). mngr surfaces updates itself instead: at provision it
+compares `codex --version` against the `latest_version` codex last recorded in its own
+`~/.codex/version.json` (no network call — codex refreshes that file on its own throttled
+schedule during your normal codex use). When codex is outdated it, in order of precedence: runs
+`codex update` if `auto_update` is set; otherwise prompts to update now if interactive; otherwise
+logs a non-blocking notice. `codex update` self-detects the install method (it runs
+`brew upgrade --cask codex` for a brew install, `npm i -g` for npm, the curl installer for
+standalone), so mngr needs no per-method logic. Updating is optional — an outdated codex still
+runs — so a declined prompt or a non-interactive run never blocks agent creation, and `--yes`
+does **not** trigger a global upgrade (only the explicit `auto_update` opt-in does).
 
 ### Model note
 

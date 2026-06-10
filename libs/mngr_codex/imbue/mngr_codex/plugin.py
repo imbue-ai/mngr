@@ -71,6 +71,7 @@ performs). Transcript scoping uses the captured rollout ``transcript_path``.
 from __future__ import annotations
 
 import importlib.resources
+import json
 import shlex
 from collections.abc import Mapping
 from pathlib import Path
@@ -115,13 +116,17 @@ from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
+from imbue.mngr_codex.codex_config import extract_latest_codex_version
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
 from imbue.mngr_codex.codex_config import get_codex_hooks_path
 from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
+from imbue.mngr_codex.codex_config import get_codex_version_cache_path
+from imbue.mngr_codex.codex_config import is_codex_update_available
 from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.codex_config import merge_project_trust
+from imbue.mngr_codex.codex_config import parse_codex_cli_version
 from imbue.mngr_codex.codex_config import read_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
@@ -138,6 +143,11 @@ _DANGEROUSLY_BYPASS_HOOK_TRUST_FLAG: Final[str] = "--dangerously-bypass-hook-tru
 # ``auto_allow_permissions`` is set; otherwise codex's trust-derived default
 # (``on-request`` for a trusted project) stands.
 _APPROVAL_POLICY_NEVER: Final[str] = "never"
+
+# Sentinel that separates the two payloads of the single-round-trip version probe
+# (``codex --version`` output, then codex's version.json). Chosen to never collide
+# with a version string or JSON content.
+_VERSION_SPLIT_SENTINEL: Final[str] = "__MNGR_CODEX_VERSION_SPLIT__"
 
 
 def _load_codex_resource_script(filename: str) -> str:
@@ -206,6 +216,32 @@ class CodexAgentConfig(AgentTypeConfig):
         default=False,
         description="When True, trust the source repo and allow the codex hook-review bypass "
         "without prompting. When False (default), the user is prompted interactively.",
+    )
+    # check_for_updates is mngr's well-behaved replacement for codex's own
+    # ``check_for_update_on_startup`` (which mngr disables because its blocking
+    # "Update available!" prompt would intercept the first pasted message). At
+    # provision, mngr compares ``codex --version`` to the latest version codex itself
+    # recorded in ~/.codex/version.json (no network call) and surfaces an available
+    # update -- interactively a prompt to update now, otherwise a non-blocking notice.
+    check_for_updates: bool = Field(
+        default=True,
+        description="When True, check at provision whether the codex CLI is outdated (comparing "
+        "`codex --version` to the latest version codex last recorded in ~/.codex/version.json -- "
+        "no network call) and surface it: an interactive prompt to run `codex update`, or a "
+        "non-blocking notice when non-interactive. mngr disables codex's own blocking startup "
+        "update prompt, so this is the replacement.",
+    )
+    # auto_update is the opt-in to let mngr run ``codex update`` itself. ``codex update``
+    # self-detects the install method (brew/npm/standalone), so mngr needs no
+    # per-method logic. Off by default: updating mutates the user's *global* codex
+    # install, so we only do it on an explicit opt-in or an interactive yes.
+    auto_update: bool = Field(
+        default=False,
+        description="When True, run `codex update` automatically (no prompt) whenever the check "
+        "finds codex is outdated. `codex update` self-detects the install method. Default False: "
+        "mngr instead prompts interactively, or just notifies when non-interactive. Note: updating "
+        "mutates the user's global codex install. Implies the update check even if "
+        "check_for_updates is False.",
     )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
@@ -315,14 +351,17 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
            canonical work-dir path (the trust key codex matches).
         2. Ensure the source repo is trusted (consent-gated; also gates the
            hook-review bypass) -- a clean ``SystemExit`` if consent is unavailable.
-        3. Build the per-agent ``CODEX_HOME`` (config.toml, hooks.json, the
+        3. Surface (and, if opted in, apply) a codex CLI update -- best-effort and
+           never fatal (an outdated codex still runs).
+        4. Build the per-agent ``CODEX_HOME`` (config.toml, hooks.json, the
            auth.json symlink, the NUX-skip marker).
-        4. Install the transcript scripts + background supervisor under
+        5. Install the transcript scripts + background supervisor under
            ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         user_codex_home = self._resolve_user_codex_home(host)
         canonical_work_dir = self._resolve_canonical_path(host, self.work_dir)
         self._ensure_source_repo_trusted(host, user_codex_home, mngr_ctx)
+        self._maybe_check_for_codex_update(host, user_codex_home, mngr_ctx)
         self._provision_codex_home(host, user_codex_home, canonical_work_dir)
         with mngr_ctx.concurrency_group.make_concurrency_group("codex_provisioning") as concurrency_group:
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
@@ -486,6 +525,144 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
             f"Trust {source_path} and allow mngr to run codex with its hook review bypassed?",
             default=False,
         )
+
+    def _maybe_check_for_codex_update(
+        self, host: OnlineHostInterface, user_codex_home: Path, mngr_ctx: MngrContext
+    ) -> None:
+        """Surface (and optionally apply) a codex CLI update at provision.
+
+        mngr disables codex's own ``check_for_update_on_startup`` (its blocking
+        "Update available!" prompt would intercept the first pasted message), so this
+        is the well-behaved replacement: a network-free check (codex's own
+        ``version.json`` vs ``codex --version``) plus, when outdated, either an
+        automatic ``codex update`` (``auto_update``), an interactive prompt, or a
+        non-blocking notice. Updating is optional -- an outdated codex still runs --
+        so, unlike workspace trust, a declined or non-interactive case never aborts
+        provisioning, and any probe/parse failure is swallowed (debug-logged).
+        """
+        if not (self.agent_config.check_for_updates or self.agent_config.auto_update):
+            return
+        installed, latest = self._read_codex_versions(host, user_codex_home)
+        if installed is None or latest is None:
+            logger.debug(
+                "Could not determine codex version (installed={!r}, latest={!r}); skipping update check.",
+                installed,
+                latest,
+            )
+            return
+        if not is_codex_update_available(installed, latest):
+            logger.debug("codex CLI is up to date (installed {}).", installed)
+            return
+        self._handle_codex_update_available(host, installed, latest, mngr_ctx)
+
+    def _read_codex_versions(self, host: OnlineHostInterface, user_codex_home: Path) -> tuple[str | None, str | None]:
+        """Resolve ``(installed, latest)`` codex versions over the host in one round-trip.
+
+        ``installed`` comes from ``codex --version``; ``latest`` from the
+        ``latest_version`` codex itself recorded in ``<user_codex_home>/version.json``
+        (no network call). Either is None when it cannot be determined (codex not
+        installed, no cache yet, an unparseable value), and the caller then skips the
+        check. Exposed as a method so tests can inject versions without a real codex.
+        """
+        base = str(self.agent_config.command)
+        quoted_cache = shlex.quote(str(get_codex_version_cache_path(user_codex_home)))
+        # One command: the installed version, a sentinel, then the version cache
+        # (empty if absent). ``2>/dev/null`` hides a missing-codex error and
+        # ``cat ... || true`` keeps a missing cache non-fatal, so the probe still
+        # exits 0 and we fall through to "could not determine" rather than failing.
+        probe = (
+            f"{base} --version 2>/dev/null; "
+            f"printf '%s\\n' {shlex.quote(_VERSION_SPLIT_SENTINEL)}; "
+            f"cat {quoted_cache} 2>/dev/null || true"
+        )
+        result = host.execute_idempotent_command(probe, timeout_seconds=30.0)
+        if not result.success:
+            logger.debug("codex version probe failed (stderr={!r}); skipping update check.", result.stderr)
+            return None, None
+        version_text, _, cache_text = result.stdout.partition(_VERSION_SPLIT_SENTINEL)
+        return parse_codex_cli_version(version_text), self._parse_latest_codex_version(cache_text)
+
+    def _parse_latest_codex_version(self, cache_text: str) -> str | None:
+        """Parse the ``latest_version`` out of codex's ``version.json`` text, or None.
+
+        A blank cache (file absent) yields None silently -- the normal fresh-install
+        case. Malformed JSON is surfaced at warning level (it is codex-managed machine
+        state, so corruption is abnormal) and then skipped.
+        """
+        stripped = cache_text.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            logger.warning("codex version cache is not valid JSON ({}); skipping update check.", exc)
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        return extract_latest_codex_version(parsed)
+
+    def _handle_codex_update_available(
+        self, host: OnlineHostInterface, installed: str, latest: str, mngr_ctx: MngrContext
+    ) -> None:
+        """Apply or surface an available codex update.
+
+        ``auto_update`` -> run ``codex update`` with no prompt. Otherwise, when
+        interactive (and not ``--yes``), prompt to update now. In every other case
+        (``--yes`` or non-interactive), just log a non-blocking notice -- we never
+        mutate the user's *global* codex install at provision without an explicit
+        opt-in (the ``auto_update`` flag) or an interactive yes. (``--yes`` clears
+        blocking prerequisites like trust, but an optional global upgrade is heavier,
+        so it is gated on ``auto_update`` alone, not on auto-approve.)
+        """
+        should_update = self.agent_config.auto_update
+        if not should_update and mngr_ctx.is_interactive and not mngr_ctx.is_auto_approve:
+            should_update = self._prompt_user_to_update_codex(installed, latest)
+        if should_update:
+            self._run_codex_update(host, installed, latest)
+            return
+        logger.warning(
+            "A newer codex CLI is available ({} -> {}). Run `codex update` to upgrade, or set "
+            "`auto_update = true` on the codex agent type to have mngr do it. (mngr disables "
+            "codex's own blocking startup update prompt, so it won't interrupt the agent.)",
+            installed,
+            latest,
+        )
+
+    def _prompt_user_to_update_codex(self, installed: str, latest: str) -> bool:
+        """Prompt to run ``codex update`` now. Defaults to False (no stray upgrade).
+
+        Exposed as a method so tests can override without driving click.confirm.
+        """
+        logger.info(
+            "\nA newer codex CLI is available: you're on {}, latest is {}.\n"
+            "`codex update` self-detects your install method (brew/npm/standalone) and upgrades.\n",
+            installed,
+            latest,
+        )
+        return click.confirm(f"Update codex now ({installed} -> {latest})?", default=False)
+
+    def _run_codex_update(self, host: OnlineHostInterface, installed: str, latest: str) -> None:
+        """Run ``codex update`` over the host (best-effort; never fatal).
+
+        ``codex update`` self-detects the install method and shells out to the right
+        updater (``brew upgrade --cask codex`` for brew, ``npm i -g`` for npm, the curl
+        installer for standalone); for an install it cannot update it prints its own
+        "update manually" guidance and exits non-zero, which we surface as a warning. A
+        failed update must not abort agent creation -- the (outdated) codex still works.
+        Exposed as a method so tests can override it without invoking codex.
+        """
+        update_command = f"{self.agent_config.command} update"
+        with log_span("Updating codex CLI {} -> {} via `codex update`", installed, latest):
+            result = host.execute_idempotent_command(update_command, timeout_seconds=600.0)
+        if result.success:
+            logger.info("codex update completed (was {}, latest {}).", installed, latest)
+        else:
+            logger.warning(
+                "`codex update` did not complete (stderr={!r}); continuing with codex {}. "
+                "You may need to update manually (e.g. `brew upgrade --cask codex`).",
+                result.stderr.strip(),
+                installed,
+            )
 
     def _build_background_tasks_command(self) -> str:
         """Shell snippet that launches the backgrounded transcript supervisor.
