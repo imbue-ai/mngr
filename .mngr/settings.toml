@@ -27,7 +27,35 @@ provider = "modal"
 build_arg = ["file=libs/mngr/imbue/mngr/resources/Dockerfile", "context-dir=.mngr/dev/build/", "volume=code-review-json:/code_reviews"]
 extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
 agent_args = ["--dangerously-skip-permissions"]
-pass_env = ["GH_TOKEN"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
+# Dogfood this repo on an AWS EC2 host (the analogue of the `modal` template above).
+# Unlike modal/docker, the AWS backend runs `docker build` on the remote VPS and
+# rewrites `--file=` relative to the uploaded build context, so the keyframe
+# `.mngr/dev/build/` tarball shape doesn't apply. Instead we use the real-source-tree
+# shape: context `.` (the worktree) is cloned + overlaid with uncommitted changes by
+# the mngr_vps_docker build flow, and the Dockerfile's `COPY . /code/mngr/` consumes it.
+#
+# The shared [providers.aws] block (region/plan/builder/auto_shutdown) is committed below
+# in the providers section; only the per-developer allowed_ssh_cidrs lives in the
+# gitignored .mngr/settings.local.toml.
+#
+# The image is built on depot's cached remote builders (builder=DEPOT on [providers.aws]):
+# depot.json (project fsjzltqvxq) ships in the build context, so DEPOT_PROJECT_ID is not
+# needed. (A local `docker build` on a t3.large also fits the backend's 600s build cap, so
+# builder=DOCKER is a viable fallback; depot is faster and cached.)
+#
+# Requirements at `mngr create -t aws` time:
+#   - DEPOT_TOKEN exported in your shell; it's forwarded to the remote depot build.
+#   - GH_TOKEN exported (same as the modal template) for git/gh inside the container.
+[create_templates.aws]
+provider = "aws"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
@@ -44,6 +72,26 @@ default_cpu = 4
 default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
+
+# Shared AWS dogfooding config (consumed by the `aws` create-template above).
+# Only the per-developer allowed_ssh_cidrs is operator-specific and lives in the
+# gitignored .mngr/settings.local.toml; everything here is the same for everyone.
+# These keys merge per-field with that local block (ProviderInstanceConfig.merge_with
+# honors model_fields_set), so the local file only needs allowed_ssh_cidrs (backend
+# defaults to "aws" for this config type, and the `[providers.aws]` name resolves it too).
+[providers.aws]
+backend = "aws"
+# us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
+default_region = "us-west-2"
+# 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
+# instance only needs to comfortably run the agent.
+default_instance_type = "t3.large"
+# Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
+# the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
+auto_shutdown_minutes = 120
+# Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
+# in the repo supplies the project id.
+builder = "DEPOT"
 
 [plugins.forward]
 enabled = true

@@ -35,10 +35,10 @@ from typing import TextIO
 
 from loguru import logger
 
+from imbue.imbue_common.env_vars import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hook_io import DEFAULT_MAX_SUBAGENT_DEPTH
 from imbue.mngr_claude_subagent_proxy.hook_io import emit_depth_limit_deny
 from imbue.mngr_claude_subagent_proxy.hook_io import emit_pre_tool_deny
-from imbue.mngr_claude_subagent_proxy.hook_io import parse_int_env
 from imbue.mngr_claude_subagent_proxy.hook_io import read_hook_stdin_json
 from imbue.mngr_claude_subagent_proxy.hooks.agent_definitions import resolve_agent_definition
 

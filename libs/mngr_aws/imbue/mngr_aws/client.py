@@ -1,0 +1,561 @@
+import os
+from collections.abc import Iterator
+from collections.abc import Mapping
+from collections.abc import Sequence
+from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
+from typing import Any
+from typing import Final
+from typing import assert_never
+
+import boto3
+from botocore.exceptions import ClientError
+from loguru import logger
+from pydantic import ConfigDict
+from pydantic import Field
+from pydantic import PrivateAttr
+
+from imbue.mngr.errors import MngrError
+from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import ExistingSecurityGroup
+from imbue.mngr_aws.config import SecurityGroupSpec
+from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsProvisioningError
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
+from imbue.mngr_vps_docker.primitives import VpsSnapshotId
+from imbue.mngr_vps_docker.vps_client import VpsClientInterface
+from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
+from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
+
+# Tag that ``create_instance`` adds to every EC2 instance launched while
+# ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
+# this tag (not the Name tag) to find leaked instances, which means tests
+# do not have to constrain host naming: any agent name works.
+AWS_PYTEST_LAUNCHED_TAG: Final[str] = "mngr-pytest-launched"
+
+_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
+    "pending": VpsInstanceStatus.PENDING,
+    "running": VpsInstanceStatus.ACTIVE,
+    "stopping": VpsInstanceStatus.HALTED,
+    "stopped": VpsInstanceStatus.HALTED,
+    "shutting-down": VpsInstanceStatus.DESTROYING,
+    "terminated": VpsInstanceStatus.DESTROYING,
+}
+
+
+class AwsVpsClient(VpsClientInterface):
+    """EC2 client implementing the VPS provider interface via boto3."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # EC2 instance bootstrap is routinely slower than Vultr (Debian + Docker
+    # install on a t3.small typically lands around 60-90s); raise the warning
+    # threshold so normal boots don't log a "slow" warning.
+    slow_provisioning_warning_threshold_seconds: float = Field(default=90.0)
+
+    session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
+    region: str = Field(frozen=True, description="AWS region this client targets")
+    ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
+    security_group: SecurityGroupSpec = Field(
+        default_factory=AutoCreateSecurityGroup,
+        description=(
+            "Tagged union: ``ExistingSecurityGroup(id=...)`` to attach an existing SG, or "
+            "``AutoCreateSecurityGroup(name=...)`` to look up / create one by name. Default "
+            "is auto-create with the conventional 'mngr-aws' name."
+        ),
+    )
+    subnet_id: str | None = Field(default=None, description="Subnet ID, or None to let EC2 pick a default")
+    vpc_id: str | None = Field(default=None, description="VPC ID, used only to scope SG lookup")
+    allowed_ssh_cidrs: tuple[str, ...] = Field(
+        default=("0.0.0.0/0",),
+        description=(
+            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
+            "security group. Default ('0.0.0.0/0',) matches Vultr/OVH default reachability in "
+            "this monorepo (neither provider ships a managed firewall). Tighten for production "
+            "(e.g. ('203.0.113.4/32',) for a single IP). Empty tuple means 'add no ingress' -- "
+            "the SG ends up unreachable from outside its VPC; logged as a warning."
+        ),
+    )
+    associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
+    root_volume_size_gb: int = Field(default=30, description="Root EBS volume size in GB")
+    root_volume_type: str = Field(default="gp3", description="Root EBS volume type")
+    iam_instance_profile: str | None = Field(default=None, description="IAM instance profile name to attach")
+    container_ssh_port: int = Field(
+        default=2222, description="Port the container's sshd is exposed on (added to the SG)"
+    )
+    _cached_ec2_client: Any = PrivateAttr(default=None)
+
+    def _ec2(self) -> Any:
+        """Return the EC2 client, building and caching it from the session on first use."""
+        if self._cached_ec2_client is None:
+            self._cached_ec2_client = self.session.client("ec2", region_name=self.region)
+        return self._cached_ec2_client
+
+    @contextmanager
+    def _translate_aws_errors(self) -> Iterator[None]:
+        """Translate ``botocore.exceptions.ClientError`` into ``VpsApiError`` while inside the block."""
+        try:
+            yield
+        except ClientError as e:
+            err = e.response.get("Error", {})
+            code = err.get("Code", "Unknown")
+            message = err.get("Message", str(e))
+            http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+            raise VpsApiError(http_status, f"{code}: {message}") from e
+
+    # =========================================================================
+    # Security group management (idempotent)
+    # =========================================================================
+
+    def ensure_security_group(self) -> str:
+        """Return the SG id to attach to new instances, creating it if needed.
+
+        ``security_group`` is a tagged union:
+        - ``ExistingSecurityGroup(id=...)``: return the id as-is.
+        - ``AutoCreateSecurityGroup(name=...)``: look up by name (optionally
+          scoped to ``vpc_id``); create if absent. Open tcp/22 and
+          tcp/``container_ssh_port`` to every CIDR in ``allowed_ssh_cidrs``.
+
+        Empty ``allowed_ssh_cidrs`` means "no ingress rules added": the SG is
+        created (or reused) but the instance is unreachable from outside its
+        VPC. Logged as a warning rather than raised so the behavior matches
+        the Vultr / OVH default (no provider-managed firewall) -- key-only
+        SSH is what protects the host, not network ACLs. The default ingress
+        of ``0.0.0.0/0`` is logged as a warning too, prompting production
+        users to tighten it.
+
+        Used by ``mngr aws prepare`` (one-time admin setup). The hot path
+        in ``create_instance`` uses ``resolve_security_group_id`` instead,
+        which is lookup-only and requires only RunInstances-style permissions.
+        """
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                return sg_id
+            case AutoCreateSecurityGroup(name=sg_name):
+                return self._ensure_auto_created_security_group(sg_name)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def resolve_security_group_id(self) -> str:
+        """Look up the SG id without creating or modifying anything.
+
+        Mirrors ``ensure_security_group`` but with no write API calls --
+        callers only need ``ec2:DescribeSecurityGroups``. When the auto-create
+        SG is missing, raises a ``MngrError`` pointing at ``mngr aws prepare``
+        so a user with restricted IAM (RunInstances-only) gets a clear next
+        step rather than an opaque AWS permission denial.
+        """
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                return sg_id
+            case AutoCreateSecurityGroup(name=sg_name):
+                return self._lookup_security_group_id_or_raise(sg_name)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _describe_security_groups_or_raise_on_multi_vpc(self, sg_name: str) -> list[dict[str, Any]]:
+        """Describe SGs matching ``sg_name`` (optionally vpc-scoped). Raise on multi-VPC name collision.
+
+        Shared between the lookup-only ``_lookup_security_group_id_or_raise``
+        path and the create-if-missing ``_ensure_auto_created_security_group``
+        path so the filter shape, the describe call, and the multi-VPC error
+        message stay defined in one place. The not-found case is left to the
+        caller (the two paths handle it differently: lookup raises with a
+        prepare hint, ensure proceeds to CreateSecurityGroup).
+        """
+        filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
+        if self.vpc_id is not None:
+            filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
+        with self._translate_aws_errors():
+            existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
+        if len(existing) > 1:
+            # EC2 enforces (group-name, vpc-id) uniqueness, so >1 result here
+            # means our lookup spans multiple VPCs (vpc_id is None and there
+            # are SGs with the same name in different VPCs). Refuse to guess
+            # which one the user wanted -- pick a specific one explicitly.
+            sg_descriptions = ", ".join(f"{g['GroupId']} (vpc={g.get('VpcId', '?')})" for g in existing)
+            raise MngrError(
+                f"Found {len(existing)} security groups named {sg_name!r}: {sg_descriptions}. "
+                "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
+                "security_group=ExistingSecurityGroup(id='sg-...')."
+            )
+        return existing
+
+    def _lookup_security_group_id_or_raise(self, sg_name: str) -> str:
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
+        if not existing:
+            raise MngrError(
+                f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
+                f"Run `uv run mngr aws prepare --region {self.region}` once to create it "
+                "(needs ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress), then "
+                "retry the create with your usual RunInstances-only credentials. Alternatively, "
+                "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "
+                "to attach an SG you manage outside mngr."
+            )
+        return existing[0]["GroupId"]
+
+    def _warn_about_cidrs_if_needed(self, sg_name: str) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (instance unreachable), whereas 0.0.0.0/0 means "open to the internet"
+        (default but worth flagging). Anything else is silent.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.warning(
+                "AWS allowed_ssh_cidrs is empty; auto-created security group {!r} will have no "
+                "ingress rules and the instance will be unreachable from outside its VPC. Set "
+                "allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                sg_name,
+            )
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "AWS allowed_ssh_cidrs includes 0.0.0.0/0; auto-created security group {!r} will "
+                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
+                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                sg_name,
+            )
+
+    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
+        self._warn_about_cidrs_if_needed(sg_name)
+
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
+        if existing:
+            sg_id = existing[0]["GroupId"]
+            self._authorize_ssh_ingress_idempotent(sg_id)
+            return sg_id
+
+        create_kwargs: dict[str, Any] = {
+            "GroupName": sg_name,
+            "Description": "Auto-created by mngr_aws for SSH access to managed instances",
+        }
+        if self.vpc_id is not None:
+            create_kwargs["VpcId"] = self.vpc_id
+        with self._translate_aws_errors():
+            result = self._ec2().create_security_group(**create_kwargs)
+        sg_id = result["GroupId"]
+        logger.info("Created security group {} in region {}", sg_id, self.region)
+        self._authorize_ssh_ingress_idempotent(sg_id)
+        return sg_id
+
+    def _authorize_ssh_ingress_idempotent(self, sg_id: str) -> None:
+        """Authorize ingress for SSH ports on the SG, swallowing duplicate errors.
+
+        Each permission is authorized in its own API call so that a duplicate
+        on one port (e.g., tcp/22 already authorized from a previous run) does
+        not cause AWS to reject the entire batch and silently drop the other
+        port. AWS rejects ``AuthorizeSecurityGroupIngress`` calls with
+        ``InvalidPermission.Duplicate`` atomically — none of the permissions in
+        the batch are added if any one is a duplicate.
+
+        When ``allowed_ssh_cidrs`` is empty, skip the authorize calls entirely:
+        AWS rejects an ``IpPermission`` with no source set (no IpRanges /
+        Ipv6Ranges / UserIdGroupPairs / PrefixListIds) with
+        ``InvalidParameterValue``, so issuing the call with empty ``IpRanges``
+        is a real API error, not a no-op. The "no usable ingress" shape is the
+        SG sitting with the AWS default of zero ingress rules, which is exactly
+        what the caller gets by not issuing the call.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.debug(
+                "Skipping authorize_security_group_ingress on {}: allowed_ssh_cidrs is empty "
+                "(the security group keeps its default of zero ingress rules)",
+                sg_id,
+            )
+            return
+        ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
+        ip_permissions = [
+            {
+                "IpProtocol": "tcp",
+                "FromPort": 22,
+                "ToPort": 22,
+                "IpRanges": ip_ranges,
+            },
+            {
+                "IpProtocol": "tcp",
+                "FromPort": self.container_ssh_port,
+                "ToPort": self.container_ssh_port,
+                "IpRanges": ip_ranges,
+            },
+        ]
+        for permission in ip_permissions:
+            try:
+                self._ec2().authorize_security_group_ingress(GroupId=sg_id, IpPermissions=[permission])
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                # InvalidPermission.Duplicate means "already authorized" -- treat as success (idempotent ensure).
+                if code != "InvalidPermission.Duplicate":
+                    http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
+                    raise VpsApiError(http_status, f"{code}: {e}") from e
+
+    # =========================================================================
+    # Instance Operations
+    # =========================================================================
+
+    def create_instance(
+        self,
+        label: str,
+        region: str,
+        plan: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+        ami_id_override: str | None = None,
+        spot: bool = False,
+    ) -> VpsInstanceId:
+        """Provision an EC2 instance.
+
+        Uses ``ami_id_override`` when supplied (from ``--aws-ami=<ami-id>`` on
+        ``mngr create``), otherwise the client's configured default
+        (``self.ami_id``). When ``spot`` is True (from the presence-only
+        ``--aws-spot`` build arg), passes ``InstanceMarketOptions={'MarketType':
+        'spot'}`` to RunInstances so the host runs on EC2 spot capacity. AWS
+        may reclaim spot instances with ~2 minutes' interruption notice; the
+        host is terminated, not stopped, on reclaim. Opt-in only.
+
+        Both kwargs are AWS-specific: they widen ``AwsVpsClient.create_instance``'s
+        signature beyond the shared ``VpsClientInterface.create_instance`` contract,
+        so providers reach them through ``self.aws_client.create_instance(...)``
+        (via ``AwsProvider._create_vps_instance``) rather than the abstract
+        interface.
+        """
+        if region != self.region:
+            raise VpsApiError(
+                400,
+                f"Cross-region create not supported: client bound to {self.region!r}, "
+                f"got region={region!r}. Instantiate a region-specific client.",
+            )
+
+        effective_ami_id = ami_id_override or self.ami_id
+
+        sg_id = self.resolve_security_group_id()
+
+        tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
+        tag_specs.append({"Key": "Name", "Value": label})
+        tag_specs.append({"Key": "mngr-created-at", "Value": datetime.now(timezone.utc).isoformat()})
+        # Mark instances launched during pytest so the conftest session-end
+        # orphan scanner can identify and force-terminate any leaks
+        # without having to constrain the agent / host name shape.
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            tag_specs.append({"Key": AWS_PYTEST_LAUNCHED_TAG, "Value": "true"})
+
+        block_device_mappings = [
+            {
+                "DeviceName": "/dev/xvda",
+                "Ebs": {
+                    "VolumeSize": self.root_volume_size_gb,
+                    "VolumeType": self.root_volume_type,
+                    "DeleteOnTermination": True,
+                    # Explicit Encrypted=True so encryption-at-rest is guaranteed
+                    # regardless of the AWS account's EBS-default-encryption
+                    # setting (which only became automatic on new accounts in
+                    # 2023). Uses the account's default KMS key.
+                    "Encrypted": True,
+                },
+            }
+        ]
+
+        network_interfaces: list[dict[str, Any]] = [
+            {
+                "DeviceIndex": 0,
+                "AssociatePublicIpAddress": self.associate_public_ip,
+                "Groups": [sg_id],
+                "DeleteOnTermination": True,
+            }
+        ]
+        if self.subnet_id is not None:
+            network_interfaces[0]["SubnetId"] = self.subnet_id
+
+        run_kwargs: dict[str, Any] = {
+            "ImageId": effective_ami_id,
+            "InstanceType": plan,
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": user_data,
+            "BlockDeviceMappings": block_device_mappings,
+            "NetworkInterfaces": network_interfaces,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            # IMDSv2 required: refuse IMDSv1 (unauthenticated GET) entirely
+            # and cap the response-hop limit at 1 so the metadata service
+            # cannot be reached from a hostile container running on the
+            # instance. Mirrors the AWS-recommended secure default from
+            # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html.
+            "MetadataOptions": {
+                "HttpTokens": "required",
+                "HttpEndpoint": "enabled",
+                "HttpPutResponseHopLimit": 1,
+            },
+            "TagSpecifications": [
+                {"ResourceType": "instance", "Tags": tag_specs},
+                {"ResourceType": "volume", "Tags": tag_specs},
+            ],
+        }
+        if ssh_key_ids:
+            run_kwargs["KeyName"] = ssh_key_ids[0]
+        if self.iam_instance_profile is not None:
+            run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
+        if spot:
+            # Default spot config: AWS sets max price to the on-demand price
+            # automatically; no need to specify SpotInstanceType or
+            # MaxPrice for the dev-host use case (any non-zero capacity is
+            # acceptable, and a higher max price just lengthens uptime when
+            # spot prices spike). InstanceInitiatedShutdownBehavior=terminate
+            # (always set above) interacts cleanly with spot's
+            # interruption-by-terminate semantics: the cloud-init auto-shutdown
+            # safety net still fires the same way.
+            run_kwargs["InstanceMarketOptions"] = {"MarketType": "spot"}
+
+        with self._translate_aws_errors():
+            result = self._ec2().run_instances(**run_kwargs)
+        instances = result.get("Instances", [])
+        if not instances:
+            raise VpsProvisioningError("RunInstances returned no instances")
+        instance_id = instances[0]["InstanceId"]
+        logger.info(
+            "Created EC2 instance {} (label: {}, region: {}, type: {}, ami: {})",
+            instance_id,
+            label,
+            region,
+            plan,
+            effective_ami_id,
+        )
+        return VpsInstanceId(instance_id)
+
+    def destroy_instance(self, instance_id: VpsInstanceId) -> None:
+        with self._translate_aws_errors():
+            self._ec2().terminate_instances(InstanceIds=[str(instance_id)])
+        logger.info("Terminated EC2 instance {}", instance_id)
+
+    def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
+        with self._translate_aws_errors():
+            result = self._ec2().describe_instances(InstanceIds=[str(instance_id)])
+        for reservation in result.get("Reservations", []):
+            for instance in reservation.get("Instances", []):
+                return instance
+        return None
+
+    def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
+        try:
+            instance = self._describe_instance(instance_id)
+        except VpsApiError as e:
+            # Only the specific "instance does not exist" AWS code should be
+            # treated as UNKNOWN. Other ``*.NotFound`` codes (e.g.,
+            # InvalidSubnetID.NotFound) indicate real misconfiguration and
+            # must surface to the caller.
+            if "InvalidInstanceID.NotFound" in str(e):
+                return VpsInstanceStatus.UNKNOWN
+            raise
+        if instance is None:
+            return VpsInstanceStatus.UNKNOWN
+        state = instance.get("State", {}).get("Name", "")
+        return _STATE_MAP.get(state, VpsInstanceStatus.UNKNOWN)
+
+    def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
+        instance = self._describe_instance(instance_id)
+        if instance is None:
+            raise VpsApiError(404, f"Instance {instance_id} not found")
+        ip = instance.get("PublicIpAddress", "")
+        if not ip:
+            raise VpsProvisioningError(f"Instance {instance_id} does not have a public IP yet")
+        return ip
+
+    def list_instances(self, provider_tag: str | None = None) -> list[dict[str, Any]]:
+        """List instances in this region. Optionally filtered by ``mngr-provider=<value>`` tag.
+
+        Returns a normalized list of dicts with keys: ``id``, ``main_ip``, ``state``,
+        ``tags`` (a list of ``"key=value"`` strings to mirror Vultr's tag shape).
+        """
+        filters: list[dict[str, Any]] = [
+            {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]}
+        ]
+        if provider_tag is not None:
+            filters.append({"Name": "tag:mngr-provider", "Values": [provider_tag]})
+
+        instances: list[dict[str, Any]] = []
+        # The paginator defers actual API calls until iteration, so the error
+        # translation block must wrap the iteration itself, not just the
+        # ``get_paginator`` factory call.
+        with self._translate_aws_errors():
+            paginator = self._ec2().get_paginator("describe_instances")
+            for page in paginator.paginate(Filters=filters):
+                for reservation in page.get("Reservations", []):
+                    for instance in reservation.get("Instances", []):
+                        tag_kv = [f"{t['Key']}={t['Value']}" for t in instance.get("Tags", [])]
+                        instances.append(
+                            {
+                                "id": instance.get("InstanceId", ""),
+                                "main_ip": instance.get("PublicIpAddress", ""),
+                                "state": instance.get("State", {}).get("Name", ""),
+                                "tags": tag_kv,
+                            }
+                        )
+        return instances
+
+    # =========================================================================
+    # Snapshot Operations (EBS root volume of an instance)
+    # =========================================================================
+
+    def _get_root_volume_id(self, instance_id: VpsInstanceId) -> str:
+        instance = self._describe_instance(instance_id)
+        if instance is None:
+            raise VpsApiError(404, f"Instance {instance_id} not found")
+        for mapping in instance.get("BlockDeviceMappings", []):
+            ebs = mapping.get("Ebs", {})
+            if ebs.get("VolumeId"):
+                return ebs["VolumeId"]
+        raise VpsApiError(500, f"Instance {instance_id} has no EBS volume")
+
+    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
+        volume_id = self._get_root_volume_id(instance_id)
+        with self._translate_aws_errors():
+            result = self._ec2().create_snapshot(VolumeId=volume_id, Description=description)
+        snap_id = result.get("SnapshotId", "")
+        if not snap_id:
+            raise VpsApiError(500, "CreateSnapshot returned no SnapshotId")
+        logger.info("Created EBS snapshot {} for volume {}", snap_id, volume_id)
+        return VpsSnapshotId(snap_id)
+
+    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
+        with self._translate_aws_errors():
+            self._ec2().delete_snapshot(SnapshotId=str(snapshot_id))
+        logger.info("Deleted EBS snapshot {}", snapshot_id)
+
+    def list_snapshots(self) -> list[VpsSnapshotInfo]:
+        with self._translate_aws_errors():
+            result = self._ec2().describe_snapshots(OwnerIds=["self"])
+        # boto3 returns tz-aware datetimes for EC2 timestamps; let a missing
+        # StartTime or unexpected type surface as a KeyError / TypeError
+        # rather than silently substituting "now" (which would be misleading
+        # data attached to the wrong snapshot).
+        return [
+            VpsSnapshotInfo(
+                id=VpsSnapshotId(snap["SnapshotId"]),
+                description=snap.get("Description", ""),
+                created_at=snap["StartTime"],
+            )
+            for snap in result.get("Snapshots", [])
+        ]
+
+    # =========================================================================
+    # SSH Key Operations (EC2 KeyPairs)
+    # =========================================================================
+
+    def upload_ssh_key(self, name: str, public_key: str) -> str:
+        """Import an SSH public key as an EC2 KeyPair. Returns the KeyName as the ID."""
+        with self._translate_aws_errors():
+            self._ec2().import_key_pair(KeyName=name, PublicKeyMaterial=public_key.encode("utf-8"))
+        logger.debug("Imported EC2 KeyPair {}", name)
+        return name
+
+    def delete_ssh_key(self, key_id: str) -> None:
+        with self._translate_aws_errors():
+            self._ec2().delete_key_pair(KeyName=key_id)
+        logger.debug("Deleted EC2 KeyPair {}", key_id)
+
+    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
+        with self._translate_aws_errors():
+            result = self._ec2().describe_key_pairs()
+        return [VpsSshKeyInfo(id=k["KeyName"], name=k["KeyName"]) for k in result.get("KeyPairs", [])]

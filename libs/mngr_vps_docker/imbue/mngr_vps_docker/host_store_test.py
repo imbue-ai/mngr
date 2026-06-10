@@ -61,14 +61,12 @@ def test_vps_host_config_creation() -> None:
         vps_instance_id=VpsInstanceId("inst-abc123"),
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         container_name="mngr-test-host",
         volume_name="mngr-host-vol-abc123",
     )
     assert config.vps_instance_id == VpsInstanceId("inst-abc123")
     assert config.region == "ewr"
     assert config.plan == "vc2-1c-1gb"
-    assert config.os_id == 2136
     assert config.container_name == "mngr-test-host"
     assert config.volume_name == "mngr-host-vol-abc123"
 
@@ -78,7 +76,6 @@ def test_vps_host_config_optional_fields() -> None:
         vps_instance_id=VpsInstanceId("inst-abc123"),
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         container_name="test",
         volume_name="vol",
     )
@@ -116,7 +113,6 @@ def test_vps_docker_host_record_serialization_roundtrip() -> None:
         vps_instance_id=VpsInstanceId("inst-abc123"),
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         container_name="test",
         volume_name="vol",
     )

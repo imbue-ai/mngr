@@ -169,6 +169,12 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(
+        entry_point_name="aws",
+        package_name="imbue-mngr-aws",
+        description="AWS provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
         entry_point_name="tutor",
         package_name="imbue-mngr-tutor",
         description="Interactive tutorial plugin for mngr",

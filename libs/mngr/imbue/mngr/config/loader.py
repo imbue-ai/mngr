@@ -6,13 +6,11 @@ from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Sequence
-from typing import get_args
 from uuid import uuid4
 
 import pluggy
 from loguru import logger
 from pydantic import BaseModel
-from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -492,8 +490,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
       raise so the caller picks one canonical spelling.
 
     Always returns a fresh dict, so callers can freely mutate the result
-    (e.g. via ``del`` in ``_check_unknown_fields`` or ``pop`` in
-    ``parse_config``) without affecting the caller's input.
+    (e.g. via ``pop`` in ``parse_config``) without affecting the caller's input.
     """
     result: dict[str, Any] = {}
     seen_normalized: dict[str, str] = {}
@@ -527,7 +524,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     return result
 
 
-def _check_unknown_fields(
+def _drop_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
     context: str,
@@ -535,81 +532,34 @@ def _check_unknown_fields(
     strict: bool = True,
     silent: bool = False,
     extra_hint: str | None = None,
-) -> None:
-    """Check for unknown fields in raw_config and either raise or warn.
+) -> dict[str, Any]:
+    """Return ``raw_config`` keeping only fields declared on ``model_class``.
 
-    When strict=True, raises ConfigParseError (used by config set to catch typos).
-    When strict=False, logs a warning and removes the unknown fields so that config files
-    written for newer versions of mngr don't break older versions.
-    When silent=True (and strict=False), suppress the warning entirely. Used by
-    ``mngr plugin add``, where the config is expected to reference plugins that
-    are not yet installed; the warnings are noise that resolve themselves once
-    the install completes.
+    When strict=True (used by ``config set`` to catch typos), raises
+    ConfigParseError on any unknown field. When strict=False, logs a warning and
+    returns a copy with the unknown fields removed, so config files written for
+    newer versions of mngr don't break older versions. When silent=True (and
+    strict=False), suppresses the warning entirely -- used by ``mngr plugin add``,
+    where the config is expected to reference plugins that are not yet installed;
+    the warnings are noise that resolve themselves once the install completes.
+
+    The input dict is left untouched; the returned dict is the one to use (it is
+    the same object when there are no unknown fields).
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
-    if unknown:
-        base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
-        full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
-        if strict:
-            raise ConfigParseError(full_msg)
-        if not silent:
-            logger.warning(full_msg)
-        for key in unknown:
-            del raw_config[key]
-
-
-def _annotation_references_model(annotation: Any) -> bool:
-    """Whether a field annotation is a pydantic model or contains one as a type
-    argument (e.g. ``SSHHostConfig``, ``dict[str, SSHHostConfig]``,
-    ``list[SSHHostConfig]``, ``SSHHostConfig | None``).
-    """
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return True
-    return any(_annotation_references_model(arg) for arg in get_args(annotation))
-
-
-def _coerce_nested_model_fields(
-    raw_config: dict[str, Any],
-    config_class: type[BaseModel],
-    context: str,
-) -> dict[str, Any]:
-    """Validate fields whose declared type involves a nested pydantic model.
-
-    Provider configs are built with ``model_construct`` (see ``_parse_providers``)
-    so that unset top-level fields stay ``None`` for config-layer merging. But
-    ``model_construct`` does not coerce values, so a nested-model field such as
-    ``SSHProviderConfig.hosts`` (``dict[str, SSHHostConfig]``) would keep its raw
-    TOML dicts and blow up the moment the backend accessed an attribute on them
-    (``AttributeError: 'dict' object has no attribute 'key_file'``).
-
-    Only fields actually present in ``raw_config`` are touched, and only those
-    whose annotation references a pydantic model, so scalar fields and the
-    None-for-unset merge semantics for unset fields are both unaffected. Nested
-    entries are atomic (validated as a unit), which is why coercing them does not
-    interfere with the layer merge. Returns a new dict; the input is not mutated.
-
-    Unlike ``_check_unknown_fields``, this does not take ``strict``/``silent``: a
-    malformed nested value is always fatal. Downgrading to warn-and-skip is not an
-    option here, because the only way to "skip" coercion is to leave the raw dict
-    in place -- which reintroduces the exact late ``AttributeError`` this function
-    exists to prevent. A clear ``ConfigParseError`` at parse time is strictly
-    better, and this path was already a hard crash before coercion existed, so
-    always raising is not a forward-compat regression.
-    """
-    result = dict(raw_config)
-    for field_name, value in raw_config.items():
-        field_info = config_class.model_fields.get(field_name)
-        if field_info is None or not _annotation_references_model(field_info.annotation):
-            continue
-        try:
-            result[field_name] = TypeAdapter(field_info.annotation).validate_python(value)
-        except ValidationError as e:
-            raise ConfigParseError(f"Invalid value for '{context}.{field_name}': {e}") from e
-    return result
+    if not unknown:
+        return raw_config
+    base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
+    full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
+    if strict:
+        raise ConfigParseError(full_msg)
+    if not silent:
+        logger.warning(full_msg)
+    return {k: v for k, v in raw_config.items() if k not in unknown}
 
 
 def _parse_providers(
@@ -621,7 +571,11 @@ def _parse_providers(
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
-    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Validates each block with ``model_validate`` so raw TOML scalars are coerced
+    to their declared field types (e.g. ``builder = "DEPOT"`` to
+    ``DockerBuilder.DEPOT``, ``allowed_ssh_cidrs = [...]`` to a tuple). Only the
+    keys actually present in the block are recorded in ``model_fields_set``, so
+    per-field config-layer merging works.
     Provider blocks whose plugin is disabled are silently skipped.
     Provider blocks with is_enabled=false whose backend plugin is not installed
     are also skipped, since there is no config class to resolve for a disabled
@@ -666,9 +620,30 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
-        raw_config = _coerce_nested_model_fields(raw_config, config_class, f"providers.{name}")
-        providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
+        # _drop_unknown_fields raises (strict) or returns the config with unknown
+        # keys removed (non-strict), leaving only known fields for model_validate
+        # to coerce to their declared types. model_validate (rather than
+        # model_construct) is what coerces raw TOML scalars and nested tables to
+        # their declared field types: an enum like ``builder = "DEPOT"`` to
+        # ``DockerBuilder.DEPOT`` (whose ``is``-identity check would otherwise
+        # silently fail on the raw string), ``allowed_ssh_cidrs = [...]`` to a
+        # tuple, and a nested-model table like ``SSHProviderConfig.hosts`` to
+        # ``SSHHostConfig`` (which would otherwise stay a raw dict and crash with
+        # ``AttributeError: 'dict' object has no attribute ...`` the moment the
+        # backend touched it). Only the keys present in the block land in
+        # ``model_fields_set``, so per-field config-layer merging is unaffected.
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"providers.{name}", strict=strict, silent=silent
+        )
+        try:
+            providers[ProviderInstanceName(name)] = config_class.model_validate(cleaned_config)
+        except ValidationError as e:
+            # A malformed known field (bad scalar, failed validator, malformed
+            # nested host table, ...) is always fatal: surface it as a clear
+            # parse-time ConfigParseError keyed on the provider block rather than
+            # a raw pydantic ValidationError or a late AttributeError from the
+            # backend.
+            raise ConfigParseError(f"Invalid config for 'providers.{name}': {e}") from e
 
     return providers
 
@@ -801,7 +776,7 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
-        _check_unknown_fields(
+        cleaned_config = _drop_unknown_fields(
             raw_config,
             config_class,
             f"agent_types.{name}",
@@ -809,7 +784,7 @@ def _parse_agent_types(
             silent=silent,
             extra_hint=extra_hint,
         )
-        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types
@@ -830,8 +805,10 @@ def _parse_plugins(
     for name, raw_config in raw_plugins.items():
         raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
-        plugins[PluginName(name)] = config_class.model_construct(**raw_config)
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent
+        )
+        plugins[PluginName(name)] = config_class.model_construct(**cleaned_config)
 
     return plugins
 
@@ -908,8 +885,8 @@ def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silen
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_retry = _normalize_field_keys(raw_retry, "retry")
-    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
-    return RetryConfig.model_construct(**raw_retry)
+    cleaned_retry = _drop_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
+    return RetryConfig.model_construct(**cleaned_retry)
 
 
 def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, silent: bool = False) -> LoggingConfig:
@@ -918,8 +895,8 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_logging = _normalize_field_keys(raw_logging, "logging")
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
-    return LoggingConfig.model_construct(**raw_logging)
+    cleaned_logging = _drop_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
+    return LoggingConfig.model_construct(**cleaned_logging)
 
 
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:

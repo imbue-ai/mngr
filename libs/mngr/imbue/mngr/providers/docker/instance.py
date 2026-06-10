@@ -330,6 +330,17 @@ class DockerProviderInstance(BaseProviderInstance):
         prefix = self.mngr_ctx.config.prefix
         return state_volume_name(prefix, user_id)
 
+    def ensure_state_container_exists(self) -> None:
+        """Create the singleton state container if it does not already exist.
+
+        Used by the backend's ``bootstrap_for_host_creation`` on the
+        ``mngr create`` path so the subsequent read-only ``build_provider_instance``
+        passes its emptiness guard. Idempotent: backed by the cached
+        ``_state_volume`` property, which calls ``ensure_state_container``.
+        """
+        # Accessing the cached property forces ensure_state_container() to run.
+        _ = self._state_volume
+
     def has_state_container(self) -> bool:
         """Whether the singleton state container already exists, without creating it.
 
