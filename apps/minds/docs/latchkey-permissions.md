@@ -71,19 +71,28 @@ and how the agent receives the answer.
      there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
-      `authOptions`, and `setCredentialsExample`.
-   2. If credentials are not `valid` and the service advertises a
-      `browser` auth option (or latchkey reports no `authOptions` at all,
-      treated as the legacy fallback), runs `latchkey auth browser <service>`
-      synchronously (transparently running the one-off `latchkey auth
-      browser-prepare <service>` step first when latchkey asks for it).
+      `authOptions`, and `setCredentialsExample`. A `valid` *or*
+      `unknown` status skips credential setup entirely and proceeds
+      straight to the grant (step 6.4) -- `unknown` means latchkey
+      cannot vouch for the credential either way (e.g. a generic
+      `rawCurl` credential it has no validator for, or a catalog scope
+      like `minds` that is not a registered latchkey service at all),
+      so prompting the user would demand credentials that already exist
+      or were never theirs to manage.
+   2. If credentials are reported as `missing` or `invalid` and the
+      service advertises a `browser` auth option (or latchkey reports no
+      `authOptions` at all, treated as the legacy fallback), runs
+      `latchkey auth browser <service>` synchronously (transparently
+      running the one-off `latchkey auth browser-prepare <service>`
+      step first when latchkey asks for it).
       Cancellation or failure of either step produces a `FAILED` outcome:
       the grant is **not** applied and the request stays pending (no
       response event is written), so the dialog surfaces the reason and the
       user can click Approve again to retry. A failed approval is never
       recorded as a denial.
-   3. If credentials are not `valid` and the service does not advertise a
-      `browser` auth option (e.g. Coolify, where `authOptions = ["set"]`),
+   3. If credentials are reported as `missing` or `invalid` and the
+      service does not advertise a `browser` auth option (e.g. Coolify,
+      where `authOptions = ["set"]`),
       the grant is **refused** and the request stays pending. The dialog
       shows the `setCredentialsExample` returned by latchkey (or a
       generic fallback) and asks the user to run it in a terminal. A
