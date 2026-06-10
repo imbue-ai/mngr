@@ -1286,7 +1286,9 @@ def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefi
     )
     exempt_override = MngrConfig.model_construct(
         prefix=mngr_test_prefix,
-        agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=ScalarTuple(("--verbose",)))},
+        agent_types={
+            AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=ScalarTuple(("--verbose",)))
+        },
     )
     assert detect_settings_narrowing(base, exempt_override) == []
     plain_override = MngrConfig.model_construct(
