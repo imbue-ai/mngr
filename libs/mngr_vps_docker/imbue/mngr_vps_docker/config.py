@@ -43,6 +43,15 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default=300.0,
         description="Timeout for Docker installation on the VPS in seconds",
     )
+    cloud_init_slow_warning_threshold_seconds: float = Field(
+        default=30.0,
+        description=(
+            "Log a warning when cloud-init (apt-get + Docker install on a fresh VPS) takes longer "
+            "than this many seconds. Informational only -- it does not fail the create; the hard "
+            "limit is `docker_install_timeout`. Providers whose images legitimately take longer to "
+            "bootstrap (e.g. AWS) raise this in their own config to avoid spurious warnings."
+        ),
+    )
     container_ssh_port: int = Field(
         default=2222,
         description="Port for sshd inside the Docker container (mapped to VPS localhost only)",

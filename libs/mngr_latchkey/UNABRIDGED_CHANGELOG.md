@@ -4,6 +4,47 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Regenerated the latchkey `services.json` permission catalog from detent 1.5.0.
+This adds the new `notion-mcp` service (Notion's hosted MCP endpoint at
+`mcp.notion.com`, scope `notion-mcp-api`, displayed as "Notion (MCP)") with its
+20 grantable permissions, and refreshes the Slack `slack-read-all` /
+`slack-write-all` descriptions to match detent's updated wording. The catalog
+generator (`scripts/generate_services_json.py`) gained curated display-name and
+service-order entries for `notion-mcp`.
+
+The VPS-resident latchkey gateway is now launched with
+`LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`. The remote gateway runs on a synced
+copy of the user's credentials, so disabling refresh there prevents it from
+racing the desktop-side latchkey to rotate the same OAuth refresh token (which
+would exhaust the user's token and invalidate the desktop's credentials). The
+desktop-side latchkey remains the single owner of credential refresh.
+
+The `permission-requests` gateway extension's approve endpoint
+(`POST /permission-requests/approve/<id>`) now accepts an optional JSON body
+carrying a single `path` field. When present, and only for `file-sharing`
+requests, the file-sharing effect is recomputed for that path instead of using
+the one precomputed at request-creation time -- this lets the Minds desktop
+client honor a user who edited the shared path in the approval dialog. The
+overridden path is re-validated with the same traversal-rejection rules used at
+request creation, the access mode fixed at creation time is preserved (a path
+override cannot escalate read-only to read-write), and only the `path` field is
+accepted in the body. An empty or `null` body preserves the previous behavior
+(apply the precomputed effect verbatim).
+
+File-sharing requests are now validated to be within one of the Minds WebDAV
+mount roots -- the user's home directory or the system temp directory -- at
+request-creation time (and at approve time for a user-edited path override).
+A grant for any path outside those roots is inert (the WebDAV server has no
+provider for it and answers 404), so rejecting it up front gives the agent a
+clear "must be within a shared root" error instead of an approve-then-404 dead
+end. The roots are derived from the gateway process's `homedir()` / `tmpdir()`,
+which match the `Path.home()` / `tempfile.gettempdir()` roots the Minds WebDAV
+server serves on the desktop host. The comparison is case-insensitive (mirroring
+the WebDAV share-prefix matching) and purely lexical (no symlink resolution or
+existence check).
+
 ## 2026-06-08
 
 - Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr latchkey` plugin). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` and `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
