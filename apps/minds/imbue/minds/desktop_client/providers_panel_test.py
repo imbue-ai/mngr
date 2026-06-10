@@ -442,8 +442,11 @@ def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
 
 
 def test_build_workspace_list_emits_black_foreground_for_light_palette_entries() -> None:
+    # #fcefd4 is the "clarity" palette entry, used here because it's
+    # near the upper end of the lightness range -- exercises the
+    # >= 0.179 luminance branch of pick_workspace_foreground.
     resolver = MngrCliBackendResolver()
-    agent = _make_workspace_agent_with_color("#fcefd4")  # clarity
+    agent = _make_workspace_agent_with_color("#fcefd4")
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)

@@ -866,10 +866,10 @@ def test_normalize_workspace_color_accepts_lenient_inputs(value: str, expected: 
         "",
         "not-a-hex",
         "#ff",
-        "#fffff",  # 5 chars in body
-        "#fffffff",  # 7 chars in body
+        "#fffff",
+        "#fffffff",
         "#xyz",
-        "#ffffff80",  # 8 chars (alpha) not supported -- picker doesn't offer alpha
+        "#ffffff80",
         "rgb(255, 255, 255)",
         "ffffffff",
     ],
