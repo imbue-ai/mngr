@@ -76,9 +76,11 @@ def subprocess_env(tmp_path: Path) -> dict[str, str]:
     ``.mngr`` config is not picked up. A project config is still required so
     that (a) the config loader's pytest guard is satisfied
     (``is_allowed_in_pytest``) and (b) the remote providers are disabled so
-    ``mngr`` does not try to reach Modal/Docker. pi needs no trust file (it has
-    no trust dialog), so unlike the claude release tests there is nothing
-    else to seed.
+    ``mngr`` does not try to reach Modal/Docker. No trust file needs seeding
+    here: pi 0.79+ *does* show a "Trust project folder?" dialog (the source repo
+    below adds a ``.agents/skills`` dir to trigger it), but the plugin pre-seeds
+    workspace trust during ``mngr create --yes`` -- the very behavior this e2e
+    exercises -- so the fixture only needs the project config.
     """
     env = get_subprocess_test_env(root_name="mngr-pi-release-test")
     project_config_dir = tmp_path / ".mngr-pi-test"
