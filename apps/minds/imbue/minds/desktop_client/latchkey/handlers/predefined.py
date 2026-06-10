@@ -60,6 +60,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -142,6 +143,41 @@ def _prepend_latchkey_directory(command: str, latchkey_directory: Path) -> str:
     never see them.
     """
     return f"LATCHKEY_DIRECTORY={shlex.quote(str(latchkey_directory))} {command}"
+
+
+def _needs_credential_setup(latchkey_service_info: LatchkeyServiceInfo) -> bool:
+    """True when the grant flow must sort out credentials before granting.
+
+    Only intervene when latchkey is certain credentials are absent
+    (MISSING) or known-broken (INVALID). VALID obviously proceeds.
+    UNKNOWN also proceeds: it covers both generic ``rawCurl``
+    credentials latchkey has no way to verify, and catalog scopes
+    that are not registered latchkey services at all (e.g. the
+    ``minds`` peer-spawn scope, served by a gateway extension that
+    injects its own credential -- ``latchkey services info minds``
+    fails and degrades to UNKNOWN). Treating UNKNOWN as "needs
+    setup" would prompt the user for credentials that either
+    already exist or were never theirs to manage; if a credential
+    is in fact stale, the downstream API call will fail and
+    surface a real error instead.
+    """
+    return latchkey_service_info.credential_status in (
+        CredentialStatus.MISSING,
+        CredentialStatus.INVALID,
+    )
+
+
+def _supports_browser_auth(latchkey_service_info: LatchkeyServiceInfo) -> bool:
+    """True when ``latchkey auth browser`` is the right way to fix credentials.
+
+    Either latchkey explicitly advertises a browser flow, or it returned
+    no ``authOptions`` at all and we don't actually know (legacy
+    fallback: keep the old always-run-browser behaviour).
+    """
+    return (
+        LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
+        or not latchkey_service_info.auth_options
+    )
 
 
 def _json_error(message: str, status_code: int) -> Response:
@@ -332,32 +368,12 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
 
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        # Only intervene when latchkey is certain credentials are absent
-        # (MISSING) or known-broken (INVALID). VALID obviously proceeds.
-        # UNKNOWN also proceeds: it covers both generic ``rawCurl``
-        # credentials latchkey has no way to verify, and catalog scopes
-        # that are not registered latchkey services at all (e.g. the
-        # ``minds`` peer-spawn scope, served by a gateway extension that
-        # injects its own credential -- ``latchkey services info minds``
-        # fails and degrades to UNKNOWN). Treating UNKNOWN as "needs
-        # setup" would prompt the user for credentials that either
-        # already exist or were never theirs to manage; if a credential
-        # is in fact stale, the downstream API call will fail and
-        # surface a real error instead.
-        if latchkey_service_info.credential_status in (
-            CredentialStatus.MISSING,
-            CredentialStatus.INVALID,
-        ):
-            # If latchkey advertises a browser flow (or returned no
-            # ``authOptions`` at all and we don't actually know), keep the
-            # legacy behaviour and run it. Otherwise refuse the grant and
-            # ask the user to set credentials manually -- the request
-            # stays pending so a follow-up Approve click re-checks status.
-            is_browser_supported = (
-                LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
-                or not latchkey_service_info.auth_options
-            )
-            if not is_browser_supported:
+        if _needs_credential_setup(latchkey_service_info):
+            # If a browser flow is available, run it. Otherwise refuse the
+            # grant and ask the user to set credentials manually -- the
+            # request stays pending so a follow-up Approve click re-checks
+            # status.
+            if not _supports_browser_auth(latchkey_service_info):
                 logger.info(
                     "Credentials for {} reported as {}; latchkey does not advertise a browser flow, "
                     "asking user to run 'latchkey auth set'",
@@ -488,22 +504,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         host_id = _resolve_host_id(backend_resolver, parsed_id)
         pre_checked = self._initial_checked_permissions(host_id, service_info, req_event.permissions)
 
-        # Match ``grant()``: ``latchkey auth browser`` runs only when
-        # credentials are reported MISSING or INVALID (VALID and UNKNOWN
-        # both proceed straight to the grant) AND the service either
-        # advertises a browser flow or returns no auth options at all
-        # (legacy fallback). Computed up front so the dialog's progress
-        # notice tells the truth about whether to expect a browser
-        # pop-up. If the status changes between render and submit
-        # (rare), the user may see a slightly inaccurate notice for one
-        # cycle; the actual outcome is unaffected.
+        # ``grant()`` runs ``latchkey auth browser`` exactly when both
+        # shared predicates hold. Computed up front so the dialog's
+        # progress notice tells the truth about whether to expect a
+        # browser pop-up. If the status changes between render and
+        # submit (rare), the user may see a slightly inaccurate notice
+        # for one cycle; the actual outcome is unaffected.
         latchkey_service_info = self.latchkey.services_info(service_info.name)
-        will_open_browser = latchkey_service_info.credential_status in (
-            CredentialStatus.MISSING,
-            CredentialStatus.INVALID,
-        ) and (
-            LATCHKEY_AUTH_OPTION_BROWSER in latchkey_service_info.auth_options
-            or not latchkey_service_info.auth_options
+        will_open_browser = _needs_credential_setup(latchkey_service_info) and _supports_browser_auth(
+            latchkey_service_info
         )
 
         return render_predefined_permission_dialog(
