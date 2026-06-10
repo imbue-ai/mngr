@@ -78,15 +78,6 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default="us-east-1",
         description="Default AWS region (e.g., 'us-east-1').",
     )
-    cloud_init_slow_warning_threshold_seconds: float = Field(
-        default=90.0,
-        description=(
-            "Raised above the VPS-Docker base default (30s) because a cold EC2 instance "
-            "legitimately spends 30-60s+ on apt + Docker install during cloud-init; the lower "
-            "base value produced spurious 'Cloud-init took Ns' warnings on AWS. Informational "
-            "only -- the hard limit remains `docker_install_timeout`."
-        ),
-    )
     default_instance_type: str = Field(
         default="t3.small",
         description=(
