@@ -407,9 +407,16 @@
     try {
       if (data.type === 'freeform_accent_preview') {
         // Create-form preview: no workspace yet, so there's no agentId
-        // to key the cache by. Paint the CSS variables directly; the
-        // next regular navigation/SSE event will overwrite them.
+        // to key the cache by. Paint the CSS variables directly and
+        // drop the SSE replay target so a background ``workspaces``
+        // tick (a liveness flip or rename in any workspace) doesn't
+        // repaint the previous workspace's accent over the preview
+        // while the user is still on the create form. The next
+        // navigation event (``current-workspace-changed`` for the new
+        // workspace on submit, or the last-workspace re-query on
+        // cancel) re-establishes the regular accent path.
         if (data.accent) {
+          lastRequestedAccentAgentId = null;
           document.documentElement.style.setProperty('--workspace-accent', data.accent);
           document.documentElement.style.setProperty('--titlebar-bg', data.accent);
           if (data.accent_fg) {
