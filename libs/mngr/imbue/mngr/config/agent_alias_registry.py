@@ -23,6 +23,17 @@ def register_agent_alias(
     _agent_alias_registry[AgentTypeName(alias)] = AgentTypeName(canonical_agent_type)
 
 
+def unregister_agent_alias(alias: str) -> None:
+    """Drop an alias from the registry, if present.
+
+    Used when a user-defined custom agent type shadows a plugin-registered
+    alias of the same name: the user's concrete type takes precedence (just as
+    a registered type beats an alias at plugin-load time), so the alias is
+    removed and the name resolves to the custom type instead.
+    """
+    _agent_alias_registry.pop(AgentTypeName(alias), None)
+
+
 def is_agent_alias(agent_type: str) -> bool:
     """Whether an agent-type name is a registered alias rather than a canonical type."""
     return AgentTypeName(agent_type) in _agent_alias_registry

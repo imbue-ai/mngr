@@ -11,6 +11,8 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import apply_create_template
+from imbue.mngr.config.agent_alias_registry import is_agent_alias
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_alias_registry import register_agent_alias
 from imbue.mngr.config.agent_alias_registry import reset_agent_alias_registry
 from imbue.mngr.config.agent_config_registry import register_agent_config
@@ -43,7 +45,6 @@ from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import ConfigParseError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import LogLevel
@@ -418,15 +419,23 @@ def test_parse_agent_types_resolves_alias_parent_type_to_canonical() -> None:
         reset_agent_alias_registry()
 
 
-def test_parse_agent_types_rejects_custom_type_named_like_alias() -> None:
-    """A custom type whose name collides with an alias is rejected."""
+@pytest.mark.allow_warnings
+def test_parse_agent_types_lets_custom_type_shadow_alias() -> None:
+    """A custom type whose name collides with an alias wins; the alias is dropped."""
     reset_agent_alias_registry()
     try:
         register_agent_alias("agy", "antigravity")
 
         raw = {"agy": {"cli_args": "--verbose"}}
-        with pytest.raises(UserInputError, match="conflicts with a built-in alias for 'antigravity'"):
-            _parse_agent_types(raw, disabled_plugins=frozenset())
+        result = _parse_agent_types(raw, disabled_plugins=frozenset())
+
+        # The user's custom type is kept...
+        assert AgentTypeName("agy") in result
+        assert result[AgentTypeName("agy")].cli_args == ("--verbose",)
+        # ...and the colliding alias was dropped, so the name now refers to the
+        # custom type instead of resolving to the canonical 'antigravity'.
+        assert not is_agent_alias("agy")
+        assert normalize_agent_type_name("agy") == "agy"
     finally:
         reset_agent_alias_registry()
 

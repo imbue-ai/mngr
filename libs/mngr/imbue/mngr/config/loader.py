@@ -20,6 +20,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_alias_registry import is_agent_alias
 from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
+from imbue.mngr.config.agent_alias_registry import unregister_agent_alias
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -768,15 +769,26 @@ def _parse_agent_types(
     # read normalized `plugin` / `parent_type` fields as it walks the chain.
     raw_types = {name: _normalize_field_keys(raw, f"agent_types.{name}") for name, raw in raw_types.items()}
 
-    for name, raw_config in raw_types.items():
-        # A custom type name must not collide with a plugin-registered alias:
-        # that would make the same name mean two different things, so reject it.
+    # A user-defined custom type shadows a plugin-registered alias of the same
+    # name: the user's concrete type wins (mirroring how a registered type
+    # beats an alias at plugin-load time), so drop the colliding alias before
+    # resolving anything. Done as a pre-pass so a shadowed alias is never
+    # consulted when normalizing a parent_type in the loop below.
+    for name in raw_types:
         if is_agent_alias(name):
-            raise UserInputError(
-                f"Agent type '{name}' conflicts with a built-in alias for "
-                f"'{normalize_agent_type_name(name)}'. Rename your custom "
-                f"[agent_types.{name}] block to a name that is not an alias."
-            )
+            shadowed_canonical = normalize_agent_type_name(name)
+            unregister_agent_alias(name)
+            if not silent:
+                logger.warning(
+                    "Custom agent type '{}' shadows the built-in alias for '{}'; '{}' now "
+                    "refers to your custom type and no longer resolves to '{}'.",
+                    name,
+                    shadowed_canonical,
+                    name,
+                    shadowed_canonical,
+                )
+
+    for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
         # has auto_dismiss_dialogs). Without this, unregistered custom type names
