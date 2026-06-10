@@ -1,0 +1,1 @@
+- Add a planning document at `blueprint/workspace-color-picker/plan-workspace-color-picker.md` describing the workspace color-picker feature: a 12-color palette (11 named Figma colors + `#ffffff` white) plus an optional custom hex in workspace settings, replacing the current SHA-derived per-workspace accent. Plan-only — no implementation lands in this PR.
