@@ -20,16 +20,18 @@ on:
         description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
         required: false
         default: ''
-  # Daily health check against the heads of both repos. Runs at 14:00 UTC
-  # (07:00 PDT / 06:00 PST), so a failure surfaces at the start of the
-  # workday rather than overnight. The cron only fires from the default
-  # branch -- this file has to be merged to mngr `main` first for the
-  # schedule to activate (GitHub Actions ignores schedule triggers
-  # defined only on feature branches). Defaults: commit_sha = mngr main
-  # HEAD at trigger time (github.sha), template_ref = `main`,
-  # skip_slack_flow = false (exercise the latchkey + slack-mock path).
+  # Twice-daily health check against the heads of both repos: 09:00 PDT
+  # (16:00 UTC) so a morning failure surfaces at the start of the workday,
+  # and 21:00 PDT (04:00 UTC) so an evening failure is caught before the
+  # next workday opens. The cron only fires from the default branch --
+  # this file has to be merged to mngr `main` first for the schedule to
+  # activate (GitHub Actions ignores schedule triggers defined only on
+  # feature branches). Defaults: commit_sha = mngr main HEAD at trigger
+  # time (github.sha), template_ref = `main`, skip_slack_flow = false
+  # (exercise the latchkey + slack-mock path).
   schedule:
-    - cron: '0 14 * * *'
+    - cron: '0 16 * * *'  # 09:00 PDT / 08:00 PST
+    - cron: '0 4 * * *'   # 21:00 PDT / 20:00 PST
 
 concurrency:
   group: mac-runner
