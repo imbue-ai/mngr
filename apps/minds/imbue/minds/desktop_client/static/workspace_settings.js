@@ -213,6 +213,17 @@
       syncSwatchSelection(normalized);
       saveColor(normalized);
     });
+
+    hexInput.addEventListener('keydown', function (e) {
+      // Enter applies the color. Blurring routes through the blur
+      // handler above (validate -> normalize -> save), so Enter and
+      // click-away share one save path. preventDefault stops a stray
+      // form submission if this input ever sits inside a <form>.
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        hexInput.blur();
+      }
+    });
   }
   // -- End color picker ---------------------------------------------------
 
