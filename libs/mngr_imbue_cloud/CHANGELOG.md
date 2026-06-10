@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Offline hosts produced by this provider are now readable through the new `HostFileReadInterface`. The offline-host construction path (used by both `get_host` for stopped hosts and `to_offline_host`) returns an `OfflineHostWithVolume` via the shared `make_readable_offline_host` helper, so a stopped host's files are reachable through the same interface as an online host (used e.g. by Claude session preservation when a host is destroyed while offline). The host's volume is resolved lazily on first read, so this adds no per-host probe to host discovery; when no volume is available, reads behave as "nothing there".
+- Changed: Offline hosts produced by this provider are now readable through the new `HostFileReadInterface`. `to_offline_host` returns an `OfflineHostWithVolume` via the shared `make_readable_offline_host` helper, so a stopped host's files are reachable through the same interface as an online host (used e.g. by Claude session preservation when a host is destroyed while offline; the destroy path obtains the host via `get_host`). The host's volume is resolved lazily on first read, so this adds no per-host probe to host discovery; when no volume is available, reads behave as "nothing there".
 
 ## [v0.1.1] - 2026-06-08
 
