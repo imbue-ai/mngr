@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Notion (MCP) entry in the regenerated latchkey `services.json` catalog — Notion's hosted MCP endpoint at `mcp.notion.com` (scope `notion-mcp-api`, displayed as "Notion (MCP)") with 20 grantable permissions; the catalog generator (`scripts/generate_services_json.py`) gained curated display-name and service-order entries for `notion-mcp`.
+- Added: Optional `path` JSON body field on `POST /permission-requests/approve/<id>` for `file-sharing` requests — when present, the file-sharing effect is recomputed for that path instead of the one precomputed at request-creation time, letting the Minds desktop client honor a user who edited the shared path in the approval dialog. The override is re-validated with the same traversal-rejection rules used at request creation; the access mode fixed at creation time is preserved (a path override cannot escalate read-only to read-write).
+
+### Changed
+
+- Changed: VPS-resident latchkey gateway is now launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`. The remote gateway runs on a synced copy of the user's credentials, so disabling refresh there prevents it from racing the desktop-side latchkey to rotate the same OAuth refresh token (which would exhaust the user's token and invalidate the desktop's credentials). The desktop-side latchkey remains the single owner of credential refresh.
+- Changed: Refreshed Slack `slack-read-all` / `slack-write-all` descriptions to match detent's updated wording.
+
+### Fixed
+
+- Fixed: File-sharing requests are now validated against the Minds WebDAV mount roots (the user's home directory and the system temp directory) at request-creation time and at approve time for a user-edited path override. A grant for any path outside those roots was previously inert (the WebDAV server has no provider for it and answers 404); rejecting it up front gives the agent a clear "must be within a shared root" error instead of an approve-then-404 dead end. Matching mirrors the WebDAV share-prefix matching (case-insensitive, lexical, no symlink resolution or existence check).
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

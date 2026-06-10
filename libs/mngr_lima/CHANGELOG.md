@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `is_run_as_root` config field on the Lima provider — when enabled, mngr runs the agent in the VM as root (uid 0), so a coding agent can `apt install` and write anywhere with no `sudo`. mngr injects a root client key, enables key-based root login, and SSHes in as root. Requires the btrfs additional-disk layout (`is_host_data_volume_exposed=false`); the invalid combination with the 9p bind-mount layout is rejected at config construction.
+
+### Changed
+
+- Changed: Lima provider runs agents directly in the VM again (docker-in-VM mode removed — see Removed). Consistent dependency setup across providers is now achieved by having the project ship idempotent setup scripts that its `Dockerfile` runs (for docker/vps_docker/ovh) and that the Lima host runs directly after the project is synced in. btrfs-based backups continue to work because `host_dir` stays on a btrfs disk and the root agent can snapshot it directly.
+- Changed: Offline hosts produced by this provider implement the new `HostFileReadInterface` (via the shared `make_readable_offline_host` helper / `OfflineHostWithVolume`), so a stopped host's files are readable through the same interface as an online host. Volume resolution is lazy on first read, so no per-host probe is added to host discovery.
+
+### Removed
+
+- Removed: Lima provider's `is_host_in_docker` mode entirely, along with all its config fields (`is_host_in_docker`, `container_ssh_port`, `default_image`, `builder`, `docker_install_timeout`, `container_ssh_connect_timeout`, `image_build_timeout_seconds`, `default_container_run_args`, `docker_runtime`, `install_gvisor_runtime`). Configs that still set these now fail to load; existing docker-mode Lima hosts (records with `is_host_in_docker=true`) are no longer startable — destroy and recreate them. The Lima provider no longer depends on `mngr_vps_docker`.
+
 ## [v0.1.5] - 2026-06-08
 
 ### Added

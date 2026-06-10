@@ -6,6 +6,18 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `claude_process_started` marker file (touched by the `SessionStart` hook) whose mtime gives consumers a restart boundary — any transcript event older than it belongs to a turn the current process did not run.
+
+### Changed
+
+- Changed: Claude session preservation rewritten onto core mngr's shared `preserve_agent_data` machinery. Sessions, the raw and common transcripts, and the session-id history are still preserved before the agent state directory is deleted, but through a single declarative list executed against either an online host or a volume-backed offline host (replacing the previously duplicated SSH and Volume implementations). Preserved files now mirror the agent state directory verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/` (e.g. `plugin/claude/anthropic/projects/...`, `logs/claude_transcript/...`, `events/claude/common_transcript/...`, `claude_session_id_history`) instead of the old `<local_host_dir>/plugin/mngr_claude/preserved_sessions/<agent-name>--<agent-id>/` location with renamed subdirectories — a switch-forward change (previously preserved sessions in the old location are left in place).
+
+### Fixed
+
+- Fixed: A Claude agent restarted or resumed mid-turn no longer stays stuck at the `RUNNING` lifecycle state. The `active` marker (set on `UserPromptSubmit`, cleared by `Stop` / idle `Notification`) used to outlive a turn abandoned by an abnormal exit (container restart, OOM, crash); the `SessionStart` hook now clears the `active` / `permissions_waiting` markers on `startup`/`resume` (a fresh, not-mid-turn process), so the lifecycle state self-heals on the next (re)start. `compact` is excluded because auto-compaction fires mid-turn while Claude is genuinely active.
+
 ## [v0.2.12] - 2026-06-08
 
 ### Added

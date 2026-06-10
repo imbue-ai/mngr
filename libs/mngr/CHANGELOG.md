@@ -6,6 +6,30 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: Cross-plugin file-preservation API in `imbue.mngr.api.preservation` (`PreservedItem`, `preserve_agent_data()`, `get_preserved_agent_dir()`) alongside new `HostFileReadInterface` / `HostFileWriteInterface` on `OuterHostInterface` and a new `OfflineHostWithVolume` that exposes a stopped host's volume through the same interfaces (lazy volume resolution via the new provider `get_volume_reference_for_host`). Plugins can declare a single list of paths to preserve, executed through one code path against either an online host or a volume-backed offline host; the listing-entry type `VolumeFile` now carries a full `FileType` enum (file, directory, symlink, pipe, socket, block, character, other — moved into core `interfaces/data_types.py` from `mngr_file`, which now re-exports it) and an optional `permissions` string.
+- Added: SSH provider documentation page at `docs/core_plugins/providers/ssh.md` covering host config (`address`/`port`/`user`/`key_file`/`known_hosts_file`), the dynamic-hosts file, the `NAME@HOST.PROVIDER` form for running an agent on a configured host, and the provider's limitations (no host creation/snapshots/tags); the `ssh` backend is now registered in the provider concepts doc.
+- Added: `mngr usage --preserved` / `--no-preserved` flags documented on `mngr usage` and `mngr usage wait` in the regenerated CLI reference (behavior implemented in the `mngr_usage` plugin).
+
+### Changed
+
+- Changed: Read-only commands (`mngr list`, `mngr gc`, `mngr cleanup`, and cross-provider discovery) no longer create a Docker singleton state container when none exists; the Docker backend now treats the provider as empty and skips it, mirroring how the Modal backend skips a non-existent environment. Only `mngr create` (which passes `is_for_host_creation=True`) still creates the state container; behavior for existing Docker hosts is unchanged.
+- Changed: `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider is unavailable; other selected providers still run to completion and the unavailable provider is reported in the summary. Empty providers (e.g. a fresh Modal per-user environment) remain silently skipped, and the automatic post-destroy gc path (which uses `--all-providers` and tolerates skips) is unaffected.
+- Changed: `api/events.py` reads and discovers event journals through the unified `HostFileReadInterface` rather than shelling out `find`/`cat` over SSH for online hosts and using a separately-fetched events-scoped `Volume` otherwise; the trailing-newline "sentinel-cat" workaround is gone (host reads are byte-exact), and `EventsTarget`'s dual `online_host`/`volume` representation collapses to a single `host` handle.
+
+### Removed
+
+- Removed: `-a` / `--all` / `--all-agents` flag on `mngr message` (alias `mngr msg`). Use the explicit `mngr list --ids | mngr msg -` pattern (optionally with `--include` / `--exclude` to scope the broadcast); the tutorial and CLI examples have been updated.
+
+### Fixed
+
+- Fixed: SSH provider was silently disabling strict host-key checking for statically-configured hosts that set both `key_file` and `known_hosts_file` — `SSHProviderBackend.build_provider_instance` rebuilt the `SSHHostConfig` from only `address`/`port`/`user`/`key_file`, dropping `known_hosts_file`. The backend now updates only `key_file`, preserving `known_hosts_file` and any future fields; both static and dynamic paths share a new `SSHHostConfig.with_expanded_key_file()` method so neither can silently drop a field.
+- Fixed: Statically-configured SSH hosts under `[providers.<pool>.hosts.<host>]` previously crashed every host-enumerating command (`mngr list`, `mngr connect`, `mngr create <agent>@<host>.<pool>`, ...) with `AttributeError: 'dict' object has no attribute 'key_file'` because `model_construct` left each host entry as a raw dict. The config loader now coerces nested pydantic-model fields after `model_construct`, so static SSH hosts load and resolve correctly; a malformed host entry now produces a clear `providers.<pool>.hosts` config error instead of a late crash.
+- Fixed: `mngr create --template` `setting` / `setting__extend` entries (e.g. `setting__extend = ["providers.docker.docker_runtime=runsc"]`) are no longer silently dropped. A template `setting` that targets `commands.*` or `create_templates.*` now raises a clear error (those sections are resolved before template settings are applied, so the value could never take effect) instead of being silently ignored; direct CLI `-S` still wins over a template-provided setting for the same key.
+- Fixed: `mngr config get` and `mngr config list --all` now surface provider-subclass fields (e.g. `docker_runtime` on a docker provider) instead of reporting "Key not found".
+- Fixed: `ProviderInstanceConfig.merge_with` docstring updated — the stale `is_host_in_docker` example was replaced with `is_run_as_root` after the Lima provider's docker-in-VM mode was removed.
+
 ## [v0.2.12] - 2026-06-08
 
 ### Added

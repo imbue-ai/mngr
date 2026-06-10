@@ -41,6 +41,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `MINDS_OPEN_DEVTOOLS=1` env var auto-opens detached DevTools on the content view at launch.
 - Added: `--no-recycle` flag on `minds pool create` that forwards to the admin command, forcing a fresh OVH VPS order instead of reclaiming a cancelled one.
 - Added: Workspace create form now shows an explicit Region control under advanced settings for providers that place a host in a region (Imbue Cloud, Vultr). Defaults to that provider's last-used region (persisted per provider in `~/.minds/config.toml`), then a geolocation-guessed region, then a hardcoded default; chosen region is remembered on a successful create.
+- Added: `FAILED` outcome on the latchkey permission-grant flow — a failed approval (e.g. browser sign-in failure during `latchkey auth browser-prepare`) now keeps the request pending with a retryable failure reason instead of auto-denying it.
+- Added: File-sharing permission dialog exposes the requested path as an editable field with "Choose file…" / "Choose folder…" buttons that open a native OS file dialog (desktop app only); the edited path is re-validated against the WebDAV mount roots and against traversal before the grant is written. The dialog gives instant feedback while the path is empty or points outside a shared folder.
 
 ### Changed
 
@@ -112,6 +114,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The onboarding initial-message retry budget is raised from 10 minutes to 1 hour, so the message still lands on slow-to-start workspaces (e.g. a cold lima create) and when the user takes a while to finish logging in to their AI provider.
 - Changed: LIMA launch-mode progress-bar duration estimate bumped from 300s to 600s on the workspace-creation page; LIMA mode now boots a VM and builds the project image inside it (animation only, not a hard timeout).
 - Changed: Dev create-form defaults (`MINDS_WORKSPACE_GIT_URL`/`_NAME`/`_BRANCH`) are now honored on any tier (including staging/production) only when the explicit opt-in `MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1` is set; the previous tier-based gate is gone, so stray `MINDS_WORKSPACE_*` vars in the operator's shell are ignored on every tier.
+- Changed: The active workspace's accent now paints the full width of the titlebar (was a small swatch next to the page title) and the workspace content below floats inside a 4px inset frame with 12px rounded corners; per-workspace accents lightened from `oklch(65% 0.15 <hue>)` to `oklch(85% 0.08 <hue>)`; titlebar title text, navigation icons, and account button flip between dark and light foreground based on accent lightness; the redundant 3px top stripe on inner workspace pages is removed.
+- Changed: The most-recently-opened workspace's accent persists per window across navigation to Home, survives app restarts, and is cleared when the stored workspace is deleted (matching windows only) or the user signs out of their account (all windows). Stored per-entry in `~/.minds/window-state.json`.
+- Changed: Window state is now persisted in most-recently-focused order, so for multi-window users the loading screen opens at the bounds of the last window they interacted with; lesser-MRU windows are restored without stealing keyboard focus, and the most-recently-focused window is re-raised as each restored window appears.
 
 ### Removed
 
@@ -144,6 +149,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `minds pool {list,create,destroy}` no longer leaks the Neon pool DSN (which embeds the DB username + password) into the `Running: ...` log line when `--database-url` is passed explicitly. The DSN is masked before the command is rendered for logging; the real subprocess still receives the unredacted value. The secret-masking logic that `mngr forward`'s `--preauth-cookie` redaction already used is now a shared `imbue.minds.utils.secret_redaction.redact_secret_flag_values` helper.
 - Fixed: Two JinjaX template bugs where a component tag's quoted `{{ ... }}` attribute was forwarded literally — the Landing settings-gear `<Button>` (which navigated to `/workspace/{{ agent_id }}/settings` and 500'd) and the Sharing page's `<Link>` (dead "open workspace" link). Both now use the `attr={{ expr }}` form, with render regression tests asserting no literal `{{` survives in the affected pages.
 - Fixed: Destroyed workspaces now disappear from the workspace list, and destroying a workspace no longer reports a spurious "failed" once the host is gone.
+- Fixed: Requests-panel X button was unclickable when the panel auto-opened at startup. The chrome view's startup state-priming step (`primeViewWithCachedChromeState`, called from `did-finish-load`) now also replays the current modal-open state alongside the workspaces/auth/requests state it already primed.
+- Fixed: WebDAV file sharing was broken for macOS users — the `/api/v1/files` share is now registered under a lowercased key (while the filesystem provider keeps the real correct-case path), so home-directory paths like `/Users/<name>` resolve correctly instead of returning `404 Not Found: Could not find resource provider`. Linux users were unaffected.
+- Fixed: Startup loading window no longer flashes at the default centered position before jumping to its saved bounds; saved bounds from the previous session are now applied to the initial window before its loading screen renders.
 
 ## [v0.2.8] - 2026-05-13
 
