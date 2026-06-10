@@ -404,6 +404,24 @@
 
   function handleChromeEvent(data) {
     try {
+      if (data.type === 'workspace_accent_preview') {
+        // Optimistic single-workspace cache update + repaint, emitted by
+        // main.js when the settings page in this bundle picks a color.
+        // Lets the chrome titlebar update instantly without waiting for
+        // the POST -> mngr label -> SSE round-trip. The cross-machine
+        // sync still goes through the normal SSE path; this is just a
+        // local-window shortcut.
+        if (data.agent_id && data.accent) {
+          accentByAgentId[data.agent_id] = {
+            accent: data.accent,
+            fg: typeof data.accent_fg === 'string' ? data.accent_fg : null,
+          };
+          if (lastRequestedAccentAgentId === data.agent_id) {
+            applyTitleAccent(data.agent_id);
+          }
+        }
+        return;
+      }
       if (data.type === 'workspaces') {
         rememberWorkspaceAccents(data.workspaces);
         renderWorkspaces(data.workspaces);

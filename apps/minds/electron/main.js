@@ -2685,6 +2685,30 @@ ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
 });
 
+// Settings-page color picker: optimistic chrome-titlebar paint for the
+// bundle the picker is in, so the user sees the new color immediately
+// without waiting for the POST -> mngr label subprocess -> SSE
+// round-trip. The actual persistence still goes through the
+// /api/workspaces/<id>/color POST endpoint; this just shortcuts the
+// local-window UI feedback. Only content-relay-preload.js can emit
+// this channel, and it validates the agent id + accent shape there;
+// we re-validate here defensively and only forward to the *sending
+// bundle's* chrome view so a stray sender can't paint another
+// window's titlebar.
+ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
+  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  bundle.chromeView.webContents.send('chrome-event', {
+    type: 'workspace_accent_preview',
+    agent_id: agentId,
+    accent,
+    accent_fg: accentFg,
+  });
+});
+
 // Native file/directory picker for the file-sharing permission dialog.
 // The inbox modal calls this (via the preload bridge) so the user can
 // pick the path to share. ``options.mode`` is 'file' or 'directory':

@@ -61,10 +61,36 @@
       }
     }
 
+    function previewChromeAccent(hex) {
+      // Optimistic local repaint: the content-relay-preload watches for
+      // ``minds:preview-workspace-accent`` postMessages and forwards
+      // them to main, which retargets the bundle's chrome view. Cross-
+      // machine sync still happens via the normal SSE flow; this just
+      // shortcuts the local-window paint so the user sees their pick
+      // immediately instead of waiting for ``mngr label`` + the SSE
+      // round-trip. Falls through silently in browser mode (no
+      // postMessage listener) -- the SSE path still updates the bar
+      // a tick later.
+      if (typeof hex !== 'string') return;
+      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
+        ? window.mindsAccent.pickForegroundForHex(hex)
+        : null;
+      if (!fg) return;
+      window.postMessage({
+        type: 'minds:preview-workspace-accent',
+        agentId: agentId,
+        accent: hex,
+        accentFg: fg,
+      }, '*');
+    }
+
     function saveColor(normalized) {
       // Idempotency: skip the POST when the user types the same value
       // that's already saved (e.g. blur after no edit).
       if (normalized === lastSavedHex) return;
+      // Paint the chrome immediately so this window sees the picked
+      // color before the POST returns.
+      previewChromeAccent(normalized);
       setControlsDisabled(true);
       fetch('/api/workspaces/' + encodeURIComponent(agentId) + '/color', {
         method: 'POST',
@@ -96,16 +122,19 @@
           } else {
             showError('Save failed (HTTP ' + result.status + ').');
           }
-          // Revert the input to the last saved value so the picker
-          // stays consistent with the persisted state.
+          // Revert the input + the optimistic chrome paint to the last
+          // saved value so the picker stays consistent with persisted
+          // state.
           hexInput.value = lastSavedHex;
           syncSwatchSelection(lastSavedHex);
+          previewChromeAccent(lastSavedHex);
         })
         .catch(function (err) {
           setControlsDisabled(false);
           showError('Network error saving color: ' + err.message);
           hexInput.value = lastSavedHex;
           syncSwatchSelection(lastSavedHex);
+          previewChromeAccent(lastSavedHex);
         });
     }
 
