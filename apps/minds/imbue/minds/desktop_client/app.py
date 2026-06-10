@@ -203,6 +203,16 @@ def _get_mngr_forward_origin(request: Request) -> str:
     return f"http://localhost:{port}"
 
 
+def _get_is_mac(request: Request) -> bool:
+    """Return True if the request's User-Agent indicates macOS.
+
+    Used by templates that gate macOS-specific styling (traffic-light
+    padding, hidden window controls, sidebar-menu left offset).
+    """
+    user_agent = request.headers.get("user-agent", "")
+    return "Macintosh" in user_agent or "Mac OS" in user_agent
+
+
 # -- Auth helpers --
 
 
@@ -1780,8 +1790,7 @@ def _handle_chrome_page(
     shows an empty state for unauthenticated users; the SSE stream populates it
     after authentication.
     """
-    user_agent = request.headers.get("user-agent", "")
-    is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
+    is_mac = _get_is_mac(request)
 
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
@@ -1797,11 +1806,9 @@ def _handle_chrome_page(
 
 def _handle_chrome_sidebar(request: Request) -> Response:
     """Serve the standalone sidebar page loaded into the shared modal WebContentsView."""
-    user_agent = request.headers.get("user-agent", "")
-    is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
     html = render_sidebar_page(
         mngr_forward_origin=_get_mngr_forward_origin(request),
-        is_mac=is_mac,
+        is_mac=_get_is_mac(request),
     )
     return HTMLResponse(content=html)
 
