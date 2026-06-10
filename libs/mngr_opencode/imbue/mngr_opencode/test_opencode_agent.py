@@ -4,7 +4,7 @@ Drives the real ``mngr`` CLI against the real ``opencode`` binary (no mocks) thr
 the shared agent release lifecycle (create -> WAITING -> message -> transcript ->
 stop/start resume -> destroy). Uses OpenCode's free OpenCode-Zen model so no API key
 is required. The arc and assertions live in
-``imbue.mngr.utils.agent_release_testing``; this file only supplies opencode's
+``imbue.mngr.agents.agent_release_testing``; this file only supplies opencode's
 plumbing (free-model seeding, env, source) via an :class:`AgentReleaseProfile`.
 
 Release tests do NOT run in CI. Run manually::
@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.utils.agent_release_testing import AgentReleaseContext
-from imbue.mngr.utils.agent_release_testing import AgentReleaseProfile
-from imbue.mngr.utils.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
+from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess

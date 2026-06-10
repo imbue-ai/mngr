@@ -3,7 +3,7 @@
 Drives the real ``mngr`` CLI against the real ``pi`` binary and a real model through
 the shared agent release lifecycle (create -> WAITING -> message -> RUNNING ->
 transcript -> stop/start resume -> destroy). The arc and assertions live in
-``imbue.mngr.utils.agent_release_testing``; this file supplies pi's plumbing via an
+``imbue.mngr.agents.agent_release_testing``; this file supplies pi's plumbing via an
 :class:`AgentReleaseProfile`.
 
 pi exercises the richest end of the shared lifecycle: it observes the RUNNING marker,
@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.utils.agent_release_testing import AgentReleaseContext
-from imbue.mngr.utils.agent_release_testing import AgentReleaseProfile
-from imbue.mngr.utils.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
+from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_git_command

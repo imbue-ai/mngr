@@ -3,4 +3,4 @@ common-transcript records validate against the new canonical envelope schema
 (`imbue.mngr.agents.common_transcript_records`) -- also the first CI-runnable check of
 opencode's in-process TypeScript emitter (previously covered only by the non-CI release
 test). The release test now runs on the shared agent release-lifecycle harness
-(`imbue.mngr.utils.agent_release_testing`).
+(`imbue.mngr.agents.agent_release_testing`).

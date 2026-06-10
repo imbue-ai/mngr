@@ -2,7 +2,7 @@
 
 Drives the real ``mngr`` CLI through the shared agent release lifecycle (create ->
 WAITING -> message -> transcript -> stop/start resume -> destroy). The arc and
-assertions live in ``imbue.mngr.utils.agent_release_testing``; this file supplies
+assertions live in ``imbue.mngr.agents.agent_release_testing``; this file supplies
 codex's plumbing via an :class:`AgentReleaseProfile`.
 
 codex's plumbing is the most involved: an isolated ``MNGR_HOST_DIR`` and a throwaway
@@ -37,9 +37,9 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.utils.agent_release_testing import AgentReleaseContext
-from imbue.mngr.utils.agent_release_testing import AgentReleaseProfile
-from imbue.mngr.utils.agent_release_testing import run_agent_release_lifecycle
+from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
+from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
+from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 
 # Resolved at import time, before the autouse ``setup_test_mngr_env`` fixture redirects
 # $HOME / mutates PATH: the real home (auth source) and the real codex / mngr binaries.
