@@ -377,6 +377,33 @@ def test_agent_details_to_cel_context_computes_idle() -> None:
     assert context["idle"] < 320
 
 
+def test_agent_details_to_cel_context_exposes_project_alias() -> None:
+    """agent_details_to_cel_context should expose labels.project as the bare `project` alias.
+
+    Mirrors the host.provider alias and the --project filter flag, so CEL filters
+    and sorts can reference `project` directly. The key is always present (None
+    when the label is unset), matching how optional scalar fields appear.
+    """
+    host_details = _make_host_details()
+    with_project = AgentDetails(
+        id=AgentId.generate(),
+        name=AgentName("proj-agent"),
+        type="claude",
+        command=CommandString("sleep 100"),
+        work_dir=Path("/work"),
+        initial_branch=None,
+        create_time=datetime.now(timezone.utc),
+        start_on_boot=False,
+        state=AgentLifecycleState.RUNNING,
+        labels={"project": "mngr"},
+        host=host_details,
+    )
+    assert agent_details_to_cel_context(with_project)["project"] == "mngr"
+
+    without_project = with_project.model_copy_update(to_update(with_project.field_ref().labels, {}))
+    assert agent_details_to_cel_context(without_project)["project"] is None
+
+
 def test_agent_details_to_cel_context_preserves_full_model_structure() -> None:
     """Regression test: every AgentDetails / HostDetails field must be reachable at its
     declared nesting in the CEL context.
