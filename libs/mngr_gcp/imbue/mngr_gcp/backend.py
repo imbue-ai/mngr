@@ -5,6 +5,7 @@ from typing import Final
 
 import click
 from google.auth import exceptions as google_auth_exceptions
+from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
@@ -43,9 +44,15 @@ class GcpProvider(VpsDockerProvider):
         return self.gcp_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Refuse to create a GCE instance under pytest without auto_shutdown_minutes set.
+        """Pre-create hook: announce an inferred project, then enforce the pytest safety net.
 
-        Mirrors the AWS guard (``mngr_aws.backend.AwsProvider``): when
+        First, when ``project_id`` was not pinned in the config (so it was
+        inferred from ADC), log which project we are about to create billable
+        instances in. This fires only at create time -- not on every
+        ``mngr list`` discovery pass -- so a stray ``gcloud config`` default is
+        never used silently.
+
+        Then mirror the AWS guard (``mngr_aws.backend.AwsProvider``): when
         ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible for
         configuring the safety net that prevents leaked cost if pytest itself is
         killed. For GCP, that net is ``scheduling.max_run_duration`` +
@@ -54,6 +61,13 @@ class GcpProvider(VpsDockerProvider):
         isn't, fail closed at the pre-create hook rather than silently leak an
         instance.
         """
+        if not self.gcp_config.project_id:
+            logger.info(
+                "No GCP project_id configured; creating instances in project {!r} resolved from "
+                "Application Default Credentials (gcloud config / GOOGLE_CLOUD_PROJECT). Run "
+                "'mngr config set providers.gcp.project_id <your-project>' to pin it explicitly.",
+                self.gcp_client.project_id,
+            )
         if "PYTEST_CURRENT_TEST" not in os.environ:
             return
         minutes = self._get_effective_auto_shutdown_minutes()
@@ -102,8 +116,8 @@ class GcpProvider(VpsDockerProvider):
         """Return external IPs of GCE instances labeled with this provider's name.
 
         Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderEmptyError`` when ``config.get_credentials()`` fails, so any
-        GcpProvider that reaches this point has working credentials.
+        raises ``ProviderEmptyError`` when ``config.get_credentials_and_resolved_project()``
+        fails, so any GcpProvider that reaches this point has working credentials.
         """
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
@@ -159,22 +173,26 @@ class GcpProviderBackend(ProviderBackendInterface):
             raise MngrError(f"Expected GcpProviderConfig, got {type(config).__name__}")
 
         try:
-            # Validate the cheap, local, network-free config first (project_id,
-            # zone). ADC resolution is deliberately last: google.auth.default()
-            # probes the GCE metadata server as its final fallback, which blocks
-            # for seconds in non-GCE environments without credentials (e.g. CI).
-            # An unconfigured provider (no project_id) must fail fast here rather
-            # than hang that probe on every `mngr list` / discovery pass.
-            project_id = config.get_project_id()
+            # Validate the cheap, network-free zone/region config first. ADC
+            # resolution (google.auth.default()) comes next and serves double
+            # duty: it yields both the credentials and the project ADC infers
+            # from the environment (GOOGLE_CLOUD_PROJECT / `gcloud config set
+            # project` / metadata), which resolve_project_id uses as the
+            # fallback when no explicit project_id is configured. A single
+            # default() call serves both, so we never probe twice. When
+            # credentials are absent the call raises; when neither an explicit
+            # project_id nor an ADC-resolved project exists, resolve_project_id
+            # raises -- both surface as ProviderEmptyError below.
             config.validate_zone_in_region()
-            credentials = config.get_credentials()
+            credentials, adc_project = config.get_credentials_and_resolved_project()
+            project_id = config.resolve_project_id(adc_project)
         except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
             # Match the AWS/Modal pattern: when the provider cannot be reached
-            # (no resolvable ADC, no project_id, or a malformed zone/region),
-            # raise ProviderEmptyError so read paths (mngr list / mngr gc /
-            # discovery) skip the GCP provider entirely instead of constructing
-            # a half-working placeholder. Host-creation paths surface this same
-            # error to the user.
+            # (no resolvable ADC, no project anywhere, or a malformed
+            # zone/region), raise ProviderEmptyError so read paths (mngr list /
+            # mngr gc / discovery) skip the GCP provider entirely instead of
+            # constructing a half-working placeholder. Host-creation paths
+            # surface this same error to the user.
             raise ProviderEmptyError(name, str(e)) from e
 
         gcp_client = GcpVpsClient(

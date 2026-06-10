@@ -2,6 +2,7 @@
 
 import pytest
 from google.auth.credentials import AnonymousCredentials
+from google.auth.credentials import Credentials
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -12,6 +13,24 @@ from imbue.mngr_gcp.backend import GcpProvider
 from imbue.mngr_gcp.backend import GcpProviderBackend
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
+
+
+class _StubAdcConfig(GcpProviderConfig):
+    """GcpProviderConfig with ADC resolution stubbed for deterministic tests.
+
+    ``build_provider_instance`` resolves credentials and the fallback project via
+    ``get_credentials_and_resolved_project``, which calls ``google.auth.default()``.
+    Stubbing it here keeps these tests independent of whatever gcloud / ADC state
+    the test host happens to have configured.
+    """
+
+    stub_has_credentials: bool = True
+    stub_resolved_project: str | None = None
+
+    def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
+        if not self.stub_has_credentials:
+            raise ValueError("GCP Application Default Credentials not configured (stub).")
+        return AnonymousCredentials(), self.stub_resolved_project
 
 
 def test_backend_name_and_config_class() -> None:
@@ -33,18 +52,55 @@ def test_backend_build_args_help_mentions_gcp_specific_args() -> None:
     assert "image" in help_text and "default_source_image" in help_text
 
 
-def test_build_provider_instance_raises_provider_empty_without_project(
+def test_build_provider_instance_raises_provider_empty_without_credentials(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """Missing project_id surfaces as ProviderEmptyError so read paths skip GCP.
-
-    ADC may be resolvable in the test environment, but project_id is empty by
-    default, so build must fail with ProviderEmptyError (mirroring the AWS
-    no-AMI / no-creds case).
-    """
-    config = GcpProviderConfig()
+    """No resolvable ADC surfaces as ProviderEmptyError so read paths skip GCP."""
+    config = _StubAdcConfig(stub_has_credentials=False)
     with pytest.raises(ProviderEmptyError):
         GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+
+
+def test_build_provider_instance_raises_provider_empty_without_project_anywhere(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Credentials but no project (neither configured nor ADC-resolved) -> empty.
+
+    Mirrors the AWS no-AMI case: the provider cannot be used without a project,
+    so it must be skipped by read paths rather than half-constructed.
+    """
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project=None)
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+
+
+def test_build_provider_instance_falls_back_to_adc_resolved_project(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """With no configured project_id, the ADC-resolved project is used.
+
+    This is the gcloud-default fallback: a user who ran `gcloud config set
+    project` (or set GOOGLE_CLOUD_PROJECT) can create without pinning project_id
+    in the mngr config.
+    """
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project="adc-resolved-project")
+    provider = GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+    assert isinstance(provider, GcpProvider)
+    assert provider.gcp_client.project_id == "adc-resolved-project"
+
+
+def test_build_provider_instance_prefers_configured_project_over_adc(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An explicit project_id wins over whatever ADC resolved."""
+    config = _StubAdcConfig(
+        project_id="explicit-project",
+        stub_has_credentials=True,
+        stub_resolved_project="adc-resolved-project",
+    )
+    provider = GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+    assert isinstance(provider, GcpProvider)
+    assert provider.gcp_client.project_id == "explicit-project"
 
 
 def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None) -> GcpProvider:
