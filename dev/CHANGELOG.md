@@ -91,9 +91,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline, so a failed run is no longer reported as successful when `pipefail` fails to propagate the left-side failure.
 - Fixed: Tightened the `test_every_project_has_changelog_layout` meta-ratchet to also require a `.gitkeep` inside each project's `changelog/` directory. Previously only the directory's existence was checked, so a newly added project with no `.gitkeep` would pass until a later consolidation run drained its entries and the empty directory silently vanished from git.
-- Fixed: `mngr-shim-installed` pre-commit hook no longer gives a false failure when invoked under `uv run` (e.g. during `mngr create`), where the project-local `mngr` console script shadowed the dev shim. The hook now resolves `mngr` the way an interactive shell would, while still catching a genuinely stale global.
 - Fixed: Added a `**/tmr-report/` pattern to the root `.gitignore` so the test-orchestrator run-report directory is no longer flagged as an untracked change (the existing `**/tmr_*/` pattern used an underscore and did not match the dash-named directory).
-- Fixed: `publish` workflow's "Verify versions and pin consistency" step now uses `uv run --all-packages` so the workspace `imbue.mngr` package is installed, avoiding a `ModuleNotFoundError` on the `UNPUBLISHED_PACKAGES` import.
 
 ### Security
 
