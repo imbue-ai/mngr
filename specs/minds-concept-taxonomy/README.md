@@ -25,9 +25,14 @@ Two codebases, treated as one system:
 
 ## How to read this
 
-- **`README.md`** (this file) — the canonical glossary: one standardized term, a
+- **`USER-FACING-CONCEPTS.md`** — **start here.** The top-down, primary taxonomy: a list of
+  the things a user perceives/chooses/acts on (in the spirit of `Minds_concepts.md`), each
+  with its candidate name(s), a working definition, the lower-level technical pieces it
+  subsumes, and the ambiguities that make it hard to name precisely. The premise: settling
+  the user-facing name for each concept is the lever that unblocks the technical cleanup.
+- **`README.md`** (this file) — the bottom-up canonical glossary: one standardized term, a
   plain-language definition, the precise/technical definition, the canonical code location,
-  and a status flag per concept. Works as a full standalone summary. Start here.
+  and a status flag per concept. The per-term reference behind the user-facing view.
 - **`HUMAN-READABLE.md`** — the expanded plain-language, app/docs-voice definitions for
   non-technical users, with the full reasoning behind each flagged user-facing naming
   decision. The "Plain language" column here is the condensed version of that doc.
