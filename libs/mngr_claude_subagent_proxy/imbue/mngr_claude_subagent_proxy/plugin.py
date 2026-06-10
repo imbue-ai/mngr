@@ -251,6 +251,17 @@ def _check_proxy_artifact_gitignored(host: OnlineHostInterface, work_dir: Path, 
     whose result has to hold on a remote host. Raises
     ``UnignoredProxyArtifactError`` otherwise, pointing the user at both the
     gitignore fix and the option to disable the plugin.
+
+    We check the exact file the plugin is about to write, not its directory:
+    the guard runs before the directory is created, and a directory-only
+    gitignore rule (``mngr-proxy/``) does not match a not-yet-existing
+    *directory* path -- but it does match a *file* under it, which is what we
+    check. So checking the file accepts both ``.claude/agents/mngr-proxy/`` and
+    broader rules like ``.claude/``. The remediation still points at the file's
+    parent directory, since the plugin owns that whole ``mngr-proxy/`` subdir
+    and one directory rule is the clean way to ignore it. ``relative.parent``
+    (not the input subpath's parent) is used so the suggestion reflects any
+    symlink resolution -- e.g. ``.agents/...`` when ``.claude -> .agents``.
     """
     status, relative = check_path_gitignore_status(host, work_dir, Path(".claude") / claude_subpath)
     if status is not GitignoreStatus.NOT_IGNORED:
