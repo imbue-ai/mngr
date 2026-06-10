@@ -273,16 +273,18 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         # marker, so waiting on that channel both confirms the message was
         # submitted and guarantees the agent reads as RUNNING by the time this
         # returns -- closing the race where a caller checks lifecycle state before
-        # the turn registers. No queue-log fallback (claude's misfire workaround):
-        # codex's raw transcript is the rollout JSONL, not the enqueue-event log
-        # that fallback greps, and the foreground-registered waiter already avoids
-        # the signal-vs-waiter race.
+        # the turn registers. ``accept_marker_command=None``: wait on the hook
+        # alone. The acceptance-marker fast path exists to confirm submission for
+        # busy agents whose hook fires late, but codex's hook fires immediately
+        # on submission (after setting the ``active`` marker) and the
+        # foreground-registered waiter already avoids the signal-vs-waiter race,
+        # so no separate marker probe is needed.
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
             wait_channel=f"{SUBMIT_WAIT_CHANNEL_PREFIX}{self.session_name}",
             timeout_seconds=self.enter_submission_timeout_seconds,
-            queue_log_path_template=None,
+            accept_marker_command=None,
         )
 
     @property
