@@ -17,6 +17,17 @@ into a ``scope schema name -> canonical service name`` index so callers
 can map the scopes a host has been granted back to the canonical
 service names whose credentials should be shipped to that host.
 
+Not to be confused with the desktop client's
+``imbue.minds.desktop_client.latchkey.services_catalog.ServicesCatalog``.
+That one fetches the same data over HTTP from a *running* gateway's
+``/permissions/available`` endpoint and produces rich, dialog-facing
+records (display names, descriptions, grantable permission schemas) for
+the permission UI. This module reads the *static bundled file* directly
+-- no gateway, no network -- because the credential-sync path runs
+server-side with only the desktop's own package data on hand, and needs
+nothing more than the scope-to-service mapping. Same underlying file,
+deliberately different access paths; they are not interchangeable.
+
 The file is trusted package data copied verbatim into the wheel, so a
 missing or malformed file is a packaging bug; it surfaces as
 :class:`ServiceCatalogError` rather than being silently tolerated.
