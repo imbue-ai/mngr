@@ -1,1 +1,0 @@
-Fixed the e2e test fixture (`mngr/e2e/conftest.py`) which wrote a `settings.local.toml` containing a duplicate `type = "claude"` key under `[commands.create]`. The duplicate key is invalid TOML and caused every Docker e2e tutorial test (e.g. `test_create_docker_volume_start_arg`) to fail with "Cannot overwrite a value" when `mngr` parsed the config file.
