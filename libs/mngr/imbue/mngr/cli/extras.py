@@ -20,8 +20,9 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.complete import generate_bash_script
-from imbue.mngr.cli.complete import generate_zsh_script
+from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.complete import generate_completion_shim
+from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
@@ -64,17 +65,21 @@ def _get_shell_rc(shell_type: str) -> Path:
 
 
 def _is_completion_configured(rc_path: Path) -> bool:
-    """Check if mngr shell completion is already configured."""
+    """Check if the (current, managed) mngr shell completion shim is installed.
+
+    Looks for the managed-shim marker rather than just ``_mngr_complete``: an rc
+    that still holds the old self-contained completion function (no marker) is
+    treated as *not* configured, so installing adds the up-to-date shim (which,
+    sourced last, supersedes the old function).
+    """
     if not rc_path.exists():
         return False
-    return "_mngr_complete" in rc_path.read_text()
+    return COMPLETION_SHIM_MARKER in rc_path.read_text()
 
 
 def _generate_completion_script(shell_type: str) -> str:
-    """Generate the completion script using the existing complete module."""
-    if shell_type == "zsh":
-        return generate_zsh_script()
-    return generate_bash_script()
+    """Generate the rc shim that sources the managed completion file."""
+    return generate_completion_shim(shell_type)
 
 
 # -- Shared picker helper --
@@ -117,11 +122,20 @@ def _install_completion(
         "Enable shell completion",
     ),
 ) -> bool:
-    """Install shell completion. Returns True if installed (or already configured)."""
+    """Install shell completion. Returns True if installed (or already configured).
+
+    The rc gets a small shim that sources a managed completion file mngr keeps up
+    to date; the managed files are (re)written here so completion-logic changes
+    reach the user without further rc edits.
+    """
     configured, shell_type, rc_path = status_fn()
 
+    # Always refresh the managed files so they reflect the current logic, even
+    # when the shim is already installed.
+    write_managed_completion_scripts()
+
     if configured:
-        write_human_line("Shell completion already configured in {}", rc_path)
+        write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
         return True
 
     if not auto:

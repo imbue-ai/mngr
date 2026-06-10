@@ -1,1 +1,1 @@
-Documented the new `-S`/`--setting` tab completion in the repo-root README's "Shell completion" section.
+Updated the repo-root README's "Shell completion" section: documented `-S`/`--setting` completion, and the new managed-shim install model (the rc holds a small shim that sources a mngr-managed completion file, so completion updates apply on upgrade without re-editing the rc).

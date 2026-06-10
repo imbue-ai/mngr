@@ -255,9 +255,11 @@ A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure th
 ## Shell completion
 
 `mngr` supports tab completion for commands, options, agent names, and `-S`/`--setting` config overrides (both the `KEY` and, where the value is constrained, the `VALUE`) in bash and zsh.
-Shell completion is configured automatically by the install script (`scripts/install.sh`).
+Shell completion is configured automatically by the install script (`scripts/install.sh`), or interactively via `mngr extras`.
 
-To set up manually, generate the completion script and append it to your shell rc file:
+Your rc file gets only a small, stable shim that sources a managed completion file mngr keeps up to date, so completion improvements apply automatically when you upgrade mngr -- no need to re-edit your rc. If you have an older self-contained completion function in your rc, tab completion will nudge you to run `mngr extras` once to switch to the shim.
+
+To set up manually, append the shim to your shell rc file (this also writes the managed completion file):
 
 **Zsh** (run once):
 ```bash
