@@ -6,7 +6,9 @@ date, which created cross-date duplicates), followed by a single critical
 "concision pass" that drops non-notable bullets and tightens the rest. The
 merging step now also scrutinizes the `Fixed` category, dropping fixes for bugs
 that were both introduced and fixed within the current release window (which
-never reached a released version).
+never reached a released version). Relatedly, `scripts/consolidate_changelog.py`
+now prints one `SECTION <project> <date>...` line per project (listing its dates)
+instead of one line per project-date, matching how the prompt summarizes.
 
 Fixed the nightly changelog consolidation schedule firing at 8 AM Pacific
 instead of midnight. `scripts/setup_changelog_agent.sh` set the cron to

@@ -36,23 +36,22 @@ the right project's consolidated files.
 2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
    `{"status": "skipped-no-entries"}` and stop.
-   Otherwise stdout contains one or more `SECTION <project> <YYYY-MM-DD>`
-   lines — each one is a `## YYYY-MM-DD` section the
-   consolidator just inserted at the top of
-   `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
-   `libs/<project>` for libs, `apps/<project>` for apps, and `dev/` for
-   the synthetic dev bucket (the same directory that holds the project's
-   `changelog/` entries dir).
+   Otherwise stdout contains one `SECTION <project> <YYYY-MM-DD>
+   [<YYYY-MM-DD> ...]` line per project the consolidator just touched. The
+   dates (newest first) are the `## YYYY-MM-DD` sections it just inserted
+   at the top of that project's `<project_dir>/UNABRIDGED_CHANGELOG.md`,
+   where `<project_dir>` is `libs/<project>` for libs, `apps/<project>`
+   for apps, and `dev/` for the synthetic dev bucket (the same directory
+   that holds the project's `changelog/` entries dir).
 
-3. A project may have several `SECTION` lines (one per new date). Process
-   the work one project at a time: for each project that has at least one
-   `SECTION` line, read the bullets from *all* of that project's new date
-   sections in its `UNABRIDGED_CHANGELOG.md` (each section sits between its
-   `## <date>` heading and the next `## ` line), pool them, and from that
-   pooled set generate a few concise, human-friendly bullets for that
-   project's `CHANGELOG.md`. Summarizing a project's whole pool together
-   lets a single user-visible change become one bullet even when several
-   entries (possibly across different days) touched it.
+3. For each `SECTION` line (one per project), read the bullets from *all*
+   of that project's listed date sections in its
+   `UNABRIDGED_CHANGELOG.md` (each section sits between its `## <date>`
+   heading and the next `## ` line), pool them, and from that pooled set
+   generate a few concise, human-friendly bullets for that project's
+   `CHANGELOG.md`. Summarizing a project's whole pool together lets a
+   single user-visible change become one bullet even when several entries
+   (possibly across different days) touched it.
    Each bullet MUST start with one of these Keep-a-Changelog categories
    followed by `: ` and the description, e.g.:
 
