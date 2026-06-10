@@ -10,7 +10,7 @@ from typing import Literal
 from loguru import logger
 from pydantic import Field
 from pydantic import TypeAdapter
-from tenacity import retry
+from tenacity import Retrying
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
@@ -54,13 +54,17 @@ _STDERR_EXCERPT_LENGTH: Final[int] = 200
 
 
 class GitHubBoardFetchError(KanpanDataSourceError):
-    """Raised when a board page request fails at the transport level.
+    """Raised when a board page request comes back without a usable search result.
 
-    Covers cases where `gh api graphql` returns no usable JSON body -- an HTTP
-    403 secondary rate limit, a 5xx, or a transient network failure. These are
-    worth a short backoff and a retry of the same page, unlike a primary
-    `RATE_LIMITED` GraphQL error (which carries a JSON body and needs a
-    multi-minute wait, so it is surfaced rather than retried inline).
+    Covers any response lacking a `data.s` object: an unparseable / empty body,
+    an HTTP 403 secondary rate limit (whose REST-style error body has no
+    `data.s`), a primary `RATE_LIMITED` GraphQL error (which nulls out `data`),
+    or a 5xx. All are retried with a short backoff before giving up on the page.
+
+    A primary `RATE_LIMITED` needs a multi-minute wait that the inline backoff
+    cannot clear, so its retries simply exhaust quickly; the error is then
+    surfaced and the board-level retry cooldown takes over on the next refresh.
+    Earlier pages are preserved regardless of why this page failed.
     """
 
     ...
@@ -250,6 +254,9 @@ def fetch_board(
     cg: ConcurrencyGroup,
     repo_branches: Sequence[tuple[str, str]],
     unresolved_ignore_user: str | None = None,
+    # The retry policy for a single page request. Injectable so tests can drive
+    # the backoff without real sleeps; production callers use the default below.
+    page_retrying: Retrying | None = None,
 ) -> FetchBoardResult:
     """Fetch every PR the kanpan board needs, paging through `gh api graphql`.
 
@@ -261,6 +268,7 @@ def fetch_board(
     if not repo_branches:
         return FetchBoardResult(prs={})
 
+    retrying = page_retrying if page_retrying is not None else _build_page_retrying()
     all_nodes: list[dict[str, Any]] = []
     errors: list[str] = []
     cursor: str | None = None
@@ -269,7 +277,7 @@ def fetch_board(
     for page_number in range(1, _MAX_SEARCH_PAGES + 1):
         graphql = _build_board_graphql(repo_branches, after=cursor)
         try:
-            response = _run_board_query_with_retry(cg, graphql)
+            response = retrying(_run_board_query, cg, graphql)
         except (ProcessError, OSError) as e:
             logger.debug("Failed to launch gh api graphql: {}", e)
             errors.append(f"gh api graphql failed: {e}")
@@ -300,26 +308,34 @@ def fetch_board(
     return FetchBoardResult(prs=prs, errors=tuple(errors))
 
 
-@retry(
-    retry=retry_if_exception_type(GitHubBoardFetchError),
-    stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
-    wait=wait_exponential(
-        multiplier=_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS,
-        min=_PAGE_RETRY_MIN_WAIT_SECONDS,
-        max=_PAGE_RETRY_MAX_WAIT_SECONDS,
-    ),
-    reraise=True,
-)
-def _run_board_query_with_retry(cg: ConcurrencyGroup, graphql: str) -> dict[str, Any]:
-    """Run one board page query, retrying transport-level failures with backoff.
+def _build_page_retrying() -> Retrying:
+    """Build the per-page retry policy: bounded attempts with exponential backoff.
+
+    Retries `GitHubBoardFetchError` (a page that returned no search result) and
+    re-raises the final failure so the caller can keep the pages fetched so far.
+    """
+    return Retrying(
+        retry=retry_if_exception_type(GitHubBoardFetchError),
+        stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
+        wait=wait_exponential(
+            multiplier=_PAGE_RETRY_WAIT_MULTIPLIER_SECONDS,
+            min=_PAGE_RETRY_MIN_WAIT_SECONDS,
+            max=_PAGE_RETRY_MAX_WAIT_SECONDS,
+        ),
+        reraise=True,
+    )
+
+
+def _run_board_query(cg: ConcurrencyGroup, graphql: str) -> dict[str, Any]:
+    """Run one board page query, raising `GitHubBoardFetchError` on no search result.
 
     Returns the parsed GraphQL response envelope. A successful search always
     carries a `data.s` object (even when it matched nothing); the absence of
     one means the request failed at the transport level -- an unparseable body,
     an HTTP 403 secondary rate limit (whose REST-style error body has no
     `data.s`), a primary `RATE_LIMITED` error (which nulls out `data`), or a
-    5xx. Those are worth a short backoff and a retry of this same page; pages
-    already fetched are never re-fetched.
+    5xx. The caller retries this same page with backoff; pages already fetched
+    are never re-fetched.
     """
     proc = cg.run_process_in_background(
         ["gh", "api", "graphql", "-f", f"query={graphql}"],

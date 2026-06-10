@@ -5,6 +5,11 @@ from datetime import timezone
 from typing import Any
 from unittest.mock import MagicMock
 
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_none
+
 from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FIELD_CI
@@ -17,6 +22,7 @@ from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import ConflictsField
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import FetchBoardResult
+from imbue.mngr_kanpan.data_sources.github import GitHubBoardFetchError
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
@@ -24,6 +30,7 @@ from imbue.mngr_kanpan.data_sources.github import PrInfo
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
 from imbue.mngr_kanpan.data_sources.github import _MAX_SEARCH_PAGES
+from imbue.mngr_kanpan.data_sources.github import _PAGE_FETCH_ATTEMPTS
 from imbue.mngr_kanpan.data_sources.github import _build_board_graphql
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
 from imbue.mngr_kanpan.data_sources.github import _build_prs_from_nodes
@@ -113,6 +120,18 @@ def _make_paginated_board_cg(*procs: MagicMock) -> MagicMock:
     cg = MagicMock()
     cg.run_process_in_background.side_effect = list(procs)
     return cg
+
+
+def _no_wait_page_retrying() -> Retrying:
+    """The production per-page retry policy but with the backoff removed, so retry
+    behavior can be exercised in tests without real sleeps.
+    """
+    return Retrying(
+        retry=retry_if_exception_type(GitHubBoardFetchError),
+        stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
+        wait=wait_none(),
+        reraise=True,
+    )
 
 
 def _make_thread(*, resolved: bool = False, last_author: str | None = None) -> dict[str, Any]:
@@ -530,7 +549,7 @@ def test_fetch_board_keeps_earlier_pages_when_later_page_permanently_fails() -> 
     )
     bad = _make_board_proc(rate_limited_body, stderr="gh: HTTP 403")
     cg = _make_paginated_board_cg(page1, bad, bad, bad)
-    result = fetch_board(cg, repo_branches=[("org/r", "b1"), ("org/r", "b2")])
+    result = fetch_board(cg, repo_branches=[("org/r", "b1"), ("org/r", "b2")], page_retrying=_no_wait_page_retrying())
     assert result.prs[("org/r", "b1")].number == 1
     assert any("failed after" in e for e in result.errors)
     assert any("secondary rate limit" in e for e in result.errors)
@@ -545,7 +564,7 @@ def test_fetch_board_retries_transient_page_then_succeeds() -> None:
         _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=7)], has_next_page=False)
     )
     cg = _make_paginated_board_cg(bad, good)
-    result = fetch_board(cg, repo_branches=[("org/r", "b1")])
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")], page_retrying=_no_wait_page_retrying())
     assert result.errors == ()
     assert result.prs[("org/r", "b1")].number == 7
 
