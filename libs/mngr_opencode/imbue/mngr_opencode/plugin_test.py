@@ -92,13 +92,11 @@ def test_is_common_transcript_enabled_reflects_config() -> None:
     assert disabled.is_common_transcript_enabled is False
 
 
-def test_raw_transcript_has_no_commands_scripts_but_common_does() -> None:
-    """Raw capture is in-process (the .ts plugin), so no commands/ raw script; common is a converter."""
+def test_transcripts_have_no_commands_scripts_both_in_process() -> None:
+    """Both raw and common transcripts are written in-process by the .ts plugin -- no commands/ scripts."""
     agent = OpenCodeAgent.model_construct(agent_config=OpenCodeAgentConfig())
     assert agent.get_raw_transcript_scripts() == {}
-    common = agent.get_common_transcript_scripts()
-    assert "opencode_common_transcript.sh" in common
-    assert common["opencode_common_transcript.sh"].strip() != ""
+    assert agent.get_common_transcript_scripts() == {}
 
 
 def _make_opencode_agent(
@@ -178,19 +176,20 @@ def test_assemble_command_url_encodes_workdir_for_session_query(
     assert "a work dir" not in command.split("MNGR_OPENCODE_WORKDIR=", 1)[1].split(" bash ", 1)[0]
 
 
-def test_assemble_command_launches_background_supervisor_when_common_enabled(
-    opencode_agent: OpenCodeAgent,
-) -> None:
+def test_assemble_command_sets_emit_common_env_when_enabled(opencode_agent: OpenCodeAgent) -> None:
+    """The in-process plugin emits the common transcript only when this env is set."""
     command = str(opencode_agent.assemble_command(opencode_agent.host, (), command_override=None))
-    assert "( bash $MNGR_AGENT_STATE_DIR/commands/opencode_background_tasks.sh" in command
-    assert command.strip().startswith("( bash ")
+    assert "MNGR_OPENCODE_EMIT_COMMON=1" in command
+    # No backgrounded supervisor any more -- both transcripts are in-process.
+    assert "opencode_background_tasks.sh" not in command
+    assert command.strip().startswith("env ")
 
 
-def test_assemble_command_omits_supervisor_when_common_disabled(
+def test_assemble_command_omits_emit_common_env_when_disabled(
     opencode_agent_no_common: OpenCodeAgent,
 ) -> None:
     command = str(opencode_agent_no_common.assemble_command(opencode_agent_no_common.host, (), command_override=None))
-    assert "opencode_background_tasks.sh" not in command
+    assert "MNGR_OPENCODE_EMIT_COMMON" not in command
     assert "bash $MNGR_AGENT_STATE_DIR/commands/opencode_launch.sh" in command
 
 
@@ -272,19 +271,13 @@ def test_provision_copies_auth_when_symlink_disabled(local_provider: LocalProvid
     assert json.loads(auth_path.read_text())["anthropic"]["type"] == "api"
 
 
-def test_provision_installs_transcript_scripts(opencode_agent: OpenCodeAgent) -> None:
+def test_provision_installs_only_the_launch_script_in_commands(opencode_agent: OpenCodeAgent) -> None:
+    """Both transcripts are in-process, so the only commands/ script is the launch orchestrator."""
     _provision(opencode_agent)
     commands_dir = opencode_agent._get_agent_dir() / "commands"
-    assert (commands_dir / "opencode_common_transcript.sh").exists()
-    assert (commands_dir / "opencode_background_tasks.sh").exists()
-
-
-def test_provision_omits_converter_when_common_disabled(opencode_agent_no_common: OpenCodeAgent) -> None:
-    _provision(opencode_agent_no_common)
-    commands_dir = opencode_agent_no_common._get_agent_dir() / "commands"
+    assert (commands_dir / "opencode_launch.sh").exists()
     assert not (commands_dir / "opencode_common_transcript.sh").exists()
-    # The supervisor is still installed; it simply finds nothing to supervise.
-    assert (commands_dir / "opencode_background_tasks.sh").exists()
+    assert not (commands_dir / "opencode_background_tasks.sh").exists()
 
 
 def test_provision_does_not_write_into_work_dir(opencode_agent: OpenCodeAgent) -> None:

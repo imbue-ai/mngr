@@ -47,8 +47,9 @@ hook mechanism. mngr leans into that shape:
   `active` marker (it runs only in the server process). It is subagent-aware: the
   marker clears only when the *root* session goes idle, so spawning task-tool
   subagents keeps the agent RUNNING until the whole turn finishes.
-- **Transcripts**: the same plugin writes the raw transcript; a background
-  converter turns it into the common format `mngr transcript` reads.
+- **Transcripts**: the same plugin writes the raw transcript and, on session
+  idle, rebuilds the common-format transcript `mngr transcript` reads — both
+  in-process, no background converter or supervisor.
 - **Auth**: the per-agent `auth.json` symlinks to the user's shared
   `~/.local/share/opencode/auth.json`, so one `opencode auth login` (in any
   agent) authenticates them all.

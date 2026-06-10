@@ -1,4 +1,4 @@
-// mngr lifecycle plugin for OpenCode agents.
+// mngr lifecycle + transcript plugin for OpenCode agents.
 //
 // OpenCode has no POSIX-sh hook mechanism (unlike Claude Code / Antigravity);
 // its blessed extension point is an in-process TypeScript plugin whose `event`
@@ -8,61 +8,98 @@
 // mngr runs the agent as a headless `opencode serve` process plus an
 // `opencode attach` TUI client (see opencode_launch.sh), and BOTH load this
 // plugin from the same config dir. The event hook fires server-side, but to
-// avoid the attach client also acting (double-writing the marker/transcript)
-// the plugin only does work when MNGR_OPENCODE_ROLE=server -- the role mngr
-// sets exclusively on the serve invocation. In every other process it is inert.
+// avoid the attach client also acting (double-writing) the plugin only does work
+// when MNGR_OPENCODE_ROLE=server -- the role mngr sets exclusively on the serve
+// invocation. In every other process it is inert.
 //
-// In the server process it does two things, keyed off $MNGR_AGENT_STATE_DIR:
+// In the server process it does three things, keyed off $MNGR_AGENT_STATE_DIR:
 //
 //   1. Active marker -> RUNNING vs WAITING. BaseAgent.get_lifecycle_state reads
 //      the presence of $MNGR_AGENT_STATE_DIR/active as "actively working". The
 //      plugin touches it when a session goes busy and removes it when the ROOT
-//      session goes idle. OpenCode reports status per session and the root
-//      session stays busy for the whole turn -- including while task-tool
-//      subagents (child sessions) run -- so gating the *clear* on the root
-//      session (the one with no `parentID`) keeps the agent RUNNING until the
-//      entire turn is done. Touching on any busy is safe; only clearing is
-//      root-gated. A liveness fallback clears on idle when no session hierarchy
-//      has been seen yet, so the marker can never strand.
+//      session goes idle (the session with no `parentID`), so task-tool subagents
+//      keep the agent RUNNING until the whole turn is done.
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to
-//      $MNGR_AGENT_STATE_DIR/logs/opencode_transcript/events.jsonl. The Python
-//      converter turns that into the common transcript `mngr transcript` reads.
+//      logs/opencode_transcript/events.jsonl.
 //
-// The root session id (for resume) is owned by mngr (opencode_launch.sh creates
-// the session and records its id), NOT by this plugin. Filenames/paths and the
-// role env below are kept in sync with opencode_config.py (the Python side
-// cannot be imported here). Every fs touch is wrapped so a transient error
-// never disrupts OpenCode's loop.
+//   3. Common transcript (when MNGR_OPENCODE_EMIT_COMMON=1). The plugin keeps the
+//      latest message/part state in memory and, on session.idle, rebuilds the
+//      agent-agnostic common transcript (events/opencode/common_transcript/
+//      events.jsonl, what `mngr transcript` reads) from that state and writes it
+//      atomically. Rebuilding from full state on idle is robust (self-healing, no
+//      message-completion detection) and needs no background converter/supervisor.
+//      Once per turn is sufficient: the live in-progress view is the tmux pane
+//      (mngr connect), and `mngr transcript` reads on demand.
+//
+// The root session id (for resume) is owned by mngr (opencode_launch.sh). Paths,
+// the role/emit env vars, and the common `source` below are kept in sync with
+// opencode_config.py (the Python side cannot be imported here). Every fs touch is
+// wrapped so a transient error never disrupts OpenCode's loop.
 
 import type { Plugin } from "@opencode-ai/plugin"
-import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { appendFileSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 // Keep in sync with opencode_config.py: ACTIVE_MARKER_FILENAME,
-// RAW_TRANSCRIPT_RELATIVE_PATH, ROLE_ENV_VAR, SERVER_ROLE.
+// RAW_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_RELATIVE_PATH,
+// COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR, SERVER_ROLE, EMIT_COMMON_ENV_VAR.
 const ACTIVE_MARKER_FILENAME = "active"
 const RAW_TRANSCRIPT_RELATIVE_PATH = "logs/opencode_transcript/events.jsonl"
+const COMMON_TRANSCRIPT_RELATIVE_PATH = "events/opencode/common_transcript/events.jsonl"
+const COMMON_TRANSCRIPT_SOURCE = "opencode/common_transcript"
 const ROLE_ENV_VAR = "MNGR_OPENCODE_ROLE"
 const SERVER_ROLE = "server"
+const EMIT_COMMON_ENV_VAR = "MNGR_OPENCODE_EMIT_COMMON"
+
+const _MAX_INPUT_PREVIEW_LENGTH = 200
+const _MAX_OUTPUT_LENGTH = 2000
+
+const _truncate = (text: string, limit: number): string => (text.length <= limit ? text : text.slice(0, limit) + "...")
+
+const _shortValue = (value: unknown): string => (typeof value === "string" ? value : JSON.stringify(value))
+
+const _isoFromMs = (createdMs: unknown): string =>
+  typeof createdMs === "number" ? new Date(createdMs).toISOString().replace(/\.\d+Z$/, "Z") : ""
+
+const _messageText = (parts: any[]): string =>
+  parts
+    .filter((part) => part?.type === "text" && !part?.synthetic && typeof part?.text === "string")
+    .map((part) => part.text)
+    .join("")
+
+const _toolStateOutput = (state: any): { output: string; isError: boolean } => {
+  if (!state || typeof state !== "object") {
+    return { output: "", isError: false }
+  }
+  if (state.status === "error") {
+    return { output: _shortValue(state.error ?? ""), isError: true }
+  }
+  return { output: _shortValue(state.output ?? ""), isError: false }
+}
 
 export const MngrLifecyclePlugin: Plugin = async () => {
   const stateDir = process.env.MNGR_AGENT_STATE_DIR
-  // Only the mngr-managed server process maintains the marker/transcript. The
+  // Only the mngr-managed server process maintains the marker/transcripts. The
   // attach client (and any non-mngr run) loads this plugin too but stays inert,
-  // so the marker and raw transcript have exactly one writer.
+  // so the marker and transcripts have exactly one writer.
   if (!stateDir || process.env[ROLE_ENV_VAR] !== SERVER_ROLE) {
     return {}
   }
 
   const markerPath = join(stateDir, ACTIVE_MARKER_FILENAME)
   const rawTranscriptPath = join(stateDir, RAW_TRANSCRIPT_RELATIVE_PATH)
+  const commonTranscriptPath = join(stateDir, COMMON_TRANSCRIPT_RELATIVE_PATH)
+  const emitCommon = process.env[EMIT_COMMON_ENV_VAR] === "1"
 
-  // parentID per session id, learned from events that carry the full Session
-  // (session.created / session.updated). Lets status/idle events -- which carry
-  // only a sessionID -- be classified as root vs child without an async lookup.
+  // parentID per session id, learned from session.created/updated (which carry
+  // the full Session). Lets status/idle events -- which carry only a sessionID --
+  // be classified root vs child without an async lookup.
   const parentBySession = new Map<string, string | undefined>()
+  // Latest message info / parts per id, for rebuilding the common transcript.
+  const messageById = new Map<string, any>()
+  const partsByMessage = new Map<string, Map<string, any>>()
 
   const touchMarker = (): void => {
     try {
@@ -94,27 +131,116 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   }
 
   const isRootSession = (sessionId: string): boolean => {
-    // Root = a session with no parent. Until we've seen this session's hierarchy
-    // (via session.created/updated), fall back to treating it as root so idle can
-    // still clear the marker rather than strand it.
+    // Root = a session with no parent. Until we've seen this session's hierarchy,
+    // fall back to treating it as root so idle can still clear the marker.
     const parent = parentBySession.get(sessionId)
     return parent === undefined || parent === ""
+  }
+
+  const buildCommonRecords = (): Record<string, unknown>[] => {
+    const records: Record<string, unknown>[] = []
+    const messages = [...messageById.values()].sort(
+      (a, b) => (a?.time?.created ?? 0) - (b?.time?.created ?? 0),
+    )
+    for (const message of messages) {
+      const parts = [...(partsByMessage.get(message.id)?.values() ?? [])]
+      const timestamp = _isoFromMs(message?.time?.created)
+      const sessionId = message?.sessionID ?? ""
+      const text = _messageText(parts)
+      const toolParts = parts.filter((part) => part?.type === "tool")
+
+      if (message?.role === "user") {
+        if (!text) {
+          continue
+        }
+        records.push({
+          timestamp,
+          type: "user_message",
+          event_id: message.id + "-user",
+          source: COMMON_TRANSCRIPT_SOURCE,
+          role: "user",
+          content: text,
+          conversation_id: sessionId,
+          message_id: message.id,
+        })
+        continue
+      }
+      if (message?.role !== "assistant") {
+        continue
+      }
+
+      const toolCalls = toolParts.map((part) => ({
+        tool_call_id: part?.callID ?? "",
+        tool_name: part?.tool ?? "",
+        input_preview: _truncate(_shortValue(part?.state?.input ?? {}), _MAX_INPUT_PREVIEW_LENGTH),
+      }))
+      const providerId = message?.providerID ?? ""
+      const modelId = message?.modelID ?? ""
+      records.push({
+        timestamp,
+        type: "assistant_message",
+        event_id: message.id + "-assistant",
+        source: COMMON_TRANSCRIPT_SOURCE,
+        role: "assistant",
+        model: providerId && modelId ? `${providerId}/${modelId}` : null,
+        text,
+        tool_calls: toolCalls,
+        stop_reason: message?.finish ?? null,
+        usage: null,
+        conversation_id: sessionId,
+        message_id: message.id,
+      })
+
+      for (const part of toolParts) {
+        const status = part?.state?.status
+        if (status !== "completed" && status !== "error") {
+          continue
+        }
+        const { output, isError } = _toolStateOutput(part?.state)
+        records.push({
+          timestamp,
+          type: "tool_result",
+          event_id: part.id + "-tool_result",
+          source: COMMON_TRANSCRIPT_SOURCE,
+          tool_call_id: part?.callID ?? "",
+          tool_name: part?.tool ?? "",
+          output: _truncate(output, _MAX_OUTPUT_LENGTH),
+          is_error: isError,
+          conversation_id: sessionId,
+          message_id: part?.messageID ?? "",
+        })
+      }
+    }
+    return records
+  }
+
+  const rebuildCommon = (): void => {
+    if (!emitCommon) {
+      return
+    }
+    try {
+      mkdirSync(dirname(commonTranscriptPath), { recursive: true })
+      const body = buildCommonRecords()
+        .map((record) => JSON.stringify(record))
+        .join("\n")
+      const tmpPath = commonTranscriptPath + ".tmp"
+      writeFileSync(tmpPath, body.length > 0 ? body + "\n" : "")
+      renameSync(tmpPath, commonTranscriptPath)
+    } catch {
+      // best-effort
+    }
   }
 
   return {
     event: async ({ event }) => {
       const type = event.type
 
-      // Learn session hierarchy from events that carry the full Session.
       if (type === "session.created" || type === "session.updated") {
         const info = event.properties.info
         parentBySession.set(info.id, info.parentID)
         return
       }
 
-      // Marker maintenance. session.status carries busy/idle/retry; session.idle
-      // is the deprecated idle-only event (still emitted by older OpenCode) --
-      // handle both for version tolerance.
       if (type === "session.status") {
         const status = event.properties.status.type
         if (status === "busy" || status === "retry") {
@@ -123,6 +249,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
           if (isRootSession(event.properties.sessionID)) {
             clearMarker()
           }
+          rebuildCommon()
         }
         return
       }
@@ -130,11 +257,21 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         if (isRootSession(event.properties.sessionID)) {
           clearMarker()
         }
+        rebuildCommon()
         return
       }
 
-      // Raw transcript: append message/part events verbatim.
-      if (type === "message.updated" || type === "message.part.updated") {
+      if (type === "message.updated") {
+        const info = event.properties.info
+        messageById.set(info.id, info)
+        appendRaw(JSON.stringify({ type, properties: event.properties }))
+        return
+      }
+      if (type === "message.part.updated") {
+        const part = event.properties.part
+        const parts = partsByMessage.get(part.messageID) ?? new Map<string, any>()
+        parts.set(part.id, part)
+        partsByMessage.set(part.messageID, parts)
         appendRaw(JSON.stringify({ type, properties: event.properties }))
         return
       }

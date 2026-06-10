@@ -61,8 +61,6 @@ from pydantic import Field
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
-from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -78,6 +76,8 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
+from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
+from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
@@ -95,12 +95,6 @@ from imbue.mngr_opencode.opencode_config import get_opencode_server_port_file_pa
 from imbue.mngr_opencode.opencode_config import get_shared_opencode_auth_path
 from imbue.mngr_opencode.opencode_config import read_opencode_config
 from imbue.mngr_opencode.opencode_config import serialize_opencode_config
-
-_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "opencode_common_transcript.sh"
-
-# Supervisor provisioned into commands/; owns the lifecycle of the common
-# transcript converter (the raw transcript is written in-process by the plugin).
-_BACKGROUND_TASKS_SCRIPT_NAME: Final[str] = "opencode_background_tasks.sh"
 
 # User's global OpenCode config, the base for the per-agent opencode.json when
 # ``sync_global_config`` is set. Lives under the default XDG config dir; honoring
@@ -253,21 +247,26 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         return self.agent_config.emit_common_transcript
 
     def get_raw_transcript_scripts(self) -> Mapping[str, str]:
-        """Return no commands/ scripts: the raw transcript is written in-process.
+        """Return no commands/ scripts: both transcripts are written in-process.
 
         OpenCode has no native JSONL session file to tail, so the in-process
         plugin (``mngr_opencode_plugin.ts``, provisioned into the config dir, not
-        commands/) appends each message/part event to
-        ``logs/opencode_transcript/events.jsonl`` itself. Raw capture is therefore
-        not a commands/ script -- but it is still always provisioned (the plugin
+        commands/) writes the raw transcript -- and, on session idle, the common
+        transcript too -- itself. There is therefore no commands/ streamer or
+        converter script, but raw capture is still always provisioned (the plugin
         is written unconditionally in ``provision``), satisfying the
         :class:`HasTranscriptMixin` "raw is the source of truth" contract.
         """
         return {}
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the opencode raw -> common transcript converter."""
-        return {_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_opencode_resource(_COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return no commands/ scripts: the common transcript is emitted in-process.
+
+        The lifecycle plugin rebuilds the common transcript from in-memory state
+        on session idle (gated on ``EMIT_COMMON_ENV_VAR``), so there is no
+        backgrounded converter to provision -- just the plugin.
+        """
+        return {}
 
     def _get_opencode_config_dir(self) -> Path:
         """Per-agent OpenCode config dir (the ``OPENCODE_CONFIG_DIR`` value)."""
@@ -367,30 +366,25 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         options: CreateAgentOptions,
         mngr_ctx: MngrContext,
     ) -> None:
-        """Provision the per-agent config dir, lifecycle plugin, auth, and command scripts.
+        """Provision the per-agent config dir, lifecycle plugin, auth, and launch script.
 
         Steps:
 
         1. Resolve the host user's real ``$HOME`` (shared-auth / global-config source).
-        2. Write the per-agent ``opencode.json`` and the lifecycle plugin into the config dir.
+        2. Write the per-agent ``opencode.json`` and the lifecycle plugin (which
+           writes both the raw and common transcripts in-process) into the config dir.
         3. Point the per-agent ``auth.json`` at the shared host auth (symlink or copy).
-        4. Install the launch orchestrator, the common-transcript converter, and the
-           background supervisor under ``$MNGR_AGENT_STATE_DIR/commands/``.
+        4. Install the launch orchestrator under ``$MNGR_AGENT_STATE_DIR/commands/``.
         """
         host_home = self._resolve_host_home(host)
         self._provision_opencode_config(host, host_home)
         self._provision_plugin(host)
         self._provision_auth(host, host_home)
         with mngr_ctx.concurrency_group.make_concurrency_group("opencode_provisioning") as concurrency_group:
-            provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
-            maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             provision_scripts_to_commands_dir(
                 host,
                 self._get_agent_dir(),
-                {
-                    LAUNCH_SCRIPT_NAME: _load_opencode_resource(LAUNCH_SCRIPT_NAME),
-                    _BACKGROUND_TASKS_SCRIPT_NAME: _load_opencode_resource(_BACKGROUND_TASKS_SCRIPT_NAME),
-                },
+                {LAUNCH_SCRIPT_NAME: _load_opencode_resource(LAUNCH_SCRIPT_NAME)},
                 concurrency_group,
             )
 
@@ -441,11 +435,6 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
                 source,
             )
 
-    def _build_background_tasks_command(self) -> str:
-        """Shell snippet that backgrounds the transcript-supervisor subshell."""
-        script_path = f"$MNGR_AGENT_STATE_DIR/commands/{_BACKGROUND_TASKS_SCRIPT_NAME}"
-        return f"( bash {script_path} {shlex.quote(self.session_name)} ) &"
-
     def assemble_command(
         self,
         host: OnlineHostInterface,
@@ -453,24 +442,22 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         command_override: CommandString | None,
         initial_message: str | None = None,
     ) -> CommandString:
-        """Build the launch command: backgrounded converter + the serve/attach orchestrator.
+        """Build the launch command: ``env <isolation + MNGR_OPENCODE_*> bash opencode_launch.sh <user-args>``.
 
-        Composition:
-
-        1. ``( bash opencode_background_tasks.sh <session> ) &`` -- backgrounded
-           common-transcript converter supervisor (only when ``emit_common_transcript``).
-        2. ``env <isolation + MNGR_OPENCODE_*> bash opencode_launch.sh <user-args>``
-           -- the launch orchestrator (see the resource): it starts ``opencode
-           serve`` (asking for an ephemeral port via ``--port 0`` and recording
-           the actual bound port, so co-resident agents never collide),
-           pre-creates/reuses the session, and attaches the TUI client in the
-           foreground. The env carries the config / data isolation (inherited by
-           both serve and attach) plus the bin and work dir the script needs. User
-           ``cli_args`` / ``agent_args`` are forwarded (shell-quoted) to the attach
-           client.
+        The launch orchestrator (see the resource) starts ``opencode serve``
+        (asking for an ephemeral port via ``--port 0`` and recording the actual
+        bound port, so co-resident agents never collide), pre-creates/reuses the
+        session, and attaches the TUI client in the foreground. The env carries the
+        config / data isolation (inherited by both serve and attach), the bin and
+        work dir the script needs, and -- when ``emit_common_transcript`` is on --
+        ``MNGR_OPENCODE_EMIT_COMMON``, which tells the in-process plugin to emit
+        the common transcript on idle. User ``cli_args`` / ``agent_args`` are
+        forwarded (shell-quoted) to the attach client.
 
         Session resume across stop/start is handled inside the script (it reuses
-        the recorded root session id), so there is no resume flag here.
+        the recorded root session id), so there is no resume flag here. There is no
+        backgrounded supervisor: both transcripts are written in-process by the
+        plugin.
         """
         opencode_bin = str(command_override) if command_override is not None else str(self.agent_config.command)
         forwarded_args = " ".join(shlex.quote(arg) for arg in (*self.agent_config.cli_args, *agent_args))
@@ -491,13 +478,13 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
             f" {OPENCODE_PORT_ENV_VAR}={_EPHEMERAL_PORT}"
             f" {OPENCODE_WORKDIR_ENV_VAR}={shlex.quote(directory_query)}"
         )
+        if self.is_common_transcript_enabled:
+            env_prefix = f"{env_prefix} {EMIT_COMMON_ENV_VAR}={EMIT_COMMON_ENABLED_VALUE}"
+
         launch_command = f"{env_prefix} bash {launch_script}"
         if forwarded_args:
             launch_command = f"{launch_command} {forwarded_args}"
-
-        if not self.is_common_transcript_enabled:
-            return CommandString(launch_command)
-        return CommandString(f"{self._build_background_tasks_command()} {launch_command}")
+        return CommandString(launch_command)
 
 
 @hookimpl

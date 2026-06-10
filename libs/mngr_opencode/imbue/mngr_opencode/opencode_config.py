@@ -92,6 +92,12 @@ LAUNCH_SCRIPT_NAME: str = "opencode_launch.sh"
 ROLE_ENV_VAR: str = "MNGR_OPENCODE_ROLE"
 SERVER_ROLE: str = "server"
 
+# Env var (set on the OpenCode process by ``assemble_command`` when
+# ``emit_common_transcript`` is enabled) that tells the in-process plugin to emit
+# the common transcript on session idle. The plugin hardcodes the name + ``"1"``.
+EMIT_COMMON_ENV_VAR: str = "MNGR_OPENCODE_EMIT_COMMON"
+EMIT_COMMON_ENABLED_VALUE: str = "1"
+
 # Env vars the launch script reads (set by ``assemble_command``). The port is
 # passed as ``0`` so ``opencode serve`` binds an OS-assigned free port; the launch
 # script records the actual bound port (co-resident agents never collide). The

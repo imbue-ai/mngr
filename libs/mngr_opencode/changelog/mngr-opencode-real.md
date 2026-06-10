@@ -22,10 +22,10 @@ User-visible changes:
   on first launch and re-attaches to it (`opencode attach --session <id>`) on
   restart, reading it back from the per-agent SQLite store, instead of starting
   fresh.
-- **Transcripts.** `mngr transcript` now works for opencode agents. The raw
-  transcript is captured in-process by the plugin; a background converter turns
-  it into the common format `mngr transcript` reads. Gated by
-  `emit_common_transcript` (default on).
+- **Transcripts.** `mngr transcript` now works for opencode agents. Both the raw
+  transcript and (on session idle) the common-format transcript `mngr transcript`
+  reads are written in-process by the plugin -- no background converter or
+  supervisor. Gated by `emit_common_transcript` (default on).
 - **Per-agent isolation.** Each agent gets its own OpenCode config dir
   (`OPENCODE_CONFIG_DIR`) and data dir (`XDG_DATA_HOME`), so model, permission
   policy, sessions, and credentials are per-agent and never touch the user's
