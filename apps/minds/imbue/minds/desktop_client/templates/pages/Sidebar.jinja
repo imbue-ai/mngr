@@ -1,12 +1,14 @@
 {#def mngr_forward_origin #}
 {#
-  Standalone sidebar page served into the Electron sidebar WebContentsView.
-  Acts as a modal: the WebContentsView covers the full content area, the
-  body is the transparent backdrop, and the floating dark teal panel is
-  pinned to the top-left. Clicks on the backdrop (anywhere outside the
-  panel) and the Escape key close the sidebar via /_static/sidebar.js.
-  The panel's height comes from its own flex content -- no JS measurement
-  or Electron-side bounds math is needed.
+  Standalone sidebar page loaded into the shared modal WebContentsView
+  when the user opens the sidebar. The modal view covers the full window
+  content area, the body is the transparent backdrop, and the floating
+  dark teal panel is pinned to the top-left. Clicks on the backdrop
+  (anywhere outside the panel) dismiss the modal via /_static/sidebar.js;
+  the Escape key is handled by main.js's modal before-input-event
+  listener (see openModal in electron/main.js), so this page does not
+  install its own Escape handler. The panel's height comes from its own
+  flex content -- no JS measurement or Electron-side bounds math is needed.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
