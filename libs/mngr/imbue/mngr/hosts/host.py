@@ -299,17 +299,25 @@ _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
 # matches none of the relevant set is treated as a real failure (see
 # Host._classify_cleanup_command_stderr and specs/cleanup-error-aggregation.md).
 #
-# tmux emits these when its target session/window/pane (or the server) is already gone.
-# "error connecting to" is the client_connect failure tmux prints when the server socket is
-# absent (e.g. "error connecting to /tmp/.../default (No such file or directory)") -- the
-# common form of "no server running" on both macOS and Linux, which the literal "no server
-# running" string does not cover. An absent server means there is nothing left to clean up.
+# tmux emits one of these when its target session/window/pane is already gone, or when the
+# server itself is absent or exiting -- all of which mean there is nothing left to clean up:
+#   - "can't find session/window/pane": the target is gone but the server is still up.
+#   - "no server running" / "error connecting to ...": the server socket is absent (the
+#     client_connect form, e.g. "error connecting to /tmp/.../default (No such file or
+#     directory)", is the common shape on both macOS and Linux; the literal "no server
+#     running" string does not always appear).
+#   - "lost server" / "server exited": the client was connected but the server went away
+#     mid-command. This is a normal teardown race: killing an agent's processes can close
+#     its (last) session, which exits the local server just as a concurrent ``kill-session``
+#     for a sibling agent runs (e.g. destroying several local agents in parallel).
 _TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     "can't find session",
     "can't find window",
     "can't find pane",
     "no server running",
     "error connecting to",
+    "lost server",
+    "server exited",
 )
 # kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
 # pids routinely die between collection and the kill loop.

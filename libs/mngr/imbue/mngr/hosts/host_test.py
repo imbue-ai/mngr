@@ -1262,9 +1262,12 @@ def test_stop_agents_classifies_real_vs_benign_stderr(
     agent = make_test_agent_details("cleanup-classify-agent")
 
     def handle_benign(command: str) -> CommandResult:
-        # Session already gone: list-windows and kill-session report it on stderr.
-        if "list-windows" in command or "kill-session" in command:
+        # Session already gone (list-windows) and the server going away during teardown
+        # (kill-session racing with the local tmux server exiting) are both benign.
+        if "list-windows" in command:
             return CommandResult(stdout="", stderr="can't find session: mngr_x", success=False)
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="lost server", success=False)
         return CommandResult(stdout="", stderr="", success=True)
 
     benign_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_benign)

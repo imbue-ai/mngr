@@ -751,11 +751,16 @@ def _destroy_emptied_hosts(
     ``_resolve_host_for_partition``, so one (host, provider) entry per host
     is guaranteed.
 
-    Failures (connection / auth / provider) are logged and skipped so a
-    single broken host doesn't block destruction of other empty hosts.
-    The post-destroy GC pass that runs immediately after this is the
-    safety net that will eventually pick the host up once the transient
-    failure clears.
+    This is a best-effort convenience pass, not the operation the user asked for
+    (which was to destroy the agents -- already done). A host that *cannot* be
+    destroyed here is therefore not a cleanup failure: the local host is never
+    destroyable (``LocalHostNotDestroyableError``), and a transient connection /
+    auth / provider error is logged and skipped (the post-destroy GC pass that
+    runs immediately after is the safety net that retries once the failure
+    clears). So a *raised* error from this sweep does not contribute to the
+    command's exit code. A host that *was* destroyed but left a real resource
+    behind is surfaced normally -- those failures come back from ``destroy_host``
+    as a returned list, which we do record.
     """
     for host, provider in online_hosts_with_provider:
         host_name = host.get_name()
@@ -782,17 +787,14 @@ def _destroy_emptied_hosts(
             emit_host_destroyed(mngr_ctx.config, host.id, [])
             _output(f"Destroyed empty host: {host_name}", output_opts)
             with results_lock:
+                # Real "destroyed but a resource leaked" failures are surfaced.
                 failures.extend(host_failures)
         except MngrError as exc:
-            logger.warning("Failed to destroy emptied host {}: {}", host_name, exc)
-            with results_lock:
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.PROVIDER_INACCESSIBLE,
-                        message=f"Failed to destroy emptied host {host_name}: {exc}",
-                        host_id=host.id,
-                    )
-                )
+            # Best-effort: this implicit host-destroy could not even be attempted (e.g. the
+            # local host is not destroyable, or a transient provider error). The agent
+            # destroy the user asked for succeeded, and GC is the safety net, so this is
+            # logged and skipped rather than recorded as a cleanup failure.
+            logger.warning("Skipping destroy of emptied host {} (GC will retry): {}", host_name, exc)
 
 
 def _run_post_destroy_gc(

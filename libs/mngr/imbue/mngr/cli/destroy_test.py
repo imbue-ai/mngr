@@ -387,15 +387,17 @@ class _RecordingProvider:
     def __init__(
         self,
         raise_on_destroy: Exception | None = None,
+        return_failures_on_destroy: list[CleanupFailure] | None = None,
     ) -> None:
         self.destroyed_hosts: list[object] = []
         self._raise_on_destroy = raise_on_destroy
+        self._return_failures_on_destroy = return_failures_on_destroy or []
 
     def destroy_host(self, host: object) -> list[CleanupFailure]:
         if self._raise_on_destroy is not None:
             raise self._raise_on_destroy
         self.destroyed_hosts.append(host)
-        return []
+        return list(self._return_failures_on_destroy)
 
 
 def _pair_for_emptied(
@@ -470,7 +472,7 @@ def test_destroy_emptied_hosts_skips_host_when_get_agents_raises_connection_erro
     assert provider.destroyed_hosts == []
 
 
-@pytest.mark.allow_warnings(match="Failed to destroy emptied host")
+@pytest.mark.allow_warnings(match="Skipping destroy of emptied host")
 def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: MngrContext) -> None:
     """A provider.destroy_host failure on one host must not block others.
 
@@ -495,16 +497,41 @@ def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: 
         failures=failures,
     )
 
-    # The failing host's destroy was attempted (it raised before recording).
-    # The working host's destroy still ran after the failure -- this is the
-    # "one bad host doesn't block the others" guarantee.
+    # The failing host's destroy was attempted; the working host's destroy still
+    # ran after the failure -- the "one bad host doesn't block the others" guarantee.
     assert failing_provider.destroyed_hosts == []
     assert working_provider.destroyed_hosts == [empty_host_b]
-    # The failed host destroy is aggregated as a real cleanup failure (the
-    # provider was inaccessible) so the command can exit non-zero.
-    assert len(failures) == 1
-    assert failures[0].category == CleanupFailureCategory.PROVIDER_INACCESSIBLE
-    assert failures[0].host_id == empty_host_a.id
+    # This implicit emptied-host sweep is best-effort: a raised destroy_host error
+    # (the local host being non-destroyable, or a transient provider error) is logged
+    # and skipped, NOT recorded as a cleanup failure -- the agent destroy the user asked
+    # for succeeded and GC is the safety net, so it must not make the command exit
+    # non-zero. (A *returned* "destroyed-but-leaked" failure would still be recorded.)
+    assert failures == []
+
+
+def test_destroy_emptied_hosts_surfaces_returned_leak_failures(temp_mngr_ctx: MngrContext) -> None:
+    """A host that was destroyed but left a real resource behind (a *returned* failure
+    from destroy_host) is surfaced -- only *raised* "couldn't attempt" errors are skipped.
+    """
+    empty_host = _StubOnlineHost(remaining_agents=[])
+    leak = CleanupFailure(
+        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+        message="container could not be removed",
+        host_id=empty_host.id,
+    )
+    leaky_provider = _RecordingProvider(return_failures_on_destroy=[leak])
+
+    failures: list[CleanupFailure] = []
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[_pair_for_emptied(empty_host, leaky_provider)],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+        results_lock=threading.Lock(),
+        failures=failures,
+    )
+
+    assert leaky_provider.destroyed_hosts == [empty_host]
+    assert failures == [leak]
 
 
 def test_destroy_emptied_hosts_does_nothing_for_empty_input(temp_mngr_ctx: MngrContext) -> None:
