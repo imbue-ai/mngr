@@ -10,7 +10,7 @@ def test_default_config_values() -> None:
     config = GcpProviderConfig(project_id="my-project")
     assert config.default_region == "us-west1"
     assert config.default_zone == "us-west1-a"
-    assert config.default_plan == "e2-small"
+    assert config.default_machine_type == "e2-small"
     assert config.default_image == DEFAULT_GCE_IMAGE
     assert config.boot_disk_size_gb == 30
     assert config.boot_disk_type == "pd-balanced"

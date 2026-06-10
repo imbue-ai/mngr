@@ -275,7 +275,7 @@ class GcpVpsClient(VpsClientInterface):
             raise VpsApiError(
                 400,
                 f"Cross-zone create not supported: client bound to zone {self.zone!r}, "
-                f"got region={region!r} (for GCP, --vps-region is a zone). Instantiate a zone-specific client.",
+                f"got region={region!r} (for GCP, --gcp-zone is the placement knob). Instantiate a zone-specific client.",
             )
 
         self.ensure_firewall()

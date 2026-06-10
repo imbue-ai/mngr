@@ -23,7 +23,7 @@ backend = "gcp"
 project_id = "my-gcp-project"      # required; no credential material
 default_region = "us-west1"
 default_zone = "us-west1-a"        # GCE VMs are zonal
-default_plan = "e2-small"          # machine type (~2 vCPU / 2GB)
+default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
 # default_image defaults to the global Debian 12 image family; override only if needed:
 # default_image = "projects/debian-cloud/global/images/family/debian-12"
 
@@ -65,7 +65,7 @@ mngr create my-central-agent --provider gcp-central
 
 ```bash
 mngr create my-agent --provider gcp
-mngr create my-agent --provider gcp -b --vps-plan=e2-medium -b --vps-region=us-west1-b
+mngr create my-agent --provider gcp -b --gcp-machine-type=e2-medium -b --gcp-zone=us-west1-b
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -73,7 +73,7 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
-Note: GCE VMs are zonal, so `--vps-region=` selects a **zone** (e.g. `us-west1-b`) for this provider, not a region. The chosen zone must belong to the provider's `default_region`.
+Note: GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. The chosen zone must belong to the provider's `default_region`.
 
 ## GCP-specific configuration
 
@@ -84,7 +84,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `project_id` | (required) | GCP project ID. A plain identifier, not a credential. |
 | `default_region` | `us-west1` | GCE region. Used to validate that the chosen zone belongs to it. |
 | `default_zone` | `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
-| `default_plan` | `e2-small` | GCE machine type. |
+| `default_machine_type` | `e2-small` | GCE machine type. |
 | `default_image` | `projects/debian-cloud/global/images/family/debian-12` | Source image. GCE image families are global, so no per-region map is needed. |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
 | `boot_disk_type` | `pd-balanced` | Boot disk type (`pd-balanced`, `pd-ssd`, `pd-standard`). |

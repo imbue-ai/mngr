@@ -21,13 +21,13 @@ def test_backend_name_and_config_class() -> None:
 
 def test_backend_build_args_help_mentions_gcp_specific_args() -> None:
     """The build-args help is the only user-facing surface that describes
-    GCE-specific build-arg overrides. It must mention the GCE-specific flags and
-    call out that --vps-region is a zone for GCP.
+    GCE-specific build-arg overrides. It must mention the GCP-prefixed flags and
+    call out that placement is a zone for GCP.
     """
     help_text = GcpProviderBackend.get_build_args_help()
     assert "GCE-specific" in help_text
-    assert "--vps-region=ZONE" in help_text
-    assert "--vps-plan=TYPE" in help_text
+    assert "--gcp-zone=ZONE" in help_text
+    assert "--gcp-machine-type=TYPE" in help_text
     assert "zonal" in help_text
     # Document the per-host-image escape hatch is intentionally absent.
     assert "Image" in help_text and "default_image" in help_text
@@ -98,3 +98,47 @@ def test_validate_provider_args_under_pytest_raises_when_zero(temp_mngr_ctx: Mng
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=0)
     with pytest.raises(MngrError, match="auto_shutdown_minutes"):
         provider._validate_provider_args_for_create()
+
+
+# =============================================================================
+# GCP build-args parser (--gcp-zone, --gcp-machine-type, --git-depth)
+# =============================================================================
+
+
+def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    parsed = provider._parse_build_args(None)
+    # region holds the zone for GCP (base threads it to create_instance).
+    assert parsed.region == "us-west1-a"
+    assert parsed.plan == "e2-small"
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ()
+
+
+def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    parsed = provider._parse_build_args(
+        [
+            "--gcp-zone=us-west1-b",
+            "--gcp-machine-type=e2-medium",
+            "--git-depth=1",
+            "--file=Dockerfile",
+            ".",
+        ]
+    )
+    assert parsed.region == "us-west1-b"
+    assert parsed.plan == "e2-medium"
+    assert parsed.git_depth == 1
+    assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_parse_build_args_rejects_unknown_gcp_flag(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    with pytest.raises(MngrError, match="Unknown gcp build arg"):
+        provider._parse_build_args(["--gcp-bogus=foo"])
+
+
+def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    with pytest.raises(MngrError, match="no longer supported"):
+        provider._parse_build_args(["--vps-region=us-west1-a"])

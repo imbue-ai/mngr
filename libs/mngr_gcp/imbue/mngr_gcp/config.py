@@ -51,7 +51,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         default="us-west1-a",
         description="Default GCE zone (GCE VMs are zonal, e.g. 'us-west1-a'). Must lie in default_region.",
     )
-    default_plan: str = Field(
+    default_machine_type: str = Field(
         default="e2-small",
         description="Default GCE machine type (e.g., 'e2-small' for ~2 vCPU, 2GB RAM).",
     )

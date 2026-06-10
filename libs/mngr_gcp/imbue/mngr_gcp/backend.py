@@ -1,4 +1,5 @@
 import os
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
@@ -17,7 +18,12 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import extract_git_depth
+from imbue.mngr_vps_docker.instance import extract_single_value_arg
+from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
+from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
@@ -59,6 +65,37 @@ class GcpProvider(VpsDockerProvider):
                 "and self-deletes even if pytest is killed."
             )
 
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        """Parse GCP-prefixed build args.
+
+        Accepts ``--gcp-zone=ZONE`` (GCE VMs are zonal, so the placement knob is
+        a zone, not a region; it must equal the provider's bound zone), the
+        machine type via ``--gcp-machine-type=TYPE``, and the shared
+        ``--git-depth=N``. Composed from the shared low-level helpers (rather
+        than the ``parse_vps_build_args`` convenience, which hardcodes a
+        ``--<prefix>-region=`` flag) so the flag is named ``--gcp-zone`` to
+        match GCE's zonal model. The parsed value populates
+        ``ParsedVpsBuildOptions.region``, which the base threads to
+        ``create_instance(region=...)`` -- the GCP client interprets that as the
+        zone.
+        """
+        args = list(build_args or ())
+        zone, args = extract_single_value_arg(args, "--gcp-zone=")
+        machine_type, args = extract_single_value_arg(args, "--gcp-machine-type=")
+        git_depth, args = extract_git_depth(args)
+        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--git-depth=")
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            raise_if_unknown_provider_arg(arg, "gcp", valid_args)
+            docker_build_args.append(arg)
+        return ParsedVpsBuildOptions(
+            region=zone or self.gcp_config.default_zone,
+            plan=machine_type or self.gcp_config.default_machine_type,
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )
+
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return external IPs of GCE instances labeled with this provider's name.
 
@@ -94,15 +131,16 @@ class GcpProviderBackend(ProviderBackendInterface):
     def get_build_args_help() -> str:
         return (
             "GCE-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-region=ZONE    GCE zone, e.g. us-west1-a (GCE VMs are zonal; default: us-west1-a)\n"
-            "  --vps-plan=TYPE      GCE machine type (default: e2-small)\n"
-            "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
+            "  --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal\n"
+            "                           the provider's configured zone; default: us-west1-a)\n"
+            "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
+            "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
             "\n"
             "Image is taken from the provider config (default_image); per-host image\n"
             "overrides are not supported via build args.\n"
             "\n"
             "All other build args are passed to 'docker build' on the GCE instance.\n"
-            "Example: -b --vps-plan=e2-medium -b --file=Dockerfile -b .\n"
+            "Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod
@@ -136,7 +174,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             project_id=project_id,
             zone=config.default_zone,
             image=config.default_image,
-            machine_type=config.default_plan,
+            machine_type=config.default_machine_type,
             boot_disk_size_gb=config.boot_disk_size_gb,
             boot_disk_type=config.boot_disk_type,
             network=config.network,
