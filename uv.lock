@@ -1648,6 +1648,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "imbue-common", extra = ["dev"] },
+    { name = "imbue-mngr-latchkey", extra = ["dev"] },
     { name = "import-linter" },
     { name = "line-profiler" },
     { name = "pre-commit" },
@@ -1672,6 +1673,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "imbue-common", extras = ["dev"], editable = "libs/imbue_common" },
+    { name = "imbue-mngr-latchkey", extras = ["dev"], editable = "libs/mngr_latchkey" },
     { name = "import-linter", specifier = ">=2.0" },
     { name = "line-profiler" },
     { name = "pre-commit", specifier = ">=4.2.0" },

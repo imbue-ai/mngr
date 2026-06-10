@@ -21,6 +21,7 @@ exclude-newer = "2026-05-26T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
+imbue-mngr-latchkey = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]
@@ -40,6 +41,7 @@ dev = [
     "semver>=3.0",
     "tomlkit>=0.12.0",
     "imbue-common[dev]",
+    "imbue-mngr-latchkey[dev]",
     "shellcheck-py>=0.10.0",
 ]
 
