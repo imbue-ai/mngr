@@ -65,16 +65,20 @@
     </div>
   </div>
 
-  {# Browser-mode floating sidebar: anchored at the top-left under the
-     titlebar, dark teal panel with shadow, slides off-screen when closed.
-     In Electron this is hidden via JS; the sidebar is a separate
-     WebContentsView using the same /_static/sidebar.js renderer. #}
-  <div id="sidebar-panel"
-       class="fixed left-2 top-[46px] w-[244px] z-50 -translate-x-[260px] opacity-0 transition-all duration-200 ease-in-out flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
-    <div id="sidebar-workspaces" class="flex flex-col gap-px">
-      <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
+  {# Browser-mode floating sidebar: full-screen transparent backdrop
+     (#sidebar-backdrop) with a floating dark teal panel (#sidebar-panel)
+     pinned to the top-left under the titlebar. Clicks on the backdrop and
+     Escape close the menu (handled by chrome.js). In Electron this whole
+     block is hidden via JS; the sidebar is a separate WebContentsView
+     using the same /_static/sidebar.js renderer with the same shape. #}
+  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
+    <div id="sidebar-panel"
+         class="absolute left-2 top-[46px] w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-px">
+        <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
+      </div>
+      <SidebarBottom />
     </div>
-    <SidebarBottom />
   </div>
 
   {# White "mirror" sized exactly like the Electron contentView (left:4

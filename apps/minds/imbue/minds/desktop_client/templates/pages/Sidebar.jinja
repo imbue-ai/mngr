@@ -1,12 +1,12 @@
 {#def mngr_forward_origin #}
 {#
   Standalone sidebar page served into the Electron sidebar WebContentsView.
-  Renders as a floating menu (dark teal panel, rounded, shadowed) positioned
-  at the top-left of the WebContentsView so the workspace content shows
-  behind the empty space below. Workspace rows, the "New workspace" CTA,
-  and the "Manage account(s)" / "Log in" row are wired up in
-  /_static/sidebar.js. The same SSE subscription as the chrome-embedded
-  sidebar drives the workspace list.
+  Acts as a modal: the WebContentsView covers the full content area, the
+  body is the transparent backdrop, and the floating dark teal panel is
+  pinned to the top-left. Clicks on the backdrop (anywhere outside the
+  panel) and the Escape key close the sidebar via /_static/sidebar.js.
+  The panel's height comes from its own flex content -- no JS measurement
+  or Electron-side bounds math is needed.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
@@ -21,11 +21,13 @@
       body_class="font-sans antialiased bg-transparent"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
-  <div id="sidebar-menu"
-       class="absolute top-2 left-2 right-2 flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
-    <div id="sidebar-workspaces" class="flex flex-col gap-px">
-      <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
+  <div id="sidebar-backdrop" class="fixed inset-0">
+    <div id="sidebar-menu"
+         class="absolute top-2 left-2 w-[244px] flex flex-col gap-px p-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-px">
+        <div class="px-2 py-2 text-xs text-zinc-400 text-center">No projects</div>
+      </div>
+      <SidebarBottom />
     </div>
-    <SidebarBottom />
   </div>
 </Base>

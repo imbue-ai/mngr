@@ -37,14 +37,6 @@ contextBridge.exposeInMainWorld('minds', {
 
   // Sidebar
   toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
-  // Sidebar-renderer-driven height hint: the floating menu's rendered
-  // height is dynamic (one row per workspace + fixed bottom rows). The
-  // sidebar WebContentsView used to span full window height, which made
-  // its transparent area below the menu silently absorb clicks intended
-  // for the workspace content underneath. The sidebar page posts its
-  // rendered height here so the main process can shrink the view to
-  // match and let clicks below the menu pass through to the content view.
-  setSidebarHeight: (heightPx) => ipcRenderer.send('set-sidebar-height', heightPx),
 
   // Inbox modal (formerly the right-side requests panel)
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),

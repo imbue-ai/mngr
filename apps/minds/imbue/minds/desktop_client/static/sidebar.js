@@ -182,6 +182,24 @@
     }
   });
 
+  // -- Modal dismissal: backdrop click + Escape ----------------------------
+  //
+  // The sidebar WebContentsView covers the full content area; the body is a
+  // transparent backdrop with the floating panel pinned at top-left. Clicks
+  // anywhere outside the panel close the sidebar. The Esc key does the same
+  // (only fires when the sidebar has focus, which matches the existing
+  // Inbox modal's behavior).
+  function closeSidebar() {
+    if (isElectron && window.minds.toggleSidebar) window.minds.toggleSidebar();
+  }
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#sidebar-menu')) return;
+    closeSidebar();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeSidebar();
+  });
+
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;
@@ -225,32 +243,6 @@
     if (data.type !== 'workspaces') return;
     lastWorkspaces = data.workspaces || [];
     renderWorkspaces(lastWorkspaces);
-  }
-
-  // Tell the main process how tall the rendered menu actually is so it can
-  // size the sidebar WebContentsView to match. A transparent view that
-  // extends past the menu silently absorbs clicks intended for the
-  // workspace content behind it; with a matched height, clicks below the
-  // menu fall through to the underlying content view. ResizeObserver picks
-  // up workspace-list changes (rows added / removed) automatically.
-  if (isElectron && window.minds.setSidebarHeight) {
-    var menu = document.getElementById('sidebar-menu');
-    if (menu && typeof ResizeObserver !== 'undefined') {
-      var report = function () {
-        var rect = menu.getBoundingClientRect();
-        // `rect.bottom` is the menu's bottom edge relative to the viewport.
-        // The menu sits at `top-2 left-2 right-2` (no `bottom-2`), so
-        // `rect.bottom` already includes the 8px top inset plus the menu's
-        // rendered height. The +16 is extra headroom past the menu so the
-        // drop-shadow renders without being clipped at the WebContentsView's
-        // bottom edge.
-        var totalPx = Math.ceil(rect.bottom + 16);
-        window.minds.setSidebarHeight(totalPx);
-      };
-      var ro = new ResizeObserver(report);
-      ro.observe(menu);
-      report();
-    }
   }
 
   if (isElectron && window.minds.onChromeEvent) {

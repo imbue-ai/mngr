@@ -32,24 +32,23 @@
 
   // -- Sidebar toggle -------------------------------------------------------
   //
-  // Browser mode: slides the floating panel into view via translate +
-  // opacity. Electron mode: defers to the main process, which toggles the
-  // separate sidebar WebContentsView.
+  // Browser mode: toggles the floating backdrop's `hidden` class. The
+  // backdrop covers the full viewport with the panel pinned at top-left;
+  // clicks outside the panel (and the Esc key) close the menu. Electron
+  // mode: defers to the main process, which toggles the separate sidebar
+  // WebContentsView. ``sidebarOpen`` is intentionally browser-mode-only --
+  // in Electron the main process owns visibility (see openSidebar /
+  // closeSidebar in electron/main.js).
   var sidebarOpen = false;
   function showSidebarPanel() {
-    var panel = document.getElementById('sidebar-panel');
-    panel.classList.remove('-translate-x-[260px]', 'opacity-0');
-    panel.classList.add('translate-x-0', 'opacity-100');
+    document.getElementById('sidebar-backdrop').classList.remove('hidden');
   }
   function hideSidebarPanel() {
-    var panel = document.getElementById('sidebar-panel');
-    panel.classList.add('-translate-x-[260px]', 'opacity-0');
-    panel.classList.remove('translate-x-0', 'opacity-100');
+    document.getElementById('sidebar-backdrop').classList.add('hidden');
   }
   function toggleSidebar() {
     if (isElectron) {
       window.minds.toggleSidebar();
-      sidebarOpen = !sidebarOpen;
     } else {
       sidebarOpen = !sidebarOpen;
       if (sidebarOpen) showSidebarPanel();
@@ -57,10 +56,10 @@
     }
   }
   function closeSidebar() {
+    if (isElectron) return;  // Electron sidebar.js handles its own dismissal.
     if (!sidebarOpen) return;
     sidebarOpen = false;
-    if (!isElectron) hideSidebarPanel();
-    else window.minds.toggleSidebar();
+    hideSidebarPanel();
   }
 
   function selectWorkspace(agentId) {
@@ -191,7 +190,17 @@
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
     document.getElementById('content-frame').style.display = 'none';
-    document.getElementById('sidebar-panel').style.display = 'none';
+    document.getElementById('sidebar-backdrop').style.display = 'none';
+  } else {
+    // Browser mode: backdrop click outside the panel + Escape close the
+    // sidebar, matching the Electron sidebar's behavior.
+    document.getElementById('sidebar-backdrop').addEventListener('click', function (e) {
+      if (e.target.closest('#sidebar-panel')) return;
+      closeSidebar();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeSidebar();
+    });
   }
 
   // -- Title + URL tracking -------------------------------------------------
@@ -209,12 +218,13 @@
         document.getElementById('page-title').textContent = title || 'Minds';
       });
     }
-    // The account row that refreshAuthStatus would update lives in the inline
-    // #sidebar-panel, which is display:none in Electron mode -- the visible
-    // copy is the separate sidebar WebContentsView, which subscribes to its
-    // own content-url-changed IPC and re-fetches /auth/api/status there. So
-    // we don't subscribe to onContentURLChange here in Electron mode; doing
-    // so would fire the fetch on every nav for no visible effect.
+    // The account row that refreshAuthStatus would update lives inside the
+    // inline #sidebar-backdrop, which is display:none in Electron mode --
+    // the visible copy is the separate sidebar WebContentsView, which
+    // subscribes to its own content-url-changed IPC and re-fetches
+    // /auth/api/status there. So we don't subscribe to onContentURLChange
+    // here in Electron mode; doing so would fire the fetch on every nav
+    // for no visible effect.
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
@@ -310,8 +320,8 @@
   // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
   // the sidebar lives in its own WebContentsView with its own copy of this
   // logic; the writes below land on the inline #sidebar-account, which
-  // lives inside the display:none #sidebar-panel and so isn't user-visible.
-  // The main process drives the separate view.
+  // lives inside the display:none #sidebar-backdrop and so isn't
+  // user-visible. The main process drives the separate view.
   var signedIn = false;
   function updateAuthUI(data) {
     signedIn = !!(data && data.signedIn);

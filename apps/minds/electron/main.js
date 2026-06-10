@@ -306,23 +306,17 @@ function updateBundleBounds(bundle) {
     });
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
-    // The floating menu lives inside the sidebar page and its height
-    // varies with the workspace count. The sidebar page posts its
-    // measured height via the `set-sidebar-height` IPC and we cache it
-    // on the bundle as `sidebarHeight`. Bounding the view to that
-    // height (clamped to the available window area) means clicks below
-    // the menu fall through to the underlying workspace content view --
-    // a transparent full-height view would silently absorb them. Before
-    // the first measurement arrives we fall back to the available height.
-    const available = height - TITLEBAR_HEIGHT;
-    const desired = bundle.sidebarHeight
-      ? Math.min(bundle.sidebarHeight, available)
-      : available;
+    // The sidebar acts as a modal: the WebContentsView covers the full
+    // content area (under the titlebar to the bottom of the window) so
+    // its transparent backdrop captures clicks outside the floating
+    // menu and closes the sidebar. The menu's actual size + position
+    // is plain CSS inside the sidebar page (top-2 left-2 w-[244px]),
+    // not a function of these bounds.
     bundle.sidebarView.setBounds({
       x: 0,
       y: TITLEBAR_HEIGHT,
-      width: SIDEBAR_WIDTH,
-      height: desired,
+      width,
+      height: height - TITLEBAR_HEIGHT,
     });
   }
   // The modal overlays the entire window (including the title bar) so
@@ -492,7 +486,6 @@ function createBundle() {
     contentView,
     sidebarView: null,
     sidebarVisible: false,
-    sidebarHeight: null,
     modalView: null,
     modalVisible: false,
     modalUrl: null,
@@ -2259,15 +2252,6 @@ ipcMain.on('content-go-forward', (event) => {
 
 ipcMain.on('toggle-sidebar', (event) => {
   toggleSidebar(getBundleFromEvent(event));
-});
-
-ipcMain.on('set-sidebar-height', (event, heightPx) => {
-  const bundle = getBundleFromEvent(event);
-  if (!bundle) return;
-  const n = Math.max(1, Math.round(Number(heightPx) || 0));
-  if (bundle.sidebarHeight === n) return;
-  bundle.sidebarHeight = n;
-  updateBundleBounds(bundle);
 });
 
 ipcMain.on('toggle-inbox', (event) => {
