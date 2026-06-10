@@ -113,16 +113,16 @@ def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
 @pytest.mark.timeout(120)
 def test_message_all(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
-        # send a message to all agents
-        mngr msg -a -m "Stop what you are doing and commit your current progress"
+        # send a message to every agent by piping their ids from `mngr list`
+        mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"
     """)
     _create_sleep_agents(e2e, [("my-task", 100305)])
     result = e2e.run(
-        'mngr msg -a -m "Stop what you are doing and commit your current progress"',
-        comment="send a message to all agents",
+        'mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"',
+        comment="send a message to every agent",
     )
     expect(result).to_succeed()
-    # -a must actually broadcast to the running agent, not silently no-op.
+    # The pipe must actually broadcast to the running agent, not silently no-op.
     expect(result.stdout).to_contain("Message sent to: my-task")
     expect(result.stdout).to_contain("Successfully sent message to 1 agent(s)")
 
@@ -220,12 +220,12 @@ def test_message_on_error_continue(e2e: E2eSession) -> None:
         #   "abort", which means stop if any agent fails to receive the message
         # note that "abort" is kind of dangerous--you could easily have agents left in a strange state
         # thus the default is "continue"
-        mngr msg -a -m "Status update please" --on-error continue
+        mngr list --ids | mngr msg - -m "Status update please" --on-error continue
     """)
     _create_sleep_agents(e2e, [("my-task", 100306)])
     expect(
         e2e.run(
-            'mngr msg -a -m "Status update please" --on-error continue',
+            'mngr list --ids | mngr msg - -m "Status update please" --on-error continue',
             comment="control error handling when messaging multiple agents",
         )
     ).to_succeed()
