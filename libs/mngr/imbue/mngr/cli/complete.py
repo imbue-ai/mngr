@@ -262,7 +262,11 @@ def _get_positional_candidates_with_nargs_limit(ctx: _CompletionContext) -> list
     if nargs_limit is not None and ctx.positional_count >= nargs_limit:
         return []
     return _get_positional_candidates(
-        ctx.command_key, ctx.positional_count, ctx.cache, first_positional_word=ctx.first_positional_word
+        ctx.command_key,
+        ctx.positional_count,
+        ctx.cache,
+        first_positional_word=ctx.first_positional_word,
+        incomplete=ctx.incomplete,
     )
 
 
@@ -340,18 +344,55 @@ def _get_option_value_candidates(choice_key: str, cache: CompletionCacheData) ->
     return []
 
 
+def _segment_keys(keys: list[str], incomplete: str) -> tuple[list[str], list[str]]:
+    """Collapse dotted keys to the next ``.``-delimited segment relative to ``incomplete``.
+
+    Returns ``(branches, leaves)`` for the keys that start with ``incomplete``:
+
+    - ``branches`` are the distinct next-level prefixes that still have deeper
+      keys below them, each ending in ``.`` (e.g. ``agent_types.``). Completing
+      one drills down a level rather than dumping every descendant at once.
+    - ``leaves`` are the full keys whose next segment is terminal (no further
+      ``.`` below the current level).
+
+    This gives a hierarchical, segment-at-a-time view (top-level keys first, then
+    their sub-keys) instead of listing every fully-qualified key up front.
+    """
+    dot = incomplete.rfind(".")
+    # The already-settled ``a.b.`` portion of what's typed ("" when there's no dot yet).
+    base = incomplete[: dot + 1]
+    branches: list[str] = []
+    seen_branches: set[str] = set()
+    leaves: list[str] = []
+    for key in keys:
+        if not key.startswith(incomplete):
+            continue
+        tail = key[len(base) :]
+        next_dot = tail.find(".")
+        if next_dot == -1:
+            leaves.append(key)
+        else:
+            branch = base + tail[: next_dot + 1]
+            if branch not in seen_branches:
+                seen_branches.add(branch)
+                branches.append(branch)
+    return branches, leaves
+
+
 def _setting_key_candidates(key_prefix: str, cache: CompletionCacheData) -> list[str]:
     """Key-phase candidates for ``-S``/``--setting`` (completing the KEY of KEY=VALUE).
 
-    Keys with a constrained value set are expanded to ``KEY=VALUE`` candidates so
-    that the shared ``KEY=`` prefix is inserted with no trailing space (and a
-    second TAB lists the values). Free-form keys (no constrained values) are
-    emitted bare, since there is nothing to offer after ``=``.
+    Dotted keys are collapsed to the next ``.`` segment (see ``_segment_keys``) so
+    the user drills down one level at a time instead of seeing every descendant.
+    Branch segments end in ``.`` (the shell suppresses the trailing space so the
+    next segment can be typed). Leaf keys with a constrained value set are
+    expanded to ``KEY=VALUE`` candidates so the shared ``KEY=`` prefix is inserted
+    with no trailing space (and a second TAB lists the values); free-form leaf
+    keys are emitted bare.
     """
-    candidates: list[str] = []
-    for key in cache.config_keys:
-        if not key.startswith(key_prefix):
-            continue
+    branches, leaves = _segment_keys(cache.config_keys, key_prefix)
+    candidates: list[str] = list(branches)
+    for key in leaves:
         values = cache.config_value_choices.get(key)
         if values:
             candidates.extend(f"{key}={value}" for value in values)
@@ -429,12 +470,17 @@ def _resolve_sources(
     sources: list[str],
     cache: CompletionCacheData,
     first_positional_word: str | None = None,
+    incomplete: str = "",
 ) -> list[str]:
     """Resolve completion source identifiers to actual candidate values.
 
     Source identifiers: "agent_names", "host_names", "plugin_names",
     "catalog_packages", "installed_packages", "help_targets", "config_keys",
     "config_value_for_key".
+
+    The ``config_keys`` source is collapsed to the next ``.`` segment relative to
+    ``incomplete`` (see ``_segment_keys``), so ``mngr config get/set/unset`` drills
+    into a dotted key one level at a time rather than listing every descendant.
     """
     candidates: list[str] = []
     needs_agents = "agent_names" in sources
@@ -454,7 +500,9 @@ def _resolve_sources(
     if "help_targets" in sources:
         candidates.extend(cache.help_targets)
     if "config_keys" in sources:
-        candidates.extend(cache.config_keys)
+        branches, leaves = _segment_keys(cache.config_keys, incomplete)
+        candidates.extend(branches)
+        candidates.extend(leaves)
     if "config_value_for_key" in sources and first_positional_word:
         candidates.extend(cache.config_value_choices.get(first_positional_word, []))
     return candidates
@@ -465,6 +513,7 @@ def _get_positional_candidates(
     positional_count: int,
     cache: CompletionCacheData,
     first_positional_word: str | None = None,
+    incomplete: str = "",
 ) -> list[str]:
     """Return positional argument candidates for a specific position.
 
@@ -482,27 +531,47 @@ def _get_positional_candidates(
     sources = entries[idx]
     if not sources:
         return []
-    return _resolve_sources(sources, cache, first_positional_word=first_positional_word)
+    return _resolve_sources(sources, cache, first_positional_word=first_positional_word, incomplete=incomplete)
 
 
 def generate_zsh_script() -> str:
-    """Generate the zsh completion script with the current python path baked in."""
+    """Generate the zsh completion script with the current python path baked in.
+
+    Candidates ending in ``.`` are "branch" completions (a dotted config key
+    drilled one segment at a time); they are added with an empty suffix
+    (``-S ''``) so no trailing space is inserted and the next segment can be
+    typed immediately. All other candidates are added normally.
+    """
     python_path = sys.executable
     return f"""_mngr_complete() {{
-    local -a completions
+    local -a completions branches leaves
     (( ! $+commands[mngr] )) && return 1
     completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {python_path} -m imbue.mngr.cli.complete)"}})
-    compadd -U -V unsorted -a completions
+    local c
+    for c in $completions; do
+        if [[ $c == *. ]]; then branches+=$c; else leaves+=$c; fi
+    done
+    compadd -U -S '' -V unsorted -a branches
+    compadd -U -V unsorted -a leaves
 }}
 compdef _mngr_complete mngr"""
 
 
 def generate_bash_script() -> str:
-    """Generate the bash completion script with the current python path baked in."""
+    """Generate the bash completion script with the current python path baked in.
+
+    When the sole completion is a "branch" (a dotted config key segment ending in
+    ``.``), suppress the trailing space so the next segment can be typed
+    immediately. With multiple matches bash already inserts only the common
+    prefix (no trailing space), so this is only needed for the unique-match case.
+    """
     python_path = sys.executable
     return f"""_mngr_complete() {{
     local IFS=$'\\n'
     COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {python_path} -m imbue.mngr.cli.complete))
+    if [[ ${{#COMPREPLY[@]}} -eq 1 && ${{COMPREPLY[0]}} == *. ]]; then
+        compopt -o nospace
+    fi
 }}
 complete -o default -F _mngr_complete mngr"""
 
