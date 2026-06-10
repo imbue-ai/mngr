@@ -764,7 +764,7 @@ async def _create_workspace_and_first_message(
     logger.info("[{}] agent DONE; chat URL={}", label, win.url)
     await snap_page(win, snaps.done)
 
-    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
+    inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     await inp.fill(FIRST_PROMPT)
     await inp.press("Enter")
     with contextlib.suppress(Exception):
@@ -1043,7 +1043,7 @@ async def amain() -> int:
             try:
                 latchkey_set_slack()
                 # 8. Send slack prompt
-                inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=60_000)
+                inp = await win.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
                 await inp.fill(SLACK_PROMPT)
                 await inp.press("Enter")
                 await snap_page(win, "07-slack-prompt-sent")

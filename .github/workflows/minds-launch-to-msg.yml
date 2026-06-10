@@ -564,7 +564,31 @@ jobs:
             "$LIMA" shell "$VM" -- sudo docker ps -a 2>&1 | head -20
             CID=$("$LIMA" shell "$VM" -- sudo docker ps -q 2>/dev/null | head -1)
             if [ -z "$CID" ]; then
-              echo "(no docker container)"
+              echo "(no docker container -- pilot in-VM provisioning path)"
+              echo
+              echo "=== tmux list-sessions inside VM ==="
+              "$LIMA" shell "$VM" -- tmux list-sessions 2>&1 | head -20
+              echo
+              for win in $("$LIMA" shell "$VM" -- tmux list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+                echo "--- tmux capture-pane minds-system-services:$win ---"
+                "$LIMA" shell "$VM" -- tmux capture-pane -t "minds-system-services:$win" -p -S -200 2>&1 | tail -30
+                echo
+              done
+              echo "=== curl system_interface (port 1234) from VM ==="
+              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:1234/health 2>&1 | head -5
+              "$LIMA" shell "$VM" -- curl -s -m 3 http://localhost:1234/ 2>&1 | head -20
+              echo
+              echo "=== curl web server (port 8080) from VM ==="
+              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8080/ 2>&1 | head -5
+              echo
+              echo "=== ps aux in VM (svc processes) ==="
+              "$LIMA" shell "$VM" -- ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|sshd|tmux" | head -40
+              echo
+              echo "=== services.toml in VM ==="
+              "$LIMA" shell "$VM" -- cat /mngr/code/services.toml 2>&1 | head -40
+              echo
+              echo "=== mngr forward host-side reach via SSH (port 8421) ==="
+              curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8421/ 2>&1
               exit 0
             fi
             echo
