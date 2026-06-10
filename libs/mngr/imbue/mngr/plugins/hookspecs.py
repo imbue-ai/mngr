@@ -71,12 +71,14 @@ def register_agent_aliases() -> Mapping[str, str] | None:
     ``mngr create my-agent antigravity``.
 
     Return a mapping of ``alias_name -> canonical_agent_type_name``, or None.
-    Each alias is registered to the same agent class, config class, and
-    owning plugin as its canonical target, so it behaves identically
-    (including disabled-plugin handling). The canonical target must be a type
-    the same plugin registers; aliases pointing at an unregistered target are
-    skipped. An alias whose name collides with an already-registered agent
-    type or another alias is skipped so plugins cannot shadow existing types.
+    An alias is a name-resolution entry, not a distinct agent type: it is never
+    registered into the agent class/config registries, but is resolved to its
+    canonical type before any lookup. It is therefore accepted anywhere the
+    canonical name is and shares the canonical type's class, config, and
+    disabled-plugin handling. The canonical target must be a type the same
+    plugin registers; aliases pointing at an unregistered target are skipped.
+    An alias whose name collides with an already-registered agent type or
+    another alias is skipped so plugins cannot shadow existing types.
     """
 
 
