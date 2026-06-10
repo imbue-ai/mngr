@@ -176,6 +176,12 @@
           var normalized = normalizeHex(hex);
           if (!normalized) return;
           clearError();
+          // Drop focus from the hex input so its blue :focus ring
+          // doesn't linger on the field after a palette chip is picked.
+          // On macOS clicking a <button> doesn't move focus off a text
+          // input, so without this the input keeps showing a ring that
+          // reads as "the input is selected" even though the chip is.
+          hexInput.blur();
           hexInput.value = normalized;
           syncSwatchSelection(normalized);
           saveColor(normalized);
