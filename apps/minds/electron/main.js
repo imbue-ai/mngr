@@ -1462,9 +1462,18 @@ function handleChromeSSEEvent(evt) {
     // When the inbox modal is already open in a bundle, forward the
     // chrome-event to its shell JS (debounced) so the master list
     // re-fetches its fragment; otherwise, on a genuinely new id, open it.
+    //
+    // The auto-open is gated on ``!b.modalVisible`` (not just
+    // ``!isInboxModalOpen``) because the sidebar now shares ``modalView``:
+    // auto-opening the inbox while the sidebar (or any other modal) is open
+    // would ``loadURL`` the inbox over it, silently yanking the user's open
+    // menu out from under them. When a modal is already up we leave it
+    // alone; the titlebar requests badge still updates live (via the
+    // broadcastChromeEvent below), and the next genuinely-new request (or
+    // the user closing the modal and clicking the bell) surfaces the inbox.
     if (idsChanged || shouldAutoOpen) {
       for (const b of bundles) {
-        if (shouldAutoOpen && !isInboxModalOpen(b)) {
+        if (shouldAutoOpen && !b.modalVisible) {
           openInbox(b, '');
         } else if (isInboxModalOpen(b)) {
           scheduleInboxListRefresh(b, evt);

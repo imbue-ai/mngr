@@ -35,3 +35,11 @@ row's ``px-2`` lines up exactly with the trigger button's icon offset
 inside its ``w-8`` shell -- icon columns line up automatically. Moving
 or restyling the trigger button in the future requires no template
 changes.
+
+An incoming permission request no longer yanks the open menu away. Now
+that the sidebar and the inbox share one overlay view, auto-opening the
+inbox is gated on no modal already being visible (previously it only
+checked whether the *inbox* was open, so it would load the inbox over an
+open sidebar). When a menu is up, the request surfaces via the live
+titlebar badge instead, and auto-opens once the menu is dismissed and
+the next request arrives.
