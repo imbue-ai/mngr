@@ -79,7 +79,7 @@
   var currentTitleAgentId = null;
   // Per-agent {accent, accent_fg} map populated from each SSE
   // ``workspaces`` payload. ``applyTitleAccent`` reads from this cache
-  // so accent application is synchronous -- no more async SHA-from-id.
+  // so accent application is synchronous.
   // Workspaces missing from the cache (e.g. an agentId for which no SSE
   // tick has arrived yet) leave the accent unset on this call and get
   // painted by ``renderWorkspaces`` on the next tick.
