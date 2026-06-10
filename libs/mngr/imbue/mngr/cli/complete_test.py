@@ -10,6 +10,7 @@ from imbue.mngr.cli.complete import _read_cache
 from imbue.mngr.cli.complete import _read_discovery_names
 from imbue.mngr.cli.complete import _read_git_branches
 from imbue.mngr.cli.complete import _read_host_names
+from imbue.mngr.cli.complete import _segment_keys
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.utils.testing import run_git_command
@@ -978,7 +979,7 @@ def test_get_completions_config_key_positional(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Config get/set/unset should complete config keys positionally."""
+    """Config get/set/unset complete config keys positionally, collapsed to the next segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset", "list"]},
@@ -994,16 +995,18 @@ def test_get_completions_config_key_positional(
 
     result = _get_completions()
 
+    # Top-level keys are shown collapsed to the next ``.`` segment: a leaf key
+    # (prefix) verbatim, and the ``logging.*`` keys as the single ``logging.`` branch.
     assert "prefix" in result
-    assert "logging.console_level" in result
-    assert "logging.file_level" in result
+    assert "logging." in result
+    assert "logging.console_level" not in result
 
 
 def test_get_completions_config_key_positional_with_prefix(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """Config key completion should filter by prefix."""
+    """A prefix before the first ``.`` collapses to the matching branch segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["get", "set", "unset"]},
@@ -1012,6 +1015,25 @@ def test_get_completions_config_key_positional_with_prefix(
     )
     _write_command_cache(completion_cache_dir, data)
     set_comp_env("mngr config get log", "3")
+
+    result = _get_completions()
+
+    assert result == ["logging."]
+
+
+def test_get_completions_config_key_positional_drills_into_segment(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """Once a segment is settled (``logging.``), its sub-keys are offered as leaves."""
+    data = CompletionCacheData(
+        commands=["config"],
+        subcommand_by_command={"config": ["get", "set", "unset"]},
+        config_keys=["prefix", "logging.console_level", "logging.file_level"],
+        positional_completions={"config.get": [["config_keys"]]},
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr config get logging.", "3")
 
     result = _get_completions()
 
@@ -1121,8 +1143,9 @@ def test_get_completions_nargs_limit_not_reached(
 
     result = _get_completions()
 
+    # Keys are shown collapsed to the next segment (prefix verbatim, logging.* as a branch).
     assert "prefix" in result
-    assert "logging.console_level" in result
+    assert "logging." in result
 
 
 def test_get_completions_nargs_interleaved_options(
@@ -1226,7 +1249,7 @@ def test_get_completions_config_set_pos0_offers_keys(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """config set <TAB> at position 0 should offer config keys."""
+    """config set <TAB> at position 0 should offer config keys, collapsed to the next segment."""
     data = CompletionCacheData(
         commands=["config"],
         subcommand_by_command={"config": ["set"]},
@@ -1240,7 +1263,7 @@ def test_get_completions_config_set_pos0_offers_keys(
     result = _get_completions()
 
     assert "prefix" in result
-    assert "logging.console_level" in result
+    assert "logging." in result
 
 
 def test_get_completions_config_set_pos1_string_field_no_completions(
@@ -1554,7 +1577,12 @@ def test_get_completions_setting_key_phase_mixed(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """`mngr create -S <TAB>` offers expanded valued keys alongside bare valueless keys."""
+    """`mngr create -S <TAB>` offers top-level segments: expanded valued leaves, bare leaves, and branches.
+
+    Dotted keys are collapsed to the next segment, so ``logging.console_level``
+    appears as the ``logging.`` branch (drilled into on the next TAB), not as a
+    fully-qualified ``logging.console_level=...`` candidate.
+    """
     _write_command_cache(completion_cache_dir, _setting_cache())
     set_comp_env("mngr create -S ", "3")
 
@@ -1563,7 +1591,46 @@ def test_get_completions_setting_key_phase_mixed(
     assert "headless=true" in result
     assert "headless=false" in result
     assert "prefix" in result
-    assert "logging.console_level=TRACE" in result
+    assert "logging." in result
+    assert "logging.console_level=TRACE" not in result
+
+
+def test_get_completions_setting_key_phase_drills_into_branch(
+    completion_cache_dir: Path,
+    set_comp_env: Callable[[str, str], None],
+) -> None:
+    """`mngr create -S logging.<TAB>` drills into the branch, expanding its valued leaves."""
+    data = _setting_cache()._replace(
+        config_keys=["headless", "prefix", "logging.console_level", "logging.file_level"],
+        config_value_choices={
+            "headless": ["true", "false"],
+            "logging.console_level": ["TRACE", "DEBUG"],
+        },
+    )
+    _write_command_cache(completion_cache_dir, data)
+    set_comp_env("mngr create -S logging.", "3")
+
+    result = _get_completions()
+
+    # console_level is valued (expanded); file_level is free-form (bare).
+    assert result == ["logging.console_level=TRACE", "logging.console_level=DEBUG", "logging.file_level"]
+
+
+def test_segment_keys_collapses_to_next_dot_segment() -> None:
+    """_segment_keys returns distinct next-level branches plus terminal leaves."""
+    keys = ["headless", "prefix", "logging.console_level", "logging.file_level", "agent_types.claude.command"]
+
+    # Top level: leaves verbatim, dotted keys collapsed to their first segment.
+    branches, leaves = _segment_keys(keys, "")
+    assert branches == ["logging.", "agent_types."]
+    assert leaves == ["headless", "prefix"]
+
+    # A partial first segment still collapses to the branch (not yet past the dot).
+    assert _segment_keys(keys, "log") == (["logging."], [])
+
+    # Once the segment is settled, its children are leaves / deeper branches.
+    assert _segment_keys(keys, "logging.") == ([], ["logging.console_level", "logging.file_level"])
+    assert _segment_keys(keys, "agent_types.") == (["agent_types.claude."], [])
 
 
 def test_get_completions_setting_works_on_any_command(
