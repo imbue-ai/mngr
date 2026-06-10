@@ -65,8 +65,9 @@ def test_working_sets_marker_and_records_root(tmp_path: Path) -> None:
     result = _run(tmp_path, _payload(agent_state="working"))
     assert _marker(tmp_path).exists()
     assert _root_file(tmp_path).read_text() == _ROOT_CONV
-    # The statusline output is rendered, so stdout must be non-empty (and name the model).
-    assert _MODEL in result.stdout
+    # mngr is lifecycle-only and prints nothing of its own (agy shows working/idle
+    # itself), so with no user statusLine the rendered row is empty.
+    assert result.stdout == ""
 
 
 def test_idle_clears_marker(tmp_path: Path) -> None:
@@ -126,8 +127,8 @@ def test_garbage_stdin_records_no_root_and_clears_marker(tmp_path: Path) -> None
     result = _run(tmp_path, "not json at all\n")
     assert not _marker(tmp_path).exists()
     assert not _root_file(tmp_path).exists()
-    # Still renders something (falls back to "agy" when no model/state parsed).
-    assert result.stdout.strip() != ""
+    # mngr prints nothing of its own, and no user statusLine here, so stdout is empty.
+    assert result.stdout == ""
 
 
 def test_missing_state_dir_fails_loudly(tmp_path: Path) -> None:
@@ -148,18 +149,15 @@ def _user_cmd_file(state_dir: Path) -> Path:
 
 
 def test_composes_user_statusline_output(tmp_path: Path) -> None:
-    """When a user statusLine command is recorded, its output is appended to the row.
+    """When a user statusLine command is recorded, the row is exactly its output.
 
-    The user command receives the same payload on stdin that agy delivers, so it
-    can render from the same fields. Here it just echoes a literal to keep the
-    assertion simple.
+    mngr prints nothing of its own, so the rendered row is the user's command
+    output verbatim (no glyph, no separator). The user command receives the same
+    payload on stdin that agy delivers; here it just echoes a literal.
     """
     _user_cmd_file(tmp_path).write_text("echo USER-PART")
     result = _run(tmp_path, _payload(agent_state="working"))
-    # mngr's own part is still present (the model), and the user's output is appended.
-    assert _MODEL in result.stdout
-    assert "USER-PART" in result.stdout
-    assert "|" in result.stdout
+    assert result.stdout.strip() == "USER-PART"
 
 
 def test_user_statusline_receives_payload_on_stdin(tmp_path: Path) -> None:
@@ -170,17 +168,20 @@ def test_user_statusline_receives_payload_on_stdin(tmp_path: Path) -> None:
     assert _ROOT_CONV in result.stdout
 
 
-def test_empty_user_statusline_file_is_not_composed(tmp_path: Path) -> None:
-    """An empty user_statusline_command file (no command recorded) adds nothing."""
+def test_empty_user_statusline_file_renders_empty_row(tmp_path: Path) -> None:
+    """An empty user_statusline_command file (no command recorded) renders nothing."""
     _user_cmd_file(tmp_path).write_text("")
     result = _run(tmp_path, _payload(agent_state="working"))
-    assert "|" not in result.stdout
+    assert result.stdout == ""
 
 
-def test_failing_user_statusline_does_not_break_render(tmp_path: Path) -> None:
-    """A user command that exits non-zero / errors can't break mngr's row or side-effects."""
+def test_failing_user_statusline_does_not_break_side_effects(tmp_path: Path) -> None:
+    """A user command that exits non-zero / errors can't break mngr's side-effects.
+
+    The marker (the lifecycle source of truth, read by BaseAgent) is still
+    maintained, and the failing command emits no row.
+    """
     _user_cmd_file(tmp_path).write_text("this-command-does-not-exist-xyz")
     result = _run(tmp_path, _payload(agent_state="working"))
-    # mngr's part still renders and the marker is still maintained.
-    assert _MODEL in result.stdout
     assert _marker(tmp_path).exists()
+    assert result.stdout == ""

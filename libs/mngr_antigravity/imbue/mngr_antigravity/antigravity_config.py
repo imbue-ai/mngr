@@ -307,15 +307,16 @@ STATUSLINE_SCRIPT_NAME: str = "statusline.sh"
 # command, when they configured one. agy allows only one statusLine command (which
 # must be mngr's, for lifecycle correctness), so to preserve a user's custom
 # rendering ``statusline.sh`` runs this command -- with the same payload on stdin
-# -- and appends its output to the rendered row. Written by the provisioner (see
+# -- and emits only its output as the status row. Written by the provisioner (see
 # ``plugin._provision_agy_home``); the shell script hardcodes this same literal,
 # so keep them in sync.
 USER_STATUSLINE_COMMAND_FILENAME: str = "user_statusline_command"
 
 # The ``statusLine`` command agy invokes (with the JSON payload on stdin) on
 # every agent-state change. ``$MNGR_AGENT_STATE_DIR`` expands in agy's shell at
-# invocation time. Unlike the hook scripts, this command's stdout IS rendered
-# (it is the status row), so the script prints a short status string.
+# invocation time. Unlike the hook scripts, this command's stdout IS rendered (it
+# is the status row); mngr's use is lifecycle-only, so the script prints nothing of
+# its own (agy shows working/idle itself) and emits only a composed user statusLine.
 _STATUSLINE_COMMAND: str = f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
 
 # The lone ``PreInvocation`` handler: records the conversation ID from agy's hook
@@ -340,10 +341,12 @@ def build_antigravity_statusline_settings() -> dict[str, Any]:
 
     This block is mngr-owned and must be applied *after* (winning over) the
     user's ``settings_overrides``: lifecycle correctness depends on it, so the agy
-    ``statusLine`` must be mngr's. A user's own ``statusLine`` is not discarded
-    but *composed* -- the provisioner records its command (see
+    ``statusLine`` must be mngr's. mngr's use is lifecycle-only -- it prints
+    nothing of its own (agy shows working/idle itself), so the status row looks as
+    it would without mngr. A user's own ``statusLine`` is not discarded but
+    *composed* -- the provisioner records its command (see
     ``extract_statusline_command`` and ``USER_STATUSLINE_COMMAND_FILENAME``) and
-    ``statusline.sh`` runs it, appending its output to the rendered row.
+    ``statusline.sh`` runs it, emitting only its output as the status row.
     """
     return {"statusLine": {"type": "command", "command": _STATUSLINE_COMMAND}}
 

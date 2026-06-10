@@ -559,9 +559,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # synced base settings or settings_overrides -- both already merged into
         # per_agent_settings here) is therefore not the agy statusLine, but it is
         # *composed* rather than discarded: record its command so statusline.sh runs
-        # it (with the same payload) and appends its output to the rendered row. A
-        # statusLine we can't run as a command (an unknown shape) is dropped with a
-        # warning. Then inject mngr's statusLine LAST so it wins.
+        # it (with the same payload) and emits only its output as the status row (mngr
+        # itself renders nothing). A statusLine we can't run as a command (an unknown
+        # shape) is dropped with a warning. Then inject mngr's statusLine LAST so it wins.
         self._provision_user_statusline_command(host, per_agent_settings.get("statusLine"))
         per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
@@ -582,10 +582,11 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         carry (from the synced base settings or ``settings_overrides``), or ``None``.
         When it is a runnable ``{"type": "command", "command": <str>}`` block, its
         command is written to the per-agent ``user_statusline_command`` file;
-        ``statusline.sh`` runs it (with the same payload) and appends its output to
-        the rendered row, so the user's custom rendering survives alongside mngr's
-        lifecycle statusLine. A statusLine present but not runnable as a command is
-        dropped with a warning (mngr's statusLine must be the agy one regardless).
+        ``statusline.sh`` runs it (with the same payload) and emits only its output
+        as the status row, so the user's rendering survives verbatim (mngr's own use
+        is lifecycle-only and renders nothing). A statusLine present but not runnable
+        as a command is dropped with a warning (mngr's statusLine must be the agy one
+        regardless).
         Any stale file from a prior provision is removed so a config that no longer
         has a user statusLine stops composing one.
         """
