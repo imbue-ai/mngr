@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from enum import auto
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -83,8 +84,8 @@ class GitignoreStatus(UpperCaseStrEnum):
     domain-specific error messages from a shared check.
     """
 
-    # Not a git work tree, or a symlinked leading path component points outside
-    # the repo -- git won't track the path, so there is nothing to enforce.
+    # Not a git work tree, or a symlink in the path points outside the repo --
+    # git won't track the path, so there is nothing to enforce.
     SKIP = auto()
     # Ignored by a repository-level rule (or, when ``require_repo_rule`` is
     # False, by any rule including the user's global excludes).
@@ -96,6 +97,24 @@ class GitignoreStatus(UpperCaseStrEnum):
     ONLY_GLOBAL = auto()
 
 
+# POSIX sh that canonicalizes ``$1`` (a path that may not fully exist yet, e.g.
+# a file about to be written): it walks up to the longest existing ancestor,
+# ``realpath``s that (resolving any symlink at any depth), then re-appends the
+# missing remainder. Emits three lines -- resolved existing prefix, missing
+# remainder (possibly empty), resolved repo root -- which the caller recombines.
+# This deliberately avoids ``realpath -m`` (canonicalize-missing): GNU coreutils
+# has it but macOS/BSD ``realpath`` does not, and mngr must run on both.
+_RESOLVE_SYMLINKS_SH: Final[str] = (
+    "p=$1; s=; "
+    'while [ ! -e "$p" ] && [ "$p" != . ] && [ "$p" != / ]; do '
+    "b=${p##*/}; "
+    'case "$p" in */*) p=${p%/*} ;; *) p=. ;; esac; '
+    "s=$b${s:+/$s}; "
+    "done; "
+    'realpath "$p"; printf "%s\\n" "$s"; realpath .'
+)
+
+
 def check_path_gitignore_status(
     host: OnlineHostInterface,
     repo_path: Path,
@@ -104,19 +123,20 @@ def check_path_gitignore_status(
 ) -> tuple[GitignoreStatus, Path]:
     """Return whether ``<repo_path>/<relative_path>`` is gitignored.
 
-    ``relative_path`` is interpreted relative to ``repo_path``. If its leading
-    path component is a symlink (e.g. ``.claude -> .agents``), it is resolved
-    before consulting ``git check-ignore`` -- git otherwise fails with
+    ``relative_path`` is interpreted relative to ``repo_path`` and need not
+    exist yet (the common caller checks a file it is about to write). Any
+    symlink along the path -- at any depth, e.g. ``.claude -> .agents`` -- is
+    resolved before consulting ``git check-ignore``, which otherwise fails with
     "pathspec '...' is beyond a symbolic link". Returns a ``(status,
-    checked_relative_path)`` tuple; the second element is the repo-relative
-    path actually consulted, for use in caller error messages.
+    checked_relative_path)`` tuple; the second element is the repo-relative path
+    actually consulted (symlinks resolved), for use in caller error messages.
 
     See ``GitignoreStatus`` for the meaning of each status. ``SKIP`` means there
-    is nothing to enforce (``repo_path`` is not a git work tree, or the leading
-    symlink points outside the repo). When ``require_repo_rule`` is True, a path
-    ignored only by the user's global excludes returns ``ONLY_GLOBAL`` rather
-    than ``IGNORED`` -- important for preflight checks, since a global gitignore
-    entry won't exist on remote hosts.
+    is nothing to enforce (``repo_path`` is not a git work tree, or a symlink in
+    the path points outside the repo). When ``require_repo_rule`` is True, a
+    path ignored only by the user's global excludes returns ``ONLY_GLOBAL``
+    rather than ``IGNORED`` -- important for preflight checks, since a global
+    gitignore entry won't exist on remote hosts.
     """
     checked_relative = relative_path
 
@@ -128,28 +148,25 @@ def check_path_gitignore_status(
     if not is_git_repo.success:
         return GitignoreStatus.SKIP, checked_relative
 
-    # If the leading path component is a symlink (e.g. .claude -> .agents),
-    # resolve it so git check-ignore doesn't fail with "pathspec is beyond a
-    # symbolic link". Resolving both the component and the repo root (the latter
-    # in case repo_path itself contains symlinks) yields the correct
-    # repo-relative path. Only runs when the component is actually a symlink.
-    leading = relative_path.parts[0]
-    remainder = Path(*relative_path.parts[1:])
-    quoted_leading = shlex.quote(leading)
+    # Resolve symlinks anywhere in the path so git check-ignore doesn't fail with
+    # "pathspec is beyond a symbolic link". The repo root is resolved too (in
+    # case repo_path itself contains symlinks) so the recombined path stays
+    # repo-relative.
     resolve_result = host.execute_idempotent_command(
-        f"test -L {quoted_leading} && realpath {quoted_leading} && realpath .",
+        f"sh -c {shlex.quote(_RESOLVE_SYMLINKS_SH)} sh {shlex.quote(str(relative_path))}",
         cwd=repo_path,
         timeout_seconds=5.0,
     )
     if resolve_result.success:
-        lines = resolve_result.stdout.strip().splitlines()
-        if len(lines) == 2:
-            resolved_leading_dir = Path(lines[0])
-            resolved_repo_root = Path(lines[1])
+        lines = resolve_result.stdout.splitlines()
+        if len(lines) == 3:
+            resolved_prefix = Path(lines[0])
+            remainder = Path(lines[1]) if lines[1] else Path()
+            resolved_repo_root = Path(lines[2])
             try:
-                checked_relative = resolved_leading_dir.relative_to(resolved_repo_root) / remainder
+                checked_relative = resolved_prefix.relative_to(resolved_repo_root) / remainder
             except ValueError:
-                # Symlink target is outside the repo -- git won't track it.
+                # A symlink in the path points outside the repo -- git won't track it.
                 return GitignoreStatus.SKIP, checked_relative
 
     result = host.execute_idempotent_command(

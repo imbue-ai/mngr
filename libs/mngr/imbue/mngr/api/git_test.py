@@ -314,9 +314,8 @@ def test_git_push_transfers_commit_from_local_to_remote(
 # === check_path_gitignore_status ===
 #
 # The helper is path-agnostic (it takes any repo-relative path, not just a
-# ``.claude/`` subpath). These tests pin that with non-``.claude`` paths; the
-# ``.claude``-symlink-resolution branch is covered by mngr_claude's settings
-# guard tests (which use a shell-capable local host).
+# ``.claude/`` subpath) and resolves a symlink anywhere in the path, not only a
+# leading one. These tests pin both with non-``.claude`` paths.
 
 
 def test_check_path_gitignore_status_returns_not_ignored_for_tracked_path(tmp_path: Path) -> None:
@@ -348,3 +347,26 @@ def test_check_path_gitignore_status_skips_outside_git_repo(tmp_path: Path) -> N
     status, _ = check_path_gitignore_status(host, tmp_path, Path(".config") / "state.json")
 
     assert status is GitignoreStatus.SKIP
+
+
+def test_check_path_gitignore_status_resolves_symlink_at_any_depth(tmp_path: Path) -> None:
+    """A symlink mid-path (not just leading) is resolved before consulting git.
+
+    ``state/cache`` is a symlink to a real ``backend`` dir; the checked path runs
+    through it and does not exist yet. The helper must report the path against
+    the symlink-resolved location git actually tracks (``backend/...``), which a
+    leading-only resolver would miss -- git check-ignore would instead choke with
+    "beyond a symbolic link".
+    """
+    init_git_repo(tmp_path, initial_commit=False)
+    (tmp_path / "state").mkdir()
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "state" / "cache").symlink_to(tmp_path / "backend")
+    # Ignore the resolved real path, the one git sees -- not the symlink path.
+    (tmp_path / ".gitignore").write_text("backend/\n")
+    host = cast(OnlineHostInterface, FakeHost())
+
+    status, checked = check_path_gitignore_status(host, tmp_path, Path("state") / "cache" / "app" / "state.json")
+
+    assert status is GitignoreStatus.IGNORED
+    assert checked == Path("backend") / "app" / "state.json"
