@@ -195,7 +195,7 @@
     // Browser mode: backdrop click outside the panel + Escape close the
     // sidebar, matching the Electron sidebar's behavior.
     document.getElementById('sidebar-backdrop').addEventListener('click', function (e) {
-      if (e.target.closest('#sidebar-panel')) return;
+      if (e.target.closest('#sidebar-menu')) return;
       closeSidebar();
     });
     document.addEventListener('keydown', function (e) {
