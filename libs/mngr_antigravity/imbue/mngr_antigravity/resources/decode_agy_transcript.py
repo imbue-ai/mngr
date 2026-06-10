@@ -270,8 +270,14 @@ def stream_conversation(db_path: Path, conv_id: str, offset: int) -> tuple[list[
     """Return ``(json_lines, new_offset)`` for steps after ``offset`` in ``db_path``.
 
     Stops at the first non-terminal (still-generating) step so emission stays in order and
-    nothing partial is written; that step is picked up once it settles. Opens the database
-    read-only so it is safe to read while agy is writing.
+    nothing partial is written; that step is picked up once it settles.
+
+    Opened ``mode=ro`` (read-only) -- deliberately NOT ``immutable=1``: agy is concurrently
+    writing this db (typically WAL), so it is *not* immutable, and ``immutable=1`` would skip
+    locking/WAL handling and risk inconsistent or stale reads. ``mode=ro`` reads committed data
+    safely; a rare ``SQLITE_BUSY`` during a checkpoint surfaces as ``sqlite3.Error`` and ``run_once``
+    just retries that conversation next pass. (Static-snapshot tooling that reads completed dbs --
+    e.g. the ``dev/`` reference decoder -- can use ``immutable=1``; a live streamer must not.)
     """
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     lines: list[str] = []
