@@ -16,14 +16,6 @@ It is a ``release`` test (not run in CI) and requires the ``codex`` binary plus 
 logged-in ``~/.codex/auth.json``; skipped otherwise. The model is pinned to a
 ChatGPT-account-safe slug because codex's default ``*-codex`` model is rejected for
 ChatGPT-account logins (see the lib README).
-
-Known pre-existing issue (not a harness regression): the post-restart message send
-currently times out against the real binary -- codex's *resumed* TUI does not echo the
-tmux paste within mngr's send timeout ("Timeout waiting for pasted content to appear").
-This reproduces identically on the pre-unification version of this test, so it is a
-codex resume-send issue to be fixed separately; the shared harness drives every prior
-lifecycle step (create -> WAITING -> message -> transcript conformance -> stop -> start)
-correctly.
 """
 
 from __future__ import annotations
