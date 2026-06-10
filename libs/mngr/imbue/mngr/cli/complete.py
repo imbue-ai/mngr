@@ -631,7 +631,7 @@ def generate_zsh_shim() -> str:
     directory (``MNGR_HOST_DIR`` / ``MNGR_ROOT_NAME``), so it keeps working if
     those change.
     """
-    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras` to refresh)
+    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras completion` to refresh)
 typeset _mngr_completion="${{MNGR_HOST_DIR:-$HOME/.${{MNGR_ROOT_NAME:-mngr}}}}/completions/mngr.zsh"
 [[ -r "$_mngr_completion" ]] && source "$_mngr_completion"
 unset _mngr_completion"""
@@ -642,7 +642,7 @@ def generate_bash_shim() -> str:
 
     The bash counterpart to ``generate_zsh_shim`` (goes in ``.bashrc``).
     """
-    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras` to refresh)
+    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras completion` to refresh)
 _mngr_completion="${{MNGR_HOST_DIR:-$HOME/.${{MNGR_ROOT_NAME:-mngr}}}}/completions/mngr.bash"
 [ -r "$_mngr_completion" ] && . "$_mngr_completion"
 unset _mngr_completion"""
@@ -791,7 +791,7 @@ def _maybe_warn_stale_completion() -> None:
         pass
 
     sys.stderr.write(
-        "\n[mngr] Your shell tab-completion is out of date. Run `mngr extras` to refresh it "
+        "\n[mngr] Your shell tab-completion is out of date. Run `mngr extras completion` to refresh it "
         "(one-time; future updates apply automatically).\n"
     )
     try:
