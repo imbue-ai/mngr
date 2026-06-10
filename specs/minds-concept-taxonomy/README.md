@@ -62,8 +62,13 @@ the app or docs. Conventions:
 - **⚠** = the *user-facing* name is unsettled or has multiple candidates — a product
   decision to resolve. (The technical canonical term can be settled even when this isn't.)
   Full options are in `HUMAN-READABLE.md`.
-- **"internal"** = users never see this; a plain-language name would be noise. Inventing one
-  is not recommended.
+- **"internal"** = the *concept itself* has no user-facing manifestation — not merely that
+  the code term is plumbing. A concept can have an internal code term and still be
+  user-facing: e.g. users never see the word *provider*, but "where does my mind run
+  (this computer vs the cloud)?" is a user-facing question that the provider concept
+  answers, so it is **not** internal — its plain-language cell describes the user-facing
+  thing and points to the control (*launch mode*). Only label a row "internal" when there
+  is genuinely nothing a user perceives, chooses, or acts on.
 - Where a concept's plain-language framing is genuinely impossible to pin down without a
   prior product decision, the cell says so and points to the blocking decision.
 
@@ -76,10 +81,11 @@ a rename/cleanup (see `CROSS-CUTTING.md`) — distinct from the ⚠ user-facing 
 
 | Canonical term | Plain language (user-facing) | Technical definition | Canonical location | Status |
 |---|---|---|---|---|
-| **provider backend** | internal — users never see "provider" | Stateless factory (one per backend type) registered via pluggy `register_provider_backend`; identified by `ProviderBackendName` (`local`/`docker`/`modal`/`lima`/`vultr`/`ovh`/`imbue_cloud`). | `libs/mngr/.../interfaces/provider_backend.py:12` | OK |
-| **provider instance** | internal — surfaced to users only as *launch mode* | A configured endpoint that creates/manages hosts; identified by `ProviderInstanceName`; declared at `[providers.<name>]`. Reserve bare "provider" for this. | `libs/mngr/.../interfaces/provider_instance.py:291` | `VultrProvider` plays both roles |
+| **provider backend** | *"Where and how your mind runs — on this computer or in the cloud."* User-facing concept (chosen via *launch mode*); users never see the word "provider." | Stateless factory (one per backend type) registered via pluggy `register_provider_backend`; identified by `ProviderBackendName` (`local`/`docker`/`modal`/`lima`/`vultr`/`ovh`/`imbue_cloud`). | `libs/mngr/.../interfaces/provider_backend.py:12` | OK |
+| **provider instance** | the *specific* configured "where it runs" a mind was created with. Same user concept as above; surfaced as *launch mode*. | A configured endpoint that creates/manages hosts; identified by `ProviderInstanceName`; declared at `[providers.<name>]`. Reserve bare "provider" for this. | `libs/mngr/.../interfaces/provider_instance.py:291` | `VultrProvider` plays both roles |
+| **launch mode** | *"Where your mind runs"* — the actual choice at creation (this Mac / a VM / the cloud). ⚠ raw labels (DOCKER/LIMA/CLOUD/IMBUE_CLOUD) are developer-facing; needs friendly location/plan names | The minds-level `LaunchMode` enum mapping a user's choice to a provider + create templates (`--template <mode>`). | `apps/minds/.../primitives.py` (`LaunchMode`); `agent_creator.py` | enum labels not user-ready |
 | **region** | *"Where in the world your mind's computer runs."* ⚠ "region" vs "location" | A provider-specific datacenter string; no shared type; 3 incompatible formats (`US-EAST-VA`/`ewr`/`us-east`). | per-provider `config.py` (`default_region`) | needs shared type |
-| **host** | internal — *"the computer your mind runs on"*; users shouldn't see "host" | A managed compute environment (container/VM/sandbox/local) belonging to one provider instance; `HostId` + `HostName`. | `libs/mngr/.../interfaces/host.py:49` | OK |
+| **host** | *"Your mind's machine — what you Start and Stop, and whose status you see."* User-facing as an action target; users shouldn't see the word "host." | A managed compute environment (container/VM/sandbox/local) belonging to one provider instance; `HostId` + `HostName`. | `libs/mngr/.../interfaces/host.py:49` | OK |
 | **host pool** (imbue_cloud) | internal — pre-warmed machines that make creating a mind faster | Server-side pool of pre-baked VPS hosts the `imbue_cloud` provider *leases* rather than provisions. | `libs/mngr_imbue_cloud/.../instance.py` | OK |
 | **agent** | internal primitive — users meet it only via roles (chat agent, worker). ⚠ avoid showing users the bare word "agent" | A named process `(AgentId, AgentName, AgentTypeName, host_id)` in a tmux session on a host; roles layered via labels/templates. | `libs/mngr/.../interfaces/agent.py:39` | roles overloaded (CROSS-CUTTING §1) |
 | **host state** | the status badge — *Awake / Asleep / Stopped / Starting*. ⚠ "Paused" vs "Stopped" wording | Host lifecycle enum: BUILDING/STARTING/RUNNING/STOPPING/STOPPED/PAUSED/CRASHED/FAILED/DESTROYED/UNAUTHENTICATED/UNKNOWN. | `libs/mngr/.../primitives.py:244` | OK |

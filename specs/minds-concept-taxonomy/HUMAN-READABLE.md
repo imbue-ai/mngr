@@ -53,16 +53,20 @@ this.
 
 ## Compute substrate
 
-- **provider backend / provider instance** — **[internal]** Users never see "provider." See
-  *launch mode* below for the user-facing version.
+- **provider backend / provider instance** — **[user]** (concept), **[internal]** (word).
+  The concept answers a user-facing question: *"Where and how does my mind run — on this
+  computer, or in the cloud?"* Users choose it (via *launch mode*) and it determines whether
+  they can Start/Stop locally, cost, and latency. Users never see the word "provider," but
+  the concept is not internal. See *launch mode* for the control.
 
 - **region** — **[power]** Plain language: *"Where in the world your mind's computer lives."*
   ⚠ Minor: call it **"region"** (familiar from other cloud tools) or **"location"** (softer
   for non-technical users). Lean "location" in consumer UI.
 
-- **host** — **[internal]** The actual machine/container. Plain language only if it ever
-  leaks: *"the computer your mind runs on."* Users should generally never see the word
-  "host."
+- **host** — **[user]** (as an action target), **[internal]** (word). This is the machine a
+  user actually **Starts and Stops** and whose status badge they read. Plain language:
+  *"your mind's computer."* Users shouldn't see the word "host," but they perceive and act
+  on the thing — so it is not internal.
 
 - **host pool / leased host** — **[internal]** An optimization (pre-warmed machines) so
   creating a mind is fast. Never user-facing; at most surfaces as "your mind is ready
