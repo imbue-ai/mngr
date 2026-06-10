@@ -4,6 +4,22 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+## Remove Modal async-permission-propagation workaround
+
+Modal has fixed the bug on their side where a just-created environment returned
+`modal.exception.PermissionDeniedError` for several seconds (async per-user
+permission propagation) before the creating user could operate on it.
+Read-after-write is now immediate, so the workaround is no longer needed.
+
+Removed from `modal_proxy`:
+
+- The `ModalProxyPermissionDeniedError` error class (`imbue.modal_proxy.errors`).
+- The `_translate_modal_error` branch that mapped
+  `modal.exception.PermissionDeniedError` to it (`imbue.modal_proxy.direct`);
+  permission-denied errors once again fall through to the base `ModalProxyError`.
+
 ## 2026-06-04
 
 Retry `modal deploy` when Modal reports "The selected app is locked - probably due to a concurrent modification".
