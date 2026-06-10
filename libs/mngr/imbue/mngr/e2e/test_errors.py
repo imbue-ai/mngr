@@ -30,6 +30,11 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# This test creates a live local agent and then runs `mngr list`, which
+# enumerates every configured provider; that discovery can exceed the default
+# 10s per-test timeout when a remote provider (e.g. Docker) is unreachable and
+# the client waits on a connection. Allow extra headroom for the verification.
+@pytest.mark.timeout(120)
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     expect(
         e2e.run(
@@ -90,3 +95,9 @@ def test_create_with_dirty_tree_fails(e2e: E2eSession) -> None:
     # before any host is resolved, so no agent is created.
     expect(result.stderr).to_contain("uncommitted changes")
     expect(result.stderr).to_contain("--no-ensure-clean")
+
+    # The guard must abort cleanly: no agent should be registered. This proves
+    # the failure happened before any agent was created, not midway through.
+    list_result = e2e.run("mngr list --provider local", comment="Confirm no agent was created")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")

@@ -33,8 +33,8 @@ def test_backend_config_class() -> None:
 
 def test_backend_build_args_help() -> None:
     help_text = OvhProviderBackend.get_build_args_help()
-    assert "--vps-datacenter" in help_text
-    assert "--vps-plan" in help_text
+    assert "--ovh-datacenter" in help_text
+    assert "--ovh-plan" in help_text
 
 
 def test_backend_start_args_help() -> None:

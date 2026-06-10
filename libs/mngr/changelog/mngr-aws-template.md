@@ -17,4 +17,7 @@ a provider block defined in a single config layer (no merge to re-coerce it),
 broke identity checks like `builder is DockerBuilder.DEPOT` (silently falling
 back to the non-depot path). It now uses `model_validate`, which coerces while
 still recording only the provided keys in `model_fields_set` so per-field
-config-layer merging is unaffected.
+config-layer merging is unaffected. This also coerces nested-model provider
+fields (e.g. SSH static `hosts` tables to `SSHHostConfig`), subsuming the
+dedicated post-`model_construct` coercion helper that previously handled only
+that case.

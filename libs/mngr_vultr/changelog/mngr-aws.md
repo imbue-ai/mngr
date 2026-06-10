@@ -5,3 +5,4 @@
 - `get_build_args_help()` no longer carries the stale "OS image is set via default_os_id..." block — that described the removed shared build arg, not current Vultr behavior.
 - Picks up the shared `wait_for_instance_active` interface change (now a default method on `VpsClientInterface`).
 - `is_for_host_creation` flag removed; the Vultr backend's `del`-of-`is_for_host_creation` is removed. No behavior change.
+- **Per-host build args renamed**: `--vps-region=` is now `--vultr-region=`; `--vps-plan=` is now `--vultr-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.

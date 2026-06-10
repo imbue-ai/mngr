@@ -206,15 +206,18 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 Provider: aws
   EC2-specific args (consumed by provider, not passed to docker):
-    --vps-region=REGION  AWS region (default: us-east-1)
-    --vps-plan=TYPE      EC2 instance type (default: t3.small)
-    --git-depth=N        Shallow-clone build context to depth N before upload
-
-  AMI is taken from the provider config (default_ami_id / default_ami_by_region);
-  per-host AMI overrides are not supported via build args.
+    --aws-region=REGION         AWS region (default: us-east-1)
+    --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
+    --aws-ami=AMI-ID            Override the per-host AMI for this create only
+                                (default: provider config's default_ami_id /
+                                default_ami_by_region for the chosen region)
+    --aws-spot                  Run on EC2 spot capacity (presence-only flag).
+                                AWS may reclaim with ~2 min notice; the host is
+                                terminated, not stopped, on reclaim. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the EC2 instance.
-  Example: -b --vps-plan=t3.medium -b --file=Dockerfile -b .
+  Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: docker
@@ -268,13 +271,14 @@ Provider: modal
   No start arguments are supported for the modal provider.
 
 Provider: ovh
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
-    --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
+  OVH-specific args (consumed by provider, not passed to docker):
+    --ovh-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
+                          (alias: --ovh-region=)
+    --ovh-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
     --git-depth=N         Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
+  Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: ssh
@@ -293,13 +297,13 @@ Provider: ssh
   No start arguments are supported for the SSH provider.
 
 Provider: vultr
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-region=REGION  Vultr region (default: ewr)
-    --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
-    --git-depth=N        Shallow-clone build context to depth N before upload
+  Vultr-specific args (consumed by provider, not passed to docker):
+    --vultr-region=REGION  Vultr region (default: ewr)
+    --vultr-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
+    --git-depth=N          Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Example: -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 

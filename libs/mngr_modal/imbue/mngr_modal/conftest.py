@@ -16,10 +16,6 @@ import pytest
 import toml
 from loguru import logger
 from modal.environments import delete_environment
-from tenacity import retry
-from tenacity import retry_if_exception_type
-from tenacity import stop_after_attempt
-from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
@@ -218,23 +214,6 @@ def _apply_cleanup_outcome(
             assert_never(unreachable)
 
 
-@retry(
-    retry=retry_if_exception_type(modal.exception.PermissionDeniedError),
-    stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=1, max=5),
-    reraise=True,
-)
-def _invoke_modal_sdk_delete_with_retry(delete_fn: Callable[[], object]) -> None:
-    """Invoke a Modal SDK delete callable, retrying on transient PermissionDeniedError.
-
-    Modal's per-user permission entry for a just-created resource propagates
-    asynchronously, so deletes immediately after creation can spuriously fail
-    with PermissionDeniedError for ~3-7 seconds before the permission system
-    catches up. Retry with exponential backoff to ride through that window.
-    """
-    delete_fn()
-
-
 def _classify_modal_sdk_delete(delete_fn: Callable[[], object], resource_description: str) -> ModalCleanupOutcome:
     """Run an SDK delete callable and classify the outcome as a `ModalCleanupOutcome`.
 
@@ -249,7 +228,7 @@ def _classify_modal_sdk_delete(delete_fn: Callable[[], object], resource_descrip
     returning `None`; the return value is intentionally discarded here.
     """
     try:
-        _invoke_modal_sdk_delete_with_retry(delete_fn)
+        delete_fn()
         return ModalCleanupOutcome.DELETED
     except modal.exception.NotFoundError:
         logger.debug("Modal {} already gone", resource_description)

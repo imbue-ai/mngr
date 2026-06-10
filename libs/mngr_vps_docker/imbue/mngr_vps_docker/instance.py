@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import time
+from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -11,6 +12,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -126,57 +128,121 @@ class ParsedVpsBuildOptions(FrozenModel):
     docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
 
 
-def _parse_build_args(
+def extract_single_value_arg(args: Sequence[str], flag: str) -> tuple[str | None, list[str]]:
+    """Pop ``--flag=VALUE`` once from ``args``. Returns ``(value or None, remaining)``.
+
+    If ``flag`` appears multiple times the last occurrence wins (matching how
+    docker's CLI treats repeated single-value flags). Composable building
+    block: each provider's ``_parse_build_args`` chains a few of these to
+    peel off its own knobs before walking the remainder for docker forwarding.
+    """
+    value: str | None = None
+    remaining: list[str] = []
+    for arg in args:
+        if arg.startswith(flag):
+            value = arg.split("=", 1)[1]
+        else:
+            remaining.append(arg)
+    return value, remaining
+
+
+def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
+    """Pop ``--git-depth=N`` from ``args``. Shared because it's about the *local*
+    mngr build context (shallow-cloning the upload tarball), not the VPS, so
+    every provider accepts it under the same name.
+    """
+    raw, remaining = extract_single_value_arg(args, "--git-depth=")
+    return (int(raw) if raw is not None else None), remaining
+
+
+def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:
+    """Pop a presence-only flag like ``--aws-spot`` from ``args``.
+
+    Returns ``(True, remaining)`` if any element of ``args`` equals ``flag``
+    exactly, else ``(False, args_as_list)``. The flag MUST be passed with no
+    value: ``--aws-spot=true`` or ``--aws-spot=`` raises because that shape
+    suggests the caller expected a value-bearing flag (likely a typo).
+
+    Composable building block for boolean opt-in knobs (e.g. ``--aws-spot``).
+    """
+    present = False
+    remaining: list[str] = []
+    for arg in args:
+        if arg == flag:
+            present = True
+        elif arg.startswith(f"{flag}="):
+            raise MngrError(f"{flag} is a presence-only flag; pass it as bare {flag!r} (no value). Got: {arg!r}")
+        else:
+            remaining.append(arg)
+    return present, remaining
+
+
+_VPS_MIGRATION_HINT: Final[str] = (
+    "Build args are now per-provider: use --aws-region= / --aws-instance-type= / --aws-ami=, "
+    "--vultr-region= / --vultr-plan=, or --ovh-datacenter= (alias --ovh-region=) / --ovh-plan= "
+    "(matching your provider). The old --vps-os= / --vps-image= / --vps-ami= image-selection args "
+    "are also removed; image selection lives on the provider config (default_os_id for Vultr, "
+    "default_image_name for OVH, default_ami_id / default_ami_by_region for AWS)."
+)
+
+
+def raise_if_vps_migration_arg(arg: str) -> None:
+    """Raise the dedicated migration error if ``arg`` uses the dropped shared ``--vps-*`` prefix.
+
+    Called by every provider's parser (and by ``MinimalVpsDockerProvider``)
+    so callers still passing ``--vps-region=`` etc. get a clear pointer at
+    the new per-provider name rather than having the arg silently forwarded
+    to docker (which would either error opaquely or, worse, succeed for a
+    flag that happens to be a valid docker flag).
+    """
+    if arg.startswith("--vps-"):
+        raise MngrError(f"{arg.split('=', 1)[0]} is no longer supported. {_VPS_MIGRATION_HINT}")
+
+
+def raise_if_unknown_provider_arg(arg: str, provider_prefix: str, valid_args: Sequence[str]) -> None:
+    """Raise if ``arg`` starts with ``--<provider_prefix>-`` but isn't one of ``valid_args``.
+
+    Lets a provider's parser catch typos / unknown flags up front, with a
+    specific error that lists what was actually accepted. ``valid_args``
+    should be the full flag spellings (e.g. ``("--aws-region=", ...)``) so
+    the error message matches the user-facing names exactly.
+    """
+    if not arg.startswith(f"--{provider_prefix}-"):
+        return
+    raise MngrError(f"Unknown {provider_prefix} build arg: {arg}. Valid args: {', '.join(valid_args)}")
+
+
+def parse_vps_build_args(
     build_args: Sequence[str] | None,
     *,
+    provider_prefix: str,
     default_region: str,
     default_plan: str,
+    plan_arg_name: str,
 ) -> ParsedVpsBuildOptions:
-    """Parse build args, separating VPS provisioning args from Docker build args.
+    """Convenience parser for the common provider shape (region + plan + git-depth).
 
-    VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
-    ``--git-depth=N`` controls the git clone depth for the build context.
-    Everything else is passed through to docker build on the VPS.
-
-    Image selection is provider-specific and lives on the provider's client
-    or config (e.g., ``AwsProviderConfig.default_ami_id``,
-    ``VultrProviderConfig.default_os_id``, ``OvhProviderConfig.default_image_name``);
-    there is no shared ``--vps-os=`` build arg.
+    Builds the standard four-step parse out of ``extract_single_value_arg``,
+    ``extract_git_depth``, ``raise_if_vps_migration_arg``, and
+    ``raise_if_unknown_provider_arg``. Vultr and OVH (which only have a
+    region + plan) call this directly; AWS has its own composition because
+    it also accepts ``--aws-ami=``. Custom providers with their own knobs
+    should compose the helpers directly rather than extending this function.
     """
-    region = default_region
-    plan = default_plan
-    git_depth: int | None = None
+    args = list(build_args or ())
+    region_arg = f"--{provider_prefix}-region="
+    plan_arg = f"--{provider_prefix}-{plan_arg_name}="
+    region, args = extract_single_value_arg(args, region_arg)
+    plan, args = extract_single_value_arg(args, plan_arg)
+    git_depth, args = extract_git_depth(args)
     docker_build_args: list[str] = []
-
-    if build_args:
-        for arg in build_args:
-            if arg.startswith("--vps-region="):
-                region = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-plan="):
-                plan = arg.split("=", 1)[1]
-            elif arg.startswith("--git-depth="):
-                git_depth = int(arg.split("=", 1)[1])
-            elif arg.startswith("--vps-os") or arg.startswith("--vps-image") or arg.startswith("--vps-ami"):
-                # Dedicated error for the removed image-selection arg --
-                # used to be ``--vps-os=`` on Vultr / ``--vps-os=NAME`` on OVH;
-                # also catches ``--vps-image=`` / ``--vps-ami=`` since those are
-                # the most likely guesses for the AWS equivalent.
-                raise MngrError(
-                    f"{arg.split('=', 1)[0]} is no longer supported. OS image selection lives on the provider "
-                    "config: set ``default_os_id`` ([providers.<name>] for Vultr), ``default_image_name`` "
-                    "(OVH), or ``default_ami_id`` / ``default_ami_by_region`` (AWS) in your settings.toml. "
-                    "Per-host image overrides require a separate provider instance with its own config block."
-                )
-            elif arg.startswith("--vps-"):
-                raise MngrError(
-                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --git-depth="
-                )
-            else:
-                docker_build_args.append(arg)
-
+    for arg in args:
+        raise_if_vps_migration_arg(arg)
+        raise_if_unknown_provider_arg(arg, provider_prefix, (region_arg, plan_arg, "--git-depth="))
+        docker_build_args.append(arg)
     return ParsedVpsBuildOptions(
-        region=region,
-        plan=plan,
+        region=region or default_region,
+        plan=plan or default_plan,
         git_depth=git_depth,
         docker_build_args=tuple(docker_build_args),
     )
@@ -582,7 +648,6 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
         parsed = self._parse_build_args(build_args)
-        region, plan = parsed.region, parsed.plan
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -597,8 +662,7 @@ class VpsDockerProvider(BaseProviderInstance):
             vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
-                region=region,
-                plan=plan,
+                parsed=parsed,
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
@@ -613,8 +677,8 @@ class VpsDockerProvider(BaseProviderInstance):
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
-                    region=region,
-                    plan=plan,
+                    region=parsed.region,
+                    plan=parsed.plan,
                     image=image,
                     tags=tags,
                     build_args=build_args,
@@ -761,12 +825,41 @@ class VpsDockerProvider(BaseProviderInstance):
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """Provider hook that issues the cloud-API instance create.
+
+        Default implementation: call the shared ``self.vps_client.create_instance``
+        with the standard (label, region, plan, user_data, ssh_key_ids, tags)
+        shape, which is what every current backend's wire contract needs.
+
+        Providers that have per-host knobs beyond region + plan (e.g. AWS's
+        ``--aws-ami=`` override) override this hook to pass their extra kwargs
+        through their own concrete typed client (``self.aws_client`` rather
+        than the shared interface). That way the shared ``VpsClientInterface``
+        contract stays minimal and per-provider extensions don't ripple across
+        every other provider's signature.
+        """
+        return self.vps_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+        )
+
     def _provision_vps(
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -788,13 +881,18 @@ class VpsDockerProvider(BaseProviderInstance):
             auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
         )
 
-        logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
+        logger.log(
+            LogLevel.BUILD.value,
+            "Creating VPS instance (region: {}, plan: {})...",
+            parsed.region,
+            parsed.plan,
+            source="vps",
+        )
         with log_span("Creating VPS instance"):
             vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
-            vps_instance_id = self.vps_client.create_instance(
+            vps_instance_id = self._create_vps_instance(
+                parsed=parsed,
                 label=f"mngr-{name}",
-                region=region,
-                plan=plan,
                 user_data=user_data,
                 ssh_key_ids=[vps_ssh_key_id],
                 tags=vps_tags,
@@ -804,7 +902,7 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
                 vps_instance_id,
-                timeout_seconds=self.config.vps_boot_timeout,
+                timeout_seconds=self.config.instance_boot_timeout,
             )
         logger.log(LogLevel.BUILD.value, "VPS active (IP: {})", vps_ip, source="vps")
 
@@ -1074,13 +1172,20 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
+    @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        """Parse build args, separating VPS provisioning args from Docker build args."""
-        return _parse_build_args(
-            build_args,
-            default_region=self.config.default_region,
-            default_plan=self.config.default_plan,
-        )
+        """Parse build args, separating provisioning knobs from docker build args.
+
+        Each concrete VpsDockerProvider subclass implements its own parser
+        because the set of accepted flags is per-provider (AWS has
+        ``--aws-region=`` / ``--aws-instance-type=`` / ``--aws-ami=``; Vultr
+        and OVH have a simpler region + plan shape; ``MinimalVpsDockerProvider``
+        accepts only ``--git-depth=`` and docker passthrough). For the common
+        region + plan + git-depth shape, ``parse_vps_build_args`` is a ready-made
+        convenience; for custom shapes, compose the lower-level helpers
+        (``extract_single_value_arg``, ``extract_git_depth``,
+        ``raise_if_vps_migration_arg``, ``raise_if_unknown_provider_arg``).
+        """
 
     # =========================================================================
     # Core Lifecycle: stop_host
@@ -2008,3 +2113,45 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.remove_persisted_agent_data(agent_id)
+
+
+class MinimalVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
+
+    Pairs with a ``vps_client`` whose provisioning calls raise (e.g.
+    ``ExternallyManagedVpsClient``): some other system (an imbue_cloud pool
+    lease, a hand-rolled provisioner, etc.) already created the VPS. This
+    provider only ever runs the post-provisioning host-setup machinery --
+    ``teardown_container_on_existing_vps`` and ``create_host_on_existing_vps``
+    -- which take a caller-supplied ``outer`` and make no cloud-API calls.
+
+    Build args here are just the docker-side knobs that flow through to
+    ``docker build`` on the leased VPS: there is no cloud provider to
+    select a region / plan / image for. The parser extracts ``--git-depth=N``
+    (still relevant -- it controls the *local* mngr build context, not the
+    VPS) and forwards everything else verbatim. The legacy shared
+    ``--vps-*`` prefix is rejected with a migration error so a caller that
+    still passes the old shape gets a clear pointer rather than having the
+    arg silently land in docker.
+    """
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        # Composed from the shared helpers rather than hand-rolling the same
+        # git-depth / --vps-* migration handling: this is the same pattern
+        # ``parse_vps_build_args`` and the AWS provider use, just without any
+        # region / plan extraction (provisioning lives outside this provider).
+        args = list(build_args or ())
+        git_depth, args = extract_git_depth(args)
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            docker_build_args.append(arg)
+        # ``region`` / ``plan`` are unused on the externally-managed path
+        # (callers pass them as explicit kwargs to ``create_host_on_existing_vps``),
+        # so the sentinels are harmless.
+        return ParsedVpsBuildOptions(
+            region="",
+            plan="",
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )

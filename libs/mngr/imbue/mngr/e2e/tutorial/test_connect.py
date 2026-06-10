@@ -36,6 +36,10 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# Creating the agent, attaching a real tmux client, and detaching it takes
+# longer than the default 10s per-test timeout, so give the interactive flow
+# room. The helper itself caps each wait at 30s.
+@pytest.mark.timeout(120)
 def test_connect_by_name(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # connect to a running agent by name
@@ -57,6 +61,9 @@ def test_connect_by_name(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# See test_connect_by_name: the interactive attach/detach flow exceeds the
+# default 10s per-test timeout.
+@pytest.mark.timeout(120)
 def test_connect_short_form(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # short form
@@ -91,6 +98,9 @@ def test_connect_by_agent_id_fictional(e2e: E2eSession) -> None:
     assert result.exit_code != 0, f"expected non-zero exit, got {result.exit_code}"
     assert "not found" in combined_output, combined_output
     assert agent_id in combined_output, combined_output
+    # A Python traceback would mean the missing-agent case crashed rather than
+    # being reported as a clean, user-facing error.
+    assert "traceback (most recent call last)" not in combined_output, combined_output
 
 
 @pytest.mark.release
@@ -112,11 +122,12 @@ def test_connect_explicit_host(e2e: E2eSession) -> None:
     )
     assert result.exit_code != 0
     # The failure must be a clean, host-scoped resolution error that names the
-    # bogus host -- not a crash or a misleading "agent not found". This proves
-    # the `agent@host` syntax was parsed and the host component drove the lookup.
+    # bogus host -- not a crash or a misleading "agent not found". Asserting on
+    # the combined "no hosts found matching my-host" phrase (rather than the two
+    # fragments separately) proves the `agent@host` syntax was parsed and the
+    # host component -- not the agent name -- drove the lookup.
     combined_output = (result.stdout + result.stderr).lower()
-    assert "my-host" in combined_output, combined_output
-    assert "no hosts found" in combined_output, combined_output
+    assert "no hosts found matching my-host" in combined_output, combined_output
     # A Python traceback would mean the error escaped rather than being reported
     # as a clean user-facing message.
     assert "traceback (most recent call last)" not in combined_output, combined_output
@@ -147,6 +158,9 @@ def test_connect_explicit_host_and_provider(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# See test_connect_by_name: the interactive attach/detach flow exceeds the
+# default 10s per-test timeout.
+@pytest.mark.timeout(120)
 def test_connect_with_start(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # the default behavior is to start the agent if it's stopped (you can be explicit about that too):
@@ -166,6 +180,48 @@ def test_connect_with_start(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+# See test_connect_by_name: the interactive attach/detach flow exceeds the
+# default 10s per-test timeout.
+@pytest.mark.timeout(120)
+def test_connect_with_start_restarts_stopped_agent(e2e: E2eSession) -> None:
+    # Shares the tutorial block with test_connect_with_start, but exercises the
+    # *distinguishing* behavior of --start: test_connect_with_start connects to an
+    # already-running agent (where --start is a no-op), so it never proves that
+    # --start restarts a stopped agent. Here the agent is stopped first, so a plain
+    # connect would fail; --start must transition it back to running before attaching.
+    e2e.write_tutorial_block("""
+        # the default behavior is to start the agent if it's stopped (you can be explicit about that too):
+        mngr connect my-task --start
+    """)
+    _create_my_task(e2e, 100205)
+    # Stop the freshly-created (running) agent so --start has real work to do.
+    expect(e2e.run("mngr stop my-task", comment="stop my-task so --start must restart it")).to_succeed()
+    stopped = e2e.run("mngr list --stopped", comment="confirm my-task is stopped before connecting")
+    expect(stopped.stdout).to_contain("my-task")
+
+    result = e2e.run_connect_interactively(
+        "mngr connect my-task --start",
+        agent_name="my-task",
+        comment="explicit --start behavior (restarts the stopped agent)",
+    )
+    expect(result).to_succeed()
+    expect(result.stdout).to_contain("Connecting to agent: my-task")
+    # The observable effect of --start: the previously-stopped agent is alive
+    # again. The helper only detaches the tmux client, so the restarted agent
+    # persists. A restarted command agent settles in WAITING (not RUNNING), so
+    # assert it is back in the *active* set and has left the *stopped* set --
+    # which is exactly what --start (as opposed to --no-start) accomplishes.
+    active = e2e.run("mngr list --active", comment="confirm --start brought my-task back to life")
+    expect(active.stdout).to_contain("my-task")
+    still_stopped = e2e.run("mngr list --stopped", comment="confirm my-task is no longer stopped")
+    expect(still_stopped.stdout).not_to_contain("my-task")
+
+
+# No @pytest.mark.modal: see test_connect_by_name (local-only resolution).
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_connect_no_start(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # or you can disable auto-starting (fails if agent is stopped)
@@ -179,3 +235,37 @@ def test_connect_no_start(e2e: E2eSession) -> None:
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Connecting to agent: my-task")
+
+
+# Shares the tutorial block of test_connect_no_start, covering the "unhappy"
+# path the tutorial comment explicitly calls out: "fails if agent is stopped".
+# Connecting with --no-start fails before any tmux attach, so the plain
+# pipe-based e2e.run is sufficient (no PTY needed).
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_connect_no_start_fails_when_stopped(e2e: E2eSession) -> None:
+    e2e.write_tutorial_block("""
+        # or you can disable auto-starting (fails if agent is stopped)
+        mngr connect my-task --no-start
+    """)
+    _create_my_task(e2e, 100204)
+    # Stop the agent so --no-start has nothing to attach to and must refuse.
+    expect(e2e.run("mngr stop my-task", comment="stop the agent so --no-start fails")).to_succeed()
+    result = e2e.run(
+        "mngr connect my-task --no-start",
+        comment="disable auto-starting (fails if agent is stopped)",
+    )
+    # mngr must refuse with a clean, controlled error -- not auto-start the agent
+    # and not crash. The message names the agent and explains that auto-start is
+    # disabled, proving --no-start was honored rather than silently ignored.
+    assert result.exit_code != 0, f"expected non-zero exit, got {result.exit_code}"
+    combined_output = (result.stdout + result.stderr).lower()
+    assert "my-task" in combined_output, combined_output
+    assert "stopped and automatic starting is disabled" in combined_output, combined_output
+    # A successful connect would have logged this line; it must NOT appear.
+    assert "connecting to agent: my-task" not in combined_output, combined_output
+    # A Python traceback would mean the error escaped instead of being reported
+    # as a clean user-facing message.
+    assert "traceback (most recent call last)" not in combined_output, combined_output

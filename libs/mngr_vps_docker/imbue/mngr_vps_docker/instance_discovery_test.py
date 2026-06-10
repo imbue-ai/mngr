@@ -49,6 +49,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -131,6 +132,11 @@ class _DiscoveryTestProvider(VpsDockerProvider):
 
     def _credentials_configured(self) -> bool:
         return self.credentials_present
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        # Discovery tests never exercise the create path that calls this; the
+        # body is just enough to satisfy the abstract-method contract.
+        return ParsedVpsBuildOptions(region="", plan="", docker_build_args=tuple(build_args or ()))
 
     def _read_records_from_vps(
         self,

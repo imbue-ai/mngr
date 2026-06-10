@@ -20,8 +20,9 @@ class ExistingSecurityGroup(FrozenModel):
 class AutoCreateSecurityGroup(FrozenModel):
     """Auto-create an AWS security group, opening SSH ingress to the configured CIDRs.
 
-    Fail-closed: ``ensure_security_group`` raises if ``AwsProviderConfig.allowed_ssh_cidrs``
-    is empty so a missing-CIDRs config does not silently produce an unreachable instance.
+    When ``AwsProviderConfig.allowed_ssh_cidrs`` is empty, the auto-created SG
+    gets no ingress rules and the resulting instance will be unreachable from
+    outside its VPC; ``ensure_security_group`` logs a warning in that case.
     """
 
     kind: Literal["auto_create"] = "auto_create"
@@ -77,9 +78,14 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default="us-east-1",
         description="Default AWS region (e.g., 'us-east-1').",
     )
-    default_plan: str = Field(
+    default_instance_type: str = Field(
         default="t3.small",
-        description="Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM).",
+        description=(
+            "Default EC2 instance type (e.g., 't3.small' for 2 vCPU, 2GB RAM). "
+            "Threaded through the shared `plan` slot in the parsed-build-args struct; "
+            "AWS surfaces it to users as `--aws-instance-type=` rather than `--aws-plan=` "
+            "because that's what the AWS docs and console call it."
+        ),
     )
     default_ami_id: str = Field(
         default="",
@@ -106,13 +112,16 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the "
-            "auto-created security group. Empty by default (fail-closed): without an explicit "
-            "list, ensure_security_group raises rather than create a permissive SG. Use e.g. "
-            "['203.0.113.4/32'] to allow only your own IP, or ['0.0.0.0/0'] to expose to the "
-            "public internet (NOT recommended for production)."
+            "auto-created security group. Default ['0.0.0.0/0'] matches the de-facto "
+            "Vultr / OVH norm in this monorepo (those providers ship instances with no "
+            "managed firewall, leaving SSH wide open at the network layer; key-only auth "
+            "is what actually protects the host). Tighten to e.g. ['203.0.113.4/32'] to "
+            "restrict to a known IP for production. Empty tuple means 'add no ingress "
+            "rules' -- the auto-created SG ends up unreachable from outside its VPC, "
+            "which is logged as a warning at provision time."
         ),
     )
     associate_public_ip: bool = Field(

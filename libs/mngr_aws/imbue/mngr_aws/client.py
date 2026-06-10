@@ -17,7 +17,6 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
@@ -57,10 +56,6 @@ class AwsVpsClient(VpsClientInterface):
     slow_provisioning_warning_threshold_seconds: float = Field(default=90.0)
 
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
-    provider_name: ProviderInstanceName = Field(
-        default=ProviderInstanceName("aws"),
-        description="The provider instance name, used to build the config-key hint in user-facing errors.",
-    )
     region: str = Field(frozen=True, description="AWS region this client targets")
     ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
     security_group: SecurityGroupSpec = Field(
@@ -74,14 +69,13 @@ class AwsVpsClient(VpsClientInterface):
     subnet_id: str | None = Field(default=None, description="Subnet ID, or None to let EC2 pick a default")
     vpc_id: str | None = Field(default=None, description="VPC ID, used only to scope SG lookup")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "security group. Empty by default (fail-closed): when `security_group` is "
-            "`AutoCreateSecurityGroup(...)` and this tuple is empty, `ensure_security_group` "
-            "raises rather than creating a wide-open SG. Set to e.g. ('203.0.113.4/32',) to "
-            "restrict to your own IP, or ('0.0.0.0/0',) to expose to the public internet (NOT "
-            "recommended for production)."
+            "security group. Default ('0.0.0.0/0',) matches Vultr/OVH default reachability in "
+            "this monorepo (neither provider ships a managed firewall). Tighten for production "
+            "(e.g. ('203.0.113.4/32',) for a single IP). Empty tuple means 'add no ingress' -- "
+            "the SG ends up unreachable from outside its VPC; logged as a warning."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
@@ -124,11 +118,17 @@ class AwsVpsClient(VpsClientInterface):
           scoped to ``vpc_id``); create if absent. Open tcp/22 and
           tcp/``container_ssh_port`` to every CIDR in ``allowed_ssh_cidrs``.
 
-        The auto-create path fails closed if ``allowed_ssh_cidrs`` is empty:
-        rather than create a no-ingress SG (unreachable instances) or default
-        to ``0.0.0.0/0`` (public-internet SSH), raise so the caller makes an
-        explicit decision. Matches AWS's own default for a brand-new SG: no
-        ingress until you add it.
+        Empty ``allowed_ssh_cidrs`` means "no ingress rules added": the SG is
+        created (or reused) but the instance is unreachable from outside its
+        VPC. Logged as a warning rather than raised so the behavior matches
+        the Vultr / OVH default (no provider-managed firewall) -- key-only
+        SSH is what protects the host, not network ACLs. The default ingress
+        of ``0.0.0.0/0`` is logged as a warning too, prompting production
+        users to tighten it.
+
+        Used by ``mngr aws prepare`` (one-time admin setup). The hot path
+        in ``create_instance`` uses ``resolve_security_group_id`` instead,
+        which is lookup-only and requires only RunInstances-style permissions.
         """
         match self.security_group:
             case ExistingSecurityGroup(id=sg_id):
@@ -138,21 +138,36 @@ class AwsVpsClient(VpsClientInterface):
             case _ as unreachable:
                 assert_never(unreachable)
 
-    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
-        if not self.allowed_ssh_cidrs:
-            raise MngrError(
-                "Cannot auto-create an AWS security group: allowed_ssh_cidrs is empty. "
-                "Set the CIDR(s) allowed to SSH in -- to allow just your current public IP:\n"
-                f"  mngr config set providers.{self.provider_name}.allowed_ssh_cidrs "
-                '"[\\"$(curl -fsS https://checkip.amazonaws.com)/32\\"]" --scope user\n'
-                'Use ["0.0.0.0/0"] to allow any IP (not recommended), or pre-create a security '
-                'group and reference it with security_group = { kind = "existing", id = "sg-..." }.'
-            )
+    def resolve_security_group_id(self) -> str:
+        """Look up the SG id without creating or modifying anything.
 
+        Mirrors ``ensure_security_group`` but with no write API calls --
+        callers only need ``ec2:DescribeSecurityGroups``. When the auto-create
+        SG is missing, raises a ``MngrError`` pointing at ``mngr aws prepare``
+        so a user with restricted IAM (RunInstances-only) gets a clear next
+        step rather than an opaque AWS permission denial.
+        """
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                return sg_id
+            case AutoCreateSecurityGroup(name=sg_name):
+                return self._lookup_security_group_id_or_raise(sg_name)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _describe_security_groups_or_raise_on_multi_vpc(self, sg_name: str) -> list[dict[str, Any]]:
+        """Describe SGs matching ``sg_name`` (optionally vpc-scoped). Raise on multi-VPC name collision.
+
+        Shared between the lookup-only ``_lookup_security_group_id_or_raise``
+        path and the create-if-missing ``_ensure_auto_created_security_group``
+        path so the filter shape, the describe call, and the multi-VPC error
+        message stay defined in one place. The not-found case is left to the
+        caller (the two paths handle it differently: lookup raises with a
+        prepare hint, ensure proceeds to CreateSecurityGroup).
+        """
         filters: list[dict[str, Any]] = [{"Name": "group-name", "Values": [sg_name]}]
         if self.vpc_id is not None:
             filters.append({"Name": "vpc-id", "Values": [self.vpc_id]})
-
         with self._translate_aws_errors():
             existing = self._ec2().describe_security_groups(Filters=filters).get("SecurityGroups", [])
         if len(existing) > 1:
@@ -166,6 +181,48 @@ class AwsVpsClient(VpsClientInterface):
                 "Set vpc_id on the AWS provider config to scope the lookup, or pass an explicit "
                 "security_group=ExistingSecurityGroup(id='sg-...')."
             )
+        return existing
+
+    def _lookup_security_group_id_or_raise(self, sg_name: str) -> str:
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
+        if not existing:
+            raise MngrError(
+                f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
+                f"Run `uv run mngr aws prepare --region {self.region}` once to create it "
+                "(needs ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress), then "
+                "retry the create with your usual RunInstances-only credentials. Alternatively, "
+                "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "
+                "to attach an SG you manage outside mngr."
+            )
+        return existing[0]["GroupId"]
+
+    def _warn_about_cidrs_if_needed(self, sg_name: str) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (instance unreachable), whereas 0.0.0.0/0 means "open to the internet"
+        (default but worth flagging). Anything else is silent.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.warning(
+                "AWS allowed_ssh_cidrs is empty; auto-created security group {!r} will have no "
+                "ingress rules and the instance will be unreachable from outside its VPC. Set "
+                "allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                sg_name,
+            )
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "AWS allowed_ssh_cidrs includes 0.0.0.0/0; auto-created security group {!r} will "
+                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
+                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                sg_name,
+            )
+
+    def _ensure_auto_created_security_group(self, sg_name: str) -> str:
+        self._warn_about_cidrs_if_needed(sg_name)
+
+        existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
         if existing:
             sg_id = existing[0]["GroupId"]
             self._authorize_ssh_ingress_idempotent(sg_id)
@@ -193,7 +250,22 @@ class AwsVpsClient(VpsClientInterface):
         port. AWS rejects ``AuthorizeSecurityGroupIngress`` calls with
         ``InvalidPermission.Duplicate`` atomically — none of the permissions in
         the batch are added if any one is a duplicate.
+
+        When ``allowed_ssh_cidrs`` is empty, skip the authorize calls entirely:
+        AWS rejects an ``IpPermission`` with no source set (no IpRanges /
+        Ipv6Ranges / UserIdGroupPairs / PrefixListIds) with
+        ``InvalidParameterValue``, so issuing the call with empty ``IpRanges``
+        is a real API error, not a no-op. The "no usable ingress" shape is the
+        SG sitting with the AWS default of zero ingress rules, which is exactly
+        what the caller gets by not issuing the call.
         """
+        if not self.allowed_ssh_cidrs:
+            logger.debug(
+                "Skipping authorize_security_group_ingress on {}: allowed_ssh_cidrs is empty "
+                "(the security group keeps its default of zero ingress rules)",
+                sg_id,
+            )
+            return
         ip_ranges = [{"CidrIp": cidr} for cidr in self.allowed_ssh_cidrs]
         ip_permissions = [
             {
@@ -231,8 +303,25 @@ class AwsVpsClient(VpsClientInterface):
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
+        ami_id_override: str | None = None,
+        spot: bool = False,
     ) -> VpsInstanceId:
-        """Provision an EC2 instance using the client's configured AMI."""
+        """Provision an EC2 instance.
+
+        Uses ``ami_id_override`` when supplied (from ``--aws-ami=<ami-id>`` on
+        ``mngr create``), otherwise the client's configured default
+        (``self.ami_id``). When ``spot`` is True (from the presence-only
+        ``--aws-spot`` build arg), passes ``InstanceMarketOptions={'MarketType':
+        'spot'}`` to RunInstances so the host runs on EC2 spot capacity. AWS
+        may reclaim spot instances with ~2 minutes' interruption notice; the
+        host is terminated, not stopped, on reclaim. Opt-in only.
+
+        Both kwargs are AWS-specific: they widen ``AwsVpsClient.create_instance``'s
+        signature beyond the shared ``VpsClientInterface.create_instance`` contract,
+        so providers reach them through ``self.aws_client.create_instance(...)``
+        (via ``AwsProvider._create_vps_instance``) rather than the abstract
+        interface.
+        """
         if region != self.region:
             raise VpsApiError(
                 400,
@@ -240,7 +329,9 @@ class AwsVpsClient(VpsClientInterface):
                 f"got region={region!r}. Instantiate a region-specific client.",
             )
 
-        sg_id = self.ensure_security_group()
+        effective_ami_id = ami_id_override or self.ami_id
+
+        sg_id = self.resolve_security_group_id()
 
         tag_specs: list[dict[str, str]] = [{"Key": k, "Value": v} for k, v in tags.items()]
         tag_specs.append({"Key": "Name", "Value": label})
@@ -279,7 +370,7 @@ class AwsVpsClient(VpsClientInterface):
             network_interfaces[0]["SubnetId"] = self.subnet_id
 
         run_kwargs: dict[str, Any] = {
-            "ImageId": self.ami_id,
+            "ImageId": effective_ami_id,
             "InstanceType": plan,
             "MinCount": 1,
             "MaxCount": 1,
@@ -306,6 +397,16 @@ class AwsVpsClient(VpsClientInterface):
             run_kwargs["KeyName"] = ssh_key_ids[0]
         if self.iam_instance_profile is not None:
             run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
+        if spot:
+            # Default spot config: AWS sets max price to the on-demand price
+            # automatically; no need to specify SpotInstanceType or
+            # MaxPrice for the dev-host use case (any non-zero capacity is
+            # acceptable, and a higher max price just lengthens uptime when
+            # spot prices spike). InstanceInitiatedShutdownBehavior=terminate
+            # (always set above) interacts cleanly with spot's
+            # interruption-by-terminate semantics: the cloud-init auto-shutdown
+            # safety net still fires the same way.
+            run_kwargs["InstanceMarketOptions"] = {"MarketType": "spot"}
 
         with self._translate_aws_errors():
             result = self._ec2().run_instances(**run_kwargs)
@@ -319,7 +420,7 @@ class AwsVpsClient(VpsClientInterface):
             label,
             region,
             plan,
-            self.ami_id,
+            effective_ami_id,
         )
         return VpsInstanceId(instance_id)
 

@@ -16,11 +16,13 @@ def test_default_config_values() -> None:
     assert config.default_idle_timeout == 800
     assert config.default_idle_mode == IdleMode.IO
     assert config.ssh_connect_timeout == 60.0
-    assert config.vps_boot_timeout == 300.0
+    assert config.instance_boot_timeout == 300.0
     assert config.docker_install_timeout == 300.0
     assert config.container_ssh_port == 2222
     assert config.default_region == "ewr"
-    assert config.default_plan == "vc2-1c-1gb"
+    # default_plan moved off the shared base; each provider's config carries its
+    # own native field (Vultr/OVH ``default_plan``, AWS ``default_instance_type``).
+    assert not hasattr(config, "default_plan")
     assert config.default_start_args == ()
     assert config.builder is DockerBuilder.DOCKER
 

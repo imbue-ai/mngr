@@ -22,7 +22,7 @@ convention). Any of the following works:
 backend = "aws"
 
 default_region = "us-east-1"
-default_plan = "t3.small"          # instance type
+default_instance_type = "t3.small"  # EC2 instance type
 default_ami_id = ""                # leave empty to use default_ami_by_region
 
 # Optional networking
@@ -31,10 +31,9 @@ default_ami_id = ""                # leave empty to use default_ami_by_region
 # kind = "existing"
 # id = "sg-..."
 # subnet_id = "subnet-..."          # default-VPC subnet if unset
-# Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
-# container SSH port of the auto-created security group. Empty default
-# refuses to auto-create the SG -- you must opt in to either a tight
-# range like ['203.0.113.4/32'] or the wide-open '0.0.0.0/0'.
+# Inbound CIDRs for tcp/22 and the container SSH port on the auto-created
+# security group. Default ['0.0.0.0/0'] matches Vultr/OVH defaults in this
+# monorepo (no managed firewall); tighten for production.
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional EBS sizing
@@ -70,7 +69,9 @@ mngr create my-west-agent --provider aws-west
 
 ```bash
 mngr create my-agent --provider aws
-mngr create my-agent --provider aws -b --vps-plan=t3.medium -b --vps-region=us-west-2
+mngr create my-agent --provider aws -b --aws-instance-type=t3.medium -b --aws-region=us-west-2
+mngr create my-agent --provider aws -b --aws-ami=ami-0123abcd456    # per-host AMI override
+mngr create my-agent --provider aws -b --aws-spot                    # run on EC2 spot capacity
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -85,30 +86,53 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `default_region` | `us-east-1` | AWS region for new instances. |
-| `default_plan` | `t3.small` | EC2 instance type. |
+| `default_instance_type` | `t3.small` | EC2 instance type. Surfaced to users as `--aws-instance-type=` build arg (not `--aws-plan=`) to match AWS's native terminology. |
 | `default_ami_id` | `""` | Explicit AMI override; takes precedence over the per-region map. |
 | `default_ami_by_region` | (pinned Debian 12 amd64 per region) | Per-region default AMIs. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Tagged union: `{kind = "existing", id = "sg-..."}` to attach an existing SG, or `{kind = "auto_create", name = "..."}` to look up / create one. |
 | `subnet_id` | `None` | Optional explicit subnet. |
 | `vpc_id` | `None` | Scopes auto-SG lookup. |
-| `allowed_ssh_cidrs` | `()` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Empty (fail-closed): the auto-SG path raises unless you explicitly list a CIDR or pre-create the SG. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Default matches Vultr/OVH default reachability in this repo (no provider-managed firewall). A warning is logged at provision time when the effective range includes `0.0.0.0/0`; tighten for production (e.g. `("203.0.113.4/32",)`). Empty tuple means "add no ingress" — the SG is unreachable from outside its VPC, also warned. |
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
 | `iam_instance_profile` | `None` | IAM instance profile name. |
 | `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
+## One-time setup: `mngr aws prepare`
+
+Run this once, with credentials that can create security groups, before any developer attempts `mngr create --provider aws`:
+
+```bash
+uv run mngr aws prepare --region us-east-1
+# Or with explicit ingress restriction:
+uv run mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
+```
+
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
+
+- `ec2:DescribeSecurityGroups`
+- `ec2:CreateSecurityGroup`
+- `ec2:AuthorizeSecurityGroupIngress`
+
+After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
+
 ## Required IAM permissions
 
-The minimal policy actions needed:
+For `mngr create --provider aws` (per-host path):
 
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
-ec2:DescribeSecurityGroups, ec2:CreateSecurityGroup,
-ec2:AuthorizeSecurityGroupIngress,
+ec2:DescribeSecurityGroups,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
+```
+
+For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
+
+```
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
 ```
 
 Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). Stop/start operate on the container inside the instance (Docker over SSH), not on the EC2 instance itself, so `ec2:StopInstances` / `ec2:StartInstances` are not needed. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
@@ -120,8 +144,9 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - SSH key auth: each host gets a per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
-- The security group (`mngr-aws` by default) is auto-created on first `create_host` and reused across hosts; it is not deleted on `destroy_host` — clean up manually when retiring a provider.
+- The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host` — clean up manually when retiring a provider.
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
+- **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
 
 ## Release tests and cost
 
@@ -143,9 +168,12 @@ Production code enforces this: `AwsProvider._validate_provider_args_for_create` 
 
 ## Future improvements
 
-- `--vps-ami=<ami-id>` build-arg for per-host AMI override.
-- Spot instances via `InstanceMarketOptions`.
-- GPU instances with pre-baked CUDA AMIs.
-- Auto SSM Parameter Store lookup for current Debian AMIs per region.
-- Optional EIP allocation for stable public addressing across stops/starts.
-- Multi-container per EC2 instance packing.
+Tagged `[future]` items are deferred but tracked so the user-facing surface in this README is honest about what does not yet exist:
+
+- `[future]` `mngr aws ami` subcommand that builds and registers a Debian + Docker + deps-baked AMI. Bypasses the ~60-90s cloud-init bootstrap on every create.
+- `[future]` mngr-published public AMIs (so users skip the build step entirely). Requires us to commit to a publishing cadence.
+- `[future]` GPU AMI automation: the Debian 12 AMIs in `DEFAULT_AMI_BY_REGION` have no CUDA / NVIDIA drivers / nvidia-container-toolkit. Pairs naturally with `mngr aws ami` above.
+- `[future]` Optional EIP allocation for stable public addressing across stops/starts. ~$3.60/month per idle EIP.
+- `[future]` Auto SSM Parameter Store lookup for current Debian AMIs per region (so the pinned map in `config.py` doesn't drift).
+- `[future]` Multi-container per EC2 instance packing.
+- `[future]` Auto-cleanup of the `mngr-aws` security group on the final `destroy` of a region.

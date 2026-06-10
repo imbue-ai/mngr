@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
@@ -13,7 +14,9 @@ from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 from imbue.mngr_vultr import hookimpl
 from imbue.mngr_vultr.client import VultrVpsClient
 from imbue.mngr_vultr.config import VultrProviderConfig
@@ -47,6 +50,16 @@ class VultrProvider(VpsDockerProvider):
 
     def _credentials_configured(self) -> bool:
         return bool(self.vultr_client.api_key.get_secret_value())
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        """Parse Vultr-prefixed build args (--vultr-region, --vultr-plan, --git-depth)."""
+        return parse_vps_build_args(
+            build_args,
+            provider_prefix="vultr",
+            default_region=self.vultr_config.default_region,
+            default_plan=self.vultr_config.default_plan,
+            plan_arg_name="plan",
+        )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return public IPs of Vultr instances tagged with this provider's name.
@@ -88,13 +101,13 @@ class VultrProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-region=REGION  Vultr region (default: ewr)\n"
-            "  --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
-            "  --git-depth=N        Shallow-clone build context to depth N before upload\n"
+            "Vultr-specific args (consumed by provider, not passed to docker):\n"
+            "  --vultr-region=REGION  Vultr region (default: ewr)\n"
+            "  --vultr-plan=PLAN      Vultr plan (default: vc2-2c-4gb)\n"
+            "  --git-depth=N          Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
-            "Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
+            "Example: -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod

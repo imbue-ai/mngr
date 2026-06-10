@@ -1,0 +1,1 @@
+Fixed a duplicate `type = "claude"` key in the e2e test fixture's generated `settings.local.toml` that caused a TOML parse error ("Cannot overwrite a value") in all e2e tutorial tests. Also strengthened `test_create_with_plugin_flags` to verify the failed create leaves no agent behind.

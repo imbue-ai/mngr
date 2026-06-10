@@ -11,6 +11,7 @@ from uuid import uuid4
 import pluggy
 from loguru import logger
 from pydantic import BaseModel
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -621,11 +622,28 @@ def _parse_providers(
             continue
         # _drop_unknown_fields raises (strict) or returns the config with unknown
         # keys removed (non-strict), leaving only known fields for model_validate
-        # to coerce to their declared types.
+        # to coerce to their declared types. model_validate (rather than
+        # model_construct) is what coerces raw TOML scalars and nested tables to
+        # their declared field types: an enum like ``builder = "DEPOT"`` to
+        # ``DockerBuilder.DEPOT`` (whose ``is``-identity check would otherwise
+        # silently fail on the raw string), ``allowed_ssh_cidrs = [...]`` to a
+        # tuple, and a nested-model table like ``SSHProviderConfig.hosts`` to
+        # ``SSHHostConfig`` (which would otherwise stay a raw dict and crash with
+        # ``AttributeError: 'dict' object has no attribute ...`` the moment the
+        # backend touched it). Only the keys present in the block land in
+        # ``model_fields_set``, so per-field config-layer merging is unaffected.
         cleaned_config = _drop_unknown_fields(
             raw_config, config_class, f"providers.{name}", strict=strict, silent=silent
         )
-        providers[ProviderInstanceName(name)] = config_class.model_validate(cleaned_config)
+        try:
+            providers[ProviderInstanceName(name)] = config_class.model_validate(cleaned_config)
+        except ValidationError as e:
+            # A malformed known field (bad scalar, failed validator, malformed
+            # nested host table, ...) is always fatal: surface it as a clear
+            # parse-time ConfigParseError keyed on the provider block rather than
+            # a raw pydantic ValidationError or a late AttributeError from the
+            # backend.
+            raise ConfigParseError(f"Invalid config for 'providers.{name}': {e}") from e
 
     return providers
 

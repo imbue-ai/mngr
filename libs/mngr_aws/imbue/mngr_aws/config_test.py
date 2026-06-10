@@ -37,12 +37,13 @@ def _clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_default_config_values() -> None:
     config = AwsProviderConfig()
     assert config.default_region == "us-east-1"
-    assert config.default_plan == "t3.small"
+    assert config.default_instance_type == "t3.small"
     # Default security_group is AutoCreate with name 'mngr-aws'.
     assert isinstance(config.security_group, AutoCreateSecurityGroup)
     assert config.security_group.name == "mngr-aws"
-    # Empty by default -- fail-closed; user must opt in to SSH ingress.
-    assert config.allowed_ssh_cidrs == ()
+    # Default is 0.0.0.0/0 to match Vultr/OVH reachability norms in this monorepo
+    # (those providers ship no managed firewall). Production users should tighten.
+    assert config.allowed_ssh_cidrs == ("0.0.0.0/0",)
     assert config.associate_public_ip is True
     assert config.root_volume_size_gb == 30
     assert config.root_volume_type == "gp3"
