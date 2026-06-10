@@ -226,3 +226,21 @@ html {
     transform: rotate(360deg);
   }
 }
+
+/*
+ * Workspace color picker (workspace settings page).
+ * The swatch's selected state is conveyed via aria-checked="true" so
+ * screen readers see the radio role correctly; the visual ring uses
+ * the same attribute selector so the two stay in lockstep. The
+ * inner-shadow border is what makes a white / very-light swatch
+ * still readable against the zinc-50 page background.
+ */
+.color-swatch {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.color-swatch[aria-checked="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.08),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb; /* blue-600 selection ring */
+}

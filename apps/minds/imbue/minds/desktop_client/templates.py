@@ -27,6 +27,8 @@ from jinjax import Catalog
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -1149,6 +1151,8 @@ def render_workspace_settings(
     servers: Sequence[str],
     telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
+    current_color: str = DEFAULT_WORKSPACE_COLOR,
+    is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1162,6 +1166,15 @@ def render_workspace_settings(
     Imbue Cloud; the account section then shows the bound account with a
     disabled Disassociate control and no association controls.
 
+    ``current_color`` is the workspace's stored color hex (``#rrggbb``),
+    used to pre-select a palette swatch / pre-fill the hex input.
+    Defaults to ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care
+    about color (e.g. some tests) can omit it.
+
+    ``is_stale`` reflects the workspace's provider-health flag from the
+    SSE workspace payload; when True the color picker controls are
+    disabled with a hint that the workspace is currently unreachable.
+
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
@@ -1174,6 +1187,9 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
+        palette=WORKSPACE_PALETTE,
     )
 
 

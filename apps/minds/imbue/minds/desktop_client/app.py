@@ -127,6 +127,7 @@ from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.errors import BackupProvisioningError
@@ -2900,17 +2901,28 @@ def _handle_workspace_settings(
     accounts = session_store.list_accounts() if session_store else []
     is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
 
-    ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
+    parsed_agent_id = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_agent_id)
+    info = backend_resolver.get_agent_display_info(parsed_agent_id)
     if not ws_name:
-        info = backend_resolver.get_agent_display_info(AgentId(agent_id))
         ws_name = info.agent_name if info else agent_id
 
-    servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
+    servers = [str(s) for s in backend_resolver.list_services_for_agent(parsed_agent_id)]
 
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
     telegram_state: str | None = None
     if telegram_orchestrator is not None:
-        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
+        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(parsed_agent_id) else "pending"
+
+    # Pre-fill the color picker with the workspace's stored color (or the
+    # default if the migration backfill hasn't reached it yet). Disable
+    # the picker controls when the provider that owns this workspace is
+    # in error state -- writes against an unreachable host would not be
+    # observable until the provider recovers.
+    stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
+    current_color = stored_color if stored_color is not None else DEFAULT_WORKSPACE_COLOR
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
+    is_stale = info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -2920,6 +2932,8 @@ def _handle_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
     )
     return HTMLResponse(content=html)
 

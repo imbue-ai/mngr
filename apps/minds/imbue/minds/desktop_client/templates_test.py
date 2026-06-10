@@ -66,6 +66,57 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     assert "{{" not in html
 
 
+def test_render_workspace_settings_renders_all_palette_swatches() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+    )
+    # All 12 swatches present, with the workspace's current color marked
+    # as the checked radio so screen readers see the selection state.
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' in html
+    assert 'aria-checked="true"' in html
+    # The hex input is pre-filled with the current saved color.
+    assert 'value="#0b292b"' in html
+
+
+def test_render_workspace_settings_picker_disabled_when_stale() -> None:
+    """is_stale=True disables the picker controls so the user can't write
+    a label against an unreachable host (would not be observable until
+    provider recovery)."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+        is_stale=True,
+    )
+    assert 'data-is-stale="true"' in html
+    # Both the input and the swatches carry the disabled attribute.
+    assert "disabled" in html
+
+
+def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> None:
+    """When the saved color is a custom hex (not in the palette), no
+    swatch shows as selected; the hex input still carries the value."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#123456",
+    )
+    assert 'value="#123456"' in html
+    assert 'aria-checked="true"' not in html
+
+
 def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
     # Regression: the workspace <Link href="...{{ }}..."> must interpolate
     # (component quoted-attribute interpolation does not happen in JinjaX).

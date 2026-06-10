@@ -1,12 +1,154 @@
-// Workspace settings page: handles disassociate + (optional) Telegram
-// setup. Reads the agent id from the #workspace-settings container's
-// data-agent-id attribute so the template does not have to interpolate
-// anything into JS.
+// Workspace settings page: handles the color picker, disassociate, and
+// (optional) Telegram setup. Reads the agent id from the
+// #workspace-settings container's data-agent-id attribute so the
+// template does not have to interpolate anything into JS.
 (function () {
   var root = document.getElementById('workspace-settings');
   if (!root) return;
   var agentId = root.getAttribute('data-agent-id');
   if (!agentId) return;
+  var isStale = root.getAttribute('data-is-stale') === 'true';
+
+  // -- Color picker -------------------------------------------------------
+  //
+  // 12 unlabeled palette swatches + an always-visible hex input. The hex
+  // input is the source of truth: selecting a swatch fills the input,
+  // typing a valid hex sets the matching swatch (if any) to
+  // aria-checked="true". Save is implicit -- a valid hex saves on blur,
+  // a swatch click saves immediately; no Save button. SSE drives the
+  // re-paint of the chrome / sidebar after each save.
+  var hexInput = document.getElementById('color-hex-input');
+  var swatchContainer = document.getElementById('color-swatches');
+  var errorEl = document.getElementById('color-error');
+
+  if (hexInput && swatchContainer && errorEl && !isStale) {
+    var swatches = swatchContainer.querySelectorAll('.color-swatch');
+    var lastSavedHex = (hexInput.value || '').toLowerCase();
+    var hexPattern = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+    function normalizeHex(value) {
+      var match = hexPattern.exec(String(value).trim());
+      if (!match) return null;
+      var body = match[1].toLowerCase();
+      if (body.length === 3) {
+        body = body.split('').map(function (ch) { return ch + ch; }).join('');
+      }
+      return '#' + body;
+    }
+
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.classList.remove('hidden');
+    }
+
+    function clearError() {
+      errorEl.textContent = '';
+      errorEl.classList.add('hidden');
+    }
+
+    function syncSwatchSelection(normalized) {
+      for (var i = 0; i < swatches.length; i++) {
+        var sw = swatches[i];
+        var checked = sw.getAttribute('data-color') === normalized;
+        sw.setAttribute('aria-checked', checked ? 'true' : 'false');
+      }
+    }
+
+    function setControlsDisabled(disabled) {
+      hexInput.disabled = disabled;
+      for (var i = 0; i < swatches.length; i++) {
+        swatches[i].disabled = disabled;
+      }
+    }
+
+    function saveColor(normalized) {
+      // Idempotency: skip the POST when the user types the same value
+      // that's already saved (e.g. blur after no edit).
+      if (normalized === lastSavedHex) return;
+      setControlsDisabled(true);
+      fetch('/api/workspaces/' + encodeURIComponent(agentId) + '/color', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hex: normalized }),
+      })
+        .then(function (resp) {
+          return resp.json().then(function (body) { return { ok: resp.ok, status: resp.status, body: body }; });
+        })
+        .then(function (result) {
+          setControlsDisabled(false);
+          if (result.ok) {
+            lastSavedHex = normalized;
+            hexInput.value = normalized;
+            syncSwatchSelection(normalized);
+            clearError();
+            return;
+          }
+          var err = (result.body && result.body.error) || 'unknown';
+          if (err === 'invalid_hex') {
+            showError('That hex value is not valid. Use #rrggbb or #rgb.');
+          } else if (err === 'not_primary') {
+            showError("This agent isn't a primary workspace; color can't be set.");
+          } else if (err === 'stale_provider') {
+            showError('This workspace is currently unreachable; try again later.');
+            setControlsDisabled(true);
+          } else if (err === 'host_unreachable') {
+            showError('Could not reach the workspace host. Try again in a moment.');
+          } else {
+            showError('Save failed (HTTP ' + result.status + ').');
+          }
+          // Revert the input to the last saved value so the picker
+          // stays consistent with the persisted state.
+          hexInput.value = lastSavedHex;
+          syncSwatchSelection(lastSavedHex);
+        })
+        .catch(function (err) {
+          setControlsDisabled(false);
+          showError('Network error saving color: ' + err.message);
+          hexInput.value = lastSavedHex;
+          syncSwatchSelection(lastSavedHex);
+        });
+    }
+
+    for (var i = 0; i < swatches.length; i++) {
+      (function (sw) {
+        sw.addEventListener('click', function () {
+          var hex = sw.getAttribute('data-color');
+          var normalized = normalizeHex(hex);
+          if (!normalized) return;
+          clearError();
+          hexInput.value = normalized;
+          syncSwatchSelection(normalized);
+          saveColor(normalized);
+        });
+      })(swatches[i]);
+    }
+
+    hexInput.addEventListener('input', function () {
+      var normalized = normalizeHex(hexInput.value);
+      if (normalized === null) {
+        // Mark invalid but defer the error message to blur so users
+        // mid-typing don't get yelled at on every keystroke.
+        clearError();
+        return;
+      }
+      clearError();
+      syncSwatchSelection(normalized);
+    });
+
+    hexInput.addEventListener('blur', function () {
+      var normalized = normalizeHex(hexInput.value);
+      if (normalized === null) {
+        showError('That hex value is not valid. Use #rrggbb or #rgb.');
+        hexInput.value = lastSavedHex;
+        syncSwatchSelection(lastSavedHex);
+        return;
+      }
+      hexInput.value = normalized;
+      syncSwatchSelection(normalized);
+      saveColor(normalized);
+    });
+  }
+  // -- End color picker ---------------------------------------------------
 
   var disassociateBtn = document.getElementById('disassociate-btn');
   if (disassociateBtn) {
