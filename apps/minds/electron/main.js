@@ -731,9 +731,13 @@ function openSidebar(bundle) {
     });
     // Transparent background so the dark teal floating menu rendered by
     // Sidebar.jinja appears to float over the workspace content view.
-    // The WebContentsView still intercepts mouse events in its bounds,
-    // so the user toggles it closed via the titlebar sidebar button or
-    // by making a selection in the menu.
+    // The WebContentsView still intercepts mouse events in its bounds --
+    // that's intentional: it acts as the modal's scrim. sidebar.js
+    // catches clicks outside ``#sidebar-menu`` (and Escape) and dismisses
+    // the sidebar via ``window.minds.toggleSidebar()``. Selection clicks
+    // (workspace row, "New workspace", "Manage account(s)", settings,
+    // open-in-new-window) navigate and the main process closes the
+    // sidebar on its end.
     sidebarView.setBackgroundColor('#00000000');
     bundle.sidebarView = sidebarView;
     bundle.window.contentView.addChildView(sidebarView);
