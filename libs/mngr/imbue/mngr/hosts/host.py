@@ -300,11 +300,16 @@ _STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
 # Host._classify_cleanup_command_stderr and specs/cleanup-error-aggregation.md).
 #
 # tmux emits these when its target session/window/pane (or the server) is already gone.
+# "error connecting to" is the client_connect failure tmux prints when the server socket is
+# absent (e.g. "error connecting to /tmp/.../default (No such file or directory)") -- the
+# common form of "no server running" on both macOS and Linux, which the literal "no server
+# running" string does not cover. An absent server means there is nothing left to clean up.
 _TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     "can't find session",
     "can't find window",
     "can't find pane",
     "no server running",
+    "error connecting to",
 )
 # kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
 # pids routinely die between collection and the kill loop.
