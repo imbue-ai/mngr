@@ -29,7 +29,7 @@ Kanpan uses pluggable data sources to fetch per-agent data. Each data source pro
 
 - **repo_paths**: Extracts GitHub repo path from agent remote labels (infrastructure data for other sources)
 - **git_info**: Computes commits-ahead count from `git rev-list`
-- **github**: Fetches PRs, CI status, merge conflict status, and unresolved review comments via the `gh` CLI
+- **github**: Fetches PRs, CI status, merge conflict status, and unresolved review comments via the `gh` CLI. All data is fetched in a single GraphQL request that pages through the results, so boards tracking more than 100 agents are fully covered (GitHub caps a single search page at 100). Transient GitHub failures (secondary rate limits, 5xx) are retried with exponential backoff, retrying only the failing page.
 
 ### Configuration
 
