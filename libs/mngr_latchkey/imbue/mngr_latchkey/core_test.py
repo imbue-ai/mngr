@@ -209,9 +209,10 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         # (and that stdin was empty, i.e. the same key is reused). Enough to
         # verify the manager builds the right command and reads the result.
         'if sys.argv[1:3] == ["auth", "re-encrypt"]:\n'
-        "    import json as _json, os as _os\n"
+        "    import json as _json\n"
         "    destination = sys.argv[3]\n"
-        "    services = sys.argv[4:]\n"
+        "    rest = sys.argv[4:]\n"
+        "    services = rest[1:] if rest[:1] == ['--services'] else []\n"
         "    stdin_key = sys.stdin.read()\n"
         "    payload = {'services': services, 'reused_key': stdin_key == ''}\n"
         "    open(destination, 'w').write(_json.dumps(payload))\n"

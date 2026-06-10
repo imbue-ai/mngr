@@ -767,7 +767,7 @@ class Latchkey(MutableModel):
     def export_credentials_subset(self, destination: Path, service_names: Collection[str]) -> None:
         """Write a re-encrypted copy of the credential store, filtered to ``service_names``.
 
-        Shells out to ``latchkey auth re-encrypt <destination> [service ...]``.
+        Shells out to ``latchkey auth re-encrypt <destination> --services <service> ...``.
         The source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``)
         is decrypted with the current per-directory encryption key and a
         re-encrypted copy containing *only* the listed services'
@@ -777,11 +777,12 @@ class Latchkey(MutableModel):
         readable by the same gateway -- and the same derived password /
         permissions-override JWTs -- as the canonical store.
 
-        Passing an empty ``service_names`` produces an empty store: a
-        deny-all host gets no credentials shipped to it at all. This is
-        why the caller resolves the host's granted services first; the
-        only credentials that ever reach a host are the ones its
-        permissions actually allow.
+        ``--services`` is always passed explicitly (even with an empty
+        list), so the export is always filtered rather than defaulting to
+        the full store: a deny-all host gets an empty ``--services`` and
+        therefore an empty copy. This is why the caller resolves the
+        host's granted services first; the only credentials that ever
+        reach a host are the ones its permissions actually allow.
 
         Raises:
             LatchkeyError: if the binary cannot be launched or the
@@ -790,7 +791,7 @@ class Latchkey(MutableModel):
         env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
         # Sorted for a deterministic command line (stable logs / tests);
         # the set of services is order-independent.
-        command = [self.latchkey_binary, "auth", "re-encrypt", str(destination), *sorted(service_names)]
+        command = [self.latchkey_binary, "auth", "re-encrypt", str(destination), "--services", *sorted(service_names)]
         cg = ConcurrencyGroup(name="latchkey-reencrypt")
         try:
             with cg:

@@ -175,7 +175,9 @@ def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
-        "open(sys.argv[3], 'w').write(json.dumps({'services': sys.argv[4:]}))\n"
+        "rest = sys.argv[4:]\n"
+        "services = rest[1:] if rest[:1] == ['--services'] else []\n"
+        "open(sys.argv[3], 'w').write(json.dumps({'services': services}))\n"
         "sys.exit(0)\n"
     )
     script.chmod(0o755)
