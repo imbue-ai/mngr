@@ -432,11 +432,11 @@
         // in this window. Main has already validated the agent-id +
         // hex shape and only fires this for the *sending bundle's*
         // chrome view, so a stray sender can't paint someone else's
-        // titlebar. (Earlier draft gated on
-        // ``lastRequestedAccentAgentId``, which failed on settings
-        // pages because /workspace/<id>/settings doesn't fire
-        // ``current-workspace-changed`` -- the persisted
-        // last-workspace id might point at a different workspace.)
+        // titlebar. Do not gate this on ``lastRequestedAccentAgentId``:
+        // /workspace/<id>/settings doesn't fire
+        // ``current-workspace-changed``, so the persisted last-workspace
+        // id may point at a different workspace than the one whose
+        // settings page is open.
         if (data.agent_id && data.accent) {
           accentByAgentId[data.agent_id] = {
             accent: data.accent,
