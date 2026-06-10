@@ -113,7 +113,11 @@ class _CodexReleaseProfile(AgentReleaseProfile):
         user_codex_home.mkdir()
         # Private tmux server (short /tmp path -- tmux sockets are length-limited) so the
         # agent's sessions never touch the real server this test may run inside.
-        tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mngr-codex-e2e-tmux-", dir="/tmp"))
+        # Derive the mkdtemp args from _TMUX_TMPDIR_PREFIX so the created path is guaranteed
+        # to satisfy the safety guard in _kill_private_tmux_server (the two cannot drift).
+        tmux_tmpdir = Path(
+            tempfile.mkdtemp(prefix=os.path.basename(_TMUX_TMPDIR_PREFIX), dir=os.path.dirname(_TMUX_TMPDIR_PREFIX))
+        )
 
         shutil.copy2(_REAL_AUTH, user_codex_home / "auth.json")
         (user_codex_home / "auth.json").chmod(0o600)
