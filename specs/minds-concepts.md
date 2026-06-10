@@ -133,7 +133,8 @@ Not first-class today (or only hinted at in guidelines, future_specs, or comment
 
 - **tasks** -- the logically running bits of work as durable first-class objects (richer than
   tickets: state machine, owner, budget, artifacts, lineage)
-- **schedules / crons** -- recurring agent runs (`mngr schedule` is already sketched as future)
+- **schedules / crons** -- recurring agent runs (`mngr schedule` already exists as an mngr plugin
+  but is not surfaced in minds)
 - **triggers / automations** -- event-to-action rules (when X happens, do Y)
 - **watchers / monitors** -- standing observations that alert or wake the mind on change
 - **reminders** -- time-based nudges for the user or the mind
