@@ -105,8 +105,9 @@
           {% endfor %}
           <input id="color-hex-input"
                  type="text"
-                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
+                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 placeholder:text-zinc-400 disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
                  value="{{ current_color }}"
+                 placeholder="#a1b2c3"
                  maxlength="9"
                  spellcheck="false"
                  autocomplete="off"
