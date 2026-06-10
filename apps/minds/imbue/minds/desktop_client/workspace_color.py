@@ -82,6 +82,16 @@ def normalize_workspace_color(value: str) -> str | None:
 
 
 @pure
+def _srgb_to_linear(channel: float) -> float:
+    """Inverse sRGB gamma. Used by ``pick_workspace_foreground``; kept at
+    module scope (rather than nested) so the ratchet test that forbids
+    nested defs in production code stays green."""
+    if channel <= 0.03928:
+        return channel / 12.92
+    return ((channel + 0.055) / 1.055) ** 2.4
+
+
+@pure
 def pick_workspace_foreground(hex_color: str) -> str:
     """Return the contrasting RGB triple for titlebar text/icons over ``hex_color``.
 
@@ -91,21 +101,15 @@ def pick_workspace_foreground(hex_color: str) -> str:
     the whole 12-color palette and any custom hex -- replacing the prior
     fixed-OKLCH-L-85 picker that always emitted black.
 
-    ``hex_color`` must be a normalized ``#rrggbb`` (lowercase). Callers
-    should pass values through ``normalize_workspace_color`` first.
+    ``hex_color`` must be a normalized lowercase ``#rrggbb`` hex string.
+    Callers should pass values through ``normalize_workspace_color`` first.
     """
     r = int(hex_color[1:3], 16) / 255.0
     g = int(hex_color[3:5], 16) / 255.0
     b = int(hex_color[5:7], 16) / 255.0
-
-    def _linearize(channel: float) -> float:
-        if channel <= 0.03928:
-            return channel / 12.92
-        return ((channel + 0.055) / 1.055) ** 2.4
-
     luminance = (
-        0.2126 * _linearize(r)
-        + 0.7152 * _linearize(g)
-        + 0.0722 * _linearize(b)
+        0.2126 * _srgb_to_linear(r)
+        + 0.7152 * _srgb_to_linear(g)
+        + 0.0722 * _srgb_to_linear(b)
     )
     return "0 0 0" if luminance > _FOREGROUND_LUMINANCE_THRESHOLD else "255 255 255"

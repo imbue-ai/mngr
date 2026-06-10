@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from loguru import logger as loguru_logger
 
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -324,10 +325,13 @@ def _workspace_agent(
 # -- get_workspace_color tests ----------------------------------------
 #
 # The color label is the storage substrate the workspace color picker
-# writes to and the SSE workspaces payload reads from. Tests cover the
-# four states: missing (-> None), normalized (-> #rrggbb), lenient
-# (uppercase / 3-char / no #) and malformed (-> DEFAULT_WORKSPACE_COLOR
-# with a once-per-agent warning log).
+# writes to and the SSE workspaces payload reads from. Tests cover all
+# four states the resolver may see on a label read:
+#   1. label missing -> None (caller backfills)
+#   2. label set, well-formed -> normalized lowercase hex
+#   3. label set, lenient form -> normalized to canonical lowercase
+#   4. label set, malformed -> DEFAULT_WORKSPACE_COLOR plus a single
+#      once-per-agent warning log
 
 
 def test_get_workspace_color_returns_none_when_label_missing() -> None:
@@ -360,11 +364,11 @@ def test_get_workspace_color_returns_normalized_hex_when_label_set() -> None:
 @pytest.mark.parametrize(
     ("stored_label", "expected_hex"),
     [
-        ("#FFFFFF", "#ffffff"),  # uppercase -> lowercased
-        ("ffffff", "#ffffff"),  # missing # -> added
-        ("#fff", "#ffffff"),  # 3-char -> expanded
-        ("FFF", "#ffffff"),  # 3-char uppercase no # -> expanded + lowercased
-        ("  #0b292b  ", "#0b292b"),  # surrounding whitespace -> trimmed
+        ("#FFFFFF", "#ffffff"),
+        ("ffffff", "#ffffff"),
+        ("#fff", "#ffffff"),
+        ("FFF", "#ffffff"),
+        ("  #0b292b  ", "#0b292b"),
     ],
 )
 def test_get_workspace_color_normalizes_lenient_label_values(
@@ -403,9 +407,11 @@ def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
     assert resolver.get_workspace_color(AgentId.generate()) is None
 
 
-def test_get_workspace_color_logs_each_malformed_agent_only_once(caplog: pytest.LogCaptureFixture) -> None:
+def test_get_workspace_color_logs_each_malformed_agent_only_once() -> None:
     """Reads happen on every SSE tick; a malformed label must not spam
-    the log. Subsequent reads for the same agent stay silent."""
+    the log. Subsequent reads for the same agent stay silent. Uses a
+    loguru sink instead of caplog because loguru does not propagate
+    to the standard logging module that caplog hooks."""
     resolver = MngrCliBackendResolver()
     host = HostId.generate()
     agent = AgentId.generate()
@@ -415,9 +421,6 @@ def test_get_workspace_color_logs_each_malformed_agent_only_once(caplog: pytest.
             discovered_agents=(_workspace_agent(host, agent, extra_labels={"color": "junk"}),),
         )
     )
-    # loguru does not propagate to standard logging by default; use a sink.
-    from loguru import logger as loguru_logger
-
     log_records: list[str] = []
     sink_id = loguru_logger.add(lambda msg: log_records.append(str(msg)), level="WARNING")
     try:

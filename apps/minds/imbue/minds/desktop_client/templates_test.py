@@ -812,28 +812,28 @@ def test_workspace_palette_matches_js_mirror() -> None:
     assert js_entries == dict(WORKSPACE_PALETTE)
 
 
-@pytest.mark.parametrize(
-    ("hex_color", "expected_foreground"),
-    [
-        # Dark palette entries pick white text.
-        ("#000000", "255 255 255"),  # indifference
-        ("#0b292b", "255 255 255"),  # confusion
-        ("#492222", "255 255 255"),  # courage
-        ("#3c3d06", "255 255 255"),  # envy
-        # Light palette entries pick black text.
-        ("#9fbbd3", "0 0 0"),  # peace
-        ("#e8a7a8", "0 0 0"),  # belonging
-        ("#cecd0c", "0 0 0"),  # energy
-        ("#cfc7b3", "0 0 0"),  # strength
-        ("#f5d6a0", "0 0 0"),  # comfort
-        ("#e9ecd9", "0 0 0"),  # inspiration
-        ("#fcefd4", "0 0 0"),  # clarity
-        ("#ffffff", "0 0 0"),  # white
-        # A few mid-range customs that exercise the threshold.
-        ("#808080", "0 0 0"),  # gray 50 -> luminance 0.216 -> black
-        ("#404040", "255 255 255"),  # gray 25 -> luminance 0.052 -> white
-    ],
+# Cases ordered: 4 dark palette entries (-> white text), 8 light palette
+# entries (-> black text), 2 mid-range customs that exercise either side
+# of the WCAG threshold.
+_PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
+    ("#000000", "255 255 255"),
+    ("#0b292b", "255 255 255"),
+    ("#492222", "255 255 255"),
+    ("#3c3d06", "255 255 255"),
+    ("#9fbbd3", "0 0 0"),
+    ("#e8a7a8", "0 0 0"),
+    ("#cecd0c", "0 0 0"),
+    ("#cfc7b3", "0 0 0"),
+    ("#f5d6a0", "0 0 0"),
+    ("#e9ecd9", "0 0 0"),
+    ("#fcefd4", "0 0 0"),
+    ("#ffffff", "0 0 0"),
+    ("#808080", "0 0 0"),
+    ("#404040", "255 255 255"),
 )
+
+
+@pytest.mark.parametrize(("hex_color", "expected_foreground"), _PICK_FOREGROUND_CASES)
 def test_pick_workspace_foreground_chooses_legible_text(
     hex_color: str, expected_foreground: str
 ) -> None:
