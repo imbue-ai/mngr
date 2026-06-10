@@ -332,11 +332,11 @@ def run_once(state_dir: Path, app_data_dir: Path) -> int:
     return emitted
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Decode agy SQLite conversations into raw transcript records.")
     parser.add_argument("--state-dir", type=Path, required=True, help="$MNGR_AGENT_STATE_DIR")
     parser.add_argument("--app-data-dir", type=Path, required=True, help="$ANTIGRAVITY_APP_DATA_DIR")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     run_once(args.state_dir, args.app_data_dir)
 
 

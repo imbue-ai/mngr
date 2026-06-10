@@ -10,8 +10,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr_antigravity.resources import decode_agy_transcript as dat
 from imbue.mngr_antigravity.resources.testing import assistant_step as _assistant_step
+from imbue.mngr_antigravity.resources.testing import error_step as _error_step
 from imbue.mngr_antigravity.resources.testing import make_conversation_db as _make_db
 from imbue.mngr_antigravity.resources.testing import step_blob as _step
 from imbue.mngr_antigravity.resources.testing import user_step as _user_step
@@ -158,3 +161,62 @@ def test_truncated_payload_is_skipped(tmp_path: Path) -> None:
     # Step 0 emits; step 1 is truncated so the pass stops there without advancing past it.
     assert dat.run_once(state_dir, app_data_dir) == 1
     assert [e["content"] for e in _read_events(state_dir)] == ["complete"]
+
+
+# --- coverage of error/edge branches and the CLI entrypoint ------------------------------
+
+
+def test_decode_error_message_extracts_text() -> None:
+    record = dat.decode_step(_CONV, 3, 17, 3, _error_step("server is busy"))
+    assert record["type"] == "ERROR_MESSAGE"
+    assert record["content"] == "server is busy"
+
+
+def test_iso_timestamp_handles_missing_and_partial_metadata() -> None:
+    # No metadata at all.
+    assert dat._iso_timestamp(None) == ""
+    # Metadata present but no created_at (only source f3 = 0x18 0x05).
+    assert dat._iso_timestamp(b"\x18\x05") == ""
+    # created_at present (f1) but empty, so no seconds (f1.f1).
+    assert dat._iso_timestamp(b"\x0a\x00") == ""
+
+
+def test_iter_fields_handles_fixed_width_and_stops_on_invalid_wire() -> None:
+    # field 1 as fixed64 (wire 1, tag 0x09) then fixed32 (wire 5, tag 0x0d).
+    fields = list(dat._iter_fields(b"\x09" + b"\x00" * 8 + b"\x0d" + b"\x01" * 4))
+    assert [(f, w) for f, w, _v in fields] == [(1, 1), (1, 5)]
+    # An unsupported wire type (3) terminates iteration without raising.
+    assert list(dat._iter_fields(b"\x0b")) == []
+
+
+def test_read_varint_rejects_truncated_and_overlong_varints() -> None:
+    # A single continuation byte with no following byte: the varint runs past the end.
+    with pytest.raises(dat._TruncatedError):
+        list(dat._iter_fields(b"\x80"))
+    # Eleven continuation bytes: the varint never terminates within 10 bytes.
+    with pytest.raises(dat._TruncatedError):
+        list(dat._iter_fields(b"\x80" * 11))
+
+
+def test_run_once_skips_a_corrupt_db_but_keeps_others(tmp_path: Path) -> None:
+    state_dir, app_data_dir = _setup(tmp_path, _CONV, [(0, 14, 3, _user_step("ok"))])
+    corrupt = "ffffffff-0000-0000-0000-000000000000"
+    (app_data_dir / "conversations" / f"{corrupt}.db").write_bytes(b"this is not a sqlite database")
+    (state_dir / "antigravity_conversation_ids").write_text(f"{_CONV}\n{corrupt}\n")
+    # The corrupt db raises sqlite3.Error and is skipped; the good conversation still emits.
+    assert dat.run_once(state_dir, app_data_dir) == 1
+    assert [event["content"] for event in _read_events(state_dir)] == ["ok"]
+
+
+def test_run_once_with_no_conversation_ids_file_emits_nothing(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    app_data_dir = tmp_path / "appdata"
+    (app_data_dir / "conversations").mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    assert dat.run_once(state_dir, app_data_dir) == 0
+
+
+def test_main_runs_one_pass(tmp_path: Path) -> None:
+    state_dir, app_data_dir = _setup(tmp_path, _CONV, [(0, 14, 3, _user_step("via main"))])
+    dat.main(["--state-dir", str(state_dir), "--app-data-dir", str(app_data_dir)])
+    assert [event["content"] for event in _read_events(state_dir)] == ["via main"]

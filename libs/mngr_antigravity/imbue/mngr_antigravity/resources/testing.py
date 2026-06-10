@@ -92,6 +92,12 @@ def assistant_step(
     return step_blob(15, status, source=SOURCE_MODEL, seconds=seconds, content_field=20, content=inner)
 
 
+def error_step(text: str, *, status: int = STATUS_DONE, seconds: int = 0) -> bytes:
+    """An ERROR_MESSAGE step (type 17) with ``text`` in ``CortexStepErrorMessage`` (f24.f1)."""
+    inner = _len_field(1, text.encode())
+    return step_blob(17, status, source=SOURCE_SYSTEM, seconds=seconds, content_field=24, content=inner)
+
+
 def make_conversation_db(path: Path, rows: list[tuple[int, int, int, bytes]]) -> None:
     """Create a minimal agy ``steps`` table at ``path`` from ``(idx, step_type, status, payload)`` rows."""
     connection = sqlite3.connect(path)
