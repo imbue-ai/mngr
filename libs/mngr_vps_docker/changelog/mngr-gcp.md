@@ -1,6 +1,6 @@
 ## host-setup: OS-aware Docker install (Debian + Ubuntu)
 
-- The pinned Docker install step now derives the apt repo (`download.docker.com/linux/$ID`) and the full apt version suffix (`~$ID.$VERSION_ID~$VERSION_CODENAME`) from `/etc/os-release` at run time, instead of hardcoding the Debian 12 / bookworm strings. On the existing Debian-family outers (Vultr / OVH / AWS) the rendered command is byte-identical; the change lets the same step work on GCP's Ubuntu LTS images. `PINNED_DOCKER_APT_VERSION` is retained as the fully-rendered Debian 12 string for callers that target Debian directly (e.g. `mngr_lima`).
+- The pinned Docker install step now derives the apt repo (`download.docker.com/linux/$ID`) and the full apt version suffix (`~$ID.$VERSION_ID~$VERSION_CODENAME`) from `/etc/os-release` at run time, instead of hardcoding the Debian 12 / bookworm strings. The script *text* changed (the os-release source moved up, a `DOCKER_APT_VERSION` shell var was added, the repo URL is now `linux/$ID`), but on Debian 12 it renders the identical apt version (`5:29.5.1-1~debian.12~bookworm`) and repo URL (`linux/debian`) as before, so the existing Debian-family outers (Vultr / OVH / AWS) are behaviorally unchanged; the change lets the same step work on GCP's Ubuntu LTS images. `PINNED_DOCKER_APT_VERSION` is retained as the fully-rendered Debian 12 string for callers that target Debian directly (e.g. `mngr_lima`).
 
 ## cloud-init: optional direct root-key injection
 
