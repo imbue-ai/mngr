@@ -87,7 +87,7 @@ from imbue.mngr.agents.common_transcript import maybe_provision_common_transcrip
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
-from imbue.mngr.agents.tui_utils import send_enter_best_effort
+from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.common import symlink_on_host
@@ -112,6 +112,7 @@ from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENTS_DIRNAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STARTED_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import SUBAGENT_STOPPED_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import SUBMIT_WAIT_CHANNEL_PREFIX
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
@@ -267,10 +268,22 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         return "codex"
 
     def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
-        # codex submits the composer on Enter. Upstream ``wait_for_paste_visible``
-        # already confirmed the message landed in the pane before we get here, so
-        # a best-effort Enter is the right strategy.
-        send_enter_best_effort(self, tmux_target)
+        # codex's UserPromptSubmit hook (set_active_marker.sh) fires
+        # ``tmux wait-for -S mngr-submit-<session>`` *after* it sets the ``active``
+        # marker, so waiting on that channel both confirms the message was
+        # submitted and guarantees the agent reads as RUNNING by the time this
+        # returns -- closing the race where a caller checks lifecycle state before
+        # the turn registers. No queue-log fallback (claude's misfire workaround):
+        # codex's raw transcript is the rollout JSONL, not the enqueue-event log
+        # that fallback greps, and the foreground-registered waiter already avoids
+        # the signal-vs-waiter race.
+        send_enter_via_tmux_wait_for_hook(
+            self,
+            tmux_target,
+            wait_channel=f"{SUBMIT_WAIT_CHANNEL_PREFIX}{self.session_name}",
+            timeout_seconds=self.enter_submission_timeout_seconds,
+            queue_log_path_template=None,
+        )
 
     @property
     def is_common_transcript_enabled(self) -> bool:

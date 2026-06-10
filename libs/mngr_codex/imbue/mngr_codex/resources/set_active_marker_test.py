@@ -20,6 +20,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from imbue.mngr_codex.codex_config import SUBMIT_WAIT_CHANNEL_PREFIX
 from imbue.mngr_codex.resources.testing import provision_commands_dir
 from imbue.mngr_codex.resources.testing import run_codex_hook
 
@@ -136,6 +137,28 @@ def test_garbage_stdin_still_sets_marker(tmp_path: Path) -> None:
     assert _marker(tmp_path).exists()
     assert not _root_file(tmp_path).exists()
     assert not _transcript_file(tmp_path).exists()
+    assert result.stdout == ""
+
+
+def test_signals_submit_channel_after_setting_the_marker() -> None:
+    """The hook fires the `mngr-submit-<session>` wait-for channel AFTER the marker
+    recompute, so a `send_message` waiter wakes only once the agent reads RUNNING.
+    The prefix is pinned to codex_config's SUBMIT_WAIT_CHANNEL_PREFIX, which
+    CodexAgent._send_enter_and_validate waits on -- this keeps the two literals in
+    sync (the shell script can't import the constant)."""
+    script = (Path(__file__).parent / _SCRIPT).read_text()
+    signal = f'tmux wait-for -S "{SUBMIT_WAIT_CHANNEL_PREFIX}'
+    assert signal in script
+    assert script.index("codex_marker_recompute") < script.index(signal)
+
+
+def test_submit_signal_is_skipped_headless_without_breaking_the_marker(tmp_path: Path) -> None:
+    """In a headless run ($TMUX unset, as run_codex_hook arranges) the submit signal
+    is skipped entirely, so the hook still sets the marker and stays silent -- and
+    never invokes tmux (which would trip the resource guard)."""
+    provision_commands_dir(tmp_path, (_SCRIPT,))
+    result = _run(tmp_path, _payload(_ROOT_SESSION, _ROOT_TRANSCRIPT))
+    assert _marker(tmp_path).exists()
     assert result.stdout == ""
 
 
