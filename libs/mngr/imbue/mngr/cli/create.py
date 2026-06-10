@@ -1241,9 +1241,10 @@ def _try_reuse_existing_agent(
         # The address host may be a HostId (exact id) or a HostName (the host's name).
         if host_name is not None:
             if isinstance(host_name, HostId):
-                if host_ref.host_id != host_name:
-                    continue
-            elif host_ref.host_name != host_name:
+                host_matches_address = host_ref.host_id == host_name
+            else:
+                host_matches_address = host_ref.host_name == host_name
+            if not host_matches_address:
                 continue
 
         for agent_ref in agent_refs:
