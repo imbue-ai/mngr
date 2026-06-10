@@ -94,14 +94,8 @@
              class="flex flex-wrap items-center gap-2 mb-3"
              id="color-swatches">
           {% for name, hex_value in palette.items() %}
-            <button type="button"
-                    role="radio"
-                    class="color-swatch w-[34px] h-[34px] rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 disabled:opacity-40"
-                    aria-label="{{ name }}"
-                    aria-checked="{{ 'true' if hex_value == current_color else 'false' }}"
-                    data-color="{{ hex_value }}"
-                    style="background-color: {{ hex_value }};"
-                    {% if is_stale %}disabled{% endif %}></button>
+            <ColorSwatch :hex="hex_value" :name="name" size="md"
+                         :selected="hex_value == current_color" :disabled="is_stale" />
           {% endfor %}
           <input id="color-hex-input"
                  type="text"

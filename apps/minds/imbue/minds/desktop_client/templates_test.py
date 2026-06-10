@@ -781,6 +781,34 @@ def test_button_passes_through_arbitrary_attrs() -> None:
     assert 'data-x="y"' in html
 
 
+def test_color_swatch_renders_radio_contract() -> None:
+    """The ColorSwatch component owns the markup contract the picker JS
+    selects on: role=radio, data-color, aria-label, aria-checked, the
+    .color-swatch class, and the background-color style."""
+    html = CATALOG.render("ColorSwatch", hex="#0b292b", name="confusion", selected=True, size="md")
+    assert 'role="radio"' in html
+    assert 'data-color="#0b292b"' in html
+    assert 'aria-label="confusion"' in html
+    assert 'aria-checked="true"' in html
+    assert "color-swatch" in html
+    # The style sets the swatch fill; assert the trailing-semicolon form
+    # (from ``background-color: {{ hex }};``) so the value is pinned and
+    # the trailing-comment ratchet does not misfire on the hex literal.
+    assert "#0b292b;" in html
+    # md size geometry.
+    assert "w-[34px]" in html
+    assert "h-[34px]" in html
+
+
+def test_color_swatch_unselected_and_small_and_disabled() -> None:
+    html = CATALOG.render("ColorSwatch", hex="#cecd0c", name="energy", selected=False, size="sm", disabled=True)
+    assert 'aria-checked="false"' in html
+    # sm size geometry (create form).
+    assert "w-6" in html
+    assert "h-6" in html
+    assert "disabled" in html
+
+
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
     # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn

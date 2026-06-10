@@ -275,13 +275,7 @@
         <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
         <div class="flex flex-wrap gap-2">
           {% for name, hex_value in palette.items() %}
-            <button type="button"
-                    role="radio"
-                    class="color-swatch w-6 h-6 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                    aria-label="{{ name }}"
-                    aria-checked="{{ 'true' if hex_value == color else 'false' }}"
-                    data-color="{{ hex_value }}"
-                    style="background-color: {{ hex_value }};"></button>
+            <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="hex_value == color" />
           {% endfor %}
         </div>
       </div>
