@@ -593,17 +593,37 @@ jobs:
             echo "=== bootstrap log ==="
             "$LIMA" shell "$VM" -- sudo docker exec "$CID" find /var/log /tmp /mngr -name "bootstrap*" -type f 2>/dev/null | head -5
             echo
-            echo "=== TEST: paramiko import inside agent container (replicate mngr_plugin_add SIGILL) ==="
+            echo "=== container arch + cpu features ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              echo "uname -m: $(uname -m)"
+              echo "dpkg arch: $(dpkg --print-architecture)"
+              python3 -c "import platform; print(\"python platform:\", platform.machine(), platform.processor())"
+              echo "--- cpuinfo (features) ---"
+              grep -E "^(processor|Features|CPU implementer|CPU part|CPU variant|model name)" /proc/cpuinfo | head -10
+            ' 2>&1 | tail -15
+            echo
+            echo "=== VM lima cpuinfo (host the docker container runs on) ==="
+            "$LIMA" shell "$VM" -- bash -c 'uname -m; grep -E "^(processor|Features|CPU implementer|CPU part|model name)" /proc/cpuinfo | head -10' 2>&1 | tail -12
+            echo
+            echo "=== TEST: bisect paramiko import inside agent container ==="
             "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
               MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
-              if [ -n "$MNGR_PY" ]; then
-                echo "mngr python: $MNGR_PY"
-                "$MNGR_PY" -c "import paramiko; print(\"paramiko OK\")" 2>&1 || echo "rc=$?"
-                "$MNGR_PY" -c "import pyinfra; print(\"pyinfra OK\")" 2>&1 || echo "rc=$?"
-              else
-                echo "(mngr not installed in container)"
-              fi
-            ' 2>&1 | tail -10
+              if [ -z "$MNGR_PY" ]; then echo "(mngr not installed)"; exit 0; fi
+              echo "mngr python: $MNGR_PY"
+              for stmt in \
+                "import sys; print(sys.version)" \
+                "import cryptography; print(cryptography.__version__)" \
+                "from cryptography.hazmat.bindings._rust import openssl" \
+                "from cryptography.hazmat.backends.openssl.backend import backend" \
+                "import bcrypt" \
+                "import nacl.bindings" \
+                "import cffi" \
+                "import paramiko" \
+                "import pyinfra"; do
+                echo "--- $stmt ---"
+                "$MNGR_PY" -c "$stmt; print(\"OK\")" 2>&1 || echo "rc=$?"
+              done
+            ' 2>&1 | tail -40
             echo
             echo "=== /var/log/cloud-init-output.log tail (VM) ==="
             "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
