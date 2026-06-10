@@ -124,8 +124,10 @@ def prepare(
         raise click.ClickException(str(e)) from e
     if not client.project_id:
         raise click.ClickException(
-            "No GCP project resolved. Pass --project, or run "
-            "'mngr config set providers.gcp.project_id <your-project>' to set it."
+            "No GCP project resolved. Pass --project, run "
+            "'mngr config set providers.gcp.project_id <your-project>', set the GOOGLE_CLOUD_PROJECT "
+            "environment variable, or run 'gcloud config set project <your-project>' (the active "
+            "gcloud project is used automatically when Application Default Credentials are present)."
         )
     try:
         target_tag = client.ensure_firewall()
