@@ -5,4 +5,4 @@ Hardened suspicious edge-case handling in the agents layer:
 - `get_reported_start_time` no longer crashes on a malformed `status/start_time` file: it falls back to `None` and logs a warning instead of propagating an uncaught `ValueError`.
 - `list_reported_plugin_files` now logs (at warning for host/OS errors, debug for a non-zero `ls`) so a failed listing is no longer indistinguishable from a confirmed-empty directory.
 - Registering an agent type with neither a class nor a config now fails loudly instead of being a silent no-op, and `load_agents_from_plugins` no longer silently drops malformed (non-tuple) plugin registrations.
-- Documented the empty-probe short-circuit in the TUI paste-visibility check and named the previously magic `5.0` wait-for-signal floor constant.
+- Documented the empty-probe short-circuit in the TUI paste-visibility check.
