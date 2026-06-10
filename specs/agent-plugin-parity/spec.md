@@ -172,7 +172,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Settings/resource sync | Y | Y | Y | Y (`sync_global_config`) | Y (`config.toml` rewritten each provision) |
 | Per-agent permissions | Y | Y | - | Y (`permission` via `config_overrides`) | Y (`sandbox_mode` + `approval_policy`/`config_overrides`) |
 | Auto-allow permissions | Y | Y | - | Y (`auto_allow_permissions`) | Y (`approval_policy = "never"`) |
-| Trust / dialog handling | Y | Y | Y (`trust.json` seed) | n/a (no trust dialog) | Y (`[projects."<path>"] trust_level` seed) |
+| Trust / dialog handling | Y | Y | Y (`trust.json` seed) | n/a (no trust dialog) | Y (`[projects."<path>"] trust_level` seed + `check_for_update_on_startup = false`) |
 | Onboarding NUX seed | Y | Y | n/a (no NUX) | n/a (no NUX) | Y (`.personality_migration` + `[notice]` suppressors) |
 | Raw transcript | Y | Y | Y | Y (in-process, raw-seeded) | Y (tail rollout JSONL) |
 | Common transcript | Y | Y | Y | Y (in-process, rebuilt on idle) | Y (converter, derived from raw) |
@@ -181,7 +181,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
 | Field generators (waiting_reason) | Y (online) | - | - | - | - |
-| Installation management | Y | - | Y | - (no version pinning) | - (no version pinning) |
+| Installation management | Y | - | Y | - (no version pinning) | partial (mngr-side update notify + opt-in auto-update; no pinning) |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - (app-server variant deferred) |
 
 Notable observations:
@@ -765,7 +765,22 @@ untrusted code**.
   bypasses codex's hook review without the user's say-so. Onboarding NUX: the empty
   `.personality_migration` marker skips codex's personality-migration prompt, and the `[notice]`
   suppressors (`hide_full_access_warning`/`hide_world_writable_warning`/`hide_rate_limit_model_nudge`,
-  `codex_config.py:198`) silence the first-run migration notices.
+  `codex_config.py:222`) silence the first-run migration notices. **Codex also has a launch-time
+  *update* dialog -- a blocking "Update available! ... 1. Update now / 2. Skip / 3. Skip until next
+  version" prompt codex shows on startup, including on `codex resume`** (`codex_config.py:204-212`),
+  exactly the dimension-J "first-launch dialog that intercepts the first message" failure mode: it
+  takes over the TUI composer, so mngr's first pasted message lands in the update menu instead of the
+  input (an Enter could even select "Update now" and run `brew upgrade`) -- this manifested as `mngr
+  message` timing out with "Timeout waiting for pasted content to appear" after a stop/start resume.
+  The plugin suppresses it by pinning `check_for_update_on_startup = false` (`codex_config.py:212`,
+  `codex_config.py:287-311` -- written *unconditionally* by `build_codex_config`) alongside the
+  `[notice]` suppressor allow-list, into the per-agent `config.toml` rewritten on **every** provision
+  (`plugin.py:402-416`) under the durable per-agent `CODEX_HOME`, so it survives stop/start and applies
+  on `codex resume`. Documented limitation: the `[notice]` suppressors are a *hardcoded allow-list* of
+  known keys (an unknown-to-this-version key is inert, `codex_config.py:218-226`), so a *future* new
+  blocking prompt under a different notice/migration key could reappear until the allow-list is
+  extended -- the update prompt, by contrast, is pinned off by its own dedicated key, not the
+  allow-list. (mngr surfaces updates on its own, well-behaved side instead -- see dimension Q.)
 
 **Gotchas**: trust dialogs are often keyed off an exact cwd match -- a symlinked or
 relocated workspace path must be the one seeded. Don't write transient paths to shared
@@ -977,8 +992,21 @@ Check the binary is present and optionally install/pin a version.
   integration is written to *tolerate* old/new event shapes (it handles both `session.status`
   and the deprecated `session.idle`). Version pinning / install management is a natural
   follow-up.
-- **codex**: none yet -- assumes `codex` is on PATH, with no version pinning. A natural
-  follow-up, like opencode.
+- **codex**: no install/version *pinning* (assumes `codex` is on PATH), but -- unlike opencode --
+  it *does* surface upstream CLI updates **mngr-side**, as the well-behaved replacement for codex's
+  own blocking startup update prompt (which the plugin disables, see dimension J). At provision,
+  `_maybe_check_for_codex_update` (`plugin.py:527-554`) runs a **network-free** check: it reads the
+  user's real `~/.codex/version.json` -- the `latest_version` codex itself records on its own ~20h
+  throttle (`codex_config.py:109-121`) -- and compares it to `codex --version`, printing a
+  non-blocking notice when outdated, with opt-in auto-update (`auto_update` runs `codex update`, which
+  self-detects brew/npm/standalone; off by default since it mutates the user's *global* install --
+  `plugin.py:236-243`). It is best-effort, never fatal: an outdated codex still runs, and a corrupt
+  or unusable `version.json` cache is tolerated -- `_parse_latest_codex_version` returns None on blank
+  or malformed JSON (warning-logged, then skipped) so a bad cache just skips the check rather than
+  breaking provision (`plugin.py:583-600`). Contrast: claude's `version` *pins* an install; pi's npm
+  *install/check* installs the binary; codex neither installs nor pins -- it only *notifies* about an
+  upstream update of an already-present binary (with optional self-update). Version pinning / install
+  management proper is still a natural follow-up, like opencode.
 
 ### R. Workspace path quirks
 

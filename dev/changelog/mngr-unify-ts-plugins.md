@@ -12,4 +12,7 @@ capability matrix, and documented its real mechanisms across the parity
 dimensions -- most notably its third, distinct subagent-aware idle-gating shape
 (dedicated `SubagentStart`/`SubagentStop` hooks tracking one file per in-flight
 async subagent, with the `active` marker recomputed under an `mkdir`-based lock).
-No named agent type is a stub any more.
+No named agent type is a stub any more. Also documented codex's launch-time
+update-dialog suppression (`check_for_update_on_startup = false`, which prevents the
+"Update available!" prompt from intercepting the first pasted message on resume) and
+its mngr-side update notify + opt-in auto-update.
