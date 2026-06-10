@@ -282,7 +282,6 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
             tmux_target,
             wait_channel=f"{SUBMIT_WAIT_CHANNEL_PREFIX}{self.session_name}",
             timeout_seconds=self.enter_submission_timeout_seconds,
-            queue_log_path_template=None,
         )
 
     @property
