@@ -13,6 +13,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.timeout(120)
 def test_create_with_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can set environment variables for the agent:
@@ -21,17 +22,31 @@ def test_create_with_env(e2e: E2eSession) -> None:
     """)
     # Use a unique value so we can verify it appears in the tmux pane
     env_value = uuid.uuid4().hex
-    # Pass the compound command as a single argument after ``--`` so that
-    # ``&&`` reaches the agent's shell instead of being interpreted by the
-    # outer e2e runner shell. The command agent joins agent_args with spaces,
-    # so a single quoted arg is preserved verbatim.
+    # Run the agent body via ``bash -c`` so the env-var expansion and ``&&``
+    # happen inside the agent's own shell. The command agent shell-quotes each
+    # ``agent_arg`` individually before joining (see ``quote_agent_args``), so a
+    # whole compound command wrapped in one set of quotes would collapse into a
+    # single (non-existent) command word. Passing ``bash``, ``-c`` and the
+    # script as three separate args keeps the script intact: the outer e2e shell
+    # strips the single quotes, and the command agent re-quotes the script as one
+    # argument to ``bash -c``. ``$MNGR_TEST_VAR`` is then expanded by that bash.
     expect(
         e2e.run(
             f"mngr create my-task --env MNGR_TEST_VAR={env_value} --type command --no-ensure-clean"
-            " -- 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100116'",
+            " -- bash -c 'echo MNGR_TEST_VAR=$MNGR_TEST_VAR && sleep 100116'",
             comment="you can set environment variables for the agent",
         )
     ).to_succeed()
+
+    # Verify the env var was persisted into the agent's on-disk env file.
+    # This is a deterministic check (independent of tmux pane timing) that
+    # --env actually recorded the variable in the agent's environment.
+    env_file_result = e2e.run(
+        "cat $MNGR_HOST_DIR/agents/*/env",
+        comment="Verify --env recorded the variable in the agent environment",
+    )
+    expect(env_file_result).to_succeed()
+    expect(env_file_result.stdout).to_contain(f"MNGR_TEST_VAR={env_value}")
 
     # Verify the env var is visible in the agent's tmux pane.
     # The command prints MNGR_TEST_VAR=<value> before sleeping, so it
@@ -51,7 +66,7 @@ def test_create_with_env(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -78,8 +93,58 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
     expect(env_file_result).to_succeed()
     expect(env_file_result.stdout).to_contain("API_KEY=abc123")
 
+    # Verify the forwarded variable actually reaches the running agent's
+    # environment (not just the on-disk env file): exec into the agent and
+    # print API_KEY. This is the behavior a user ultimately depends on.
+    # ``mngr exec`` takes ``[AGENTS...] COMMAND``, so the command must be a
+    # single argument; quote it so ``printenv API_KEY`` is not parsed as extra
+    # agent names.
+    exec_result = e2e.run(
+        "mngr exec my-task 'printenv API_KEY'",
+        comment="Verify API_KEY is visible inside the running agent",
+    )
+    expect(exec_result).to_succeed()
+    expect(exec_result.stdout).to_contain("abc123")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_create_with_pass_env_unset(e2e: E2eSession) -> None:
+    # Unhappy path for the same tutorial block: --pass-env forwards a variable
+    # from the current shell, but when that variable is *not* set in the shell
+    # it is silently skipped rather than causing an error. The agent is still
+    # created; the variable simply does not appear in its environment.
+    e2e.write_tutorial_block("""
+    # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
+    export API_KEY=abc123
+    mngr create my-task --pass-env API_KEY
+    # that command passes the API_KEY environment variable from your current shell into the agent's environment, without you having to specify the value on the command line.
+    """)
+    # Deliberately do NOT set API_KEY in the shell before creating the agent.
+    expect(
+        e2e.run(
+            "mngr create my-task --pass-env API_KEY --type command --no-ensure-clean -- sleep 100098",
+            comment="pass-env for a variable that is unset in the shell is skipped, not an error",
+        )
+    ).to_succeed()
+
+    list_result = e2e.run("mngr list", comment="Verify agent was still created")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+
+    # The unset variable must not be forwarded into the agent's env file.
+    env_file_result = e2e.run(
+        "cat $MNGR_HOST_DIR/agents/*/env",
+        comment="Verify the unset API_KEY was not forwarded into agent environment",
+    )
+    expect(env_file_result).to_succeed()
+    expect(env_file_result.stdout).not_to_contain("API_KEY")
+
 
 @pytest.mark.release
+@pytest.mark.timeout(120)
 def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can use templates to quickly apply a set of preconfigured options:
@@ -118,6 +183,12 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     combined = result.stdout + result.stderr
     expect(combined).to_match(r"(?i)modal|provider")
 
+    # The failed create must not leave a partial agent behind: the disabled
+    # provider should abort before anything is registered.
+    list_result = e2e.run("mngr list", comment="Verify the failed create left no agent behind")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
+
 
 @pytest.mark.release
 def test_create_with_plugin_flags(e2e: E2eSession) -> None:
@@ -138,10 +209,49 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     expect(result).to_fail()
     expect(combined).to_match(r"(?i)plugin.*not registered")
 
+    # The rejected plugin flag must abort before anything is registered, so the
+    # failed create leaves no partial agent behind.
+    list_result = e2e.run("mngr list", comment="Verify the failed create left no agent behind")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).not_to_contain("my-task")
+
+
+@pytest.mark.rsync
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.timeout(120)
+def test_create_with_real_plugin_flags(e2e: E2eSession) -> None:
+    # Happy-path counterpart to test_create_with_plugin_flags: the unhappy-path
+    # test above uses non-existent plugin names, so the strict --disable-plugin
+    # check fails before --plugin is ever exercised. Here we pass *real*
+    # registered plugin names so both flags take effect and the agent is
+    # actually created. We disable the external "modal" provider plugin (safe
+    # for a local command agent) and enable the always-present "usage" plugin.
+    e2e.write_tutorial_block("""
+    # you can enable or disable specific plugins:
+    mngr create my-task --plugin my-plugin --disable-plugin other-plugin
+    """)
+    result = e2e.run(
+        "mngr create my-task --plugin usage --disable-plugin modal --type command --no-ensure-clean -- sleep 100099",
+        comment="you can enable or disable specific plugins",
+    )
+    expect(result).to_succeed()
+    # Real plugin names must not trigger the "not registered" rejection.
+    combined = result.stdout + result.stderr
+    expect(combined).not_to_match(r"(?i)not registered")
+
+    list_result = e2e.run("mngr list", comment="Verify agent created with real plugin flags")
+    expect(list_result).to_succeed()
+    expect(list_result.stdout).to_contain("my-task")
+
+    # Verify the agent is actually running (the flags did not break creation).
+    exec_result = e2e.run("mngr exec my-task pwd", comment="Verify the agent is running")
+    expect(exec_result).to_succeed()
+
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
@@ -168,26 +278,43 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_set_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set that option in your config so that it always applies:
     mngr config set headless true
     """)
+    # ``config set`` writes to the project settings.toml (the default scope).
+    # The e2e fixture already seeds that file with ``is_allowed_in_pytest = true``
+    # so it passes the enforce_pytest_config_opt_in guard, and ``config set``
+    # preserves that key when it re-saves the file with the new value.
     result = e2e.run(
         "mngr config set headless true",
         comment="or you can set that option in your config so that it always applies",
     )
     expect(result).to_succeed()
     expect(result.stdout).to_contain("Set headless")
+    # The default scope is the project config, so the command must report that.
+    expect(result.stdout).to_contain("project")
 
     # Verify the value was persisted via the merged config view (default scope)
     get_result = e2e.run("mngr config get headless", comment="Verify headless config is visible in merged view")
     expect(get_result).to_succeed()
     expect(get_result.stdout).to_contain("true")
 
+    # Observe the concrete on-disk effect (as a human debugging would): the value
+    # was actually written into the project-scope settings.toml file, not just
+    # surfaced in the merged view.
+    file_result = e2e.run(
+        "cat .$MNGR_ROOT_NAME/settings.toml",
+        comment="Verify config set persisted headless to the project settings.toml on disk",
+    )
+    expect(file_result).to_succeed()
+    expect(file_result.stdout).to_contain("headless = true")
+
 
 @pytest.mark.release
-@pytest.mark.modal
+@pytest.mark.timeout(60)
 def test_env_var_mngr_headless(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # or you can set it as an environment variable:
@@ -217,6 +344,7 @@ def test_env_var_mngr_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_config_set_default_provider(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # *all* mngr options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
@@ -243,7 +371,7 @@ def test_config_set_default_provider(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(120)
 def test_create_with_label(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can add labels to organize your agents and tags for host metadata:
@@ -264,3 +392,45 @@ def test_create_with_label(e2e: E2eSession) -> None:
     assert len(matching_agents) == 1
     assert matching_agents[0]["labels"]["team"] == "backend"
     assert matching_agents[0]["host"]["tags"]["env"] == "staging"
+
+    # Labels exist to organize/filter agents, so verify they actually drive
+    # filtering: the agent shows up when filtering on its label and host label,
+    # and is excluded when filtering on a non-matching label value.
+    filtered = e2e.run(
+        "mngr list --label team=backend --host-label env=staging --format json",
+        comment="filter agents by label and host label",
+    )
+    expect(filtered).to_succeed()
+    filtered_names = [a["name"] for a in json.loads(filtered.stdout)["agents"]]
+    assert "my-task" in filtered_names
+
+    excluded = e2e.run(
+        "mngr list --label team=frontend --format json",
+        comment="a non-matching label value excludes the agent",
+    )
+    expect(excluded).to_succeed()
+    excluded_names = [a["name"] for a in json.loads(excluded.stdout)["agents"]]
+    assert "my-task" not in excluded_names
+
+
+@pytest.mark.release
+@pytest.mark.timeout(60)
+def test_create_with_invalid_label_format(e2e: E2eSession) -> None:
+    # Unhappy path for the same tutorial block: labels must be KEY=VALUE, so a
+    # value without "=" is rejected and no agent is created.
+    e2e.write_tutorial_block("""
+    # you can add labels to organize your agents and tags for host metadata:
+    mngr create my-task --label team=backend --host-label env=staging
+    """)
+    result = e2e.run(
+        "mngr create my-task --type command --no-ensure-clean --label notvalid -- sleep 100098",
+        comment="labels must be in KEY=VALUE format",
+    )
+    expect(result).to_fail()
+    expect(result.stderr + result.stdout).to_contain("KEY=VALUE")
+
+    # The agent must not have been created when label parsing fails.
+    list_result = e2e.run("mngr list --format json", comment="Verify no agent was created")
+    expect(list_result).to_succeed()
+    parsed = json.loads(list_result.stdout)
+    assert [a for a in parsed["agents"] if a["name"] == "my-task"] == []

@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.1] - 2026-06-08
+
+### Added
+
+- Added: Auto-discovered as a publishable package by the release tooling (peer of the already-published `mngr_vultr`); will be offered for first publication to PyPI on the next release.
+
+### Changed
+
+- Changed: OVH provisioning now applies the shared `mngr_vps_docker` host-setup steps over SSH (OVH has no cloud-init). With this change OVH installs the pinned Docker version, registers gVisor `runsc` when `install_gvisor_runtime` is set, tunes sshd, installs the required outer packages, and purges qemu — all from the single shared source of truth. This closes a real gap: OVH never installed `runsc` before, so `[providers.ovh] install_gvisor_runtime = true` was silently a no-op and OVH-baked hosts (including the imbue_cloud pool) ran the agent container under the default runtime.
+
+### Removed
+
+- Removed: OVH-specific `install_required_outer_packages` and `purge_qemu_packages` bootstrap helpers — their behavior is now folded into the shared host-setup step list as config-gated steps.
+
 ## [v0.1.0] - 2026-06-05
 
 ### Fixed
@@ -23,13 +37,13 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: `OvhProviderConfig.recycle_safety_margin_hours` default drops 24 → 2 so same-day destroy + create reclaims the cancelled VPS instead of ordering a fresh month.
-- Changed: `order_and_wait_for_vps` no longer diffs `/vps` listings to find the new serviceName — it walks the `/me/order/{orderId}/details/...` chain so two concurrent orders against the same OVH account can never swap serviceNames.
+- Changed: VPS ordering no longer diffs `/vps` listings to find the new service — it tracks the specific order, so two concurrent orders against the same OVH account can never swap services.
 - Changed: `OvhVpsClient.set_renew_at_expiration` now retries on the OVH transient 400 `"Unable to synchronize l1::Service, subscription is not active yet"` (5-minute default budget, 15 s poll interval, both injectable).
 - Changed: `parse_extra_tags_env(MNGR_VPS_EXTRA_TAGS)` now runs at the top of `_provision_vps`, before any OVH API call, so a typo fails before we pay for a VPS.
 - Changed: `OuterHost.get_name` / `OuterHostInterface.get_name` now return `str` instead of `HostName` (the outer host's name is an SSH hostname / IP address that routinely contains dots).
 - Changed: **Breaking** — OVH hosts created by `mngr create --provider ovh` now back their per-host unified docker volume with a btrfs subvolume on a loop-mounted btrfs filesystem on the VPS (`/mngr-btrfs/<host_id_hex>` on `/var/lib/mngr-btrfs.img`), enabling consistent `btrfs subvolume snapshot -r` of agent data. See `mngr_vps_docker`'s changelog for the full mechanism. Existing OVH hosts created on the prior layout cannot be discovered or managed after upgrade — destroy and recreate them.
 - Changed: Added `inotify-tools` and `jq` to `_REQUIRED_OUTER_PACKAGES` so the new `snapshot_helper.service` (provisioned by `mngr_vps_docker`) has the tools it needs on OVH-leased outers.
-- Changed: OVH-provisioned hosts now have OVH automated backups disabled. As the final bootstrap step the OVH provider purges all `qemu*` packages (`apt-get purge --auto-remove 'qemu*'`) over SSH on each freshly-ordered or recycled VPS, removing the `qemu-guest-agent` that OVH backups use to freeze the guest filesystem (which caused serious runtime problems on the agent). A failure aborts provisioning so no host is left running with backups enabled. mngr never orders an OVH backup option in the order/cart flow either. Existing already-running OVH hosts are not swept; they pick up the purge when next recycled.
+- Changed: OVH-provisioned hosts now have OVH automated backups disabled. As the final bootstrap step the OVH provider purges all `qemu*` packages over SSH on each freshly-ordered or recycled VPS, removing the `qemu-guest-agent` that OVH backups use to freeze the guest filesystem (which caused serious runtime problems on the agent). A failure aborts provisioning so no host is left running with backups enabled. Existing already-running OVH hosts are not swept; they pick up the purge when next recycled.
 - Changed: `OvhVpsClient.set_renew_at_expiration` also retries on transient transport failures (dropped connection / timeout), not just the "subscription is not active yet" billing-propagation case, hardening the failure-cleanup cancel path against leaking a freshly-ordered month of billing. Non-transient API errors still surface immediately.
 - Changed: Added to the release tooling's publish graph (`scripts/utils.py`); will be offered for first publication to PyPI on the next release. No runtime change.
 

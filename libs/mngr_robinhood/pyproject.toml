@@ -1,12 +1,12 @@
 [project]
 name = "imbue-mngr-robinhood"
-version = "0.1.0"
+version = "0.1.1"
 description = "Drop-in replacement for `claude -p` that runs through mngr create/message/transcript"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.11",
-    "imbue-mngr-claude==0.2.11",
+    "imbue-mngr==0.2.12",
+    "imbue-mngr-claude==0.2.12",
     "claude-agent-sdk>=0.1.0",
 ]
 
@@ -61,7 +61,7 @@ omit = [
 # fixture to be exercised end-to-end; that test infrastructure is logged as a
 # follow-up. cli.py is similarly hard to test in isolation because it depends
 # on the full mngr context. Raise once those integration tests land.
-fail_under = 65
+fail_under = 70
 exclude_lines = [
     "assert_never",
 ]

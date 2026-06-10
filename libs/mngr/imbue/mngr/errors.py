@@ -40,6 +40,10 @@ class ParseSpecError(MngrError, ValueError):
     """Raised when parsing a specification string fails."""
 
 
+class MismatchedPreselectionError(MngrError, ValueError):
+    """Raised when a picker's preselected mask length does not match its options."""
+
+
 class InvalidRelativePathError(MngrError, ValueError):
     """Raised when a path that should be relative is actually absolute."""
 

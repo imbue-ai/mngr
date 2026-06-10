@@ -22,6 +22,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 
 _AGENT_A: AgentId = AgentId("agent-00000000000000000000000000000001")
@@ -301,6 +302,170 @@ def test_get_system_services_agent_id_finds_agent_sharing_the_host() -> None:
 def test_get_system_services_agent_id_returns_none_when_not_discovered() -> None:
     resolver = MngrCliBackendResolver()
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
+
+
+def _workspace_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+    """A primary-workspace DiscoveredAgent (carries the labels the workspace listing filters on)."""
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName(str(agent_id)),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+    )
+
+
+def test_list_active_workspace_ids_excludes_agents_on_destroyed_hosts() -> None:
+    """A workspace on a DESTROYED host stays in the known set but drops from the active set."""
+    resolver = MngrCliBackendResolver()
+    live_host = HostId.generate()
+    dead_host = HostId.generate()
+    live_agent = AgentId.generate()
+    dead_agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(live_agent, dead_agent),
+            discovered_agents=(
+                _workspace_agent(live_host, live_agent),
+                _workspace_agent(dead_host, dead_agent),
+            ),
+            host_state_by_host_id={
+                str(live_host): HostState.RUNNING,
+                str(dead_host): HostState.DESTROYED,
+            },
+        )
+    )
+
+    assert set(resolver.list_known_workspace_ids()) == {live_agent, dead_agent}
+    assert resolver.list_active_workspace_ids() == (live_agent,)
+
+
+def test_list_active_workspace_ids_keeps_agents_whose_host_state_is_unknown() -> None:
+    """Absent host state must not hide a workspace (only an explicit DESTROYED does)."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+        )
+    )
+
+    assert resolver.list_active_workspace_ids() == (agent,)
+
+
+def test_get_host_state_returns_known_state_and_none_otherwise() -> None:
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.DESTROYED},
+        )
+    )
+
+    assert resolver.get_host_state(host) is HostState.DESTROYED
+    assert resolver.get_host_state(HostId.generate()) is None
+
+
+def _resolver_with_host_state(host: HostId, agent: AgentId, state: HostState | None) -> MngrCliBackendResolver:
+    """A resolver carrying one workspace on ``host`` with the given discovery host state."""
+    resolver = MngrCliBackendResolver()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): state} if state is not None else {},
+        )
+    )
+    return resolver
+
+
+def test_host_state_override_wins_over_discovery_then_drops_on_agreement() -> None:
+    """An optimistic override masks discovery until the next snapshot agrees, then is dropped."""
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+
+    # Discovery still says RUNNING, but the user just stopped it.
+    resolver.set_host_state_override(host, HostState.STOPPED)
+    assert resolver.get_host_state(host) is HostState.STOPPED
+
+    # A fresh discovery snapshot that agrees (STOPPED) confirms and drops the override.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.STOPPED},
+        )
+    )
+    assert resolver.get_host_state(host) is HostState.STOPPED
+    # Override is gone: a later discovery-only flip back to RUNNING is reflected, unmasked.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(host, agent),),
+            host_state_by_host_id={str(host): HostState.RUNNING},
+        )
+    )
+    assert resolver.get_host_state(host) is HostState.RUNNING
+
+
+def test_clear_host_state_override_reverts_to_discovery() -> None:
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+    resolver.set_host_state_override(host, HostState.STOPPED)
+
+    resolver.clear_host_state_override(host)
+
+    assert resolver.get_host_state(host) is HostState.RUNNING
+
+
+def test_host_state_override_fires_on_change_on_set_and_clear() -> None:
+    host = HostId.generate()
+    resolver = MngrCliBackendResolver()
+    changes: list[None] = []
+    resolver.add_on_change_callback(lambda: changes.append(None))
+
+    resolver.set_host_state_override(host, HostState.STOPPED)
+    # Clearing an absent override is a no-op (no extra fire); clearing a present one fires.
+    resolver.clear_host_state_override(HostId.generate())
+    resolver.clear_host_state_override(host)
+
+    assert len(changes) == 2
+
+
+def test_host_state_override_does_not_affect_active_workspace_filtering() -> None:
+    """The override only ever holds RUNNING/STOPPED, so it can't change the DESTROYED-only filter."""
+    host = HostId.generate()
+    agent = AgentId.generate()
+    resolver = _resolver_with_host_state(host, agent, HostState.RUNNING)
+
+    resolver.set_host_state_override(host, HostState.STOPPED)
+
+    # A stopped (overridden) host is still an active workspace -- only DESTROYED drops it.
+    assert resolver.list_active_workspace_ids() == (agent,)
+
+
+def test_parse_agents_from_json_extracts_host_state() -> None:
+    """mngr list --format json carries host.state, which parsing surfaces per host id."""
+    json_output = json.dumps(
+        {
+            "agents": [
+                {"id": str(_AGENT_A), "host": {"id": "host-aaaa", "state": "RUNNING"}},
+                {"id": str(_AGENT_B), "host": {"id": "host-bbbb", "state": "DESTROYED"}},
+            ]
+        }
+    )
+    result = parse_agents_from_json(json_output)
+    assert result.host_state_by_host_id == {
+        "host-aaaa": HostState.RUNNING,
+        "host-bbbb": HostState.DESTROYED,
+    }
 
 
 def _pair_snapshot(

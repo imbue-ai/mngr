@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Offline hosts produced by this provider are now readable via the new `HostFileReadInterface` — the offline-host construction path (used by both `get_host` and `to_offline_host`) returns an `OfflineHostWithVolume` via the shared `make_readable_offline_host` helper, with lazy volume resolution (no per-host probe). The new `get_volume_reference_for_host` is wrapped so missing/expired Modal credentials surface as the user-friendly `ModalAuthError` (consistent with the other provider methods), including during offline-host construction.
+
+### Removed
+
+- Removed: Modal async-permission-propagation workaround. The `ModalProxyPermissionDeniedError` retries in `_lookup_persistent_app_with_retry` and `_enter_ephemeral_app_context_with_retry` are gone (both decorators once again retry only on `ModalProxyNotFoundError`), and the `_invoke_modal_sdk_delete_with_retry` test-cleanup helper is removed (`_classify_modal_sdk_delete` now invokes the SDK delete callable directly again). Modal has fixed the underlying bug on their side, so read-after-write is immediate and the workaround is no longer needed.
+
+## [v0.2.12] - 2026-06-08
+
+### Fixed
+
+- Fixed: Creating a Modal host with an invalid argument (e.g. a non-existent `--snapshot` image id) now fails with a clean single-line `Error: Failed to create Modal host: '<id>' is not a valid Image ID.` instead of dumping a raw Python traceback — `create_host` now wraps `ModalProxyInvalidError` in a user-facing `MngrError`, mirroring how `ModalProxyRemoteError` was already handled.
+
 ## [v0.2.11] - 2026-06-05
 
 ## [v0.2.10] - 2026-06-01

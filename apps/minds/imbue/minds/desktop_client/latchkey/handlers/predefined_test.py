@@ -327,7 +327,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     assert len(_read_recording(auth_recording)) == 1
 
 
-def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path: Path) -> None:
+def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
     handler = _build_handler(
         tmp_path,
         credential_status="missing",
@@ -345,18 +345,20 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
         granted_permissions=("slack-read-all",),
     )
 
-    assert result.outcome == GrantOutcome.DENIED
+    # A failed sign-in is a FAILED outcome, not a denial.
+    assert result.outcome == GrantOutcome.FAILED
     assert "sign-in" in result.message.lower()
     assert "user cancelled" in result.message
+    # The request stays pending: no resolving response event is returned.
+    assert result.response_event is None
     # latchkey_permissions.json must NOT have been written.
     assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
-    # A DENIED response event was appended (no separate AUTH_FAILED status).
-    responses = load_response_events(tmp_path)
-    assert len(responses) == 1
-    assert responses[0].status == str(RequestStatus.DENIED)
-    # mngr message was still sent (the agent needs to be unblocked).
-    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert len(mngr_recording) == 1
+    # No response event was appended, so the request is not auto-denied and
+    # remains pending for the user to retry from the dialog.
+    assert load_response_events(tmp_path) == []
+    # No mngr message was sent: the agent stays blocked, waiting on the
+    # still-pending request rather than being told it was resolved.
+    assert not (tmp_path / "mngr_report.jsonl").exists()
 
 
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
@@ -733,8 +735,8 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     """Deny must work even when the request's scope is not in the gateway catalog.
 
     An agent can file a permission request under an unknown scope
-    (typo, stale catalog, etc.); the rendered dialog
-    (:func:`_render_unknown_scope_page`) offers Deny as the only
+    (typo, stale catalog, etc.); the rendered detail fragment
+    (:func:`_render_unknown_scope_fragment`) offers Deny as the only
     action. The deny HTTP path must therefore still tear down the
     pending request, append a DENIED response event, and notify the
     agent -- using the raw scope string in place of a catalog

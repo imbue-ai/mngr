@@ -28,6 +28,7 @@ Only after doing all of the above should you begin writing code.
 
 # Important commands and conventions:
 
+- The `mngr` on your PATH is the dev shim (`scripts/mngr`), which routes `mngr` (and anything that shells out to it, e.g. minds) to the checkout you're working in instead of a stale global install. A pre-commit hook installs it automatically (a symlink in `~/.local/bin`) and verifies it's on PATH; if it fails, put `~/.local/bin` on your PATH ahead of any venv bin (then `hash -r`) -- do not bypass it.
 - Never run `uv sync`, always run `uv sync --all-packages` instead
 - Never pipe the output of a non-instant command through `grep`, `jq`, `awk`, `head`, `tail`, or similar without preserving the full output. If you later need something that was discarded, you have to rerun the entire command. Instead, write the output to a file first and then filter the file, or use `tee` to capture and filter simultaneously (e.g. `some_command | tee /tmp/some_command_output.txt | grep pattern`).
 
@@ -141,6 +142,7 @@ Every PR must include one changelog entry file **per project it touches**. CI wi
   - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
   - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
 - Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
+  - If the entry uses a list, separate the bullets with a double newline (a blank line between each bullet).
 - A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
 - There is no separate "this file is a changelog file, so it doesn't count" exemption: adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, and inherently satisfies the requirement. A PR that *only* touches a project's consolidated `CHANGELOG.md` (e.g. a manual correction) still owes a per-PR entry describing the correction.

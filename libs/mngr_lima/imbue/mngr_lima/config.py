@@ -1,6 +1,8 @@
 from pathlib import Path
+from typing import Self
 
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
@@ -9,6 +11,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_lima.constants import DEFAULT_HOST_DATA_DISK_SIZE
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
+from imbue.mngr_lima.errors import LimaConfigError
 
 
 class LimaProviderConfig(ProviderInstanceConfig):
@@ -35,7 +38,8 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "machine has no direct read path so get_volume_for_host() returns "
             "None and mngr event / mngr transcript against a stopped Lima host "
             "stops working until the host is started. The False mode is "
-            "intended for consistent btrfs snapshots of host_dir."
+            "intended for consistent btrfs snapshots of host_dir, and is "
+            "required when is_run_as_root=True."
         ),
     )
     host_data_disk_size: str = Field(
@@ -45,6 +49,20 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "is_host_data_volume_exposed=False. qcow2 is sparse, so this is "
             "a logical cap visible to the guest, not upfront host disk usage. "
             "Format follows Lima's size string (e.g. '100GiB')."
+        ),
+    )
+    is_run_as_root: bool = Field(
+        default=False,
+        description=(
+            "When True, mngr runs the agent in the VM as root (uid 0), matching "
+            "the docker/vps_docker providers where the agent is root inside its "
+            "container: the agent can apt-install and write anywhere with no "
+            "sudo. mngr injects a root client key and SSHes in as root. This "
+            "requires the btrfs additional-disk layout "
+            "(is_host_data_volume_exposed must be False), because root cannot "
+            "traverse the 9p/reverse-sshfs bind mount the exposed layout uses. "
+            "When False (today's default), the agent runs as the Lima default "
+            "user with passwordless sudo."
         ),
     )
     default_image_url_aarch64: str | None = Field(
@@ -91,3 +109,15 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "abort -- both have to be wide enough."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_run_as_root_requires_btrfs_layout(self) -> Self:
+        # Root cannot traverse the 9p/reverse-sshfs bind mount the exposed
+        # layout uses, so running the agent as root requires the btrfs
+        # additional-disk layout. Fail fast at config construction.
+        if self.is_run_as_root and self.is_host_data_volume_exposed:
+            raise LimaConfigError(
+                "providers.lima.is_run_as_root=True requires the btrfs additional-disk layout; "
+                "set providers.lima.is_host_data_volume_exposed=false."
+            )
+        return self
