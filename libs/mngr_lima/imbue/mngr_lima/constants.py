@@ -11,10 +11,7 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
 # Default image URLs for Lima VMs (Debian 12 "bookworm" genericcloud images).
-# Debian's genericcloud variant is a minimal cloud image -- now that the agent
-# runs inside a Docker container in the VM (is_host_in_docker), the VM only
-# needs Docker + btrfs + sshd, so a lighter base than Ubuntu suffices. This
-# also mirrors the OVH provider's "Debian 12 - Docker" base. The provisioning
+# Debian's genericcloud variant is a minimal cloud image; the provisioning
 # script is apt-based, so it works on Debian unchanged and installs any missing
 # mngr dependencies. Pinned to a specific dated snapshot for reproducibility;
 # bump the snapshot id (in both URLs) to pick up a newer point release.
@@ -37,10 +34,6 @@ CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
 # Default logical size of the btrfs additional disk. qcow2 is sparse so this
 # is a logical cap visible to the guest, not upfront host disk usage.
 DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
-
-# Default guest-internal port the agent container publishes its sshd on when
-# is_host_in_docker=True. Mirrors the vps_docker provider's container_ssh_port.
-DEFAULT_CONTAINER_SSH_PORT: Final[int] = 2222
 
 
 def lima_host_data_disk_mount_path(disk_name: str) -> str:
