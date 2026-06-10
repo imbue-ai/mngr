@@ -33,6 +33,7 @@ from imbue.mngr_pi_coding.plugin import _inbox_append_command
 from imbue.mngr_pi_coding.plugin import _load_resource
 from imbue.mngr_pi_coding.plugin import _read_pi_trust
 from imbue.mngr_pi_coding.plugin import _serialize_pi_trust
+from imbue.mngr_pi_coding.plugin import register_agent_aliases
 from imbue.mngr_pi_coding.plugin import register_agent_type
 
 # =============================================================================
@@ -167,6 +168,10 @@ def test_register_agent_type_returns_correct_tuple() -> None:
     assert name == "pi-coding"
     assert agent_class is PiCodingAgent
     assert config_class is PiCodingAgentConfig
+
+
+def test_register_agent_aliases_maps_pi_to_pi_coding() -> None:
+    assert register_agent_aliases() == {"pi": "pi-coding"}
 
 
 def test_modify_env_vars_sets_pi_dir(pi_agent: PiCodingAgent, tmp_path: Path) -> None:

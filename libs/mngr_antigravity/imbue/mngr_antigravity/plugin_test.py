@@ -31,6 +31,7 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.plugin import AntigravityAgent
 from imbue.mngr_antigravity.plugin import AntigravityAgentConfig
+from imbue.mngr_antigravity.plugin import register_agent_aliases
 from imbue.mngr_antigravity.plugin import register_agent_type
 
 
@@ -92,6 +93,10 @@ def test_register_agent_type_returns_antigravity_class_and_config() -> None:
     assert name == "antigravity"
     assert agent_class is AntigravityAgent
     assert config_class is AntigravityAgentConfig
+
+
+def test_register_agent_aliases_maps_agy_to_antigravity() -> None:
+    assert register_agent_aliases() == {"agy": "antigravity"}
 
 
 def _make_antigravity_agent(

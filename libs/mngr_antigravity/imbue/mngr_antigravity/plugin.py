@@ -888,3 +888,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the antigravity agent type."""
     return ("antigravity", AntigravityAgent, AntigravityAgentConfig)
+
+
+@hookimpl
+def register_agent_aliases() -> dict[str, str]:
+    """Register ``agy`` as a short alias for the ``antigravity`` agent type."""
+    return {"agy": "antigravity"}
