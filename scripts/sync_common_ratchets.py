@@ -109,6 +109,11 @@ def _extract_tests(text: str) -> list[RatchetTemplate]:
 
         source = "".join(lines[start:end])
 
+        # Only the test name is consumed from this result (see main(), which reads
+        # `.name` to compute which tests each project already has); `.section` here
+        # is never used, so the "Unknown" default for a header-less test is harmless.
+        # The section that drives insertion comes from _discover_check_functions,
+        # which raises rather than emitting "Unknown".
         section = "Unknown"
         for sec_line, sec_name in sections:
             if sec_line < start:
@@ -198,11 +203,20 @@ def _discover_check_functions() -> list[RatchetTemplate]:
         test_name = f"test_prevent_{check_name.removeprefix('check_')}"
         test_source = f"def {test_name}() -> None:\n    rc.{check_name}(_DIR, snapshot(0))"
 
-        section = "Unknown"
+        section: str | None = None
         func_line = node.lineno - 1
         for sec_line, sec_name in sections:
             if sec_line < func_line:
                 section = sec_name
+
+        # Every check in the source-of-truth file must live under a `# --- ... ---`
+        # header. A check with no preceding header would otherwise be synced into a
+        # bogus "Unknown" section across the whole monorepo, so we fail loudly here.
+        if section is None:
+            raise ValueError(
+                f"Check function {check_name!r} in {STANDARD_RATCHET_CHECKS_PATH.name} is not under any "
+                f"'# --- <section> ---' header; add a section header before it."
+            )
 
         templates.append(RatchetTemplate(name=test_name, source=test_source, section=section))
 
