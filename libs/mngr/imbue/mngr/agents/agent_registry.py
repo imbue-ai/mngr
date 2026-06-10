@@ -68,28 +68,56 @@ def load_agents_from_plugins(pm: pluggy.PluginManager) -> None:
     # Register agent types, recording which plugin produced each registration
     # so the disabled-plugin check (and aliases) can attribute a type to its
     # real owning plugin instead of assuming the type name equals the plugin
-    # name. We iterate the hookimpls (rather than the flattened hook results)
-    # because each HookImpl carries the registering plugin's name.
-    for hookimpl in pm.hook.register_agent_type.get_hookimpls():
-        registration = cast(
-            "tuple[str, type[AgentInterface] | None, type[AgentTypeConfig] | None] | None",
-            hookimpl.function(),
-        )
+    # name. Each result is paired with its registering plugin's name.
+    for registration, plugin_name in _agent_type_registrations_by_plugin(pm):
         if registration is not None:
             agent_type_name, agent_class, config_class = registration
             _register_agent_internal(agent_type_name, agent_class, config_class)
-            register_agent_plugin(agent_type_name, hookimpl.plugin_name)
+            register_agent_plugin(agent_type_name, plugin_name)
 
     # Register aliases after all canonical types exist, so an alias can point
     # at any registered type. Aliases live in the alias-resolution layer (not
     # the type registries): callers normalize a name through them before any
     # registry lookup.
-    for hookimpl in pm.hook.register_agent_aliases.get_hookimpls():
-        alias_mapping = cast("Mapping[str, str] | None", hookimpl.function())
+    for alias_mapping, plugin_name in _agent_alias_mappings_by_plugin(pm):
         if alias_mapping is not None:
-            _register_aliases(alias_mapping, hookimpl.plugin_name)
+            _register_aliases(alias_mapping, plugin_name)
 
     _registry_state["agents_loaded"] = True
+
+
+# The declared result type of the register_agent_type hook (a hook may also
+# return None, handled by callers).
+_AgentTypeRegistration = tuple[str, type[AgentInterface] | None, type[AgentTypeConfig] | None]
+
+
+def _agent_type_registrations_by_plugin(
+    pm: pluggy.PluginManager,
+) -> list[tuple[_AgentTypeRegistration | None, str]]:
+    """Return each register_agent_type result paired with its plugin name.
+
+    pluggy's flattened ``hook()`` call drops the originating plugin, so we go
+    through the individual hook implementations to recover it. ``HookImpl``'s
+    ``function`` is pluggy-typed as returning ``object``, so the cast here
+    re-applies the hook's declared result type.
+    """
+    return [
+        (cast("_AgentTypeRegistration | None", hookimpl.function()), hookimpl.plugin_name)
+        for hookimpl in pm.hook.register_agent_type.get_hookimpls()
+    ]
+
+
+def _agent_alias_mappings_by_plugin(
+    pm: pluggy.PluginManager,
+) -> list[tuple[Mapping[str, str] | None, str]]:
+    """Return each register_agent_aliases result paired with its plugin name.
+
+    See ``_agent_type_registrations_by_plugin`` for why the cast is needed.
+    """
+    return [
+        (cast("Mapping[str, str] | None", hookimpl.function()), hookimpl.plugin_name)
+        for hookimpl in pm.hook.register_agent_aliases.get_hookimpls()
+    ]
 
 
 def _register_aliases(

@@ -18,13 +18,10 @@ Built-in plugins provide the following agent types:
 
 The following agent types require installing an external plugin:
 
-| Type | Alias | Command | Description | Plugin |
-|------|-------|---------|-------------|--------|
-| `opencode` | | `opencode` | [OpenCode](https://github.com/sst/opencode) - An open-source AI coding assistant. | `imbue-mngr-opencode` |
-| `antigravity` | `agy` | `agy` | [Antigravity CLI](https://antigravity.google/docs/cli-overview) - Google's coding agent (successor to Gemini CLI). | `imbue-mngr-antigravity` |
-| `pi-coding` | `pi` | `pi` | Pi coding agent. | `imbue-mngr-pi-coding` |
-
-An "Alias" is a short alternate name accepted anywhere the agent type is, so `mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`.
+| Type | Command | Description | Plugin |
+|------|---------|-------------|--------|
+| `opencode` | `opencode` | [OpenCode](https://github.com/sst/opencode) - An open-source AI coding assistant. | `imbue-mngr-opencode` |
+| `antigravity` | `agy` | [Antigravity CLI](https://antigravity.google/docs/cli-overview) - Google's coding agent (successor to Gemini CLI). | `imbue-mngr-antigravity` |
 
 ## Using Agent Types
 
