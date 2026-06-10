@@ -357,14 +357,15 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
 # -- _build_workspace_list stale marking --
 
 
-def _make_workspace_agent(provider_name: str) -> DiscoveredAgent:
+def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
     """A primary workspace agent (carries the workspace + is_primary labels)."""
+    labels = {"workspace": "my-workspace", "is_primary": "true", **(extra_labels or {})}
     return DiscoveredAgent(
         host_id=HostId("host-" + "0" * 31 + "1"),
         agent_id=AgentId("agent-" + "0" * 31 + "1"),
         agent_name=AgentName("ws-agent"),
         provider_name=ProviderInstanceName(provider_name),
-        certified_data={"labels": {"workspace": "my-workspace", "is_primary": "true"}},
+        certified_data={"labels": labels},
     )
 
 
@@ -419,21 +420,9 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
 # rollout doesn't visually break existing workspaces.
 
 
-def _make_workspace_agent_with_color(color_hex: str) -> DiscoveredAgent:
-    return DiscoveredAgent(
-        host_id=HostId("host-" + "0" * 31 + "2"),
-        agent_id=AgentId("agent-" + "0" * 31 + "2"),
-        agent_name=AgentName("ws-agent-color"),
-        provider_name=ProviderInstanceName("docker"),
-        certified_data={
-            "labels": {"workspace": "colored-ws", "is_primary": "true", "color": color_hex},
-        },
-    )
-
-
 def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
     resolver = MngrCliBackendResolver()
-    agent = _make_workspace_agent_with_color("#0b292b")
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#0b292b"})
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)
@@ -448,7 +437,7 @@ def test_build_workspace_list_emits_black_foreground_for_light_palette_entries()
     # near the upper end of the lightness range -- exercises the
     # >= 0.179 luminance branch of pick_workspace_foreground.
     resolver = MngrCliBackendResolver()
-    agent = _make_workspace_agent_with_color("#fcefd4")
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#fcefd4"})
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
 
     workspaces = _build_workspace_list(resolver)
