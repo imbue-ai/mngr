@@ -40,11 +40,19 @@ def run_codex_hook(
     payload: str,
     is_check_enabled: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke a provisioned hook script from ``state_dir/commands/`` with ``payload`` on stdin."""
+    """Invoke a provisioned hook script from ``state_dir/commands/`` with ``payload`` on stdin.
+
+    Runs with the ambient tmux environment stripped (no ``TMUX``/``TMUX_TMPDIR``),
+    so set_active_marker.sh's submit-channel signal takes its headless ``$TMUX``-unset
+    path and never invokes ``tmux`` -- keeping these unit tests off the developer's
+    real tmux server (and out of the tmux resource guard).
+    """
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_TMPDIR")}
+    env["MNGR_AGENT_STATE_DIR"] = str(state_dir)
     return subprocess.run(
         ["bash", str(state_dir / "commands" / script_name)],
         input=payload,
-        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+        env=env,
         capture_output=True,
         text=True,
         check=is_check_enabled,
