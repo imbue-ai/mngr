@@ -237,7 +237,7 @@ curl -X POST "$LATCHKEY_GATEWAY/minds-api-proxy/api/create-agent" \
   -H 'Content-Type: application/json' \
   -d '{
     "git_url": "https://github.com/example/template",
-    "launch_mode": "LOCAL",
+    "launch_mode": "DOCKER",
     "ai_provider": "SUBSCRIPTION"
   }'
 
@@ -294,7 +294,7 @@ permission-request dialog:
    file via the gateway's `permissions` extension.
 6. Agent retries the request. Detent now matches; the `minds-api-proxy`
    extension injects the bearer header and forwards. Minds validates
-   the key and returns `{"agent_id": "<creation_id>", "status": "CLONING"}`.
+   the key and returns `{"agent_id": "<creation_id>", "status": "INITIALIZING"}`.
 7. Agent polls `GET .../api/create-agent/<creation_id>/status` and may
    stream `GET .../api/create-agent/<creation_id>/logs` -- both are
    covered by the same grant -- until `agent_id` is populated. The new
