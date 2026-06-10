@@ -145,15 +145,14 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
         # you can specify the agent type as the second positional argument to create:
         mngr create my-task codex
     """)
+    # codex is a real agent-type plugin now (not a command-driven stub), so it
+    # can't be faked with a `command` override. Create it without launching
+    # (--no-auto-start) and auto-approve workspace trust (-y), which exercises the
+    # positional-argument type resolution without needing a codex binary or auth
+    # on this host. The real codex run is covered by the mngr_codex release test.
     expect(
         e2e.run(
-            "mngr config set agent_types.codex.command 'sleep 100952'",
-            comment="configure codex command for test environment",
-        )
-    ).to_succeed()
-    expect(
-        e2e.run(
-            "mngr create my-task codex --no-ensure-clean --no-connect",
+            "mngr create my-task codex -y --no-auto-start --no-ensure-clean --no-connect",
             comment="agent type as second positional argument",
         )
     ).to_succeed()
@@ -181,27 +180,22 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
         # or by specifying it explicitly
         mngr create my-task --type codex
     """)
+    # codex is a real agent-type plugin now (not a command-driven stub), so it
+    # can't be faked with a `command` override. Create it without launching
+    # (--no-auto-start) and auto-approve workspace trust (-y): this verifies
+    # `--type codex` resolves to the codex agent type without needing a codex
+    # binary or auth. The real codex run is covered by the mngr_codex release test.
     expect(
         e2e.run(
-            # Write to the local scope: its settings.local.toml already sets
-            # is_allowed_in_pytest = true, so the agent-type config we add here
-            # is loaded by the subsequent create. The default project scope would
-            # create a settings.toml that the pytest config guard rejects.
-            "mngr config set --scope local agent_types.codex.command 'sleep 100953'",
-            comment="configure codex command for test environment",
-        )
-    ).to_succeed()
-    expect(
-        e2e.run(
-            "mngr create my-task --type codex --no-ensure-clean --no-connect",
+            "mngr create my-task --type codex -y --no-auto-start --no-ensure-clean --no-connect",
             comment="agent type via --type",
         )
     ).to_succeed()
 
-    # Verify the actual effect of --type codex: the agent exists, was created
-    # with the codex type, and is running (not just that create exited 0).
-    # Scope discovery to the local provider so the check stays fast and never
-    # queries Modal (--provider restricts which providers are queried, unlike
+    # Verify the effect of --type codex: the agent exists and was created with the
+    # codex type (not silently falling back to a default), confirming the type
+    # resolves. Scope discovery to the local provider so the check stays fast and
+    # never queries Modal (--provider restricts which providers are queried, unlike
     # the --local result filter which still fans out to remote providers).
     list_result = e2e.run("mngr list --provider local --format json", comment="verify the codex agent was created")
     expect(list_result).to_succeed()
@@ -209,7 +203,6 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     matching = [agent for agent in agents if agent["name"] == "my-task"]
     assert len(matching) == 1, f"expected exactly one 'my-task' agent, got {agents}"
     assert matching[0]["type"] == "codex", f"expected type 'codex', got {matching[0]['type']}"
-    assert matching[0]["state"] in ("RUNNING", "WAITING"), f"unexpected agent state: {matching[0]['state']}"
 
 
 @pytest.mark.rsync
