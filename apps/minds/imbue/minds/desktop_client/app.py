@@ -405,9 +405,17 @@ def _color_for_new_workspace(raw_color: object) -> str:
     JSON API accepts an optional ``color`` field. A missing or malformed
     value (e.g. the browser ate the input) must not reject the whole
     create request -- the new workspace just gets the default color.
+    A *missing* color is normal flow (the JSON API treats it as optional)
+    and stays silent; a non-empty value that fails to parse indicates a
+    buggy client, so it is logged before falling back.
     """
-    normalized = normalize_workspace_color(str(raw_color).strip())
-    return normalized if normalized is not None else DEFAULT_WORKSPACE_COLOR
+    stripped = str(raw_color).strip()
+    normalized = normalize_workspace_color(stripped)
+    if normalized is not None:
+        return normalized
+    if stripped:
+        logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
+    return DEFAULT_WORKSPACE_COLOR
 
 
 def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
