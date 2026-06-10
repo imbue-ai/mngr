@@ -1,6 +1,7 @@
 // Persistent chrome (titlebar + sidebar + iframe). Shared between browser
-// mode (this iframe-based layout) and Electron (where the content + sidebar
-// are separate WebContentsViews and window.minds exposes IPC adapters).
+// mode (this iframe-based layout) and Electron (where the content is its
+// own WebContentsView, the sidebar page is loaded into the shared modal
+// WebContentsView when opened, and window.minds exposes IPC adapters).
 (function () {
   var isElectron = !!window.minds;
 
