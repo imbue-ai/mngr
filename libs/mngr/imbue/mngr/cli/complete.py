@@ -13,12 +13,35 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Final
 from typing import NamedTuple
 
 from imbue.mngr.cli.complete_names import resolve_names_from_discovery_stream
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
+from imbue.mngr.config.host_dir import read_default_host_dir
+
+# Bumped whenever the generated completion *function* changes in a way that
+# warrants users refreshing their installed completion. The managed completion
+# script sets ``MNGR_COMPLETION_SHIM_VERSION`` to this value when it invokes the
+# completer; an absent or smaller value means the user's installed completion
+# predates the current logic (e.g. the old self-contained function pasted
+# directly into their rc) and should be refreshed.
+_COMPLETION_SHIM_VERSION: Final[int] = 1
+_SHIM_VERSION_ENV_VAR: Final[str] = "MNGR_COMPLETION_SHIM_VERSION"
+
+# How often (seconds) to re-warn about an out-of-date installed completion, so
+# the nudge does not appear on every TAB press.
+_STALE_WARNING_INTERVAL_SECONDS: Final[float] = 24 * 60 * 60
+
+# Marker comment that identifies the managed completion shim in a user's rc file.
+# ``mngr extras`` uses it to tell an up-to-date install (the shim) apart from an
+# old self-contained function, and to avoid adding the shim twice.
+COMPLETION_SHIM_MARKER: Final[str] = "# mngr shell completion (managed"
 
 
 class _CompletionContext(NamedTuple):
@@ -535,18 +558,24 @@ def _get_positional_candidates(
 
 
 def generate_zsh_script() -> str:
-    """Generate the zsh completion script with the current python path baked in.
+    """Generate the zsh completion *function* (the managed file body), python path baked in.
+
+    This is written to the managed completion file (see
+    ``write_managed_completion_scripts``); the user's rc only holds the small shim
+    from ``generate_zsh_shim`` that sources it.
 
     Candidates ending in ``.`` are "branch" completions (a dotted config key
     drilled one segment at a time); they are added with an empty suffix
     (``-S ''``) so no trailing space is inserted and the next segment can be
-    typed immediately. All other candidates are added normally.
+    typed immediately. All other candidates are added normally. The completer is
+    invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell an up-to-date
+    install from an out-of-date one.
     """
     python_path = sys.executable
     return f"""_mngr_complete() {{
     local -a completions branches leaves
     (( ! $+commands[mngr] )) && return 1
-    completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {python_path} -m imbue.mngr.cli.complete)"}})
+    completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete)"}})
     local c
     for c in $completions; do
         if [[ $c == *. ]]; then branches+=$c; else leaves+=$c; fi
@@ -558,22 +587,151 @@ compdef _mngr_complete mngr"""
 
 
 def generate_bash_script() -> str:
-    """Generate the bash completion script with the current python path baked in.
+    """Generate the bash completion *function* (the managed file body), python path baked in.
+
+    Written to the managed completion file; the rc only holds the shim from
+    ``generate_bash_shim`` that sources it.
 
     When the sole completion is a "branch" (a dotted config key segment ending in
     ``.``), suppress the trailing space so the next segment can be typed
     immediately. With multiple matches bash already inserts only the common
     prefix (no trailing space), so this is only needed for the unique-match case.
+    The completer is invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell
+    an up-to-date install from an out-of-date one.
     """
     python_path = sys.executable
     return f"""_mngr_complete() {{
     local IFS=$'\\n'
-    COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {python_path} -m imbue.mngr.cli.complete))
+    COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete))
     if [[ ${{#COMPREPLY[@]}} -eq 1 && ${{COMPREPLY[0]}} == *. ]]; then
         compopt -o nospace
     fi
 }}
 complete -o default -F _mngr_complete mngr"""
+
+
+def _managed_completion_dir() -> Path:
+    """Directory holding the managed per-shell completion files."""
+    return read_default_host_dir() / "completions"
+
+
+def get_managed_completion_script_path(shell: str) -> Path:
+    """Path of the managed completion file for ``shell`` (e.g. ``~/.mngr/completions/mngr.zsh``)."""
+    return _managed_completion_dir() / f"mngr.{shell}"
+
+
+def generate_zsh_shim() -> str:
+    """Generate the small, stable zsh rc snippet that sources the managed completion file.
+
+    This is what goes in the user's ``.zshrc``. It deliberately contains no
+    completion logic -- only a pointer to the managed file that mngr regenerates
+    -- so completion-logic changes reach the user without editing the rc. The
+    path is resolved at shell-startup time the same way mngr resolves the host
+    directory (``MNGR_HOST_DIR`` / ``MNGR_ROOT_NAME``), so it keeps working if
+    those change.
+    """
+    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras` to refresh)
+typeset _mngr_completion="${{MNGR_HOST_DIR:-$HOME/.${{MNGR_ROOT_NAME:-mngr}}}}/completions/mngr.zsh"
+[[ -r "$_mngr_completion" ]] && source "$_mngr_completion"
+unset _mngr_completion"""
+
+
+def generate_bash_shim() -> str:
+    """Generate the small, stable bash rc snippet that sources the managed completion file.
+
+    The bash counterpart to ``generate_zsh_shim`` (goes in ``.bashrc``).
+    """
+    return f"""{COMPLETION_SHIM_MARKER}; do not edit -- run `mngr extras` to refresh)
+_mngr_completion="${{MNGR_HOST_DIR:-$HOME/.${{MNGR_ROOT_NAME:-mngr}}}}/completions/mngr.bash"
+[ -r "$_mngr_completion" ] && . "$_mngr_completion"
+unset _mngr_completion"""
+
+
+def generate_completion_shim(shell: str) -> str:
+    """Return the rc shim for ``shell`` (``zsh`` or ``bash``)."""
+    if shell == "zsh":
+        return generate_zsh_shim()
+    return generate_bash_shim()
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically write ``content`` to ``path`` (write a temp sibling, then rename).
+
+    A local stdlib-only implementation (rather than ``utils.file_utils.atomic_write``)
+    so this module stays free of heavier imports on the tab-completion hot path.
+    """
+    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as tmp_file:
+            tmp_file.write(content)
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def write_managed_completion_scripts() -> None:
+    """(Re)write the managed completion files for all supported shells (best-effort).
+
+    These hold the actual completion function; the rc shim just sources them.
+    Regenerating here -- e.g. from the background completion refresh -- is what
+    lets completion-logic changes reach users without manual rc edits. Only
+    rewrites a file whose content changed. Filesystem errors are swallowed so
+    this never breaks the caller.
+    """
+    for shell, content in (("zsh", generate_zsh_script()), ("bash", generate_bash_script())):
+        path = get_managed_completion_script_path(shell)
+        try:
+            if path.is_file() and path.read_text() == content:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(path, content)
+        except OSError:
+            pass
+
+
+def _stale_warning_marker_path() -> Path:
+    """Timestamp file used to rate-limit the out-of-date-completion warning."""
+    return read_default_host_dir() / ".completion-stale-warned"
+
+
+def _maybe_warn_stale_completion() -> None:
+    """Warn (throttled, on stderr) if the installed completion predates the current logic.
+
+    The managed completion function sets ``MNGR_COMPLETION_SHIM_VERSION`` when it
+    invokes this completer; an absent or smaller value means the user is running
+    an out-of-date installed completion (e.g. the old self-contained function
+    pasted into their rc) and should refresh it. The warning goes to stderr
+    (stdout is reserved for completion candidates) and is rate-limited via a
+    marker file so it does not appear on every keypress.
+    """
+    try:
+        installed_version = int(os.environ.get(_SHIM_VERSION_ENV_VAR, "0"))
+    except ValueError:
+        installed_version = 0
+    if installed_version >= _COMPLETION_SHIM_VERSION:
+        return
+
+    marker = _stale_warning_marker_path()
+    now = time.time()
+    try:
+        if marker.is_file() and now - marker.stat().st_mtime < _STALE_WARNING_INTERVAL_SECONDS:
+            return
+    except OSError:
+        pass
+
+    sys.stderr.write(
+        "\n[mngr] Your shell tab-completion is out of date. Run `mngr extras` to refresh it "
+        "(one-time; future updates apply automatically).\n"
+    )
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(now))
+    except OSError:
+        pass
 
 
 def main() -> None:
@@ -583,20 +741,21 @@ def main() -> None:
         python -m imbue.mngr.cli.complete
             Complete (reads COMP_WORDS/COMP_CWORD from the environment).
         python -m imbue.mngr.cli.complete --script zsh
-            Print the zsh completion script to stdout.
+            Write the managed completion files and print the zsh rc shim to stdout.
         python -m imbue.mngr.cli.complete --script bash
-            Print the bash completion script to stdout.
+            Write the managed completion files and print the bash rc shim to stdout.
     """
     args = sys.argv[1:]
 
     if len(args) >= 2 and args[0] == "--script":
         shell = args[1]
-        if shell == "zsh":
-            sys.stdout.write(generate_zsh_script() + "\n")
-        else:
-            sys.stdout.write(generate_bash_script() + "\n")
+        # Materialise the managed files so the shim has something to source, then
+        # emit the shim (the rc content).
+        write_managed_completion_scripts()
+        sys.stdout.write(generate_completion_shim(shell) + "\n")
         return
 
+    _maybe_warn_stale_completion()
     completions = _get_completions()
     if completions:
         sys.stdout.write("\n".join(completions) + "\n")

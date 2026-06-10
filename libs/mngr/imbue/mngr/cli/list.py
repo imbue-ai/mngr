@@ -24,6 +24,7 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.cli.field_catalog import FieldContext
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
@@ -207,6 +208,16 @@ def list_command(ctx: click.Context, **kwargs) -> None:
         ctx.exit(1)
 
 
+def _refresh_completion_artifacts(**kwargs: Any) -> None:
+    """Refresh the tab-completion cache and the managed completion script files.
+
+    Run in the background from ``list`` so an upgraded mngr keeps the installed
+    completion (which the rc shim sources) current without any manual steps.
+    """
+    write_cli_completions_cache(**kwargs)
+    write_managed_completion_scripts()
+
+
 def _list_impl(ctx: click.Context, **kwargs) -> None:
     """Implementation of list command (extracted for exception handling)."""
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -234,7 +245,7 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         topic_names = sorted(get_all_topics().keys())
         installed_plugin_packages = get_installed_plugin_package_names()
         mngr_ctx.concurrency_group.start_new_thread(
-            target=write_cli_completions_cache,
+            target=_refresh_completion_artifacts,
             kwargs={
                 "cli_group": cli_group,
                 "mngr_ctx": mngr_ctx,
