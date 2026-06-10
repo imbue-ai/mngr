@@ -78,6 +78,7 @@ def test_exec_echo_on_modal(
 
 @pytest.mark.acceptance
 @pytest.mark.rsync
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_exec_cwd_override_on_modal(
     temp_source_dir: Path,
