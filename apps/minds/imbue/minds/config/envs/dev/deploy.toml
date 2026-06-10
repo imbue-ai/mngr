@@ -13,9 +13,6 @@ modal_workspace = "minds-dev"
 vault_path_prefix = "secrets/minds/dev"
 cloudflare_domain = "minds-dev.com"
 
-oauth_google_client_id = ""
-oauth_github_client_id = ""
-
 # Vault-backed per-env Modal Secrets. Each name corresponds to a
 # Vault entry at `<vault_path_prefix>/<name>` -- the deploy reads that
 # entry, adds any deploy-time-computed overrides (URLs, DSNs, app
@@ -30,10 +27,23 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "paid-accounts",
     "pool-ssh",
     "supertokens",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    # The rsc app references `ovh-<tier>-<deploy_id>` via Secret.from_name, so
+    # this must be pushed or `modal deploy rsc-<tier>` fails.
+    "ovh",
 ]
+
+# Dev envs keep no warm containers (min_containers defaults to 0), so without
+# this every request after ~60s idle pays a cold boot. Hold containers for
+# ~10 minutes after the last request so a dev session stays hot. The ci tier
+# deliberately omits this block (0 = Modal default) so test containers tear
+# down promptly; staging/production also omit it and rely on min_containers=1.
+[scaledown_window]
+connector = 600
+litellm_proxy = 600
 
 # Tier-shape flags consumed by `minds env deploy` / `destroy`. All four
 # are required (no defaults) so a misconfigured tier fails fast on load.
@@ -42,3 +52,9 @@ creates_resources = true
 modal_env_strategy = "PER_ENV"
 writes_local_state = true
 tracks_generation = false
+
+# Default paid-access entries seeded (seed-if-absent) into the connector's
+# paid_domains table after migrations, so the imbue team can use paid features
+# (host pool, LiteLLM keys, R2 buckets) on a fresh env without manual setup.
+[paid]
+domains = ["imbue.com"]

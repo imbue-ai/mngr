@@ -19,7 +19,6 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import Permission
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
@@ -42,7 +41,6 @@ def _create_test_agent(
     # Write basic data.json
     data = {
         "command": command,
-        "permissions": [],
         "start_on_boot": False,
     }
     (agent_dir / "data.json").write_text(json.dumps(data, indent=2))
@@ -88,42 +86,11 @@ def test_base_agent_get_command_default_bash(
 
     # Write data.json without command
     data_path = agent._get_data_path()
-    data_path.write_text(json.dumps({"permissions": []}, indent=2))
+    data_path.write_text(json.dumps({}, indent=2))
 
     command = agent.get_command()
 
     assert command == CommandString("bash")
-
-
-def test_base_agent_get_permissions(
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Test getting permissions from agent."""
-    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-perms", temp_work_dir)
-
-    perms = agent.get_permissions()
-
-    assert isinstance(perms, list)
-    assert len(perms) == 0
-
-
-def test_base_agent_set_permissions(
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """Test setting permissions on agent."""
-    agent = _create_test_agent(local_provider, temp_mngr_ctx, "test-set-perms", temp_work_dir)
-
-    permissions = [Permission("read"), Permission("write")]
-    agent.set_permissions(permissions)
-
-    retrieved = agent.get_permissions()
-    assert len(retrieved) == 2
-    assert Permission("read") in retrieved
-    assert Permission("write") in retrieved
 
 
 def test_base_agent_get_labels_returns_empty_dict_by_default(

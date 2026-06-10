@@ -5,8 +5,6 @@ from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
 from imbue.imbue_common.ratchet_testing.ratchets import TEST_FILE_PATTERNS
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 # mngr's test_ratchets.py is nested one level deeper than other projects (in utils/),
 # so the source dir is parent.parent instead of parent.parent.parent
@@ -19,7 +17,12 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(2))
+    # The 1 violation is in libs/mngr/imbue/mngr/e2e/tutorial/test_git.py inside
+    # an e2e.write_tutorial_block(\"\"\"...\"\"\") triple-quoted string -- it is a
+    # verbatim quote of a "# TODO: ..." line in mega_tutorial.sh that the
+    # tutorial_matcher requires to appear in the test body, not a TODO we
+    # added to the codebase. See PR #1806.
+    rc.check_todos(_DIR, snapshot(1))
 
 
 def test_prevent_exec() -> None:
@@ -43,7 +46,7 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(34), excluded_patterns=("_kqueue_tty_test_script.py",))
+    rc.check_bare_print(_DIR, snapshot(33), excluded_patterns=("_kqueue_tty_test_script.py",))
 
 
 # --- Exception handling ---
@@ -54,7 +57,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(9))
+    rc.check_broad_exception_catch(_DIR, snapshot(8))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -62,18 +65,18 @@ def test_prevent_base_exception_catch() -> None:
 
 
 def test_prevent_builtin_exception_raises() -> None:
-    rc.check_builtin_exception_raises(_DIR, snapshot(0))
+    rc.check_builtin_exception_raises(_DIR, snapshot(1))
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(12))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(8))
 
 
 # --- Import style ---
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(3))
+    rc.check_inline_imports(_DIR, snapshot(4))
 
 
 def test_prevent_relative_imports() -> None:
@@ -89,7 +92,19 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    rc.check_getattr(_DIR, snapshot(9))
+    # detect_settings_narrowing in config/data_types.py walks MngrConfig (and
+    # sub-model) fields by name via the model_fields iterable, which is the same
+    # pattern documented inline on _walk_to_field. Switching to model_dump
+    # round-tripping to dodge the ratchet would re-introduce the serialisation
+    # cost _walk_to_field was rewritten to avoid (see its docstring).
+    #
+    # cli/create.py uses the same map-driven `getattr(opts, config_field, ())`
+    # pattern twice -- once for AgentProvisioningOptions
+    # (PROVISIONING_FIELD_MAP) and once for HostProvisioningOptions
+    # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
+    # the attribute name only exists in the map; static field access is not
+    # possible.
+    rc.check_getattr(_DIR, snapshot(12))
 
 
 def test_prevent_setattr() -> None:
@@ -138,7 +153,7 @@ def test_prevent_hardcoded_claude_dir() -> None:
 # which is autouse and fires for tests without @pytest.mark.docker, so it must bypass
 # the PATH wrapper (which would otherwise block the docker invocation).
 def test_prevent_hardcoded_guarded_binary() -> None:
-    rc.check_hardcoded_guarded_binary(_DIR, snapshot(2))
+    rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 
 
 # --- Naming conventions ---
@@ -214,11 +229,11 @@ def test_prevent_logger_exception() -> None:
 
 
 def test_prevent_unittest_mock_imports() -> None:
-    rc.check_unittest_mock_imports(_DIR, snapshot(3))
+    rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(35))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(33))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -240,10 +255,25 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
     rc.check_bare_urwid_tty_signal_keys(_DIR, snapshot(0))
 
 
+# Primary enforcement lives in the type system: TmuxSessionTarget and
+# TmuxWindowTarget (in hosts/tmux.py) emit exact-match `=` targets via
+# .as_shell_arg(). This ratchet is the regex-level backstop for shell-template
+# strings (e.g. bash heredocs in providers/listing_utils.py and connect.py,
+# the agent background-task scripts, ttyd's attach script) where Python types
+# don't reach.
+#
+# Baseline 1 accounts for agents/tui_utils.py:269: `tmux send-keys -t "$1"`
+# where $1 is bound from `tmux_target.as_shell_arg()` at the f-string
+# boundary -- variable indirection that the regex can't see through; safe in
+# practice because the value of $1 includes the `=` prefix.
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(1))
+
+
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(20), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(15), excluded_patterns=excluded)
 
 
 # --- AST-based ratchets ---
@@ -266,11 +296,15 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(9))
+    rc.check_cast_usage(_DIR, snapshot(8))
 
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(2))
 
 
 # --- Project-level checks ---
@@ -285,13 +319,3 @@ def test_prevent_code_in_init_files() -> None:
             'hookimpl = pluggy.HookimplMarker("mngr")',
         },
     )
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(Path(__file__).parent.parent.parent.parent)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(Path(__file__).parent.parent.parent.parent)

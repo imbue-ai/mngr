@@ -53,7 +53,25 @@ the rest of the stack at the env's data root:
 eval "$(uv run minds env activate dev-<your-user>)"
 ```
 
-Exported variables:
+Activation has two modes:
+
+- **Use-only (default)**: exports the use-side env vars below and emits
+  `unset MODAL_PROFILE`. This is what every non-deploying user wants --
+  the desktop client, mngr, Latchkey, etc. work against the activated
+  env without touching the operator's Modal CLI auth state. A
+  previously-deploy-activated shell that gets re-activated in use-only
+  mode flips back cleanly: the `unset MODAL_PROFILE` line drops the
+  stale workspace pin before the next `modal …` shellout can pick it up.
+- **Deploy mode (`--deploy`)**: additionally exports `MODAL_PROFILE`
+  pinned to the tier's `modal_workspace`. Required for `minds env
+  deploy` / `destroy` / `recover` (they refuse without it -- see "Deploy
+  mode" below). Pre-validates that `~/.modal.toml` has a profile matching
+  the tier's `modal_workspace` and refuses up front with a
+  `modal token set --profile <workspace>` hint otherwise. Skipped when
+  the tier's `deploy.toml` is missing or its `modal_workspace` is still
+  the literal `CHANGE_ME` placeholder.
+
+Exported use-side variables (both modes):
 
 - `MINDS_ROOT_NAME` -- e.g. `minds-dev-<your-user>` (or just `minds`
   for production).
@@ -64,6 +82,9 @@ Exported variables:
   For `staging` / `production`, the in-repo
   `apps/minds/imbue/minds/config/envs/<tier>/client.toml` (committed
   to the repo).
+
+Deploy-mode adds:
+
 - `MODAL_PROFILE` -- the tier's `modal_workspace` from
   `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`. Pins every
   subsequent `modal` CLI shellout (`modal deploy`, `modal secret create`,
@@ -71,8 +92,7 @@ Exported variables:
   `active = true` in `~/.modal.toml`. **Prerequisite:** the operator
   must have a matching profile entry in `~/.modal.toml` for each tier
   they operate against (`modal token set --profile <workspace>` once
-  per tier). Skipped when the tier's `deploy.toml` is missing or its
-  `modal_workspace` is still the literal `CHANGE_ME` placeholder.
+  per tier).
 
 To deactivate:
 
@@ -96,7 +116,7 @@ Behaviour by env type:
   in one line:
 
   ```bash
-  eval "$(uv run minds env activate --create dev-<your-user>)"
+  eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
   uv run minds env deploy
   ```
 
@@ -113,8 +133,7 @@ Each tier has one committed file in
 apps/minds/imbue/minds/config/envs/
   dev/
     deploy.toml       # modal_workspace, modal_env, vault_path_prefix,
-                      # cloudflare_domain, oauth_*_client_id,
-                      # [secrets] services = [...]
+                      # cloudflare_domain, [secrets] services = [...]
   staging/
     client.toml       # connector_url, litellm_proxy_url
     deploy.toml       # same shape as dev/deploy.toml
@@ -145,14 +164,32 @@ in any committed staging/production file. A unit test in
 Secret values (API keys, DSNs, connection URIs) live in HCP Vault --
 see `apps/minds/docs/vault-setup.md`.
 
+## Deploy mode
+
+`minds env deploy`, `minds env destroy`, and `minds env recover` all
+refuse to run unless the shell is *deploy-activated* (i.e. the operator
+used `minds env activate --deploy <name>`). "Deploy-activated" is
+detected via `MODAL_PROFILE`: it must be set in the environment and
+must equal the tier's `modal_workspace` from `deploy.toml`. A missing or
+mismatched `MODAL_PROFILE` is a hard error -- the refusal points the
+operator at the exact `eval "$(uv run minds env activate --deploy
+<name>)"` to re-run.
+
+This split exists because activating `staging` (or any other tier) to
+*use* the deployed services should not require Modal CLI credentials
+for that tier's workspace. Bundling the two -- which prior versions did
+-- caused `mngr observe` Modal discovery to fail (and Latchkey to break)
+on every developer who had not added the tier's workspace to their
+`~/.modal.toml`.
+
 ## Deploying a tier (staging / production)
 
 ```bash
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 ```
 
-(For production: `activate production` + `--yes-i-mean-production`.)
+(For production: `activate --deploy production` + `--yes-i-mean-production`.)
 
 The `--yes-i-mean-<tier>` flag is mandatory for tier deploys -- the
 unified deploy CLI uses the same code path for dev and tier deploys,
@@ -275,8 +312,10 @@ cross-dev contamination, no leftover roles to clean up.
 Bootstrap a brand-new dev env:
 
 ```bash
-# 1. Activate the env (--create idempotently mkdirs ~/.minds-<name>/ if missing).
-eval "$(uv run minds env activate --create dev-<your-user>)"
+# 1. Activate the env in deploy mode (--create idempotently mkdirs
+#    ~/.minds-<name>/ if missing; --deploy pins MODAL_PROFILE for the
+#    deploy step in step 2).
+eval "$(uv run minds env activate --create --deploy dev-<your-user>)"
 
 # 2. Deploy: provisions the Modal env, Neon project (with host_pool +
 #    litellm_cost DBs), SuperTokens app, pushes per-env Modal Secrets,
@@ -284,7 +323,10 @@ eval "$(uv run minds env activate --create dev-<your-user>)"
 #    ~/.minds-dev-<your-user>/{client.toml,secrets.toml}.
 uv run minds env deploy
 
-# 3. Launch the desktop client against the new env:
+# 3. Re-activate in use-only mode so subsequent `mngr` / `minds run`
+#    invocations don't carry a stale MODAL_PROFILE, then launch the
+#    desktop client against the new env:
+eval "$(uv run minds env activate dev-<your-user>)"
 just minds-start
 ```
 
@@ -295,14 +337,14 @@ Re-deploy in place (idempotent -- picks up any new tier-shared Vault
 values and re-deploys both Modal apps):
 
 ```bash
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds env activate --deploy dev-<your-user>)"
 uv run minds env deploy
 ```
 
 Tear it down (cloud resources + the env root):
 
 ```bash
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds env activate --deploy dev-<your-user>)"
 uv run minds env destroy
 # `minds env destroy` rmdir's ~/.minds-dev-<your-user> after success;
 # clear your shell with `eval "$(uv run minds env deactivate)"`.
@@ -384,7 +426,7 @@ Done once per tier (production / staging), out of band:
    are deployed -- typically a one-line edit per app.)
 4. Deploy the Modal apps via the unified path:
    ```bash
-   eval "$(uv run minds env activate <tier>)"
+   eval "$(uv run minds env activate --deploy <tier>)"
    uv run minds env deploy --yes-i-mean-<tier>
    ```
 5. Smoke-test:

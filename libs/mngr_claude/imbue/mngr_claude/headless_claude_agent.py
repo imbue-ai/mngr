@@ -23,8 +23,8 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.agent import NoPermissionsAgentMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import CommandString
@@ -432,7 +432,7 @@ class _StreamTailState(MutableModel):
                 yield from self._yield_text_from_lines(remaining.split("\n"))
 
 
-class NoPermissionsClaudeAgent(ClaudeAgent, NoPermissionsAgentMixin):
+class NoPermissionsClaudeAgent(ClaudeAgent):
     """ClaudeAgent with no permissions granted (no tools, no trust needed).
 
     Skips trust validation and dialog dismissal during provisioning since
@@ -497,7 +497,7 @@ class HeadlessClaude(NoPermissionsClaudeAgent, BaseHeadlessAgent[ClaudeAgentConf
         prompt_path = self._get_agent_dir() / _MNGR_PROMPT_FILE
         self.host.write_text_file(prompt_path, initial_message)
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Headless agents do not accept interactive messages.
 
         Must be defined here because ClaudeAgent overrides BaseAgent's no-op

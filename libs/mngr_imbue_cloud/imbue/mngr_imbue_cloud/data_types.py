@@ -8,9 +8,29 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_imbue_cloud.primitives import DEFAULT_FAST_MODE
+from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.primitives import R2AccessKeyId
+from imbue.mngr_imbue_cloud.primitives import R2BucketAccess
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
+
+
+class PaidListEntry(FrozenModel):
+    """One row of a connector paid-list table (a domain or an email).
+
+    ``value`` holds the domain (e.g. ``imbue.com``) or full email; the
+    connector normalizes it to lowercase on write. Rows are never hard
+    deleted -- ``is_paid`` flips to False on removal and ``updated_at``
+    records when that happened.
+    """
+
+    value: str = Field(description="The allowed domain or email (lowercased)")
+    is_paid: bool = Field(description="Whether this entry currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
 
 
 class LeaseAttributes(FrozenModel):
@@ -31,50 +51,117 @@ class LeaseAttributes(FrozenModel):
         """Drop None values so the connector treats them as 'unconstrained'."""
         return {k: v for k, v in self.model_dump().items() if v is not None}
 
-    @classmethod
-    def from_build_args(cls, build_args: Sequence[str] | None) -> tuple["LeaseAttributes", str | None]:
-        """Parse mngr's ``--build-arg KEY=VALUE`` entries.
+    def relaxed(self) -> "LeaseAttributes":
+        """Drop the version/repo constraints, keeping only resource constraints.
 
-        Recognized lease-attribute keys: ``repo_url``, ``repo_branch_or_tag``,
-        ``cpus``, ``memory_gb``, ``gpu_count``. ``account`` is also recognized
-        but is NOT a lease attribute -- it tells the provider which Imbue
-        Cloud session to authenticate with, so it is returned separately.
-        Unknown keys are rejected with a clear ``ValueError`` so a misspelled
-        flag fails fast rather than silently widening the lease match.
-
-        Returns ``(attributes, account_override)`` where ``account_override``
-        is ``None`` if ``-b account=<email>`` was not passed.
+        Used by the slow path: it rebuilds the host from scratch, so the pool
+        host's pre-baked ``repo_url`` / ``repo_branch_or_tag`` no longer need to
+        match. Keeping ``cpus`` / ``memory_gb`` / ``gpu_count`` ensures the user
+        still lands on adequately-sized hardware.
         """
-        if not build_args:
-            return cls(), None
-        parsed: dict[str, Any] = {}
-        account_override: str | None = None
-        attribute_keys = set(cls.model_fields.keys())
-        for entry in build_args:
-            if "=" not in entry:
-                raise ValueError(f"build_args entry must be KEY=VALUE, got: {entry!r}")
-            key, _, value = entry.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                raise ValueError(f"build_args entry has empty key: {entry!r}")
-            if key == "account":
-                if not value:
-                    raise ValueError("build_arg account=<email> requires a non-empty value")
-                account_override = value
-                continue
-            if key not in attribute_keys:
-                raise ValueError(
-                    f"Unknown build_arg key {key!r}; allowed keys are {sorted(attribute_keys | {'account'})}"
-                )
-            if key in {"cpus", "memory_gb", "gpu_count"}:
-                try:
-                    parsed[key] = int(value)
-                except ValueError as exc:
-                    raise ValueError(f"build_arg {key}={value!r} must be an integer") from exc
-            else:
-                parsed[key] = value
-        return cls(**parsed), account_override
+        return LeaseAttributes(
+            repo_url=None,
+            repo_branch_or_tag=None,
+            cpus=self.cpus,
+            memory_gb=self.memory_gb,
+            gpu_count=self.gpu_count,
+        )
+
+
+class ParsedImbueCloudBuildArgs(FrozenModel):
+    """Result of splitting ``mngr create -b`` entries for the imbue_cloud provider.
+
+    The imbue_cloud provider consumes the lease/control keys it recognizes and
+    forwards everything else (e.g. ``--file=Dockerfile``, ``.``) verbatim to the
+    delegated vps_docker build that the slow path runs.
+    """
+
+    attributes: "LeaseAttributes" = Field(description="Lease-attribute filter for the connector")
+    account_override: str | None = Field(default=None, description="``-b account=<email>`` override, if any")
+    fast_mode: FastMode = Field(description="Whether the fast/adopt path is required or prevented")
+    region: str | None = Field(
+        default=None,
+        description=(
+            "``-b region=<dc>`` hard region requirement: only lease a host in this OVH datacenter, "
+            "or fail with a clear no-capacity error."
+        ),
+    )
+    passthrough_build_args: tuple[str, ...] = Field(
+        default=(),
+        description="Unrecognized -b entries forwarded verbatim to the delegated vps_docker build",
+    )
+
+
+_LEASE_ATTRIBUTE_KEYS: frozenset[str] = frozenset(LeaseAttributes.model_fields.keys())
+_INTEGER_ATTRIBUTE_KEYS: frozenset[str] = frozenset({"cpus", "memory_gb", "gpu_count"})
+
+
+def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbueCloudBuildArgs:
+    """Split mngr's ``-b KEY=VALUE`` entries into lease/control knobs and pass-through args.
+
+    Recognized lease-attribute keys (``repo_url``, ``repo_branch_or_tag``,
+    ``cpus``, ``memory_gb``, ``gpu_count``) populate the ``LeaseAttributes``
+    filter. ``account`` selects the Imbue Cloud session. ``fast_mode`` selects
+    the create path (``require`` / ``prevent``; defaults to
+    :data:`DEFAULT_FAST_MODE`). ``region`` is a hard datacenter requirement
+    (validated against
+    :data:`~imbue.mngr_imbue_cloud.primitives.KNOWN_OVH_US_REGIONS`). Every other
+    entry -- including bare positionals like ``.`` and docker flags like
+    ``--file=Dockerfile`` -- is preserved verbatim as a pass-through build arg for
+    the delegated vps_docker build.
+
+    Raises ``ValueError`` on a malformed recognized key (e.g. a non-integer
+    ``cpus``, an unknown ``fast_mode``, or an unknown ``region`` value).
+    """
+    if not build_args:
+        return ParsedImbueCloudBuildArgs(attributes=LeaseAttributes(), fast_mode=DEFAULT_FAST_MODE)
+    parsed_attributes: dict[str, Any] = {}
+    account_override: str | None = None
+    fast_mode = DEFAULT_FAST_MODE
+    region: str | None = None
+    passthrough: list[str] = []
+    for entry in build_args:
+        key, separator, value = entry.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if separator and key == "account":
+            if not value:
+                raise ValueError("build_arg account=<email> requires a non-empty value")
+            account_override = value
+        elif separator and key == "region":
+            # Validate the region against the known OVH-US datacenters so a typo
+            # fails fast at create time instead of silently leasing a non-matching
+            # (or no) host. An empty value is also rejected here (it's not in the
+            # set). ValueError matches the rest of this parser's contract -- the
+            # caller (instance.create_host) catches ValueError and wraps it.
+            if value not in KNOWN_OVH_US_REGIONS:
+                allowed = sorted(KNOWN_OVH_US_REGIONS)
+                raise ValueError(f"build_arg region={value!r} must be one of {allowed}")
+            region = value
+        elif separator and key == "fast_mode":
+            try:
+                fast_mode = FastMode(value.upper())
+            except ValueError as exc:
+                allowed = sorted(mode.value.lower() for mode in FastMode)
+                raise ValueError(f"build_arg fast_mode={value!r} must be one of {allowed}") from exc
+        elif separator and key in _INTEGER_ATTRIBUTE_KEYS:
+            try:
+                parsed_attributes[key] = int(value)
+            except ValueError as exc:
+                raise ValueError(f"build_arg {key}={value!r} must be an integer") from exc
+        elif separator and key in _LEASE_ATTRIBUTE_KEYS:
+            parsed_attributes[key] = value
+        else:
+            # Unrecognized entry: forward verbatim to the delegated vps_docker
+            # build (e.g. ``--file=Dockerfile`` or the ``.`` build context).
+            passthrough.append(entry)
+    return ParsedImbueCloudBuildArgs(
+        attributes=LeaseAttributes(**parsed_attributes),
+        account_override=account_override,
+        fast_mode=fast_mode,
+        region=region,
+        passthrough_build_args=tuple(passthrough),
+    )
 
 
 class LeaseResult(FrozenModel):
@@ -83,9 +170,9 @@ class LeaseResult(FrozenModel):
     host_db_id: LeaseDbId = Field(description="Database id of the leased host (UUID)")
     vps_address: str = Field(
         description=(
-            "SSH-reachable address of the VPS. May be a public IPv4 (Vultr-backed rows) "
-            "or a DNS hostname (OVH-backed rows return the OVH serviceName like "
-            "``vps-eec8860b.vps.ovh.us``)."
+            "SSH-reachable address of the VPS -- either a public IPv4 or a DNS hostname, "
+            "depending on what the host's provider returned at bake time. OVH-backed "
+            "rows are DNS hostnames like ``vps-eec8860b.vps.ovh.us``."
         )
     )
     ssh_port: int = Field(description="SSH port for the VPS itself (root)")
@@ -181,3 +268,37 @@ class AuthPolicy(FrozenModel):
     emails: tuple[str, ...] = ()
     email_domains: tuple[str, ...] = ()
     require_idp: tuple[str, ...] = ()
+
+
+class R2BucketInfo(FrozenModel):
+    """Metadata about an R2 bucket owned by the account."""
+
+    bucket_name: str = Field(description="Full R2 bucket name (<user_id_prefix>--<slug>)")
+    s3_endpoint: AnyUrl = Field(description="S3-compatible endpoint for this account")
+
+
+class R2KeyMaterial(FrozenModel):
+    """A bucket-scoped S3 credential, returned once at key creation."""
+
+    access_key_id: R2AccessKeyId = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    secret_access_key: SecretStr = Field(description="S3 Secret Access Key (shown once, never persisted by us)")
+    s3_endpoint: AnyUrl = Field(description="S3-compatible endpoint for this account")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: R2BucketAccess = Field(description="Access scope: 'read' or 'readwrite'")
+
+
+class R2KeyInfo(FrozenModel):
+    """Metadata about a bucket key (never includes the secret)."""
+
+    access_key_id: R2AccessKeyId = Field(description="S3 Access Key ID (= the Cloudflare token id)")
+    bucket_name: str = Field(description="Full R2 bucket name this key is scoped to")
+    access: R2BucketAccess = Field(description="Access scope: 'read' or 'readwrite'")
+    alias: str | None = Field(default=None, description="Human-readable alias")
+    created_at: str = Field(description="ISO 8601 timestamp when the key was created")
+
+
+class R2BucketCreateResult(FrozenModel):
+    """Result of creating a bucket: the bucket plus its minted default key."""
+
+    bucket: R2BucketInfo = Field(description="The created bucket")
+    key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")

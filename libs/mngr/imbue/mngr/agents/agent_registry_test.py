@@ -83,14 +83,14 @@ def test_agent_type_config_merge_keeps_base_command_when_override_none() -> None
     assert merged.command == CommandString("base-command")
 
 
-def test_agent_type_config_merge_concatenates_cli_args() -> None:
-    """Merge should concatenate cli_args from base and override."""
+def test_agent_type_config_merge_replaces_cli_args() -> None:
+    """Merge assigns cli_args from override (no concat under assign-by-default)."""
     base = AgentTypeConfig(cli_args=("--verbose",))
     override = AgentTypeConfig(cli_args=("--debug",))
 
     merged = base.merge_with(override)
 
-    assert merged.cli_args == ("--verbose", "--debug")
+    assert merged.cli_args == ("--debug",)
 
 
 def test_agent_type_config_merge_cli_args_with_empty_base() -> None:

@@ -80,6 +80,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 - Discovery: `GET /v2/iam/resource?resourceType=vps` filtered client-side for matching tags
 - Provisioning: full `/order/cart` flow (`POST /order/cart` → `POST /cart/{id}/vps` → configure datacenter/OS → assign → checkout → poll `/vps` until the new `serviceName` appears)
 - Bootstrap (no cloud-init available): after delivery, `POST /vps/{s}/rebuild` with `publicSshKey` + `doNotSendPassword=true` pre-installs our client key. OVH installs that key for the image's default non-root user (e.g. `debian` on `Debian 12 - Docker`), not for root, so the provider then SSHes in as that user, pins the host key on first connect (`StrictHostKeyChecking=accept-new` semantics), sudo-copies `authorized_keys` into `/root/.ssh/`, and verifies SSH-as-root works before handing off to the rest of the provider. After pinning, strict host-key checking is enforced on every subsequent connection.
+- Backups disabled: as the final bootstrap step, the provider purges all `qemu*` packages (`apt-get purge --auto-remove 'qemu*'`). OVH automated backups drive the image's `qemu-guest-agent` to freeze the guest filesystem, which causes serious runtime problems on the agent; removing qemu removes the mechanism the backups hook into. The purge runs on both the fresh-order and recycle paths (rebuilding the OS reinstalls the agent), and a failure aborts provisioning so no host is left running with backups enabled. mngr also never orders an OVH backup option in the cart in the first place.
 
 ## Security caveat (first connect)
 
@@ -98,6 +99,7 @@ OVH classic VPS is billed monthly (no hourly option). `mngr stop my-agent` halts
 To avoid wasting the remainder of a paid month, `mngr create --provider ovh` first checks for cancelled VPSes (those with `renew.deleteAtExpiration=true`) tagged by this provider instance. If one matches the requested plan + datacenter and has enough buffer until `expiration`, it is **un-cancelled** in place via `PUT /vps/{s}/serviceInfos` (no email round-trip needed for the reversal), its OS is rebuilt with our SSH key, and the `mngr-host-id` IAM tag is swapped to the new host. Only when no eligible cancelled VPS exists does a fresh order go out.
 
 Eligibility filters (all required):
+- **`mngr-provider` IAM tag matches this provider instance's name.** A VPS that mngr ordered but never finished tagging — e.g. an order whose delivery timed out before `_provision_vps`'s tag-immediately step ran — is invisible to the recycle path. See "Adopting slowly-delivered orphan VPSes" below.
 - `renew.deleteAtExpiration == true` and `status == "ok"`
 - `engagedUpTo` is null (no active engagement commitment)
 - `expiration` is at least `recycle_safety_margin_hours` (default 24h) into the future — guards against the billing boundary
@@ -110,3 +112,19 @@ A cooperative lock tag (`mngr-recycling-by=<uuid>`) is attached before any mutat
 This is opt-in via `enable_recycle_cancelled` (default `True`). Disable by setting `enable_recycle_cancelled = false` in your provider config if you'd rather see fresh VPS deliveries on every `mngr create`.
 
 Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) so that destroy → create within the same billing month is essentially free.
+
+## Adopting slowly-delivered orphan VPSes
+
+OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `vps_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing would leak.
+
+The recovery mechanism is a **pending-order marker** pattern:
+
+1. **Marker write on timeout.** When `order_and_wait_for_vps` raises `OvhOrderDeliveryTimeoutError`, `_provision_vps` writes a JSON marker file at `<profile_dir>/providers/ovh/<instance>/pending_orders/order-<N>.json` carrying `order_id` + `plan_code` + `region`, then re-raises the original failure. The bake exits at its normal timeout — no extra wait.
+
+2. **Reconcile sweep on every subsequent bake.** At the top of every `_provision_vps`, `_reconcile_pending_orders` walks the marker dir. For each marker, one short OVH poll (`try_poll_order_for_delivered_vps`):
+   - If the order has delivered → attach `mngr-provider` / `mngr-host-id` IAM tags, flip `deleteAtExpiration=true`, delete the marker. The `_maybe_claim_recycled_vps` call that runs immediately after sees the newly-tagged orphan as a candidate and claims it for the current bake.
+   - If still pending → keep the marker for the next bake's reconcile.
+
+Failure modes are all swallowed (logged at WARNING) so a transient OVH error or a broken marker doesn't block the current bake from proceeding to its normal order path. Worst case the orphan retries on the next bake. No operator intervention required.
+
+Mirrors the shape of `minds.envs.recover`'s recover-target file pattern.

@@ -14,6 +14,12 @@ Rename an agent or host [experimental].
 Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.
 
+If the host is offline, the rename is applied to the provider's
+persisted agent data without starting the host; tmux and env-file
+updates are skipped (data.json remains the source of truth for the
+agent's name). Pass --start to force the host online first so tmux
+and the env file are updated alongside data.json.
+
 If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt
 to complete it.
@@ -37,7 +43,7 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--dry-run` | boolean | Show what would be renamed without actually renaming | `False` |
-| `--start`, `--no-start` | boolean | Automatically start the host if offline (the agent does not need to be running) | `True` |
+| `--start`, `--no-start` | boolean | If the host is offline, start it before renaming so the tmux session and on-host env file are updated alongside data.json. Default: do not start; rename only edits the provider's persisted agent data. | `False` |
 | `--host` | boolean | Rename a host instead of an agent [future] | `False` |
 
 ## Labels
@@ -59,7 +65,7 @@ mngr rename [OPTIONS] CURRENT NEW-NAME
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also

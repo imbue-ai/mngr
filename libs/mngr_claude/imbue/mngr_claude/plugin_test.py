@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import shutil
 import subprocess
 from contextlib import contextmanager
 from datetime import datetime
@@ -19,8 +20,12 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
+from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.api.testing import FakeHost
+from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -28,6 +33,11 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostLocation
@@ -44,9 +54,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.providers.docker.host_store import HostRecord
+from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -63,16 +75,13 @@ from imbue.mngr_claude.plugin import _build_install_command_hint
 from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
+from imbue.mngr_claude.plugin import _claude_preserved_items
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
-from imbue.mngr_claude.plugin import _get_preserved_sessions_dir
-from imbue.mngr_claude.plugin import _get_preserved_sessions_dir_for
 from imbue.mngr_claude.plugin import _has_api_credentials_available
 from imbue.mngr_claude.plugin import _install_claude
 from imbue.mngr_claude.plugin import _parse_claude_version_output
-from imbue.mngr_claude.plugin import _preserve_session_files
-from imbue.mngr_claude.plugin import _preserve_session_files_from_volume
 from imbue.mngr_claude.plugin import _provision_local_credentials
 from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
@@ -83,6 +92,7 @@ from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
 from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
+from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import register_cli_options
 
 # =============================================================================
@@ -297,14 +307,14 @@ def test_claude_agent_config_merge_overrides_command() -> None:
     assert merged.command == CommandString("custom-claude")
 
 
-def test_claude_agent_config_merge_concatenates_cli_args() -> None:
-    """Claude agent config should concatenate cli_args."""
+def test_claude_agent_config_merge_replaces_cli_args() -> None:
+    """ClaudeAgentConfig assigns cli_args from override (no concat under assign-by-default)."""
     base = ClaudeAgentConfig(cli_args=("--verbose",))
     override = ClaudeAgentConfig(cli_args=("--model", "sonnet"))
 
     merged = base.merge_with(override)
 
-    assert merged.cli_args == ("--verbose", "--model", "sonnet")
+    assert merged.cli_args == ("--model", "sonnet")
 
 
 def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> None:
@@ -671,7 +681,7 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "SessionStart" in config["hooks"]
     assert len(config["hooks"]["SessionStart"]) == 1
     hooks = config["hooks"]["SessionStart"][0]["hooks"]
-    assert len(hooks) == 4
+    assert len(hooks) == 5
 
     # First hook: creates session_started file for polling-based detection
     assert hooks[0]["type"] == "command"
@@ -713,6 +723,17 @@ def test_build_readiness_hooks_config_has_session_start_hook() -> None:
     assert "compact" in submit_signal_hook
     assert "_MNGR_SOURCE" in submit_signal_hook
 
+    # Fifth hook: on startup/resume, resets the stale 'active'/'permissions_waiting'
+    # markers left over from a turn abandoned by an abnormal exit, so the agent does
+    # not report RUNNING forever after a restart. compact is excluded (mid-turn).
+    reset_markers_hook = hooks[4]["command"]
+    assert hooks[4]["type"] == "command"
+    assert "_MNGR_SOURCE" in reset_markers_hook
+    assert "startup|resume" in reset_markers_hook
+    assert "compact" not in reset_markers_hook
+    assert 'rm -f "$MNGR_AGENT_STATE_DIR/active"' in reset_markers_hook
+    assert "permissions_waiting" in reset_markers_hook
+
 
 @pytest.mark.parametrize(
     "hook_name, expected_substrings",
@@ -751,6 +772,72 @@ def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     assert "MNGR_AGENT_STATE_DIR" in hook["command"]
     assert "active" in hook["command"]
     assert "permissions_waiting" in hook["command"]
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq is required to run the SessionStart hook command")
+@pytest.mark.parametrize(
+    "source, should_clear",
+    [
+        ("startup", True),
+        ("resume", True),
+        ("compact", False),
+        ("clear", False),
+    ],
+)
+def test_session_start_hook_resets_stale_active_marker(tmp_path: Path, source: str, should_clear: bool) -> None:
+    """The SessionStart hook clears a stale 'active' marker on startup/resume only.
+
+    A turn abandoned by an abnormal exit (e.g. a container restart) leaves the
+    'active' marker set, because the Stop hook never ran to remove it. On the
+    next startup/resume -- where a fresh Claude process is provably not mid-turn
+    -- the marker must be reset so get_lifecycle_state stops reporting RUNNING
+    forever. ``compact`` and ``clear`` fire mid-conversation and must leave the
+    marker untouched (compact in particular happens while Claude is active).
+    """
+    state_dir = tmp_path / "state"
+    host_dir = tmp_path / "host"
+    state_dir.mkdir()
+    host_dir.mkdir()
+    active_marker = state_dir / "active"
+    active_marker.touch()
+    (state_dir / "permissions_waiting").touch()
+
+    config = build_readiness_hooks_config()
+    # hooks[4] is the marker-reset hook (asserted in
+    # test_build_readiness_hooks_config_has_session_start_hook).
+    command = config["hooks"]["SessionStart"][0]["hooks"][4]["command"]
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        input=json.dumps({"session_id": "sess-1", "source": source}),
+        env={
+            "MAIN_CLAUDE_SESSION_ID": "sess-1",
+            "MNGR_AGENT_STATE_DIR": str(state_dir),
+            "MNGR_HOST_DIR": str(host_dir),
+            "PATH": os.environ.get("PATH", ""),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"hook failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+
+    marker_was_cleared = not active_marker.exists()
+    assert marker_was_cleared == should_clear, (
+        f"source={source!r}: expected active marker "
+        f"{'cleared' if should_clear else 'kept'}, but it was "
+        f"{'absent' if marker_was_cleared else 'present'}"
+    )
+
+    activity_log = host_dir / "events" / "mngr" / "activity" / "events.jsonl"
+    # An activity event is emitted only when the markers are actually reset, so
+    # `mngr observe` re-fetches the now-WAITING state promptly.
+    assert activity_log.exists() == should_clear
+
+    # The restart-boundary marker is recorded only on a fresh (startup/resume)
+    # process, never on a mid-turn compaction/clear.
+    process_started_marker = state_dir / "claude_process_started"
+    assert process_started_marker.exists() == should_clear
 
 
 def test_build_readiness_hooks_config_all_commands_guard_on_main_session() -> None:
@@ -1696,13 +1783,14 @@ def test_on_before_provisioning_shared_mode_raises_for_remote_host(
         agent.on_before_provisioning(host=remote_host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_provisioning_shared_mode_raises_when_env_unset(
+def test_on_before_provisioning_shared_mode_passes_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning raises."""
+    """With use_env_config_dir=True and $CLAUDE_CONFIG_DIR unset, on_before_provisioning falls
+    back to ``~/.claude/`` and does not raise (it's the "don't touch the config" path)."""
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, host = make_claude_agent(
         local_provider,
@@ -1713,8 +1801,8 @@ def test_on_before_provisioning_shared_mode_raises_when_env_unset(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+    # Should not raise.
+    agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
 
 def test_on_destroy_removes_trust(
@@ -1779,11 +1867,20 @@ def _populate_session_files(agent: ClaudeAgent) -> dict[str, Path]:
     }
 
 
+def _preserved_dir_for_agent(agent: ClaudeAgent, mngr_ctx: MngrContext) -> Path:
+    """Return the local preserved-files dir for an agent under the new mirrored layout."""
+    return get_local_preserved_agent_dir(mngr_ctx, agent.name, agent.id)
+
+
 @pytest.mark.rsync
 def test_on_destroy_preserves_session_files(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_destroy should preserve session files when preserve_sessions_on_destroy is True."""
+    """on_destroy should preserve session files when preserve_sessions_on_destroy is True.
+
+    Files land at the new mirrored layout under <local_host_dir>/preserved/<name>--<id>/,
+    matching the agent state directory structure verbatim.
+    """
     agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=True)
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
     files = _populate_session_files(agent)
@@ -1791,27 +1888,27 @@ def test_on_destroy_preserves_session_files(
 
     agent.on_destroy(host)
 
-    dest_dir = _get_preserved_sessions_dir(agent)
+    dest_dir = _preserved_dir_for_agent(agent, temp_mngr_ctx)
     assert dest_dir.exists()
 
-    # Session JSONL files should be preserved (copy_directory copies the projects/ dir)
-    preserved_projects = dest_dir / "projects"
+    # Session JSONL files preserved at the mirrored config-dir path.
+    preserved_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
     assert preserved_projects.exists()
     preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
     assert len(preserved_session_files) == 1
     assert preserved_session_files[0].read_text() == files["session_file"].read_text()
 
-    # Raw transcript dir should be preserved (copy_directory copies the directory)
-    preserved_raw_transcript = dest_dir / "raw_transcript" / "events.jsonl"
+    # Raw transcript dir preserved at logs/claude_transcript.
+    preserved_raw_transcript = dest_dir / "logs" / "claude_transcript" / "events.jsonl"
     assert preserved_raw_transcript.exists()
     assert preserved_raw_transcript.read_text() == '{"type":"message"}\n'
 
-    # Common transcript dir should be preserved
-    preserved_common_transcript = dest_dir / "common_transcript" / "events.jsonl"
+    # Common transcript dir preserved at events/claude/common_transcript.
+    preserved_common_transcript = dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
     assert preserved_common_transcript.exists()
     assert preserved_common_transcript.read_text() == '{"type":"user_message","text":"hello"}\n'
 
-    # Session history should be preserved (single file copy)
+    # Session history preserved as a single file at the top level.
     preserved_history = dest_dir / "claude_session_id_history"
     assert preserved_history.exists()
     assert preserved_history.read_text() == "abc123 create\n"
@@ -1828,21 +1925,22 @@ def test_on_destroy_skips_preservation_when_disabled(
 
     agent.on_destroy(host)
 
-    dest_dir = _get_preserved_sessions_dir(agent)
+    dest_dir = _preserved_dir_for_agent(agent, temp_mngr_ctx)
     assert not dest_dir.exists()
 
 
 def test_on_destroy_handles_no_session_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """on_destroy should not create a preserved_sessions dir when there is no session data."""
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    """on_destroy should not create a preserved dir when there is no session data."""
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
     _write_mngr_trust_entry(agent.work_dir)
 
     # No session files populated -- just destroy
     agent.on_destroy(host)
 
-    dest_dir = _get_preserved_sessions_dir(agent)
+    dest_dir = _preserved_dir_for_agent(agent, temp_mngr_ctx)
     assert not dest_dir.exists()
 
 
@@ -1918,7 +2016,8 @@ def test_preserve_session_files_partial_data(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """Preservation should work when only some session data exists (e.g., only raw transcript)."""
-    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+    agent_config = ClaudeAgentConfig(check_installation=False, preserve_sessions_on_destroy=True)
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx, agent_config=agent_config)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1927,13 +2026,13 @@ def test_preserve_session_files_partial_data(
     transcript_dir.mkdir(parents=True, exist_ok=True)
     (transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
 
-    _preserve_session_files(agent, host)
+    agent.on_destroy(host)
 
-    dest_dir = _get_preserved_sessions_dir(agent)
+    dest_dir = _preserved_dir_for_agent(agent, temp_mngr_ctx)
     assert dest_dir.exists()
-    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
-    assert not (dest_dir / "projects").exists()
-    assert not (dest_dir / "common_transcript").exists()
+    assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
+    assert not (dest_dir / "events" / "claude" / "common_transcript").exists()
     assert not (dest_dir / "claude_session_id_history").exists()
 
 
@@ -1944,11 +2043,11 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In use_env_config_dir mode, _preserve_session_files must NOT copy the
-    user's $CLAUDE_CONFIG_DIR/projects/ directory -- that directory holds the
-    user's full cross-project session history and is not deleted with the
-    agent state. Transcripts and history (under the agent state dir) are
-    still preserved.
+    """In use_env_config_dir mode, preservation must NOT copy the per-agent
+    plugin/claude/anthropic/projects directory -- in shared mode the projects
+    live in the user's persistent $CLAUDE_CONFIG_DIR (not under the agent state
+    dir) and hold the user's full cross-project session history. Transcripts and
+    history (under the agent state dir) are still preserved.
     """
     shared_dir = tmp_path / "shared"
     shared_dir.mkdir()
@@ -1957,17 +2056,19 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
         local_provider,
         tmp_path,
         temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+        agent_config=ClaudeAgentConfig(
+            check_installation=False, use_env_config_dir=True, preserve_sessions_on_destroy=True
+        ),
     )
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    # Populate the shared projects dir with an "unrelated" project sub-dir
-    # that, if naively copied, would leak the user's other-project sessions
-    # into the preserved-sessions store.
-    unrelated_project = shared_dir / "projects" / "-Users-someone-other-project"
-    unrelated_project.mkdir(parents=True)
-    (unrelated_project / "deadbeef.jsonl").write_text('{"private":"data"}\n')
+    # Populate a projects dir under the agent state dir. In shared mode this is
+    # NOT one of the declared preserved items, so it must be ignored even if it
+    # exists on disk (the real projects dir lives in the shared config dir).
+    projects_under_state = agent_dir / "plugin" / "claude" / "anthropic" / "projects" / "-Users-someone-other"
+    projects_under_state.mkdir(parents=True)
+    (projects_under_state / "deadbeef.jsonl").write_text('{"private":"data"}\n')
 
     # Populate the per-agent transcript + history (these live under the agent
     # state dir, so they DO need preservation regardless of shared mode).
@@ -1977,14 +2078,14 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
     history_file = agent_dir / "claude_session_id_history"
     history_file.write_text("abc123 create\n")
 
-    _preserve_session_files(agent, host)
+    agent.on_destroy(host)
 
-    dest_dir = _get_preserved_sessions_dir(agent)
+    dest_dir = _preserved_dir_for_agent(agent, temp_mngr_ctx)
     assert dest_dir.exists()
-    # Projects dir must NOT be preserved (it would contain unrelated user data).
-    assert not (dest_dir / "projects").exists()
+    # Projects dir must NOT be preserved in shared mode.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
     # Transcript and history must still be preserved.
-    assert (dest_dir / "raw_transcript" / "events.jsonl").read_text() == '{"type":"message"}\n'
+    assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").read_text() == '{"type":"message"}\n'
     assert (dest_dir / "claude_session_id_history").read_text() == "abc123 create\n"
 
 
@@ -3137,17 +3238,17 @@ def test_register_cli_options_returns_none_for_other_commands() -> None:
 # =============================================================================
 
 
-def test_on_before_create_skips_when_no_adopt_session() -> None:
+def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should return None when adopt_session is not in plugin_data."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(agent_type=AgentTypeName("claude")),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    assert on_before_create(args=args) is None
+    assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session() -> None:
+def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should pass when --adopt-session is used with a claude agent."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3157,11 +3258,11 @@ def test_on_before_create_passes_with_adopt_session() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    result = on_before_create(args=args)
+    result = on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
     assert result is None
 
 
-def test_on_before_create_rejects_non_claude_agent_type() -> None:
+def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should raise UserInputError for non-claude agent types."""
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
@@ -3171,12 +3272,39 @@ def test_on_before_create_rejects_non_claude_agent_type() -> None:
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
-    with pytest.raises(UserInputError, match="--adopt-session can only be used with the claude agent type"):
-        on_before_create(args=args)
+    with pytest.raises(UserInputError, match="--adopt-session can only be used with a Claude agent type"):
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should accept a config-defined subtype whose parent_type
+    chain reaches claude (e.g. a ``write-plus`` template), not just the literal
+    ``claude`` type name. This is the centralized "is a claude agent" check via
+    resolve_agent_type, rather than a string comparison against "claude".
+    """
+    subtype = AgentTypeName("write-plus")
+    config_with_subtype = temp_mngr_ctx.config.model_copy_update(
+        to_update(
+            temp_mngr_ctx.config.field_ref().agent_types,
+            {subtype: AgentTypeConfig(parent_type=AgentTypeName("claude"))},
+        ),
+    )
+    mngr_ctx = temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
+    )
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=subtype,
+            plugin_data={"adopt_session": ("some-id",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    assert on_before_create(args=args, mngr_ctx=mngr_ctx) is None
 
 
 def test_on_before_create_rejects_adopt_session_with_clone_source(
-    local_provider: LocalProviderInstance, tmp_path: Path
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """on_before_create should raise UserInputError when both --adopt-session
     and a clone source (source_agent_state_location) are passed: each is its
@@ -3195,7 +3323,7 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
         create_work_dir=True,
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
-        on_before_create(args=args)
+        on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -4071,6 +4199,33 @@ def test_build_settings_json_local_context_no_flags() -> None:
 # =============================================================================
 
 
+def _make_offline_host_with_volume(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext
+) -> OfflineHostWithVolume:
+    """Build an OfflineHostWithVolume backed by the local provider's host_dir volume.
+
+    Uses the same ``make_readable_offline_host`` wrapping the providers use, so
+    the volume is the local provider's (rooted at host_dir). Agent state lives at
+    host_dir/agents/<id>/... and is read back through the HostFileReadInterface
+    exactly as on a real stopped host.
+    """
+    now = datetime.now(timezone.utc)
+    offline_host = OfflineHost(
+        id=local_provider.host_id,
+        certified_host_data=CertifiedHostData(
+            host_id=str(local_provider.host_id),
+            host_name="test-offline-host",
+            created_at=now,
+            updated_at=now,
+        ),
+        provider_instance=local_provider,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host = make_readable_offline_host(offline_host)
+    assert isinstance(host, OfflineHostWithVolume)
+    return host
+
+
 def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict[str, Path]:
     """Create fake session files on a volume-backed directory for testing volume-based preservation.
 
@@ -4110,36 +4265,41 @@ def _populate_volume_session_files(volume_root: Path, agent_id: AgentId) -> dict
     }
 
 
-def test_preserve_session_files_from_volume_all_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
-    """All 4 categories of session data are preserved from the volume."""
+def test_preserve_session_files_from_volume_all_data(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """All 4 categories of session data are preserved from a volume-backed offline host."""
     agent_id = AgentId.generate()
     agent_name = AgentName("test-vol-agent")
-    volume_root = tmp_path / "volume"
-    volume_root.mkdir()
+    host = _make_offline_host_with_volume(local_provider, temp_mngr_ctx)
 
-    files = _populate_volume_session_files(volume_root, agent_id)
-    volume = LocalVolume(root_path=volume_root)
-    agent_volume = volume.scoped(f"agents/{agent_id}")
+    files = _populate_volume_session_files(host.host_dir, agent_id)
 
-    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
+    preserve_agent_data(
+        _claude_preserved_items(is_shared_config=False),
+        host,
+        get_agent_state_dir_path(host.host_dir, agent_id),
+        get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id),
+        temp_mngr_ctx,
+    )
 
-    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
     assert dest_dir.exists()
 
-    # Session JSONL files
-    preserved_projects = dest_dir / "projects"
+    # Session JSONL files at the mirrored config-dir path.
+    preserved_projects = dest_dir / "plugin" / "claude" / "anthropic" / "projects"
     assert preserved_projects.exists()
     preserved_session_files = list(preserved_projects.rglob("*.jsonl"))
     assert len(preserved_session_files) == 1
     assert preserved_session_files[0].read_text() == files["session_file"].read_text()
 
     # Raw transcript
-    preserved_raw = dest_dir / "raw_transcript" / "events.jsonl"
+    preserved_raw = dest_dir / "logs" / "claude_transcript" / "events.jsonl"
     assert preserved_raw.exists()
     assert preserved_raw.read_text() == '{"type":"message"}\n'
 
     # Common transcript
-    preserved_common = dest_dir / "common_transcript" / "events.jsonl"
+    preserved_common = dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
     assert preserved_common.exists()
     assert preserved_common.read_text() == '{"type":"user_message","text":"hello"}\n'
 
@@ -4149,49 +4309,139 @@ def test_preserve_session_files_from_volume_all_data(tmp_path: Path, temp_mngr_c
     assert preserved_history.read_text() == "abc123 create\n"
 
 
-def test_preserve_session_files_from_volume_partial_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+def test_preserve_session_files_from_volume_partial_data(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
     """Preservation works when only some session data exists on the volume."""
     agent_id = AgentId.generate()
     agent_name = AgentName("test-vol-partial")
-    volume_root = tmp_path / "volume"
-    volume_root.mkdir()
+    host = _make_offline_host_with_volume(local_provider, temp_mngr_ctx)
 
     # Only create the raw transcript
-    agent_dir = volume_root / "agents" / str(agent_id)
+    agent_dir = host.host_dir / "agents" / str(agent_id)
     raw_transcript_dir = agent_dir / "logs" / "claude_transcript"
     raw_transcript_dir.mkdir(parents=True, exist_ok=True)
     (raw_transcript_dir / "events.jsonl").write_text('{"partial":"data"}\n')
 
-    volume = LocalVolume(root_path=volume_root)
-    agent_volume = volume.scoped(f"agents/{agent_id}")
+    preserve_agent_data(
+        _claude_preserved_items(is_shared_config=False),
+        host,
+        get_agent_state_dir_path(host.host_dir, agent_id),
+        get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id),
+        temp_mngr_ctx,
+    )
 
-    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
-
-    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
-    assert (dest_dir / "raw_transcript" / "events.jsonl").exists()
-    assert not (dest_dir / "projects").exists()
-    assert not (dest_dir / "common_transcript").exists()
-    # History file was not created, so _copy_volume_file_to_local logs a warning
-    # but does not create the dest file
+    dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
+    assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
+    assert not (dest_dir / "events" / "claude" / "common_transcript").exists()
+    # History file was not created on the volume, so it is skipped (no dest file).
     assert not (dest_dir / "claude_session_id_history").exists()
 
 
-def test_preserve_session_files_from_volume_no_data(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+def test_preserve_session_files_from_volume_no_data(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
     """Empty volume produces no errors and no preserved dir."""
     agent_id = AgentId.generate()
     agent_name = AgentName("test-vol-empty")
-    volume_root = tmp_path / "volume"
-    volume_root.mkdir()
+    host = _make_offline_host_with_volume(local_provider, temp_mngr_ctx)
     # Create the agent dir but leave it empty
-    (volume_root / "agents" / str(agent_id)).mkdir(parents=True, exist_ok=True)
+    (host.host_dir / "agents" / str(agent_id)).mkdir(parents=True, exist_ok=True)
 
-    volume = LocalVolume(root_path=volume_root)
-    agent_volume = volume.scoped(f"agents/{agent_id}")
+    preserve_agent_data(
+        _claude_preserved_items(is_shared_config=False),
+        host,
+        get_agent_state_dir_path(host.host_dir, agent_id),
+        get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id),
+        temp_mngr_ctx,
+    )
 
-    _preserve_session_files_from_volume(agent_volume, agent_name, agent_id, temp_mngr_ctx)
-
-    dest_dir = _get_preserved_sessions_dir_for(agent_name, agent_id, temp_mngr_ctx)
+    dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
     assert not dest_dir.exists()
+
+
+def _write_docker_agent_record(
+    host_id: HostId,
+    volume_root: Path,
+    agent_id: AgentId,
+    agent_name: AgentName,
+    *,
+    use_env_config_dir: bool,
+) -> None:
+    """Persist a Claude agent record so the offline host's discover_agents() returns it.
+
+    The docker host store reads agent records from ``host_state/<host_id>/*.json``
+    on its state volume (rooted at ``volume_root``).
+    """
+    record_dir = volume_root / "host_state" / str(host_id)
+    record_dir.mkdir(parents=True, exist_ok=True)
+    (record_dir / f"{agent_id}.json").write_text(
+        json.dumps(
+            {
+                "id": str(agent_id),
+                "name": str(agent_name),
+                "type": "claude",
+                "agent_config": {
+                    "preserve_sessions_on_destroy": True,
+                    "use_env_config_dir": use_env_config_dir,
+                },
+            }
+        )
+    )
+
+
+def _docker_host_volume_root(host_id: HostId, volume_root: Path) -> Path:
+    """Return the on-disk directory backing the host's file volume (its host_dir root)."""
+    vol_id = DockerProviderInstance._volume_id_for_host(host_id)
+    root = volume_root / "volumes" / str(vol_id)
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """The offline destroy hook honors use_env_config_dir: the per-agent ``projects``
+    dir is skipped (it lives in the shared $CLAUDE_CONFIG_DIR) while the transcripts
+    and history are still preserved.
+
+    Exercises ``on_before_host_destroy`` end-to-end -- the HostFileReadInterface
+    guard, discover_agents, the use_env_config_dir extraction from raw certified
+    data, and the preserve call -- rather than calling ``preserve_agent_data``
+    directly as the other offline tests do.
+    """
+    host_id = HostId("host-0000000000000000000000000000beef")
+    agent_id = AgentId.generate()
+    agent_name = AgentName("test-offline-hook")
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, use_env_config_dir=True)
+
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=str(host_id),
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+
+    # Populate the agent's on-volume state (under the host's file volume root),
+    # including the per-agent projects dir that shared-config mode must skip.
+    _populate_volume_session_files(_docker_host_volume_root(host_id, tmp_path), agent_id)
+
+    on_before_host_destroy(host, temp_mngr_ctx)
+
+    dest_dir = get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id)
+    # Transcripts and history are preserved...
+    assert (dest_dir / "logs" / "claude_transcript" / "events.jsonl").exists()
+    assert (dest_dir / "events" / "claude" / "common_transcript" / "events.jsonl").exists()
+    assert (dest_dir / "claude_session_id_history").exists()
+    # ...but the per-agent projects dir is skipped in use_env_config_dir mode.
+    assert not (dest_dir / "plugin" / "claude" / "anthropic" / "projects").exists()
 
 
 def test_should_preserve_sessions_true_for_claude_agent() -> None:
@@ -4258,7 +4508,7 @@ def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, tem
     # Only settings.json, no installed_plugins.json (as happens for local hosts)
     generated_files = {Path("settings.json"): '{"some": "setting"}'}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink and source file should both be untouched
     assert symlink.is_symlink()
@@ -4286,7 +4536,7 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     rewritten_content = '{"rewritten": true}'
     generated_files = {Path("plugins") / "known_marketplaces.json": rewritten_content}
 
-    _write_generated_files(host, config_dir, generated_files, temp_mngr_ctx)
+    _write_generated_files(host, config_dir, generated_files)
 
     # The symlink should be replaced with a regular file containing the rewritten content
     assert not symlink.is_symlink()
@@ -4327,7 +4577,7 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In shared mode, modify_env_vars leaves CLAUDE_CONFIG_DIR / ORIGINAL_CLAUDE_CONFIG_DIR
-    untouched so the agent inherits the parent shell's values."""
+    untouched so the agent inherits the parent shell's values, and adds no other env vars."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
     agent, host = make_claude_agent(
@@ -4340,33 +4590,8 @@ def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(
 
     agent.modify_env_vars(host, env_vars)
 
-    assert "CLAUDE_CONFIG_DIR" not in env_vars
-    assert "ORIGINAL_CLAUDE_CONFIG_DIR" not in env_vars
-    # Common transcript emission is independent of shared mode -- still set.
-    assert env_vars["MNGR_EMIT_COMMON_TRANSCRIPT"] == "1"
-
-
-def test_modify_env_vars_shared_mode_with_common_transcript_disabled(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In shared mode with emit_common_transcript=False, the env dict stays empty."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "shared"))
-    agent, host = make_claude_agent(
-        local_provider,
-        tmp_path,
-        temp_mngr_ctx,
-        agent_config=ClaudeAgentConfig(
-            check_installation=False, use_env_config_dir=True, emit_common_transcript=False
-        ),
-    )
-    env_vars: dict[str, str] = {}
-
-    agent.modify_env_vars(host, env_vars)
-
+    # In shared mode there's nothing to add: the transcript opt-out is
+    # gated at provisioning time (on-disk script presence), not via env var.
     assert env_vars == {}
 
 
@@ -4405,13 +4630,17 @@ def test_get_claude_config_dir_returns_shared_env_value_in_shared_mode(
     assert agent.get_claude_config_dir() == shared
 
 
-def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
+def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir raises."""
+    """In shared mode with $CLAUDE_CONFIG_DIR unset, get_claude_config_dir falls back
+    to ``~/.claude/`` (claude's own default), so ``use_env_config_dir=True`` effectively
+    means "don't touch the config dir at all -- inherit whatever the parent shell would
+    have used."
+    """
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     agent, _ = make_claude_agent(
         local_provider,
@@ -4420,8 +4649,7 @@ def test_get_claude_config_dir_raises_in_shared_mode_when_env_unset(
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
 
-    with pytest.raises(UserInputError, match="use_env_config_dir"):
-        agent.get_claude_config_dir()
+    assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
 # =============================================================================

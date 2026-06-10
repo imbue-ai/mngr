@@ -16,7 +16,10 @@ contains exactly two files: ``pid`` (single-line text) and
 ``output.log`` (combined stdout+stderr from the bash wrapper).
 :py:class:`DestroyingStatus` is computed from ``pid`` liveness +
 whether ``agent_id`` still appears in
-``MngrCliBackendResolver.list_known_workspace_ids()``:
+``MngrCliBackendResolver.list_active_workspace_ids()`` (which excludes
+agents whose host is in a terminal ``DESTROYED`` state, so a host that
+finished destroying counts as "gone" even while it lingers in discovery
+for its destroyed-host persistence window):
 
   - dir present + pid alive                  -> RUNNING
   - dir present + pid dead + agent gone      -> DONE   (caller deletes the dir)
@@ -78,7 +81,7 @@ class DestroyingRecord(FrozenModel):
     started_at: datetime = Field(description="Wall-clock time the destroy was started (directory mtime)")
     pid_alive: bool = Field(description="Whether the wrapper PID is still live")
     agent_in_resolver: bool = Field(
-        description="Whether the agent is still listed in MngrCliBackendResolver.list_known_workspace_ids()"
+        description="Whether the agent is still listed in MngrCliBackendResolver.list_active_workspace_ids()"
     )
     status: DestroyingStatus = Field(description="Derived status; see DestroyingStatus docstring")
     log_path: Path = Field(description="Absolute path to output.log for the detail page tail")
@@ -196,12 +199,15 @@ def _build_destroy_command(agent_id: AgentId, host_id: str | None, mngr_binary: 
     Without a host_id (lookup failed before spawn), falls back to
     single-agent destroy.
 
-    Lease release is intentionally NOT chained here. For imbue_cloud
-    agents the lease lifecycle is owned by
-    ``mngr_imbue_cloud.instance.delete_host``, called by mngr's GC after
-    the destroyed-host grace period. Eagerly chaining
-    ``mngr imbue_cloud hosts release`` from minds was duplicating that
-    responsibility in two places.
+    Lease release is not chained explicitly because ``mngr destroy`` now
+    handles it: when the last agent on a host is destroyed, ``mngr
+    destroy`` calls ``provider.destroy_host`` which (for ``imbue_cloud``)
+    wipes the on-VPS data and releases the lease back to the pool. The
+    destroyed-host grace period (``destroyed_host_persisted_seconds``)
+    then only retains historical state -- the cloud-side resources
+    (lease, VPS, btrfs subvolume, ...) are gone the moment this command
+    returns. The same chain runs again if ``mngr delete`` is called later
+    by GC; it's idempotent on an already-released lease.
     """
     if host_id is not None:
         # ``mngr list ... --ids`` writes one id per line; ``mngr destroy -f -`` reads
@@ -292,9 +298,11 @@ def read_destroying(
     """Read the on-disk record for a single agent's destroy, or None if no dir.
 
     ``agent_in_resolver`` is supplied by the caller (typically
-    ``agent_id in MngrCliBackendResolver.list_known_workspace_ids()``)
+    ``agent_id in MngrCliBackendResolver.list_active_workspace_ids()``)
     rather than fetched here so this module stays free of the resolver's
-    threading + locking shape. The status table:
+    threading + locking shape. A host that finished destroying is excluded
+    from that active set, so its destroy reads as DONE rather than FAILED.
+    The status table:
 
       - dir absent                                            -> None
       - dir present, pid alive                                -> RUNNING
@@ -338,7 +346,7 @@ def list_destroying(
     """Walk ``<paths.data_dir>/destroying/`` and return a record per agent_id.
 
     Used by the landing-page renderer. ``agent_ids_in_resolver`` is the
-    snapshot of ``MngrCliBackendResolver.list_known_workspace_ids()`` at
+    snapshot of ``MngrCliBackendResolver.list_active_workspace_ids()`` at
     render time so the same set is shared across every record's status
     derivation.
     """

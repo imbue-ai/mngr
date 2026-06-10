@@ -9,7 +9,7 @@ sandbox_project_root = "/code/mngr"
 # Run scripts/post-source-setup.sh after offload applies its thin diff
 # to the cached checkpoint image. See offload-modal.toml for the full
 # rationale. The script's frontend-build step (guarded by
-# `command -v npm`) catches changes to apps/minds_workspace_server/frontend
+# `command -v npm`) catches changes to apps/system_interface/frontend
 # in the cached release image without invalidating the checkpoint.
 post_patch_cmd = "bash scripts/post-source-setup.sh"
 
@@ -60,7 +60,7 @@ retry_count = 4
 # `test-docker-release` CI job on a GitHub runner with a real Docker daemon,
 # since Docker-in-Docker under gVisor is too flaky (dockerd startup races,
 # intermittent container networking). Non-docker release tests run here.
-filters = "-m 'release and not docker and not docker_sdk'"
+filters = "-m 'release and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-release.jsonl"

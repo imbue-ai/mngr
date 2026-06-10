@@ -1,12 +1,12 @@
 import json
 from pathlib import Path
 
-from imbue.minds.desktop_client.request_events import LatchkeyPermissionRequestEvent
+from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import append_response_event
-from imbue.minds.desktop_client.request_events import create_latchkey_permission_request_event
+from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import create_request_response_event
 from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -27,7 +27,7 @@ def test_inbox_empty_by_default() -> None:
 
 def test_inbox_add_request() -> None:
     """Adding a request makes it appear as pending."""
-    event = create_latchkey_permission_request_event(
+    event = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
         rationale="post status updates",
@@ -38,10 +38,43 @@ def test_inbox_add_request() -> None:
     assert pending[0].agent_id == "agent-1"
 
 
+def test_is_request_resolved_tracks_responses() -> None:
+    """A request is unresolved until a matching response is recorded.
+
+    The request itself lingers in the append-only log after a grant/deny,
+    so ``get_request_by_id`` still finds it; ``is_request_resolved`` is what
+    distinguishes a still-actionable request from a completed one.
+    """
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="post status updates",
+    )
+    inbox = RequestInbox().add_request(event)
+    assert inbox.is_request_resolved(str(event.event_id)) is False
+    assert inbox.is_request_resolved("never-existed") is False
+
+    resolved = inbox.add_response(
+        create_request_response_event(
+            request_event_id=str(event.event_id),
+            status=RequestStatus.GRANTED,
+            agent_id="agent-1",
+            request_type=event.request_type,
+            scope="slack-api",
+        )
+    )
+    # The request still exists, but is now resolved and no longer pending.
+    assert resolved.get_request_by_id(str(event.event_id)) is not None
+    assert resolved.is_request_resolved(str(event.event_id)) is True
+    assert resolved.get_pending_count() == 0
+
+
 def test_inbox_response_only_affects_matched_request() -> None:
     """A response only removes the request it references, not others."""
-    event1 = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r1")
-    event2 = create_latchkey_permission_request_event(agent_id="agent-1", scope="github-rest-api", rationale="r2")
+    event1 = create_latchkey_predefined_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r1")
+    event2 = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1", scope="github-rest-api", rationale="r2"
+    )
     response = create_request_response_event(
         request_event_id=str(event1.event_id),
         status=RequestStatus.DENIED,
@@ -52,13 +85,13 @@ def test_inbox_response_only_affects_matched_request() -> None:
     inbox = RequestInbox().add_request(event1).add_request(event2).add_response(response)
     pending = inbox.get_pending_requests()
     assert len(pending) == 1
-    assert isinstance(pending[0], LatchkeyPermissionRequestEvent)
+    assert isinstance(pending[0], LatchkeyPredefinedPermissionRequestEvent)
     assert pending[0].scope == "github-rest-api"
 
 
 def test_inbox_get_request_by_id() -> None:
     """Can find a request by its event_id."""
-    event = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
+    event = create_latchkey_predefined_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
     inbox = RequestInbox().add_request(event)
     found = inbox.get_request_by_id(str(event.event_id))
     assert found is not None
@@ -87,7 +120,7 @@ def test_write_and_load_response_events(tmp_path: Path) -> None:
 def test_write_request_event_to_file(tmp_path: Path) -> None:
     """Request events can be written to a file."""
     events_file = tmp_path / "events" / "requests" / "events.jsonl"
-    event = create_latchkey_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
+    event = create_latchkey_predefined_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r")
     write_request_event_to_file(events_file, event)
 
     lines = events_file.read_text().strip().splitlines()
@@ -143,8 +176,8 @@ def test_load_response_events_drops_legacy_service_name_field(tmp_path: Path) ->
     assert loaded[0].scope is None
 
 
-def test_create_latchkey_permission_request_event_populates_all_fields() -> None:
-    event = create_latchkey_permission_request_event(
+def test_create_latchkey_predefined_permission_request_event_populates_all_fields() -> None:
+    event = create_latchkey_predefined_permission_request_event(
         agent_id="agent-abc",
         scope="slack-api",
         rationale="I need to read the team channel to summarize today's discussion.",
@@ -159,7 +192,7 @@ def test_create_latchkey_permission_request_event_populates_all_fields() -> None
 
 
 def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
-    event = create_latchkey_permission_request_event(
+    event = create_latchkey_predefined_permission_request_event(
         agent_id="agent-xyz",
         scope="github-rest-api",
         rationale="Need to open a PR.",
@@ -168,18 +201,24 @@ def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
     line = json.dumps(event.model_dump(mode="json"))
     parsed = parse_request_event(line)
 
-    assert isinstance(parsed, LatchkeyPermissionRequestEvent)
+    assert isinstance(parsed, LatchkeyPredefinedPermissionRequestEvent)
     assert parsed.scope == "github-rest-api"
     assert parsed.rationale == "Need to open a PR."
 
 
-def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
-    first = create_latchkey_permission_request_event(
+def test_inbox_keeps_distinct_requests_for_same_scope() -> None:
+    """Two distinct requests for the same scope both stay pending.
+
+    Requests are keyed by ``event_id``, so identical-looking requests
+    (same agent, scope, permissions) are each shown as their own card
+    rather than collapsed into one.
+    """
+    first = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
         rationale="first",
     )
-    second = create_latchkey_permission_request_event(
+    second = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
         rationale="second",
@@ -188,18 +227,31 @@ def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
     inbox = RequestInbox().add_request(first).add_request(second)
     pending = inbox.get_pending_requests()
 
+    assert {str(req.event_id) for req in pending} == {str(first.event_id), str(second.event_id)}
+
+
+def test_inbox_collapses_redelivered_request_by_event_id() -> None:
+    """Re-adding the same request (same ``event_id``) does not duplicate it."""
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="summary",
+    )
+
+    inbox = RequestInbox().add_request(request).add_request(request)
+    pending = inbox.get_pending_requests()
+
     assert len(pending) == 1
-    assert isinstance(pending[0], LatchkeyPermissionRequestEvent)
-    assert pending[0].rationale == "second"
+    assert str(pending[0].event_id) == str(request.event_id)
 
 
 def test_inbox_treats_different_services_as_different_requests() -> None:
-    slack_request = create_latchkey_permission_request_event(
+    slack_request = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
         rationale="slack",
     )
-    github_request = create_latchkey_permission_request_event(
+    github_request = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="github-rest-api",
         rationale="github",
@@ -211,7 +263,7 @@ def test_inbox_treats_different_services_as_different_requests() -> None:
 
 
 def test_inbox_response_for_latchkey_permission_removes_from_pending() -> None:
-    request = create_latchkey_permission_request_event(
+    request = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
         rationale="summary",

@@ -10,15 +10,20 @@ from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import resolve_events_target
+from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
@@ -34,6 +39,26 @@ class TranscriptCliOptions(CommonCliOptions):
 
 
 _COMMON_TRANSCRIPT_SUFFIX = "common_transcript"
+
+
+def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> None:
+    """Raise UserInputError if the targeted agent's type does not implement HasCommonTranscriptMixin.
+
+    No-op for HostAddress targets; only agent-scoped lookups are validated here.
+    """
+    if not isinstance(address, AgentAddress):
+        return
+    _host_ref, agent_ref = find_one_agent(address, mngr_ctx)
+    agent_type = agent_ref.agent_type
+    if agent_type is None:
+        # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
+        return
+    agent_class = get_agent_class(str(agent_type))
+    if issubclass(agent_class, HasCommonTranscriptMixin):
+        return
+    raise UserInputError(
+        f"Agent '{agent_ref.agent_name}' has type '{agent_type}', which does not produce a common transcript."
+    )
 
 
 def _find_common_transcript_source(target: EventsTarget) -> str:
@@ -207,6 +232,9 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 
     if opts.head is not None and opts.tail is not None:
         raise UserInputError("Cannot specify both --head and --tail")
+
+    # Fail fast with a clear error when the agent type does not produce a common transcript.
+    _assert_agent_type_supports_transcripts(opts.target, mngr_ctx)
 
     # Resolve the target agent
     target = resolve_events_target(

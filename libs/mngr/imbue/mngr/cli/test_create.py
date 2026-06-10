@@ -19,6 +19,7 @@ from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.host import HostLocation
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
@@ -34,6 +35,8 @@ from imbue.mngr.utils.testing import wait_for_agent_session
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -294,7 +297,7 @@ def test_message_file_flag_reads_message_from_file(
         )
 
         wait_for(
-            lambda: message_content in capture_tmux_pane_contents(session_name),
+            lambda: message_content in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             timeout=15.0,
             error_message=f"Expected message '{message_content}' to appear in tmux pane output",
         )
@@ -386,7 +389,7 @@ def test_multiline_message_creates_file_and_pipes(
 
         for line in ["Line 1", "Line 2", "Line 3"]:
             wait_for(
-                lambda line=line: line in capture_tmux_pane_contents(session_name),
+                lambda line=line: line in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
                 timeout=15.0,
                 error_message=f"Expected line '{line}' to appear in tmux pane output",
             )
@@ -435,7 +438,7 @@ def test_single_line_message_uses_echo(
         )
 
         wait_for(
-            lambda: single_line_message in capture_tmux_pane_contents(session_name),
+            lambda: single_line_message in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             timeout=15.0,
             error_message=f"Expected message '{single_line_message}' to appear in tmux pane output",
         )
@@ -610,7 +613,7 @@ def test_edit_message_sends_edited_content(
         )
 
         wait_for(
-            lambda: edited_message in capture_tmux_pane_contents(session_name),
+            lambda: edited_message in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             error_message=f"Expected message '{edited_message}' to appear in tmux pane output",
         )
 
@@ -680,7 +683,7 @@ def test_edit_message_with_initial_content(
         )
 
         wait_for(
-            lambda: edited_message in capture_tmux_pane_contents(session_name),
+            lambda: edited_message in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             error_message=f"Expected message '{edited_message}' to appear in tmux pane output",
         )
 
@@ -738,7 +741,7 @@ def test_edit_message_empty_content_does_not_send(
 
         # Verify agent started (marker appears)
         wait_for(
-            lambda: marker_text in capture_tmux_pane_contents(session_name),
+            lambda: marker_text in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             error_message=f"Expected marker '{marker_text}' to appear in tmux pane output",
         )
 
@@ -766,6 +769,8 @@ def test_template_applies_values_from_config(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.mytemplate]
 ensure_clean = false
 """)
@@ -822,6 +827,8 @@ def test_template_cli_args_take_precedence(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.mytemplate]
 message = "template-message"
 ensure_clean = false
@@ -861,7 +868,7 @@ ensure_clean = false
 
         # CLI message should appear, not template message
         wait_for(
-            lambda: "cli-message" in capture_tmux_pane_contents(session_name),
+            lambda: "cli-message" in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             timeout=15.0,
             error_message="Expected CLI message 'cli-message' to appear in tmux pane output",
         )
@@ -884,6 +891,8 @@ def test_template_unknown_template_raises_error(
     mngr_dir.mkdir()
     settings_file = mngr_dir / "settings.toml"
     settings_file.write_text("""
+is_allowed_in_pytest = true
+
 [create_templates.existing]
 ensure_clean = false
 """)

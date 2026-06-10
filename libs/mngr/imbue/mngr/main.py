@@ -8,6 +8,7 @@ import pluggy
 import setproctitle
 from click_option_group import OptionGroup
 
+import imbue.mngr.cli.builtin_help_topics as builtin_help_topics_module
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
@@ -29,7 +30,10 @@ from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.cli.extras import extras
 from imbue.mngr.cli.gc import gc
+from imbue.mngr.cli.git import git_command
 from imbue.mngr.cli.help import help_command
+from imbue.mngr.cli.help import load_help_topics_from_plugins
+from imbue.mngr.cli.help import register_help_command_metadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.issue_reporting import handle_not_implemented_error
 from imbue.mngr.cli.issue_reporting import handle_unexpected_error
@@ -39,19 +43,18 @@ from imbue.mngr.cli.list import list_command
 from imbue.mngr.cli.message import message
 from imbue.mngr.cli.migrate import migrate
 from imbue.mngr.cli.observe import observe
+from imbue.mngr.cli.output_helpers import emit_error_event
 from imbue.mngr.cli.plugin import plugin as plugin_command
-from imbue.mngr.cli.provision import provision
-from imbue.mngr.cli.pull import pull
-from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.pre_readers import read_disabled_plugins
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.providers.registry import load_all_registries
@@ -110,11 +113,18 @@ class AliasAwareGroup(DefaultCommandGroup):
         except NotImplementedError as e:
             _call_on_error_hook(ctx, e)
             handle_not_implemented_error(e, is_interactive=ctx.meta.get("is_interactive"))
-        except (click.ClickException, click.Abort, click.exceptions.Exit, BaseMngrError, bdb.BdbQuit) as e:
+        except (click.Abort, click.exceptions.Exit, bdb.BdbQuit) as e:
+            # Control-flow exits (Ctrl-C, normal exit, debugger quit), not real
+            # errors -- run the hook but don't emit a structured error event.
             _call_on_error_hook(ctx, e)
+            raise
+        except (click.ClickException, MngrError) as e:
+            _call_on_error_hook(ctx, e)
+            emit_error_event(e, ctx.meta.get("output_format"))
             raise
         except Exception as e:
             _call_on_error_hook(ctx, e)
+            emit_error_event(e, ctx.meta.get("output_format"))
             if ctx.meta.get("is_error_reporting_enabled", False):
                 handle_unexpected_error(e, is_interactive=ctx.meta.get("is_interactive"))
             raise
@@ -293,8 +303,10 @@ def create_plugin_manager() -> pluggy.PluginManager:
     load_all_registries(pm)
     load_agents_from_plugins(pm)
 
-    # Wire up the agent type resolver so hosts can resolve agent types
-    # without directly importing from the agents layer
+    # Register mngr's built-in topics as a built-in plugin (like the backends/
+    # agents above). The register_help_topics hook is fired once at module
+    # import, not here (see load_help_topics_from_plugins).
+    pm.register(builtin_help_topics_module, name="builtin_help_topics")
 
     return pm
 
@@ -336,9 +348,8 @@ BUILTIN_COMMANDS: list[click.Command] = [
     events,
     connect,
     message,
-    provision,
-    pull,
-    push,
+    rsync_command,
+    git_command,
     rename,
     start,
     stop,
@@ -366,7 +377,6 @@ cli.add_command(message, name="msg")
 cli.add_command(list_command, name="ls")
 cli.add_command(connect, name="conn")
 cli.add_command(plugin_command, name="plug")
-cli.add_command(provision, name="prov")
 cli.add_command(limit, name="lim")
 cli.add_command(rename, name="mv")
 cli.add_command(snapshot, name="snap")
@@ -390,6 +400,13 @@ except ConfigParseError as e:
 
 for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
     apply_plugin_cli_options(cmd)
+
+# Populate the (process-global) topic registry now that the plugin manager is
+# fully built. At module scope -- not in create_plugin_manager, which can be
+# rebuilt (e.g. test resets) -- so it runs once per process. Then build the help
+# command's "Available Topics" metadata from the loaded registry.
+load_help_topics_from_plugins(get_or_create_plugin_manager())
+register_help_command_metadata()
 
 
 def _update_create_help_with_provider_args() -> None:

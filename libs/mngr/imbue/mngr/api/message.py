@@ -10,12 +10,12 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.cel_context import agent_to_cel_context
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
@@ -195,7 +195,7 @@ def _process_host_for_messaging(
 
             # Apply CEL filters if provided
             if compiled_include_filters or compiled_exclude_filters or not all_agents:
-                agent_context = _agent_to_cel_context(agent, str(host_ref.host_name), host_ref.provider_name)
+                agent_context = agent_to_cel_context(agent, str(host_ref.host_name), host_ref.provider_name)
                 is_included = apply_cel_filters_to_context(
                     context=agent_context,
                     include_filters=compiled_include_filters,
@@ -251,7 +251,7 @@ def _send_message_to_agent(
 ) -> None:
     """Send a message to a single agent.
 
-    Called from a worker thread. Known errors (BaseMngrError) are recorded in
+    Called from a worker thread. Known errors (MngrError) are recorded in
     `result`; in ABORT mode they are also re-raised so the ConcurrencyGroup
     propagates them.
     """
@@ -279,7 +279,7 @@ def _send_message_to_agent(
             result.successful_agents.append(agent_name)
         if on_success:
             on_success(agent_name)
-    except BaseMngrError as e:
+    except MngrError as e:
         error_msg = str(e)
         with result_lock:
             result.failed_agents.append((agent_name, error_msg))
@@ -287,18 +287,3 @@ def _send_message_to_agent(
             on_error(agent_name, error_msg)
         if error_behavior == ErrorBehavior.ABORT:
             raise MngrError(error_msg) from e
-
-
-def _agent_to_cel_context(agent: AgentInterface, host_name: str, provider_name: str) -> dict[str, Any]:
-    """Convert an agent to a CEL-friendly dict for filtering."""
-    return {
-        "id": str(agent.id),
-        "name": str(agent.name),
-        "type": str(agent.agent_type),
-        "state": agent.get_lifecycle_state().value,
-        "host": {
-            "id": str(agent.host_id),
-            "name": host_name,
-            "provider": provider_name,
-        },
-    }

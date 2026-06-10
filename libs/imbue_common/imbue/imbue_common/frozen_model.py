@@ -19,7 +19,7 @@ class FrozenModel(BaseModel):
 
     def field_ref(self) -> Self:
         """Return a proxy for type-safe field references with to_update()."""
-        return FieldProxy()  # type: ignore[return-value]
+        return FieldProxy()  # ty: ignore[invalid-return-type]
 
     def model_copy_update(self, *updates: tuple[str, Any]) -> Self:
         """Create an updated copy using type-safe to_update() pairs."""

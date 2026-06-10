@@ -324,6 +324,141 @@ mngr imbue_cloud keys litellm delete [OPTIONS] KEY_ID
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud bucket
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud bucket create
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket create [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--access` | choice (`read` &#x7C; `readwrite`) | Access scope for the default key minted with the bucket | `readwrite` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket list
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket info
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket info [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket destroy
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket destroy [OPTIONS] NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud bucket keys create
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys create [OPTIONS] BUCKET_NAME
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--alias` | text | Optional human-readable alias for the key | None |
+| `--access` | choice (`read` &#x7C; `readwrite`) | Access scope for the key | `readwrite` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys list
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys list [OPTIONS] [BUCKET_NAME]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud bucket keys destroy
+
+**Usage:**
+
+```text
+mngr imbue_cloud bucket keys destroy [OPTIONS] ACCESS_KEY_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud tunnels
 
 **Usage:**
@@ -519,11 +654,14 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of pool hosts to create | None |
+| `--region` | text | OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error. | None |
+| `--tag` | text | Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
 | `--attributes` | text | Lease-attributes JSON for the new pool rows (e.g. '{"version":"v1.2.3","cpus":2,"memory_gb":4}') | None |
 | `--workspace-dir` | path | Path to the template repo checkout | None |
 | `--management-public-key-file` | path | Path to the management SSH public key | None |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
+| `--no-recycle` | boolean | Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
 
 ## mngr imbue_cloud admin pool list
 
@@ -538,7 +676,7 @@ mngr imbue_cloud admin pool list [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 
 ## mngr imbue_cloud admin pool destroy
 
@@ -553,5 +691,134 @@ mngr imbue_cloud admin pool destroy [OPTIONS] POOL_HOST_ID
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--database-url` | text | Neon PostgreSQL direct connection string | None |
+| `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--force` | boolean | Drop the row even if status != 'released' | `False` |
+| `--skip-vps-cancel` | boolean | Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the VPS is already gone/cancelled -- otherwise the default path cancels it so no billing orphan is left behind. | `False` |
+
+## mngr imbue_cloud admin paid
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid domain
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid domain add
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain add [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid domain remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain remove [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid domain list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid domain list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--paid-only` | boolean | Only show currently-active (is_paid) domains. | `False` |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin paid email add
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email add [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email remove [OPTIONS] VALUE
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin paid email list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin paid email list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--paid-only` | boolean | Only show currently-active (is_paid) emails. | `False` |
+| `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
+| `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |

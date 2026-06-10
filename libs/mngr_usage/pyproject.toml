@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-usage"
-version = "0.1.0"
+version = "0.1.1"
 description = "mngr usage subcommand: agent-agnostic rolling-window quota / usage CLI (provider plugins implement the data side via the current_usage_snapshot hook)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.6",
+    "imbue-mngr==0.2.12",
     "click>=8.0",
     "click-option-group>=0.5.6",
     "pydantic>=2.0",
@@ -21,6 +21,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
 exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py"]
+
+# Ship the plugin's help-topic doc files inside the package so the topics it
+# contributes to `mngr help` work in a PyPI wheel install. plugin.py reads these
+# from imbue/mngr_usage/docs at runtime.
+[tool.hatch.build.targets.wheel.force-include]
+"docs" = "imbue/mngr_usage/docs"
 
 [tool.uv.sources]
 imbue-mngr = { workspace = true }

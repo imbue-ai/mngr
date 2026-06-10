@@ -17,7 +17,16 @@ from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
 
+# The in-test wait_for budget (15s for the session to appear) already exceeds
+# the global 10s pytest-timeout, so a slow sandbox can trip the ceiling before
+# the real work even fails. Real tmux session create/destroy is the point of
+# this test, so the workload cannot be shrunk; bumping the per-test timeout
+# gives room when the sandbox is slow, and offload still retries via
+# @pytest.mark.flaky if it slips further. Matches the precedent on
+# test_destroy_multiple_agents.
 @pytest.mark.tmux
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_single_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -327,12 +336,17 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
         assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
 
 
-# Flaky under heavy CI load: wait_for(tmux_session_exists(...)) calls a tmux
-# subprocess that can exceed the 10s pytest-timeout when sandboxes are
-# contended. Offload retries flaky tests automatically; the underlying
-# tmux-subprocess slowness should be addressed separately.
+# Flaky under heavy CI load: the multi-agent shape means twice the create and
+# destroy work, plus three wait_for(tmux_session_exists) polling loops that
+# call a tmux subprocess on every iteration. Under contention this can exceed
+# the global 10s pytest-timeout. The multi-agent behaviour is the point of
+# this test, so the workload itself cannot be shrunk; bumping the per-test
+# timeout gives the test enough room when the sandbox is slow, and offload
+# still retries via @pytest.mark.flaky if it slips further. Matches the
+# precedent on test_destroy_transfer_none_keeps_shared_worktree.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -548,8 +562,9 @@ def test_destroy_remove_created_branch_deletes_branch(
         )
 
 
-@pytest.mark.flaky
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_destroy_without_remove_created_branch_leaves_branch(
     cli_runner: CliRunner,
     temp_git_repo: Path,
@@ -801,8 +816,16 @@ def test_destroy_transfer_none_standalone_keeps_user_worktree(
         assert user_worktree.is_dir(), "user-owned worktree must survive --transfer=none destroy"
 
 
+# Flaky under heavy CI load: piping multiple agent names through stdin is the
+# main use case being verified here, so the two-agent shape is load-bearing
+# and cannot be shrunk. Under contention the global 10s pytest-timeout is too
+# tight for the create + wait + parallel destroy + wait pattern; bumping the
+# per-test timeout gives the test enough room when the sandbox is slow, and
+# offload still retries via @pytest.mark.flaky if it slips further. Matches
+# the precedent on test_destroy_transfer_none_keeps_shared_worktree.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_destroy_via_stdin(
     cli_runner: CliRunner,
     temp_work_dir: Path,

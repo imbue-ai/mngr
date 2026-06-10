@@ -9,11 +9,34 @@ repos:
         exclude: 'uv.lock'
 -   repo: local
     hooks:
+    -   id: uv-sync-pre-push
+#        Runs FIRST, before the uv-run-based hooks below (ruff/ty/regenerate-cli-docs/
+#        compile-style-guide). `uv run` does not install all workspace members on its own, so a push
+#        that merges origin/main and adds a new workspace member (or changes deps) would otherwise
+#        leave those hooks importing a member missing from the shared .venv and failing with
+#        ModuleNotFoundError. Syncing --all-packages first populates the env. Only runs when the push
+#        touches uv.lock or a pyproject.toml (a newly added member always adds its own pyproject.toml).
+        name: "Sync workspace packages before push (deps changed)"
+        entry: uv sync --all-packages
+        language: system
+        stages: [pre-push]
+        files: '(^|/)(uv\.lock|pyproject\.toml)$'
+        pass_filenames: false
     -   id: ruff
         name: "Python formatter + import sorter (ruff)"
         entry: bash -c 'uv run ruff check --fix --force-exclude --config pyproject.toml "$@" && uv run ruff format --force-exclude --config pyproject.toml "$@"' --
         language: system
         types: [python]
+    -   id: ty
+#        ty scans the whole uv workspace regardless of which files changed, so it does
+#        not take staged filenames (pass_filenames: false) and runs only at pre-push
+#        (a per-commit hook would add a fixed full-workspace scan to every commit).
+        name: "Python type checker (ty)"
+        entry: bash -c 'uv run ty check'
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
     -   id: regenerate-cli-docs
         name: "Regenerate CLI markdown docs"
         entry: bash -c 'uv run python scripts/make_cli_docs.py && git diff --quiet libs/mngr/docs/commands/ libs/mngr/README.md'
@@ -32,5 +55,15 @@ repos:
         entry: bash -c 'for dir in apps/* libs/*; do if [ -d "$dir" ] && [ ! -f "$dir/pyproject.toml" ]; then rm -rf "$dir"; fi; done'
         language: system
         stages: [post-checkout]
+        always_run: true
+        pass_filenames: false
+    -   id: mngr-shim-installed
+#        Enforces that the `mngr` on your PATH is the dev shim (scripts/mngr), so
+#        `mngr` -- and anything that shells out to it (e.g. minds) -- runs the
+#        checkout you are working in, not a stale global install. No opt-out: a
+#        misresolved `mngr` is always a bug. Run `just install-mngr-shim`.
+        name: "mngr dev shim is installed and on PATH"
+        entry: scripts/check_mngr_shim.sh
+        language: script
         always_run: true
         pass_filenames: false

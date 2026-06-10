@@ -15,7 +15,6 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import Permission
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 
@@ -97,22 +96,6 @@ def test_resolve_agent_type_with_custom_type_preserves_parent_specific_fields() 
 
     assert isinstance(resolved.agent_config, ClaudeAgentConfig)
     assert resolved.agent_config.sync_home_settings is True
-
-
-def test_resolve_agent_type_with_custom_type_overrides_permissions() -> None:
-    """Custom type permissions should override (replace) parent permissions."""
-    resolved = _resolve_custom_claude_type(
-        permissions=[Permission("github"), Permission("docker")],
-    )
-
-    assert resolved.agent_config.permissions == [Permission("github"), Permission("docker")]
-
-
-def test_resolve_agent_type_with_custom_type_empty_permissions_keeps_parent() -> None:
-    """Custom type with no permissions should keep the parent's default permissions."""
-    resolved = _resolve_custom_claude_type(cli_args=("--model", "opus"))
-
-    assert resolved.agent_config.permissions == []
 
 
 def test_resolve_agent_type_with_override_for_registered_type() -> None:

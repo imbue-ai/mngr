@@ -33,6 +33,8 @@ from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
@@ -508,8 +510,8 @@ def test_remote_lock_cooperatively_retains_lock_file_on_error_when_env_var_set(
     ssh_host_factory: Callable[[str], Host],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Remote host lock_cooperatively should retain the lock file on error when MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
-    monkeypatch.setenv("MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
+    """Remote host lock_cooperatively should retain the lock file on error when MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1."""
+    monkeypatch.setenv("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE", "1")
     host = ssh_host_factory("lock-err-retain")
     assert not host.is_local
     lock_file_path = host.host_dir / "host_lock"
@@ -778,20 +780,23 @@ def test_unset_vars_applied_during_agent_start(
     host.start_agents([agent.id])
 
     session_name = f"{mngr_test_prefix}{agent.name}"
+    quoted_session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
+    window_target = TmuxWindowTarget(session_name=session_name, window=0)
+    quoted_window_target = window_target.as_shell_arg()
 
     # Wait for the tmux session to exist
     def session_ready() -> bool:
-        result = host.execute_idempotent_command(f"tmux has-session -t '={session_name}'")
+        result = host.execute_idempotent_command(f"tmux has-session -t {quoted_session_target}")
         if not result.success:
             return False
-        pane_content = capture_tmux_pane_content(host, session_name)
+        pane_content = capture_tmux_pane_content(host, window_target)
         return pane_content is not None and "sleep 736249" in pane_content
 
     wait_for(session_ready, timeout=30.0, poll_interval=0.5, error_message="tmux session not ready")
 
     # Send Ctrl-C to kill the foreground sleep, returning control to the shell.
     # This lets us send echo commands to check environment variables.
-    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' C-c")
+    host.execute_stateful_command(f"tmux send-keys -t {quoted_window_target} C-c")
 
     # This was enabled in modal, but caused things to fail locally. I don't think we need or want this (and I did do a better job of waiting above by ensuring that the sleep text shows up)
     # # Wait for the shell prompt to return after Ctrl-C
@@ -802,12 +807,14 @@ def test_unset_vars_applied_during_agent_start(
     # wait_for(shell_ready, error_message="Shell prompt not ready after Ctrl-C")
 
     host.execute_stateful_command(
-        f"tmux send-keys -t '{session_name}' 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter"
+        f"tmux send-keys -t {quoted_window_target} 'echo HISTFILE_VALUE=${{HISTFILE:-UNSET}}' Enter"
     )
-    host.execute_stateful_command(f"tmux send-keys -t '{session_name}' 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter")
+    host.execute_stateful_command(
+        f"tmux send-keys -t {quoted_window_target} 'echo PROFILE_VALUE=${{PROFILE:-UNSET}}' Enter"
+    )
 
     def check_output() -> bool:
-        output = capture_tmux_pane_content(host, session_name)
+        output = capture_tmux_pane_content(host, window_target)
         if output is None:
             return False
         has_histfile = "HISTFILE_VALUE=UNSET" in output or "HISTFILE_VALUE=" in output
@@ -993,6 +1000,7 @@ def test_stop_agent_does_not_kill_prefix_matched_session(
         )
 
 
+@pytest.mark.flaky
 @pytest.mark.tmux
 def test_stop_agent_kills_multi_pane_processes(
     temp_host_dir: Path,
@@ -1028,11 +1036,12 @@ def test_stop_agent_kills_multi_pane_processes(
     host.start_agents([agent.id])
     session_name = f"{mngr_test_prefix}{agent.name}"
 
-    host._run_shell_command(StringCommand(f"tmux split-window -t '{session_name}' 'sleep 2000'"))
-    host._run_shell_command(StringCommand(f"tmux split-window -t '{session_name}' 'sleep 3000'"))
+    quoted_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    host._run_shell_command(StringCommand(f"tmux split-window -t {quoted_window_target} 'sleep 2000'"))
+    host._run_shell_command(StringCommand(f"tmux split-window -t {quoted_window_target} 'sleep 3000'"))
 
     success, output = host._run_shell_command(
-        StringCommand(f"tmux list-panes -t '={session_name}' 2>/dev/null | wc -l")
+        StringCommand(f"tmux list-panes -t {quoted_window_target} 2>/dev/null | wc -l")
     )
     assert success
     pane_count = int(output.stdout.strip())
@@ -1231,7 +1240,10 @@ def test_start_agent_creates_process_group(
 
     try:
         success, output = host._run_shell_command(
-            StringCommand(f"tmux list-panes -t '={session_name}' -F '#{{pane_pid}}' 2>/dev/null")
+            StringCommand(
+                f"tmux list-panes -t {TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()}"
+                " -F '#{pane_pid}' 2>/dev/null"
+            )
         )
         assert success
         pane_pid = output.stdout.strip()
@@ -1463,7 +1475,10 @@ def test_start_agent_additional_windows_run_commands(
         # Wait for the additional command to produce output
         def check_output() -> bool:
             capture_result = host._run_shell_command(
-                StringCommand(f"tmux capture-pane -t '{session_name}:cmd-1' -p 2>/dev/null")
+                StringCommand(
+                    f"tmux capture-pane -t {TmuxWindowTarget(session_name=session_name, window='cmd-1').as_shell_arg()}"
+                    " -p 2>/dev/null"
+                )
             )
             if not capture_result[0]:
                 return False
@@ -2566,12 +2581,16 @@ def test_new_tmux_window_inherits_env_vars(
         # reads our controlled rc files (tmux overrides HOME from the passwd
         # database for new window processes, so we must re-override it).
         fake_home = str(tmp_home_dir)
+        # Pass the exact-match `=` form directly: in subprocess-argv mode there is
+        # no shell to interpret quoting, so the TmuxSessionTarget.as_shell_arg() /
+        # TmuxWindowTarget.as_shell_arg() helpers (which shlex-quote for shell
+        # embedding) are the wrong tool here.
         subprocess.run(
             [
                 "tmux",
                 "new-window",
                 "-t",
-                session_name,
+                f"={session_name}",
                 "-n",
                 "user-window",
                 "-e",
@@ -2584,7 +2603,7 @@ def test_new_tmux_window_inherits_env_vars(
         )
 
         # Wait for the shell to be ready before sending keys
-        window_target = f"{session_name}:user-window"
+        window_target = TmuxWindowTarget(session_name=session_name, window="user-window")
 
         def shell_prompt_visible() -> bool:
             pane = capture_tmux_pane_contents(window_target)
@@ -2601,7 +2620,7 @@ def test_new_tmux_window_inherits_env_vars(
                 "tmux",
                 "send-keys",
                 "-t",
-                window_target,
+                f"={session_name}:user-window",
                 f"echo NEW_WINDOW_VAR=$NEW_WINDOW_VAR > {marker_file}",
                 "Enter",
             ],

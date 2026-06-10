@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -172,8 +175,192 @@ def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
     assert merged["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
 
 
+def test_generate_default_lima_yaml_bind_mount_mode_omits_additional_disks(tmp_path: Path) -> None:
+    """Today's default (is_host_data_volume_exposed=True equivalent): the YAML has
+    a 9p mount and no additionalDisks; the provisioning script does not contain
+    the host-data-disk block."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    config = generate_default_lima_yaml(volume_host_path=volume_path, host_dir="/mngr")
+    assert "additionalDisks" not in config
+    assert "mounts" in config and len(config["mounts"]) == 1
+    assert config["mounts"][0]["mountPoint"] == "/mngr"
+    script = config["provision"][0]["script"]
+    assert "/mnt/lima-" not in script
+    assert "ln -sfn" not in script
+
+
+def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: Path) -> None:
+    """When host_data_disk_name is set and volume_host_path is None, the YAML
+    omits the `mounts:` block entirely, attaches a btrfs additionalDisk with
+    format: true, and the provisioning script symlinks host_dir to Lima's
+    auto-mount path for that disk."""
+    del tmp_path
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+    )
+    assert "mounts" not in config
+    assert "additionalDisks" in config
+    assert len(config["additionalDisks"]) == 1
+    disk_entry = config["additionalDisks"][0]
+    assert disk_entry["name"] == "mngr-abc123-data"
+    assert disk_entry["format"] is True
+    assert disk_entry["fsType"] == "btrfs"
+    assert disk_entry["size"] == "100GiB"
+
+    script = config["provision"][0]["script"]
+    # The symlink target is the disk's canonical mount path.
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /mngr" in script
+    # We format + mount the disk ourselves (Lima can't on minimal images that lack
+    # mkfs.btrfs): btrfs-progs is installed, the disk is formatted, and mounted at
+    # the canonical path before host_dir is symlinked into it.
+    assert "btrfs-progs" in script
+    assert "mkfs.btrfs -f" in script
+    assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
+    # Opens the btrfs root for the Lima default non-root user (fresh mkfs.btrfs
+    # leaves the root dir owned by root:root).
+    assert "chmod 0777 /mnt/lima-mngr-abc123-data" in script
+    # No intermediate bind-mount or fstab manipulation -- those caused
+    # stacked-mount ordering quirks on reboot.
+    assert "mount --bind" not in script
+    assert "/etc/fstab" not in script
+
+
+def test_generate_default_lima_yaml_disk_name_without_size_raises(tmp_path: Path) -> None:
+    """host_data_disk_size is required whenever a disk name is set; the helper
+    raises MngrError rather than silently producing a malformed YAML."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    with pytest.raises(MngrError):
+        generate_default_lima_yaml(
+            volume_host_path=volume_path,
+            host_dir="/mngr",
+            host_data_disk_name="mngr-abc-data",
+            host_data_disk_size=None,
+        )
+
+
+def test_merge_lima_yaml_additional_disks_extends() -> None:
+    """A user --file YAML adding its own additionalDisks must not silently drop
+    mngr's btrfs host-data disk. _LIST_EXTEND_KEYS makes the merge concatenate
+    rather than replace."""
+    base = {"additionalDisks": [{"name": "mngr-host-data", "format": True, "fsType": "btrfs", "size": "100GiB"}]}
+    override = {"additionalDisks": [{"name": "user-extra", "format": True, "fsType": "ext4", "size": "20GiB"}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["additionalDisks"]) == 2
+    assert merged["additionalDisks"][0]["name"] == "mngr-host-data"
+    assert merged["additionalDisks"][1]["name"] == "user-extra"
+
+
 def test_parse_build_args_for_yaml_path() -> None:
     assert parse_build_args_for_yaml_path(("--file", "/path/to/config.yaml")) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--file=/path/to/config.yaml",)) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--other", "arg")) is None
     assert parse_build_args_for_yaml_path(()) is None
+
+
+def test_generate_docker_mode_lima_yaml_has_container_port_forward_and_no_mounts() -> None:
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_private_key_pem="PRIVKEY",
+        host_public_key_openssh="ssh-ed25519 AAAAPUB",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        is_docker_mode=True,
+        outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+        container_forward_guest_port=2222,
+        container_forward_host_port=49152,
+    )
+
+    # The container's sshd is forwarded out to the host's loopback, and the
+    # allow rule must come before the catch-all ignore rules so it wins.
+    forwards = config["portForwards"]
+    assert forwards[0] == {
+        "guestIP": "127.0.0.1",
+        "guestPortRange": [2222, 2222],
+        "hostIP": "127.0.0.1",
+        "hostPortRange": [49152, 49152],
+        "proto": "tcp",
+    }
+    assert forwards[1:] == _EXPECTED_DISABLED_PORT_FORWARDS
+
+    # Docker mode keeps the btrfs additional disk but never bind-mounts host_dir.
+    assert "mounts" not in config
+    assert config["additionalDisks"][0]["name"] == "mngr-abc-data"
+    assert config["additionalDisks"][0]["fsType"] == "btrfs"
+
+    # The provisioning script installs Docker + snapshot deps, authorizes the
+    # outer client key for root, and does NOT symlink host_dir into the VM.
+    script = config["provision"][0]["script"]
+    # Docker is installed from Docker's official apt repo at the pinned version,
+    # not Debian's unpinned docker.io package.
+    assert "docker.io" not in script
+    assert "docker-ce=5:29.5.1-1~debian.12~bookworm" in script
+    assert "download.docker.com" in script
+    assert "btrfs-progs" in script
+    assert "inotify-tools" in script
+    assert "ssh-ed25519 AAAAOUTER" in script
+    assert "PermitRootLogin prohibit-password" in script
+    assert "ln -sfn" not in script
+    # Docker mode also formats + mounts the btrfs data disk in-guest (Lima can't on
+    # minimal images), so the per-host subvolume can be created at the mount path.
+    assert "mkfs.btrfs -f" in script
+    assert "mountpoint -q /mnt/lima-mngr-abc-data" in script
+
+
+def test_generate_docker_mode_lima_yaml_omits_gvisor_install_by_default() -> None:
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_private_key_pem="PRIVKEY",
+        host_public_key_openssh="ssh-ed25519 AAAAPUB",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        is_docker_mode=True,
+        outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+        container_forward_guest_port=2222,
+        container_forward_host_port=49152,
+    )
+    script = config["provision"][0]["script"]
+    assert "runsc" not in script
+    assert "gvisor" not in script
+
+
+def test_generate_docker_mode_lima_yaml_includes_gvisor_install_when_requested() -> None:
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_private_key_pem="PRIVKEY",
+        host_public_key_openssh="ssh-ed25519 AAAAPUB",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        is_docker_mode=True,
+        outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+        container_forward_guest_port=2222,
+        container_forward_host_port=49152,
+        install_gvisor_runtime=True,
+    )
+    script = config["provision"][0]["script"]
+    # Installs runsc from gVisor's APT repo and registers it; guarded for idempotency.
+    assert "apt-get install -y runsc" in script
+    assert "gvisor.dev/archive.key" in script
+    assert "runsc install" in script
+    assert "docker info" in script
+    # gnupg is needed for `gpg --dearmor` on minimal images that lack it.
+    assert "gnupg" in script
+
+
+def test_generate_docker_mode_lima_yaml_requires_forward_ports() -> None:
+    with pytest.raises(MngrError):
+        generate_default_lima_yaml(
+            volume_host_path=None,
+            host_dir="/mngr",
+            is_docker_mode=True,
+            outer_authorized_public_key="ssh-ed25519 AAAAOUTER",
+            container_forward_guest_port=None,
+            container_forward_host_port=None,
+        )

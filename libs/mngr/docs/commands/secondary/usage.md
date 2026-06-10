@@ -82,7 +82,7 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options
@@ -92,6 +92,7 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
 | `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the per-mode aggregates (`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h). | None |
 | `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost lines (human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown for terseness; the per-mode cost lines and window lines are unchanged. | `False` |
+| `--preserved`, `--no-preserved` | boolean | Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). On by default so destroyed agents' spend still counts; pass --no-preserved to show only live agents. Preserved agents honor the same --provider/--project/--local/label filters. | `True` |
 
 ## mngr usage wait
 
@@ -173,6 +174,7 @@ mngr usage wait [OPTIONS]
 | `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
 | `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
 | `--provider` | text | Restrict to agents from the given provider(s) (repeatable, e.g. --provider local). | None |
+| `--preserved`, `--no-preserved` | boolean | Include usage preserved from destroyed agents when evaluating the predicate. On by default; pass --no-preserved to consider only live agents. | `True` |
 
 ## Common
 
@@ -187,7 +189,7 @@ mngr usage wait [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 

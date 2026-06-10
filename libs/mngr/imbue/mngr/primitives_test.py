@@ -15,7 +15,6 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidName
-from imbue.mngr.primitives import Permission
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import default_branch_name
 
@@ -113,18 +112,6 @@ def test_discovered_agent_start_on_boot_defaults_to_false() -> None:
     """start_on_boot should return False when not in certified_data."""
     ref = _make_discovered_agent()
     assert ref.start_on_boot is False
-
-
-def test_discovered_agent_permissions_returns_empty_when_missing() -> None:
-    """permissions should return empty tuple when not in certified_data."""
-    ref = _make_discovered_agent()
-    assert ref.permissions == ()
-
-
-def test_discovered_agent_permissions_returns_values() -> None:
-    """permissions should return Permission tuple from certified_data."""
-    ref = _make_discovered_agent({"permissions": ["read", "write"]})
-    assert ref.permissions == (Permission("read"), Permission("write"))
 
 
 def test_discovered_agent_labels_returns_empty_when_missing() -> None:

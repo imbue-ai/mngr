@@ -35,6 +35,7 @@ from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import info_span
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
@@ -65,7 +66,9 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "cloudflare",
     "neon",
     "pool-ssh",
-    "paid-accounts",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    "ovh",
 )
 
 # Placeholder key written when a Vault entry isn't populated yet. Modal
@@ -86,12 +89,31 @@ _MODAL_ENV_CREATE_TIMEOUT_SECONDS: Final[float] = 60.0
 CONNECTOR_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_CONNECTOR_MIN_CONTAINERS"
 LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_MIN_CONTAINERS"
 
+# Env-var names the deployed modal apps read at module load to set their
+# idle-before-scaledown window (seconds). Same lockstep contract as the
+# min-containers names above. ``0`` (the in-app default) means "use Modal's
+# own default scaledown window".
+CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_CONNECTOR_SCALEDOWN_WINDOW"
+LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: Final[str] = "MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW"
+
 # Env-var name the deployed modal apps read at module load to pick
 # which timestamped Modal Secret bundle to attach. Mirrors the same
 # constant in ``secret_lifecycle.py``; kept here (instead of importing
 # from there) because ``per_env_deploy`` predates that module and we
 # avoid the circular import.
 MINDS_DEPLOY_ID_ENV_VAR: Final[str] = "MINDS_DEPLOY_ID"
+
+# Map our ``DeployStrategy`` enum (whose member names match the
+# operator-facing ``--hard`` / ``--soft`` vocabulary) to the literal
+# argument values ``modal deploy --strategy`` expects on the CLI.
+# Modal calls the no-downtime variant ``rolling``; our matching enum
+# member is :attr:`DeployStrategy.ROLLOVER` (chosen so the operator
+# language "we deployed with the rollover strategy" reads naturally
+# alongside ``--soft``).
+_MODAL_STRATEGY_ARG_BY_ENUM: Final[dict[DeployStrategy, str]] = {
+    DeployStrategy.ROLLOVER: "rolling",
+    DeployStrategy.RECREATE: "recreate",
+}
 
 
 class ModalDeployError(MindError):
@@ -281,7 +303,9 @@ def deploy_litellm_proxy(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
+    strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the litellm-proxy app into ``modal_env`` for ``tier``.
@@ -305,6 +329,10 @@ def deploy_litellm_proxy(
     ``min_containers`` controls the deployed function's warm-pool size.
     Threaded into the subprocess env as ``MINDS_LITELLM_PROXY_MIN_CONTAINERS``
     so the modal app picks it up at module load.
+
+    ``scaledown_window`` is the idle-before-scaledown window (seconds);
+    threaded as ``MINDS_LITELLM_PROXY_SCALEDOWN_WINDOW``. ``0`` means
+    "use Modal's own default".
     """
     app_file = _litellm_app_file()
     with info_span(
@@ -320,14 +348,18 @@ def deploy_litellm_proxy(
             deploy_id=deploy_id,
             parent_cg=parent_cg,
         )
-    with info_span("modal deploy llm-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy llm-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=app_file,
             app_name=f"llm-{tier}",
             modal_env=modal_env,
             tier=tier,
             deploy_id=deploy_id,
-            extra_env={LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            strategy=strategy,
+            extra_env={
+                LITELLM_PROXY_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                LITELLM_PROXY_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 
@@ -383,7 +415,10 @@ def stop_modal_app(
     stopped" as success so re-running ``destroy`` after a failed first
     pass is safe. Any other non-zero exit raises :class:`ModalDeployError`.
     """
-    command = ["modal", "app", "stop", "--env", modal_env, app_name]
+    # ``-y`` skips Modal's interactive confirmation prompt; without it the
+    # command aborts with "no interactive terminal detected" whenever it runs
+    # without a TTY (auto-recover after a failed deploy, CI, background runs).
+    command = ["modal", "app", "stop", "-y", "--env", modal_env, app_name]
     cg = parent_cg.make_concurrency_group(name=f"modal-app-stop-{app_name}")
     with cg:
         result = cg.run_process_to_completion(
@@ -394,11 +429,12 @@ def stop_modal_app(
         )
     if result.returncode == 0:
         return
-    # Modal's "no such app" wording has shifted; both known variants
-    # contain "not found" or "already stopped". Treat either as a no-op
-    # so destroy stays idempotent.
+    # Modal's "no such app" wording has shifted across versions:
+    #   - older: "could not find a deployed app named '<name>' ..."
+    #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+    # Both invariant substrings handled below so destroy stays idempotent.
     message = (result.stderr + result.stdout).lower()
-    if "not found" in message or "already stopped" in message or "no such" in message:
+    if "not found" in message or "already stopped" in message or "no such" in message or "no app with name" in message:
         logger.info("`modal app stop {} --env {}`: app already stopped or missing.", app_name, modal_env)
         return
     stderr = result.stderr.strip() or result.stdout.strip()
@@ -412,7 +448,9 @@ def deploy_remote_service_connector(
     modal_env: str,
     tier: str,
     min_containers: int,
+    scaledown_window: int,
     deploy_id: str,
+    strategy: DeployStrategy,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     """``modal deploy`` the remote_service_connector app into ``modal_env`` for ``tier``.
@@ -420,21 +458,27 @@ def deploy_remote_service_connector(
     See :func:`deploy_litellm_proxy` for return-value semantics and the
     meaning of ``modal_env``. ``min_containers`` is threaded into the
     subprocess env as ``MINDS_CONNECTOR_MIN_CONTAINERS`` and consumed
-    by the modal app at module load.
+    by the modal app at module load. ``scaledown_window`` (idle seconds
+    before scaledown; ``0`` = Modal default) is threaded as
+    ``MINDS_CONNECTOR_SCALEDOWN_WINDOW``.
 
     ``deploy_id`` is threaded into the subprocess env as ``MINDS_DEPLOY_ID``
     so the deployed connector attaches to the matching ``<svc>-<tier>-<id>``
     Modal Secrets minted by this deploy. Missing the id at the app's module
     load is a hard failure (the app raises ``DeployIdMissingError``).
     """
-    with info_span("modal deploy rsc-{} into env {!r}", tier, modal_env):
+    with info_span("modal deploy rsc-{} into env {!r} (strategy={})", tier, modal_env, strategy.value):
         return _deploy_modal_app(
             app_file=_connector_app_file(),
             app_name=f"rsc-{tier}",
             modal_env=modal_env,
             tier=tier,
             deploy_id=deploy_id,
-            extra_env={CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers)},
+            strategy=strategy,
+            extra_env={
+                CONNECTOR_MIN_CONTAINERS_ENV_VAR: str(min_containers),
+                CONNECTOR_SCALEDOWN_WINDOW_ENV_VAR: str(scaledown_window),
+            },
             parent_cg=parent_cg,
         )
 
@@ -463,11 +507,17 @@ def _deploy_modal_app(
     modal_env: str,
     tier: str,
     deploy_id: str,
+    strategy: DeployStrategy,
     extra_env: dict[str, str] | None = None,
     parent_cg: ConcurrencyGroup,
 ) -> AnyUrl:
     if not app_file.is_file():
         raise RepoLayoutError(f"Modal app file not found: {app_file}")
+    # Modal's CLI calls the rollover strategy ``rolling`` and the
+    # recreate strategy ``recreate``. We use ``ROLLOVER`` in our own
+    # vocabulary (matches the operator-facing ``--soft`` flag) and
+    # only translate at the CLI boundary.
+    modal_strategy_arg = _MODAL_STRATEGY_ARG_BY_ENUM[strategy]
     command = [
         "modal",
         "deploy",
@@ -475,6 +525,8 @@ def _deploy_modal_app(
         app_name,
         "--env",
         modal_env,
+        "--strategy",
+        modal_strategy_arg,
         str(app_file),
     ]
     subprocess_env = _modal_subprocess_env()
@@ -591,14 +643,16 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
         )
     if result.returncode != 0:
         message = (result.stderr + result.stdout).lower()
-        # Modal CLI's "no such app" wording: empirically "could not find a
-        # deployed app named '<name>' in the '<env>' environment." Also
-        # handle older variants for forward-compat.
+        # Modal CLI's "no such app" wording has shifted across versions:
+        #   - older: "could not find a deployed app named '<name>' in the '<env>' environment."
+        #   - 1.4.x: "No App with name '<name>' found in the '<env>' environment."
+        # Both reduce to a few invariant substrings. Match defensively.
         if (
             "could not find" in message
             or "not found" in message
             or "no such" in message
             or "does not exist" in message
+            or "no app with name" in message
         ):
             return None
         stderr = result.stderr.strip() or result.stdout.strip()
@@ -623,7 +677,7 @@ def get_modal_app_latest_version(*, app_name: str, modal_env: str, parent_cg: Co
 
 
 def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
-    """``modal app rollback <app> <version> --env=<env>``.
+    """``modal app rollback <app> <version> --env=<env>`` + force-terminate prior containers.
 
     Re-deploys the version that was active at ``version``, including the
     env vars (notably ``MINDS_DEPLOY_ID``) captured at that deploy time
@@ -631,6 +685,18 @@ def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg
     ``<svc>-<tier>-<id>`` Modal Secrets minted under that prior deploy.
     Idempotent in the sense that re-running with the same target version
     is just a no-op redeploy.
+
+    Modal's ``app rollback`` CLI has no ``--strategy`` flag and always
+    uses rollover semantics: the new (rolled-back-spec) deployment goes
+    live while containers from the prior (broken) deploy keep serving
+    until they idle out. That is the wrong shape for ``minds env
+    recover`` -- by the time recover fires, we already know the prior
+    deploy was broken, so we want it gone ASAP, not gradually. We
+    follow the rollback with an immediate ``modal container stop`` of
+    every container belonging to this app; Modal sends SIGINT and
+    reschedules any in-flight inputs on cold-boots of the rolled-back
+    spec, so within seconds every served request is going to the
+    correct (rolled-back) code instead of the broken one.
     """
     command = ["modal", "app", "rollback", "--env", modal_env, app_name, version]
     cg = parent_cg.make_concurrency_group(name=f"modal-app-rollback-{app_name}")
@@ -646,6 +712,141 @@ def rollback_modal_app(*, app_name: str, version: str, modal_env: str, parent_cg
         raise ModalDeployError(
             f"`modal app rollback {app_name} {version} --env {modal_env}` failed (exit {result.returncode}): {stderr}"
         )
+
+    terminate_modal_app_containers(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
+
+
+def terminate_modal_app_containers(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> None:
+    """Force-terminate every running container for ``app_name`` in ``modal_env``.
+
+    Used by :func:`rollback_modal_app` to convert Modal's rollover-style
+    rollback into recreate-style behavior: after the rollback's new
+    function spec goes live, we still need to kill the prior deploy's
+    warm containers so the next request cold-boots into the rolled-back
+    code instead of the broken one.
+
+    Two-step: ``modal app list --json`` to resolve the app's id (the
+    ``modal container list --app-id`` filter requires an id, not a name),
+    then ``modal container list --app-id <id> --env <env> --json`` to
+    enumerate containers, then ``modal container stop -y <container-id>``
+    on each. Container stop sends SIGINT; Modal handles graceful drain +
+    reschedules any in-flight inputs to fresh cold-boots of the live
+    (rolled-back) spec.
+
+    Idempotent: an empty container list (everything already drained) is
+    a no-op. A missing app is treated as success (recover is called from
+    failure paths where the app may already have been stopped). Per-
+    container stop failures are logged but do not raise -- the
+    operator's recover-time priority is "no broken containers serving
+    traffic", not "every container stopped cleanly".
+    """
+    app_id = _find_modal_app_id(app_name=app_name, modal_env=modal_env, parent_cg=parent_cg)
+    if app_id is None:
+        logger.info(
+            "terminate_modal_app_containers: no app named {!r} in env {!r}; nothing to do.", app_name, modal_env
+        )
+        return
+
+    container_ids = _list_modal_app_container_ids(app_id=app_id, modal_env=modal_env, parent_cg=parent_cg)
+    if not container_ids:
+        logger.info("terminate_modal_app_containers: app {!r} has no running containers.", app_name)
+        return
+
+    logger.info(
+        "terminate_modal_app_containers: stopping {} container(s) for app {!r} in env {!r}",
+        len(container_ids),
+        app_name,
+        modal_env,
+    )
+    cg = parent_cg.make_concurrency_group(name=f"modal-container-stop-{app_name}")
+    with cg:
+        for container_id in container_ids:
+            stop_result = cg.run_process_to_completion(
+                command=["modal", "container", "stop", "-y", container_id],
+                timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+                is_checked_after=False,
+                env=_modal_subprocess_env(),
+            )
+            if stop_result.returncode != 0:
+                stderr = stop_result.stderr.strip() or stop_result.stdout.strip()
+                logger.warning(
+                    "modal container stop {} failed (exit {}): {}; continuing.",
+                    container_id,
+                    stop_result.returncode,
+                    stderr,
+                )
+
+
+def _find_modal_app_id(*, app_name: str, modal_env: str, parent_cg: ConcurrencyGroup) -> str | None:
+    """Resolve ``app_name`` to its Modal app id via ``modal app list --json``, or return None."""
+    cg = parent_cg.make_concurrency_group(name=f"modal-app-list-{app_name}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["modal", "app", "list", "--env", modal_env, "--json"],
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal app list --env {modal_env} --json` failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal app list --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        return None
+    # Modal's column names have shifted across versions; check the common shapes
+    # for both name and id. Skip stopped apps so we don't try to stop containers
+    # for an already-terminated app.
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name_value = row.get("Name") or row.get("name") or row.get("App")
+        state_value = (row.get("State") or row.get("state") or "").lower()
+        if name_value != app_name or "stop" in state_value:
+            continue
+        for id_key in ("App ID", "app_id", "AppID", "ID", "id"):
+            id_value = row.get(id_key)
+            if isinstance(id_value, str) and id_value:
+                return id_value
+    return None
+
+
+def _list_modal_app_container_ids(*, app_id: str, modal_env: str, parent_cg: ConcurrencyGroup) -> tuple[str, ...]:
+    """Return the container ids currently running for ``app_id`` in ``modal_env``."""
+    cg = parent_cg.make_concurrency_group(name=f"modal-container-list-{app_id}")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["modal", "container", "list", "--env", modal_env, "--app-id", app_id, "--json"],
+            timeout=_MODAL_SECRET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+            env=_modal_subprocess_env(),
+        )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ModalDeployError(
+            f"`modal container list --env {modal_env} --app-id {app_id} --json` "
+            f"failed (exit {result.returncode}): {stderr}"
+        )
+    try:
+        rows = json.loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ModalDeployError(f"`modal container list --json` returned non-JSON: {exc}") from exc
+    if not isinstance(rows, list):
+        return ()
+    ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for id_key in ("Container ID", "container_id", "ID", "id"):
+            value = row.get(id_key)
+            if isinstance(value, str) and value:
+                ids.append(value)
+                break
+    return tuple(ids)
 
 
 def per_env_secret_services() -> tuple[str, ...]:

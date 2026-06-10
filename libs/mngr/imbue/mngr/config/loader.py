@@ -1,24 +1,30 @@
 import os
+import re
+from collections.abc import Callable
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from typing import Final
 from typing import Sequence
+from typing import get_args
 from uuid import uuid4
 
 import pluggy
 from loguru import logger
 from pydantic import BaseModel
+from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
-from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -27,13 +33,20 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import StringDerivedTuple
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver import bare_key
+from imbue.mngr.config.key_resolver import is_extend_key
+from imbue.mngr.config.key_resolver import parse_scalar_value
+from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import get_user_config_path
-from imbue.mngr.config.pre_readers import load_local_config
-from imbue.mngr.config.pre_readers import load_project_config
+from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
+from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
@@ -50,25 +63,73 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.git_utils import find_git_worktree_root
 from imbue.mngr.utils.logging import LoggingConfig
 
-# Environment variable prefix for command config overrides.
-# Format: MNGR_COMMANDS_<COMMANDNAME>_<VARNAME>=<value>
-# Example: MNGR_COMMANDS_CREATE_NEW_BRANCH_PREFIX=agent/
+# Prefix and shape for dynamic ``MNGR__*`` env var overrides. Each
+# ``__``-separated segment after the prefix is lowercased and treated as a
+# normalized config key. A trailing ``__EXTEND`` segment is the operator suffix
+# documented in ``key_resolver.py``.
+_ENV_OVERRIDE_PREFIX: Final[str] = "MNGR__"
+_ENV_OVERRIDE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^MNGR__[A-Z0-9_]+(__[A-Z0-9_]+)*$")
+
+# Old-style ``MNGR_*`` env vars that remain accepted as documented aliases for
+# specific ``MngrConfig`` fields. Each entry maps the env var name to the dotted
+# config path it sets and a value parser. The synthesis step raises
+# ``ConfigParseError`` when both the alias and the canonical ``MNGR__*`` form
+# are set with different (parsed) values.
 #
-# IMPORTANT: Command names MUST be single words (no spaces, hyphens, or underscores).
-# This is because we use the first underscore after "MNGR_COMMANDS_" to separate
-# the command name from the parameter name. If command names contained underscores,
-# parsing would be ambiguous. For example, "MNGR_COMMANDS_FOO_BAR_BAZ" could be:
-#   - command="foo", param="bar_baz"
-#   - command="foo_bar", param="baz"
-#
-# Any future plugins that register custom commands must follow this single-word rule.
-_ENV_COMMANDS_PREFIX: Final[str] = "MNGR_COMMANDS_"
+# The value parser preserves each alias's historic value semantics:
+# ``MNGR_HEADLESS`` accepted "1"/"true"/"yes" as truthy long before the new
+# ``MNGR__*`` scheme, so it keeps using ``parse_bool_env``. The string-valued
+# aliases (``MNGR_PREFIX``, ``MNGR_HOST_DIR``) are JSON-parsed-with-string-fallback
+# like every other ``MNGR__*`` value, since they were always plain strings.
+_PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
+    "MNGR_HEADLESS": ("headless", parse_bool_env),
+    "MNGR_PREFIX": ("prefix", parse_scalar_value),
+    "MNGR_HOST_DIR": ("default_host_dir", parse_scalar_value),
+}
+
+
+class _FileSettingsSource(FrozenModel):
+    """A TOML settings-file layer for narrowing diagnostics.
+
+    ``scope`` is the :class:`ConfigScope` the file belongs to (which is exactly
+    what ``mngr config set --scope`` accepts) and ``path`` is the resolved file
+    path. The human-readable label is derived from ``scope`` in
+    ``_describe_source`` rather than stored, so the two can't drift.
+    """
+
+    scope: ConfigScope
+    path: Path
+
+
+class _EnvSettingsSource(FrozenModel):
+    """The ``MNGR__*`` environment-variable layer: not a file, so it carries no
+    path and has no ``config set`` scope.
+    """
+
+
+# A settings layer the narrowing guard can attribute a value to. The loader only
+# ever deals with these two; ``--setting`` narrowing is a separate path
+# (``apply_settings_to_config``) that does not use this type.
+_SettingsSource = _FileSettingsSource | _EnvSettingsSource
+
+
+class _NarrowingViolation(FrozenModel):
+    """A single narrowing assignment, with both sides attributed.
+
+    ``assigned_by`` is the higher-precedence layer doing the (narrowing)
+    assignment; ``dropped_from`` is the lower-precedence layer whose value would
+    be silently dropped (``None`` only if no contributing layer could be
+    identified, which should not happen for a real violation).
+    """
+
+    key_path: str
+    assigned_by: _SettingsSource
+    dropped_from: _SettingsSource | None = None
 
 
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
-    context_dir: Path | None = None,
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
@@ -78,13 +139,27 @@ def load_config(
     """Load and merge configuration from all sources.
 
     Precedence (lowest to highest):
-    1. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    2. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    3. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    4. Environment variables (MNGR_ROOT_NAME, MNGR_PREFIX, MNGR_HOST_DIR)
-    5. CLI arguments (handled by caller)
+    1. Built-in MngrConfig defaults
+    2. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
+    3. Project config (.{root_name}/settings.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
+    4. Local config (.{root_name}/settings.local.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
+    5. MNGR__* env vars (each ``__``-separated segment after ``MNGR__`` maps to a dotted config
+       key; values are JSON-parsed with raw-string fallback) plus the preserved aliases
+       ``MNGR_PREFIX``, ``MNGR_HOST_DIR``, and ``MNGR_HEADLESS`` (synthesised into the same form
+       via _collect_env_overrides). See docs/concepts/environment_variables.md for the full surface.
+    6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
+    7. CLI arguments (handled by caller)
 
-    MNGR_ROOT_NAME is used to derive:
+    Note: the narrowing guard below runs over layers 2-5 (the config files and
+    env vars) only. It does NOT see the layer-6 ``--setting`` overrides, which
+    are merged afterwards in ``setup_command_context``. ``--setting`` cannot
+    fully resolve until this function has produced the config it extends against
+    (``__extend`` keys resolve against the loaded config), so it deliberately
+    runs after. Consequently ``allow_settings_key_assignment_narrowing`` can only
+    be opted into via a settings file or the ``MNGR__*`` env var, not via
+    ``--setting`` (see the error message and changelog).
+
+    MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
     2. Defaults for prefix and default_host_dir (if not set in config files)
 
@@ -125,42 +200,69 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load and merge config files in precedence order (user, project, local)
-    for raw in (
-        try_load_toml(get_user_config_path(profile_dir)),
-        load_project_config(context_dir, root_name, concurrency_group),
-        load_local_config(context_dir, root_name, concurrency_group),
-    ):
-        if raw is not None:
-            config = config.merge_with(
-                parse_config(
-                    raw, disabled_plugins=config_disabled_plugins, strict=strict, silent=silent_unknown_fields
-                )
-            )
+    # Read the user/project/local config layers (in precedence order) through
+    # read_config_layers -- the single chokepoint that applies the pytest config
+    # guard -- so a real (non-test) config can never be loaded here during a test
+    # run. The project root is resolved from the cwd's git worktree root (or
+    # MNGR_PROJECT_CONFIG_DIR). Each layer carries its resolved path and its
+    # ``config set --scope`` value so narrowing diagnostics can name the actual
+    # file rather than an opaque layer label.
+    project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
+    loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
-    # Apply environment variable overrides
-    prefix = os.environ.get("MNGR_PREFIX")
-    default_host_dir = os.environ.get("MNGR_HOST_DIR")
+    # Merge config files in precedence order (user, project, local). Narrowing
+    # violations -- a higher-precedence layer assigning over a non-empty aggregate
+    # value from a lower-precedence layer -- are collected as we go, then turned
+    # into a single error after all layers are merged (when the final
+    # ``allow_settings_key_assignment_narrowing`` resolves to False).
+    # ``processed_sources`` lets each violation be attributed to the specific
+    # lower-precedence layer whose value is being dropped.
+    narrowing_violations: list[_NarrowingViolation] = []
+    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    for scope, config_path, raw in loaded_layers:
+        file_source = _FileSettingsSource(scope=scope, path=config_path)
+        parsed_layer = _parse_config_with_extends(
+            raw,
+            base_config=config,
+            disabled_plugins=config_disabled_plugins,
+            strict=strict,
+            silent=silent_unknown_fields,
+        )
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, file_source, processed_sources))
+        config = config.merge_with(parsed_layer)
+        processed_sources.append((file_source, parsed_layer))
 
-    # Build a dict with non-None values for final validation
+    # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
+    # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
+    # shared key resolver so assign vs extend semantics match TOML and
+    # ``--setting``. Conflicts between an alias and its canonical ``MNGR__*``
+    # form raise ConfigParseError.
+    env_override_raw = _collect_env_overrides(os.environ)
+    if env_override_raw:
+        env_source = _EnvSettingsSource()
+        parsed_env_layer = _parse_config_with_extends(
+            env_override_raw,
+            base_config=config,
+            disabled_plugins=config_disabled_plugins,
+            strict=strict,
+            silent=silent_unknown_fields,
+        )
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
+        config = config.merge_with(parsed_env_layer)
+        processed_sources.append((env_source, parsed_env_layer))
+
+    # Raise on collected narrowing assignments unless the user has opted in.
+    # Done before further config_dict mutation so the error surfaces with the
+    # actual settings-file paths in the message.
+    if narrowing_violations and not config.allow_settings_key_assignment_narrowing:
+        raise _build_narrowing_error(narrowing_violations)
+
+    # Build a dict with non-None values for final validation.
     config_dict: dict[str, Any] = {}
-
-    # Apply env var overrides, or use merged values
-    if prefix is not None:
-        config_dict["prefix"] = prefix
-    elif config.prefix is not None:
+    if config.prefix is not None:
         config_dict["prefix"] = config.prefix
-    else:
-        # Neither env var nor config has prefix - will use pydantic default
-        pass
-
-    if default_host_dir is not None:
-        config_dict["default_host_dir"] = Path(default_host_dir)
-    elif config.default_host_dir is not None:
+    if config.default_host_dir is not None:
         config_dict["default_host_dir"] = config.default_host_dir
-    else:
-        # Neither env var nor config has default_host_dir - will use pydantic default
-        pass
 
     # Always include agent_types, providers, plugins, commands, and create_templates (they default to empty dicts)
     config_dict["agent_types"] = config.agent_types
@@ -168,16 +270,6 @@ def load_config(
     config_dict["plugins"] = config.plugins
     config_dict["commands"] = config.commands
     config_dict["create_templates"] = config.create_templates
-
-    # Apply environment variable overrides for commands
-    # Format: MNGR_COMMANDS_<COMMANDNAME>_<PARAMNAME>=<value>
-    # See _ENV_COMMANDS_PREFIX comment for details on the single-word command name requirement
-    env_command_overrides = _parse_command_env_vars(os.environ)
-    if env_command_overrides:
-        config_dict["commands"] = _merge_command_defaults(
-            config_dict["commands"],
-            env_command_overrides,
-        )
 
     # Apply CLI plugin overrides
     config_dict["plugins"], config_dict["disabled_plugins"] = _apply_plugin_overrides(
@@ -204,18 +296,15 @@ def load_config(
     config_dict["connect_command"] = config.connect_command
     config_dict["is_remote_agent_installation_allowed"] = config.is_remote_agent_installation_allowed
     config_dict["is_nested_tmux_allowed"] = config.is_nested_tmux_allowed
-    # Apply MNGR_HEADLESS env var override (env var > config file > default)
-    headless_env = os.environ.get("MNGR_HEADLESS")
-    if headless_env is not None:
-        config_dict["headless"] = parse_bool_env(headless_env)
-    else:
-        config_dict["headless"] = config.headless
+    config_dict["headless"] = config.headless
     config_dict["is_error_reporting_enabled"] = config.is_error_reporting_enabled
     config_dict["is_allowed_in_pytest"] = config.is_allowed_in_pytest
     config_dict["pre_command_scripts"] = config.pre_command_scripts
     config_dict["work_dir_extra_paths"] = config.work_dir_extra_paths
     config_dict["default_destroyed_host_persisted_seconds"] = config.default_destroyed_host_persisted_seconds
     config_dict["default_min_online_host_age_seconds"] = config.default_min_online_host_age_seconds
+    config_dict["agent_ready_timeout"] = config.agent_ready_timeout
+    config_dict["allow_settings_key_assignment_narrowing"] = config.allow_settings_key_assignment_narrowing
 
     # Allow plugins to modify config_dict before validation
     pm.hook.on_load_config(config_dict=config_dict)
@@ -223,35 +312,10 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # Check whether we're in pytest. The expected way to hit this branch is a
-    # poorly-scoped test whose subprocess mngr picked up the repo's
-    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
-    # at a tmp directory. The shared plugin test fixtures handle that
-    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
-    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
-    # setting is_allowed_in_pytest=True in the repo config (both dodge the
-    # guard without actually fixing the isolation).
-    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
-        if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
-            raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. "
-                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
-                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
-                "cannot mutate real mngr state."
-            )
-        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
-        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
-        # test_schedule_add.py's local-dev path intentionally runs against the
-        # developer's real ~/.mngr so the subprocess can pick up their Modal
-        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
-        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
-        # which rejects env names that don't match TEST_ENV_PATTERN during
-        # pytest -- that's the actual leak-prevention gate.
-
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
-    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
+    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
 
     # Return MngrContext containing both config and plugin manager
     return MngrContext(
@@ -299,6 +363,105 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
+def _collect_layer_narrowing(
+    base: MngrConfig,
+    parsed_layer: MngrConfig,
+    source: _SettingsSource,
+    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
+) -> list["_NarrowingViolation"]:
+    """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
+
+    ``source`` is the layer doing the assignment. The lower-precedence layer
+    whose value is dropped is attributed by re-running ``detect_settings_narrowing``
+    of ``parsed_layer`` against each already-merged layer: because the merge is
+    assign-by-default, the merged base value at any path equals the value written
+    by the highest-precedence layer that set it, so the highest-precedence prior
+    layer that ``parsed_layer`` narrows at a given path is the one whose value is
+    being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
+    field values directly) keeps the field traversal in one place -- the place the
+    ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
+    only if no contributing layer is found (should not happen for a real
+    violation, but keeps the diagnostic robust).
+    """
+    violation_paths = detect_settings_narrowing(base, parsed_layer)
+    if not violation_paths:
+        return []
+    # For each already-merged layer (highest precedence first), the set of paths
+    # where ``parsed_layer`` narrows that specific layer.
+    narrowed_paths_by_prior_source = [
+        (prior_source, set(detect_settings_narrowing(prior_layer, parsed_layer)))
+        for prior_source, prior_layer in reversed(processed_sources)
+    ]
+    violations: list[_NarrowingViolation] = []
+    for key_path in violation_paths:
+        dropped_from = next(
+            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
+            None,
+        )
+        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
+    return violations
+
+
+def _display_path(path: Path) -> str:
+    """Render ``path`` with the user's home directory contracted to ``~`` (e.g.
+    ``~/.mngr/profiles/<id>/settings.toml``), falling back to the absolute path
+    when it is not under home. Keeps the narrowing error readable and avoids
+    spelling out the full home path.
+    """
+    home = Path.home()
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home)}"
+    return str(path)
+
+
+def _describe_source(source: _SettingsSource) -> str:
+    """Render a settings layer for the narrowing error.
+
+    A TOML file layer is described as ``<scope> settings (<path>) [edit with:
+    mngr config set --scope <scope> ...]``; the ``MNGR__*`` env-var layer is
+    named as such.
+    """
+    match source:
+        case _FileSettingsSource(scope=scope, path=path):
+            scope_flag = scope.value.lower()
+            return (
+                f"{scope_flag} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope_flag} ...]"
+            )
+        case _EnvSettingsSource():
+            return "MNGR__* environment variables"
+
+
+def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:
+    """Construct the user-facing error raised when a higher-precedence layer
+    silently narrows a non-empty aggregate value.
+
+    For each offending key it names both sides -- the file/scope doing the
+    assignment and the file/scope whose value would be dropped -- then explains
+    how to opt in to the new assign-by-default semantics, points at the
+    ``__extend`` operator for additive opt-out, and warns that the safety net
+    itself is temporary.
+    """
+    detail_lines: list[str] = []
+    for violation in violations:
+        detail_lines.append(f"  {violation.key_path}")
+        detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
+        if violation.dropped_from is not None:
+            detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
+    return ConfigParseError(
+        "Settings narrowing detected: a higher-precedence settings layer would assign over "
+        "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
+        "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
+        "To opt into this assign-by-default behavior (and silence this error), set "
+        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
+        "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
+        'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
+        "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
+        "in a future version, and support for False may be removed entirely. Migrate now so "
+        "the eventual default flip is a no-op for your config."
+    )
+
+
 def resolve_strict_from_env() -> bool:
     """Return the strict policy implied by the MNGR_ALLOW_UNKNOWN_CONFIG env var.
 
@@ -315,25 +478,52 @@ def resolve_strict_from_env() -> bool:
 def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     """Replace hyphens with underscores in dict keys.
 
-    TOML conventionally uses hyphens (`pass-env`), but Python dataclasses use
-    underscores (`pass_env`). Normalize so both forms map to the same field.
-    Raises ConfigParseError if normalization would create a duplicate key.
+    TOML conventionally uses hyphens (``pass-env``), but Python dataclasses use
+    underscores (``pass_env``). Normalize so both forms map to the same field.
+
+    Also enforces two invariants that keep ``MNGR__*`` env-var lookups
+    unambiguous and round-trippable with TOML:
+
+    - Field names cannot themselves contain ``__`` (except as the trailing
+      ``__extend`` operator suffix). Two consecutive underscores in a field
+      name would collide with the segment separator in env-var form.
+    - Sibling keys that lowercase-collapse to the same env-var segment form
+      (e.g. ``MyAgent`` and ``my-agent`` both normalising to ``my_agent``)
+      raise so the caller picks one canonical spelling.
 
     Always returns a fresh dict, so callers can freely mutate the result
-    (e.g. via `del` in `_check_unknown_fields` or `pop` in `parse_config`)
-    without affecting the caller's input.
+    (e.g. via ``del`` in ``_check_unknown_fields`` or ``pop`` in
+    ``parse_config``) without affecting the caller's input.
     """
     result: dict[str, Any] = {}
-    seen_originals: dict[str, str] = {}
+    seen_normalized: dict[str, str] = {}
+    seen_casefolded: dict[str, str] = {}
     for key, value in raw.items():
         normalized = key.replace("-", "_")
-        if normalized in result:
+        # Strip an ``__extend`` suffix before checking the field-name shape;
+        # the operator suffix is the one place ``__`` is legitimately allowed.
+        field_part = normalized[: -len(EXTEND_SUFFIX)] if normalized.endswith(EXTEND_SUFFIX) else normalized
+        if "__" in field_part:
             raise ConfigParseError(
-                f"Config in {context} has both '{seen_originals[normalized]}' and '{key}' "
+                f"Config in {context} has key '{key}' containing '__' in its field name. "
+                "Field names cannot contain consecutive underscores; '__' is reserved as "
+                "the env-var segment separator and the '__extend' operator suffix."
+            )
+        if normalized in seen_normalized:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_normalized[normalized]}' and '{key}' "
                 f"which both normalize to '{normalized}'. Use one or the other."
             )
+        casefolded = normalized.lower()
+        if casefolded in seen_casefolded:
+            raise ConfigParseError(
+                f"Config in {context} has both '{seen_casefolded[casefolded]}' and '{key}' "
+                f"which collapse to the same env-var segment '{casefolded.upper()}'. "
+                "Pick one canonical spelling."
+            )
         result[normalized] = value
-        seen_originals[normalized] = key
+        seen_normalized[normalized] = key
+        seen_casefolded[casefolded] = key
     return result
 
 
@@ -370,6 +560,56 @@ def _check_unknown_fields(
             logger.warning(full_msg)
         for key in unknown:
             del raw_config[key]
+
+
+def _annotation_references_model(annotation: Any) -> bool:
+    """Whether a field annotation is a pydantic model or contains one as a type
+    argument (e.g. ``SSHHostConfig``, ``dict[str, SSHHostConfig]``,
+    ``list[SSHHostConfig]``, ``SSHHostConfig | None``).
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    return any(_annotation_references_model(arg) for arg in get_args(annotation))
+
+
+def _coerce_nested_model_fields(
+    raw_config: dict[str, Any],
+    config_class: type[BaseModel],
+    context: str,
+) -> dict[str, Any]:
+    """Validate fields whose declared type involves a nested pydantic model.
+
+    Provider configs are built with ``model_construct`` (see ``_parse_providers``)
+    so that unset top-level fields stay ``None`` for config-layer merging. But
+    ``model_construct`` does not coerce values, so a nested-model field such as
+    ``SSHProviderConfig.hosts`` (``dict[str, SSHHostConfig]``) would keep its raw
+    TOML dicts and blow up the moment the backend accessed an attribute on them
+    (``AttributeError: 'dict' object has no attribute 'key_file'``).
+
+    Only fields actually present in ``raw_config`` are touched, and only those
+    whose annotation references a pydantic model, so scalar fields and the
+    None-for-unset merge semantics for unset fields are both unaffected. Nested
+    entries are atomic (validated as a unit), which is why coercing them does not
+    interfere with the layer merge. Returns a new dict; the input is not mutated.
+
+    Unlike ``_check_unknown_fields``, this does not take ``strict``/``silent``: a
+    malformed nested value is always fatal. Downgrading to warn-and-skip is not an
+    option here, because the only way to "skip" coercion is to leave the raw dict
+    in place -- which reintroduces the exact late ``AttributeError`` this function
+    exists to prevent. A clear ``ConfigParseError`` at parse time is strictly
+    better, and this path was already a hard crash before coercion existed, so
+    always raising is not a forward-compat regression.
+    """
+    result = dict(raw_config)
+    for field_name, value in raw_config.items():
+        field_info = config_class.model_fields.get(field_name)
+        if field_info is None or not _annotation_references_model(field_info.annotation):
+            continue
+        try:
+            result[field_name] = TypeAdapter(field_info.annotation).validate_python(value)
+        except ValidationError as e:
+            raise ConfigParseError(f"Invalid value for '{context}.{field_name}': {e}") from e
+    return result
 
 
 def _parse_providers(
@@ -427,12 +667,19 @@ def _parse_providers(
                 logger.warning(msg)
             continue
         _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
+        raw_config = _coerce_nested_model_fields(raw_config, config_class, f"providers.{name}")
         providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
 
     return providers
 
 
-_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = AGENT_TYPE_CONCAT_TUPLE_FIELDS - {"cli_args"}
+# Tuple-typed fields on AgentTypeConfig that need explicit list->tuple coercion
+# before model_construct (which bypasses pydantic's normal validators).
+# ``cli_args`` is handled separately because it also supports shell-splitting
+# of a single string into multiple arguments.
+_PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"extra_provision_command", "upload_file", "create_directory", "env", "env_file"}
+)
 
 
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
@@ -440,12 +687,18 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
 
     cli_args gets special shell-splitting behavior for single strings.
     All other tuple fields just convert list -> tuple.
+
+    When the source value is a string, the result is a ``StringDerivedTuple``
+    so narrowing detection (``_check_narrowing`` / ``would_assignment_narrow``)
+    can recognise the scalar-replacement intent and skip the per-entry
+    narrowing check against the lower-precedence layer.
     """
     result = raw_config
     if "cli_args" in result:
         cli_args = result["cli_args"]
         if isinstance(cli_args, str):
-            normalized = split_cli_args_string(cli_args) if cli_args else ()
+            tokens = split_cli_args_string(cli_args) if cli_args else ()
+            normalized: Any = StringDerivedTuple(tokens)
         elif isinstance(cli_args, (list, tuple)):
             normalized = tuple(cli_args)
         else:
@@ -458,7 +711,7 @@ def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[st
         value = result[field_name]
         if isinstance(value, str):
             # Single string -> wrap in a one-element tuple (no shell splitting for these fields)
-            result = {**result, field_name: (value,)}
+            result = {**result, field_name: StringDerivedTuple((value,))}
         elif isinstance(value, (list, tuple)):
             result = {**result, field_name: tuple(value)}
         else:
@@ -681,7 +934,9 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     parameter defaults dict so it can be stored on CommandDefaults as a
     first-class field.
 
-    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Only fields actually present in ``raw_defaults`` end up in
+    ``model_fields_set`` so ``CommandDefaults.merge_with`` can distinguish
+    "layer touched defaults" from "layer touched only default_subcommand".
     """
     commands: dict[str, CommandDefaults] = {}
 
@@ -690,11 +945,14 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
         # _normalize_field_keys always returns a fresh dict, so the pop() below
         # cannot mutate the caller's input.
         defaults_copy = _normalize_field_keys(raw_defaults, f"commands.{command_name}")
+        has_default_subcommand = "default_subcommand" in defaults_copy
         default_subcommand = defaults_copy.pop("default_subcommand", None)
-        commands[command_name] = CommandDefaults.model_construct(
-            defaults=defaults_copy,
-            default_subcommand=default_subcommand,
-        )
+        construct_kwargs: dict[str, Any] = {}
+        if defaults_copy:
+            construct_kwargs["defaults"] = defaults_copy
+        if has_default_subcommand:
+            construct_kwargs["default_subcommand"] = default_subcommand
+        commands[command_name] = CommandDefaults.model_construct(**construct_kwargs)
 
     return commands
 
@@ -707,15 +965,23 @@ def _parse_create_templates(raw_templates: dict[str, dict[str, Any]]) -> dict[Cr
              new_host = "modal"
              target_path = "/root/workspace"
 
+    ``param_name__extend = [...]`` is also accepted: the same ``__extend``
+    operator that works in TOML / ``--setting`` / env vars opts a single
+    template option into additive behavior at template-application time.
+    See ``apply_create_template`` for the application semantics.
+
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     templates: dict[CreateTemplateName, CreateTemplate] = {}
 
     for template_name, raw_options in raw_templates.items():
         raw_options = _normalize_field_keys(raw_options, f"create_templates.{template_name}")
-        # make sure the options don't define anything that cannot be handled:
+        # make sure the options don't define anything that cannot be handled
+        # (an ``__extend`` suffix is a valid operator on any CLI option key, so
+        # strip it before checking against the CreateCliOptions schema).
         for field in raw_options.keys():
-            if field not in CreateCliOptions.model_fields:
+            base_field = bare_key(field) if is_extend_key(field) else field
+            if base_field not in CreateCliOptions.model_fields:
                 raise ConfigParseError(
                     f"Unknown field '{field}' in create_templates.{template_name}. Valid fields: {sorted(CreateCliOptions.model_fields.keys())}"
                 )
@@ -784,6 +1050,8 @@ def parse_config(
     kwargs["work_dir_extra_paths"] = raw.pop("work_dir_extra_paths", None)
     kwargs["default_destroyed_host_persisted_seconds"] = raw.pop("default_destroyed_host_persisted_seconds", None)
     kwargs["default_min_online_host_age_seconds"] = raw.pop("default_min_online_host_age_seconds", None)
+    kwargs["agent_ready_timeout"] = raw.pop("agent_ready_timeout", None)
+    kwargs["allow_settings_key_assignment_narrowing"] = raw.pop("allow_settings_key_assignment_narrowing", None)
 
     if len(raw) > 0:
         if strict:
@@ -796,90 +1064,108 @@ def parse_config(
 
 
 # =============================================================================
-# Environment Variable Overrides for Commands
+# Environment Variable Overrides
 # =============================================================================
 
 
-def _parse_command_env_vars(environ: Mapping[str, str]) -> dict[str, CommandDefaults]:
-    """Parse environment variables to extract command config overrides.
+def _env_segments_to_key_path(segments: list[str]) -> list[str]:
+    """Convert lowercased env-var segments into raw-dict key path segments.
 
-    Looks for environment variables matching the pattern:
-        MNGR_COMMANDS_<COMMANDNAME>_<PARAMNAME>=<value>
-
-    where:
-        - COMMANDNAME is the command name in uppercase (e.g., CREATE, LIST)
-        - PARAMNAME is the parameter name in uppercase with underscores (e.g., NEW_BRANCH_PREFIX)
-        - value is the string value to set
-
-    The command name is determined by the first underscore after "MNGR_COMMANDS_".
-    The remaining part becomes the parameter name (lowercased).
-
-    IMPORTANT: Command names MUST be single words (no underscores) for unambiguous parsing.
-    See the comment at _ENV_COMMANDS_PREFIX for details.
-
-    Examples:
-        MNGR_COMMANDS_CREATE_BRANCH=main:mngr/*
-            -> commands["create"]["branch"] = "main:mngr/*"
-
-        MNGR_COMMANDS_CREATE_CONNECT=false
-            -> commands["create"]["connect"] = "false"
-
-        MNGR_COMMANDS_LIST_FORMAT=json
-            -> commands["list"]["format"] = "json"
-
-    Returns:
-        Dict mapping command names to CommandDefaults with the parsed values.
+    A trailing ``extend`` segment is collapsed into a ``key__extend`` suffix on
+    the preceding segment so that ``resolve_extends`` recognises the operator.
     """
-    commands: dict[str, dict[str, Any]] = {}
+    if len(segments) >= 2 and segments[-1] == "extend":
+        return segments[:-2] + [segments[-2] + EXTEND_SUFFIX]
+    return list(segments)
 
+
+def _parse_mngr_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Parse ``MNGR__X__Y[__EXTEND]=value`` env vars into a raw config dict.
+
+    Segments are uppercase-only ([A-Z0-9_]+). Each segment is lowercased to
+    produce the canonical config key. Values are JSON-parsed with raw-string
+    fallback. The returned dict may contain ``__extend``-suffixed keys; the
+    shared resolver applies them against the base config.
+    """
+    raw: dict[str, Any] = {}
     for env_key, env_value in environ.items():
-        if not env_key.startswith(_ENV_COMMANDS_PREFIX):
+        if not env_key.startswith(_ENV_OVERRIDE_PREFIX):
             continue
-
-        # Strip the prefix to get "<COMMANDNAME>_<PARAMNAME>"
-        suffix = env_key[len(_ENV_COMMANDS_PREFIX) :]
-        if not suffix:
+        # Skip mixed-case variants of the canonical form. The pattern enforces
+        # the documented uppercase-only convention; anything else is treated as
+        # unrelated.
+        if not _ENV_OVERRIDE_PATTERN.fullmatch(env_key):
             continue
-
-        # Find the first underscore to split command name from param name
-        underscore_idx = suffix.find("_")
-        if underscore_idx == -1:
-            # No underscore means no param name, skip this
+        suffix = env_key[len(_ENV_OVERRIDE_PREFIX) :]
+        segments = [seg.lower() for seg in suffix.split("__")]
+        # The pattern's ``[A-Z0-9_]+`` permits embedded underscores, which means
+        # malformed shapes like ``MNGR__X__`` or ``MNGR____X`` slip through the
+        # regex and produce empty segments after ``split("__")``. Skip those so
+        # a stray trailing ``__`` doesn't silently materialize an unnamed key.
+        if any(not seg for seg in segments):
             continue
+        key_path = _env_segments_to_key_path(segments)
+        set_at_path(raw, key_path, parse_scalar_value(env_value))
+    return raw
 
-        command_name = suffix[:underscore_idx].lower()
-        param_name = suffix[underscore_idx + 1 :].lower()
 
-        if not command_name or not param_name:
+def _collect_env_overrides(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Combine ``MNGR__*`` overrides with preserved-alias env vars into a single
+    raw config dict.
+
+    Each preserved alias uses its historic value parser (see
+    ``_PRESERVED_ALIASES``) so backwards-compatible spellings like
+    ``MNGR_HEADLESS=yes`` keep their old meaning. Raises ``ConfigParseError``
+    when a preserved alias and its canonical ``MNGR__*`` form are both set
+    with different parsed values.
+    """
+    raw = _parse_mngr_env_overrides(environ)
+    for alias_name, (canonical_path, value_parser) in _PRESERVED_ALIASES.items():
+        alias_value = environ.get(alias_name)
+        if alias_value is None:
             continue
+        parsed = value_parser(alias_value)
+        existing = _walk_raw(raw, canonical_path.split("."))
+        # Compare under the alias's value semantics. The alias and the
+        # canonical form may use different parsers (e.g. MNGR_HEADLESS uses
+        # parse_bool_env while MNGR__HEADLESS uses JSON-with-string-fallback),
+        # so a string canonical value gets re-parsed by the alias parser
+        # before the equality check. This stops false-positive conflicts
+        # when both forms carry the same intent (e.g. both set to "yes").
+        if existing is not None:
+            normalized_existing = value_parser(existing) if isinstance(existing, str) else existing
+            if normalized_existing != parsed:
+                raise ConfigParseError(
+                    f"Conflict: {alias_name}={alias_value!r} and "
+                    f"MNGR__{canonical_path.upper()}={existing!r} are both set with different values. "
+                    "Use exactly one form."
+                )
+        set_at_path(raw, canonical_path.split("."), parsed)
+    return raw
 
-        # Initialize the command's dict if needed
-        if command_name not in commands:
-            commands[command_name] = {}
 
-        # Store as string - type conversion happens downstream in click/pydantic
-        # where the actual type information is available
-        commands[command_name][param_name] = env_value
-
-    # Convert raw dicts to CommandDefaults
-    result: dict[str, CommandDefaults] = {}
-    for command_name, params in commands.items():
-        result[command_name] = CommandDefaults(defaults=params)
-
-    return result
+def _walk_raw(data: dict[str, Any], key_path: list[str]) -> Any:
+    """Look up a dotted path inside a raw dict; return None if any step is
+    missing or the intermediate value is not a dict.
+    """
+    current: Any = data
+    for segment in key_path:
+        if not isinstance(current, dict) or segment not in current:
+            return None
+        current = current[segment]
+    return current
 
 
-def _merge_command_defaults(
-    base: dict[str, CommandDefaults],
-    override: dict[str, CommandDefaults],
-) -> dict[str, CommandDefaults]:
-    """Merge two command defaults dicts, with override taking precedence."""
-    result: dict[str, CommandDefaults] = dict(base)
-
-    for command_name, override_defaults in override.items():
-        if command_name in result:
-            result[command_name] = result[command_name].merge_with(override_defaults)
-        else:
-            result[command_name] = override_defaults
-
-    return result
+def _parse_config_with_extends(
+    raw: dict[str, Any],
+    *,
+    base_config: MngrConfig,
+    disabled_plugins: frozenset[str],
+    strict: bool = True,
+    silent: bool = False,
+) -> MngrConfig:
+    """Resolve ``__extend`` keys in ``raw`` against ``base_config`` and parse
+    the resolved dict via ``parse_config``.
+    """
+    resolved = resolve_extends(base_config, raw)
+    return parse_config(resolved, disabled_plugins=disabled_plugins, strict=strict, silent=silent)

@@ -49,10 +49,10 @@ def test_build_shell_env_with_pr_field() -> None:
 
 def test_build_shell_env_with_ci_field() -> None:
     agent = make_agent_details(name="agent-1")
-    ci = CiField(status=CiStatus.FAILING, created=datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
+    ci = CiField(status=CiStatus.FAILURE, created=datetime(2030, 1, 1, 0, 0, 2, tzinfo=timezone.utc))
     cached: dict[str, FieldValue] = {"ci": ci}
     env = _build_shell_env(agent, cached)
-    assert env["MNGR_FIELD_CI_STATUS"] == "FAILING"
+    assert env["MNGR_FIELD_CI_STATUS"] == "FAILURE"
 
 
 def test_build_shell_env_with_string_field() -> None:

@@ -13,6 +13,8 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
+from typing import Final
 from typing import Iterator
 from typing import Mapping
 from typing import Sequence
@@ -47,8 +49,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStartError
-from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import InvalidActivityTypeError
@@ -59,13 +59,18 @@ from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
+from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
+from imbue.mngr.hosts.offline_host import apply_rename_to_agent_data
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
 from imbue.mngr.interfaces.host import HostInterface
@@ -82,6 +87,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -266,6 +272,16 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
     if a.id == b.id:
         return True
     return a.is_local and b.is_local
+
+
+# mngr's preferred length of tmux's status-left.
+_TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
+
+# Default tmux window dimensions used when the agent does not specify its own.
+# These match the historical hard-coded ``-x 200 -y 50`` (see the new-session
+# call in _build_start_agent_shell_command for why -x/-y are passed at all).
+_DEFAULT_TMUX_WIDTH: Final[int] = 200
+_DEFAULT_TMUX_HEIGHT: Final[int] = 50
 
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
@@ -577,7 +593,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         For local hosts, uses flock for process-level locking.
         For remote hosts, writes/removes a lock file to prevent the idle shutdown script
         from triggering during operations. On error, the lock file is removed by default
-        so the host can idle-shutdown; set MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
+        so the host can idle-shutdown; set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1
         to retain it for debugging.
         """
         lock_file_path = self.host_dir / "host_lock"
@@ -590,18 +606,18 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             except BaseException:
                 # On error, remove the lock file so the host can idle-shutdown normally,
                 # unless the user wants to retain it for debugging
-                is_retain_lock = os.environ.get("MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
+                is_retain_lock = os.environ.get("MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE") == "1"
                 if is_retain_lock:
                     logger.debug(
-                        "Retaining host lock file for debugging (MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
+                        "Retaining host lock file for debugging (MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1)"
                     )
                 else:
                     logger.debug(
-                        "Removing host lock file on error to allow idle shutdown (set MNGR_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
+                        "Removing host lock file on error to allow idle shutdown (set MNGR_DEBUG_RETAIN_LOCK_FOR_FAILED_HOSTS_DURING_CREATE=1 to prevent this and debug)"
                     )
                     try:
                         self.execute_idempotent_command(f"rm -f '{lock_file_path}'")
-                    except (BaseMngrError, OSError) as lock_removal_error:
+                    except (MngrError, OSError) as lock_removal_error:
                         logger.warning(
                             "Failed to remove host lock file during error cleanup: {}",
                             lock_removal_error,
@@ -1222,10 +1238,19 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self._git_push_to_target(source_host, source_path, target_path)
 
             with log_span("Configuring target git repo"):
+                # -f / --force: the target's working tree may have
+                # pre-bootstrap files (e.g. an in-image keyframe extracted
+                # by a Dockerfile RUN, plus a post-extraction mutation to
+                # .mngr/image_commit_hash) that would otherwise trigger
+                # "Your local changes would be overwritten" / "untracked
+                # files in the way" errors. The whole point of the mirror
+                # push + checkout is to materialize the operator's branch
+                # tip on disk, so clobbering any pre-existing state is
+                # the intended behavior.
                 if new_branch_name:
-                    checkout_cmd = f"git checkout -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f -B {shlex.quote(new_branch_name)} {shlex.quote(base_branch_name)}"
                 else:
-                    checkout_cmd = f"git checkout {shlex.quote(base_branch_name)}"
+                    checkout_cmd = f"git checkout -f {shlex.quote(base_branch_name)}"
                 config_commands = [
                     "git config --bool core.bare false",
                     checkout_cmd,
@@ -1235,12 +1260,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if git_author_email:
                     config_commands.append(f"git config user.email {shlex.quote(git_author_email)}")
                 if origin_url:
-                    # Use set-url if origin already exists (e.g. from mirror push),
-                    # otherwise add it.
+                    # Use set-url if origin already exists (e.g. from the
+                    # in-image keyframe's .git or the bare init), otherwise
+                    # add it. Written as an explicit if/else so a failure
+                    # in an earlier `&&`-chained command can't trigger
+                    # this clause as a `||` fallback (bash operator
+                    # precedence: `A && B || C` parses as `(A && B) || C`,
+                    # so if B fails, C runs unintentionally and `add`
+                    # errors with "remote origin already exists" -- a
+                    # confusing co-symptom of the real failure upstream).
+                    quoted_origin = shlex.quote(origin_url)
                     set_or_add = (
-                        f"git remote set-url origin {shlex.quote(origin_url)}"
-                        f" 2>/dev/null"
-                        f" || git remote add origin {shlex.quote(origin_url)}"
+                        f"if git remote get-url origin >/dev/null 2>&1; "
+                        f"then git remote set-url origin {quoted_origin}; "
+                        f"else git remote add origin {quoted_origin}; "
+                        f"fi"
                     )
                     config_commands.append(set_or_add)
 
@@ -1305,6 +1339,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         self._warn_if_submodules_detected(source_host, source_path)
         same_machine = _is_same_machine(source_host, self)
         target_ssh_info = self.get_ssh_connection_info()
+
+        # Cross-machine git transfer shells out to the ssh binary (via
+        # GIT_SSH_COMMAND); ssh is optional, so surface a clear error if it's absent.
+        if not same_machine:
+            SSH.require()
 
         # Same-machine push uses a bare local-on-host URL with no SSH
         # transport (covers both local-laptop-to-itself and
@@ -1608,6 +1647,45 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             exclude_git=exclude_git,
         )
 
+    def copy_local_directory(self, source_path: Path, target_path: Path, extra_args: str | None) -> None:
+        """Copy a local-machine directory to self:target_path. See OnlineHostInterface."""
+        # rsync does not create intermediate parents for the destination root.
+        self.execute_idempotent_command(f"mkdir -p {shlex.quote(str(target_path))}", timeout_seconds=5.0)
+        # --keep-dirlinks (-K) is essential: on some hosts a destination directory is a
+        # symlink to real storage (e.g. on Modal, host_dir /mngr is a symlink into the
+        # mounted volume). Without -K, when the source has a real directory where the
+        # receiver has a symlink-to-directory, rsync DELETES the symlink and replaces it
+        # with a real directory on the ephemeral filesystem -- stranding everything that
+        # lived behind the symlink (e.g. agents/<id>/data.json on the volume) and writing
+        # our files to a non-persistent location. -K makes rsync follow the symlinked dir
+        # and write through it instead. See github issue 1825.
+        rsync_args = ["rsync", "-rlpt", "--keep-dirlinks"]
+        if extra_args:
+            rsync_args.extend(shlex.split(extra_args))
+        source_str = str(source_path).rstrip("/") + "/"
+        target_str = str(target_path).rstrip("/") + "/"
+
+        if self.is_local:
+            rsync_args.extend([source_str, target_str])
+            rsync_cmd = " ".join(shlex.quote(a) for a in rsync_args)
+            with log_span("rsync: local dir {} -> {}", source_path, target_path):
+                result = self.execute_idempotent_command(rsync_cmd)
+                if not result.success:
+                    raise MngrError(f"rsync failed (local): {result.stderr}")
+            return
+
+        ssh_info = self.get_ssh_connection_info()
+        assert ssh_info is not None
+        user, hostname, port, key_path = ssh_info
+        known_hosts = get_ssh_known_hosts_file(self)
+        rsync_args.extend(["-e", build_ssh_transport_command(key_path, port, known_hosts)])
+        rsync_args.extend([source_str, f"{user}@{hostname}:{target_str}"])
+        with log_span("rsync: local dir -> {}@{}:{}", user, hostname, port):
+            try:
+                self.mngr_ctx.concurrency_group.run_process_to_completion(rsync_args)
+            except ProcessError as e:
+                raise MngrError(f"rsync failed (push to {hostname}): {e.stderr}") from e
+
     def _rsync_files(
         self,
         source_host: OnlineHostInterface,
@@ -1672,6 +1750,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                             f"rm -f {shlex.quote(str(host_files_from))}", timeout_seconds=5.0
                         )
             return
+
+        # Every remaining branch transfers to/from a remote host and uses the ssh
+        # binary as rsync's transport (-e ssh); ssh is optional, so require it here.
+        SSH.require()
 
         if source_host.is_local and not self.is_local:
             # Local to remote
@@ -1866,7 +1948,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         agent_id = options.agent_id if options.agent_id is not None else AgentId.generate()
         agent_name = options.name or AgentName(f"agent-{str(agent_id)}")
-        agent_type = options.agent_type or AgentTypeName("claude")
+        agent_type = options.agent_type
         with info_span(
             "Creating agent state...",
             agent_id=str(agent_id),
@@ -1938,10 +2020,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 "initial_message": options.initial_message,
                 "resume_message": options.resume_message,
                 "ready_timeout_seconds": options.ready_timeout_seconds,
-                "permissions": [],
                 "start_on_boot": False,
                 "labels": dict(options.label_options.labels),
                 "created_branch_name": created_branch_name,
+                "tmux": options.tmux.to_data_dict(),
             }
 
             # this is really just here to parallelize some of the work and decrease latency to creating a host
@@ -2088,9 +2170,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # Merge agent type provisioning fields into options before any other logic.
         # Use resolve_agent_type to get the parent-merged config so that
         # provisioning fields defined on a parent type are inherited by children.
-        if options.agent_type is not None:
-            resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
-            options = _merge_agent_type_provisioning(resolved.agent_config, options)
+        resolved = resolve_agent_type(options.agent_type, mngr_ctx.config)
+        options = _merge_agent_type_provisioning(resolved.agent_config, options)
 
         with self.mngr_ctx.concurrency_group.make_concurrency_group("provision_agent") as concurrency_group:
             # Call pre-provisioning validation on agent
@@ -2103,9 +2184,23 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     agent.get_provision_file_transfers(host=self, options=options, mngr_ctx=mngr_ctx)
                 )
 
+            # Resolve the remote home once: bulk uploads stage files under their
+            # absolute remote paths, and relative destinations resolve against it.
+            # (Unused for local hosts, which write directly.) Fail loudly if the remote
+            # home cannot be determined -- an empty home would silently misplace every
+            # `~/...` or relative upload at the filesystem root instead of under $HOME.
+            remote_home = ""
+            if not self.is_local:
+                home_result = self.execute_idempotent_command("echo $HOME")
+                if not home_result.success:
+                    raise MngrError(f"Failed to determine remote home directory: {home_result.stderr}")
+                remote_home = home_result.stdout.strip()
+                if not remote_home:
+                    raise MngrError("Failed to determine remote home directory: $HOME resolved to an empty string")
+
             # Validate required files exist and execute transfers
             agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers)
+                self._execute_agent_file_transfers, (agent, all_file_transfers, remote_home)
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2113,9 +2208,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             env_vars = self._collect_agent_env_vars(agent, options)
             self._write_agent_env_file(agent, env_vars)
 
-            # Ensure mngr_log.sh exists at both host and agent level so that
-            # all bash scripts can source it for logging and timestamp utilities.
-            ensure_log_thread = concurrency_group.start_new_thread(self._ensure_mngr_log_sh, (agent,))
+            # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
+            # exist at both host and agent level so that all bash scripts can source
+            # them for logging, timestamp utilities, and raw-transcript primitives.
+            ensure_shared_libs_thread = concurrency_group.start_new_thread(self._ensure_shared_shell_libs, (agent,))
 
             # files need to be there before provisioning--even making this a thread was just a minor optimization:
             agent_file_transfer_thread.join(60.0)
@@ -2137,12 +2233,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     self._mkdir(directory)
                     logger.trace("Created directory: {}", directory)
 
-                # Upload files (read from local filesystem, write to host)
-                for upload_spec in provisioning.upload_files:
-                    # Read from local filesystem (not via host primitives)
-                    local_content = upload_spec.local_path.read_bytes()
-                    self.write_file(upload_spec.remote_path, local_content)
-                    logger.trace("Uploaded file: {} -> {}", upload_spec.local_path, upload_spec.remote_path)
+                # Upload files in a single bulk transfer (rsync for remote hosts).
+                # skip_missing=False: a user-specified upload whose source is missing
+                # is an error.
+                upload_files_in_bulk(
+                    self,
+                    {spec.remote_path: spec.local_path for spec in provisioning.upload_files},
+                    remote_home,
+                    skip_missing=False,
+                )
 
                 # Build the source prefix for commands (sources host env, then agent env)
                 source_prefix = self.build_source_env_prefix(agent)
@@ -2155,41 +2254,52 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         raise MngrError(f"Extra provision command failed: {cmd}\nstderr: {result.stderr}")
 
             # should be done by now
-            ensure_log_thread.join(60.0)
+            ensure_shared_libs_thread.join(60.0)
 
             # Call post-provisioning on agent
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    def _ensure_mngr_log_sh(self, agent: AgentInterface) -> None:
-        """Write mngr_log.sh to both host-level and agent-level commands directories.
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
 
-        mngr_log.sh provides shared JSONL logging and cross-platform timestamp
-        utilities for all mngr bash scripts.  Two identical copies are maintained:
+    def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
+        """Write the shared shell libraries to host-level and agent-level commands dirs.
 
-        - ``<host_dir>/commands/mngr_log.sh``   (for host-level scripts such as
-          activity_watcher.sh)
-        - ``<agent_state_dir>/commands/mngr_log.sh``  (for agent-level scripts
-          such as stream_transcript.sh, chat.sh)
+        These libraries are sourced by mngr bash scripts and must exist on both
+        levels so host-level (``activity_watcher.sh``) and agent-level
+        (``stream_transcript.sh``, ``chat.sh``) scripts can source them
+        consistently.
+
+        - ``mngr_log.sh`` provides shared JSONL logging and cross-platform
+          timestamp utilities.
+        - ``mngr_transcript_lib.sh`` provides the raw-transcript primitives
+          (field extraction, id-set construction, offset reconciliation,
+          bounded sed-append, percent-encoded path keys) shared by per-agent
+          streamers such as claude's ``stream_transcript.sh``.
         """
-        content_bytes = importlib.resources.files(mngr_resources).joinpath("mngr_log.sh").read_text().encode()
-
         host_commands = self.host_dir / "commands"
-        self.write_file(host_commands / "mngr_log.sh", content_bytes, mode="0755")
-
         agent_commands = self._get_agent_state_dir(agent) / "commands"
-        self.write_file(agent_commands / "mngr_log.sh", content_bytes, mode="0755")
+        # These should stay per-file write_file calls (not upload_files_in_bulk) because
+        # they need the executable bit (mode="0755"), which the rsync staging helper does
+        # not preserve. The set is fixed and tiny (two libs x two destinations), so the
+        # per-file cost is negligible and this is exempt from the bulk-upload ratchet.
+        for name in self._SHARED_SHELL_LIB_NAMES:
+            content_bytes = importlib.resources.files(mngr_resources).joinpath(name).read_text().encode()
+            self.write_file(host_commands / name, content_bytes, mode="0755")
+            self.write_file(agent_commands / name, content_bytes, mode="0755")
 
     def _execute_agent_file_transfers(
         self,
         agent: AgentInterface,
         transfers: list[FileTransferSpec],
+        remote_home: str,
     ) -> None:
         """Validate and execute file transfers from the agent.
 
-        First validates that all required files exist, then executes transfers.
-        Always emits a "Transferring agent files" log_span (with count=0 when
-        the agent declared no transfers) so timing is visible at -vv.
+        First validates that all required files exist, then transfers everything in a
+        single bulk upload (rsync for remote hosts). Always emits a "Transferring agent
+        files" log_span (with count=0 when the agent declared no transfers) so timing is
+        visible at -vv.
         """
         with log_span("Transferring agent files", count=len(transfers)):
             if not transfers:
@@ -2205,26 +2315,18 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 missing_str = ", ".join(str(p) for p in missing_required)
                 raise MngrError(f"Required files for provisioning not found: {missing_str}")
 
-            for transfer in transfers:
-                if not transfer.local_path.exists():
-                    # Optional file doesn't exist, skip it
-                    logger.trace("Skipped optional file transfer (file not found): {}", transfer.local_path)
-                    continue
-
-                # Resolve relative remote paths to work_dir
-                remote_path = agent.work_dir / transfer.agent_path
-
-                local_content = transfer.local_path.read_bytes()
-                self.write_file(remote_path, local_content)
-                logger.trace("Transferred agent file: {} -> {}", transfer.local_path, remote_path)
+            # Required files were validated above; skip_missing=True drops any optional
+            # transfer whose source does not exist.
+            uploads = {agent.work_dir / transfer.agent_path: transfer.local_path for transfer in transfers}
+            upload_files_in_bulk(self, uploads, remote_home, skip_missing=True)
 
     def rename_agent(
         self,
-        agent: AgentInterface,
+        agent_ref: DiscoveredAgent,
         new_name: AgentName,
         labels_to_merge: Mapping[str, str] | None = None,
-    ) -> AgentInterface:
-        """Rename an agent (optionally merging labels) and return the updated object.
+    ) -> DiscoveredAgent:
+        """Rename an agent (optionally merging labels) and return the updated ref.
 
         The operation is idempotent: if interrupted mid-rename, re-running
         will complete it. This works because data.json (the "commit point")
@@ -2236,27 +2338,33 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         an external observer of the agent's state never sees the rename without
         also seeing the new labels.
         """
-        with log_span("Renaming agent", agent_id=str(agent.id), old_name=str(agent.name), new_name=str(new_name)):
+        agent_id = agent_ref.agent_id
+        with log_span(
+            "Renaming agent",
+            agent_id=str(agent_id),
+            old_name=str(agent_ref.agent_name),
+            new_name=str(new_name),
+        ):
             # Prevent same-host name collisions (the tmux session name is derived
             # from the agent name, so duplicates would share a session).
-            for existing_agent in self.get_agents():
-                if existing_agent.name == new_name and existing_agent.id != agent.id:
-                    raise DuplicateAgentNameError(new_name, existing_agent.id)
+            self._check_rename_conflict(agent_id, new_name)
 
-            old_name = agent.name
-            data_path = self._get_agent_state_dir(agent) / "data.json"
+            old_name = agent_ref.agent_name
+            agent_state_dir = get_agent_state_dir_path(self.host_dir, agent_id)
+            data_path = agent_state_dir / "data.json"
 
             # Rename the tmux session first (idempotent -- no-ops if session doesn't exist with old name)
             old_session_name = f"{self.mngr_ctx.config.prefix}{old_name}"
             new_session_name = f"{self.mngr_ctx.config.prefix}{new_name}"
+            old_session_target = TmuxSessionTarget(session_name=old_session_name).as_shell_arg()
             result = self.execute_idempotent_command(
-                f"tmux has-session -t {shlex.quote('=' + old_session_name)} 2>/dev/null && "
-                f"tmux rename-session -t {shlex.quote('=' + old_session_name)} -- {shlex.quote(new_session_name)} || true"
+                f"tmux has-session -t {old_session_target} 2>/dev/null && "
+                f"tmux rename-session -t {old_session_target} -- {shlex.quote(new_session_name)} || true"
             )
             logger.debug("Tmux rename result: success={}, stdout={}", result.success, result.stdout.strip())
 
             # Update the MNGR_AGENT_NAME env var in the agent's env file
-            env_path = self.get_agent_env_path(agent)
+            env_path = agent_state_dir / "env"
             try:
                 env_content = self.read_text_file(env_path)
                 updated_lines: list[str] = []
@@ -2267,7 +2375,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         updated_lines.append(line)
                 self.write_file(env_path, ("\n".join(updated_lines) + "\n").encode(), is_atomic=True)
             except FileNotFoundError:
-                logger.debug("No env file found for agent {}, skipping env update", agent.id)
+                logger.debug("No env file found for agent {}, skipping env update", agent_id)
 
             # Update data.json last (the "commit point" for the rename). Any
             # provided labels are merged into the existing labels in the same
@@ -2275,18 +2383,17 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # together.
             content = self.read_text_file(data_path)
             data = json.loads(content)
-            data["name"] = str(new_name)
-            if labels_to_merge:
-                current_labels = data.get("labels") or {}
-                data["labels"] = {**current_labels, **dict(labels_to_merge)}
-            self.write_file(data_path, json.dumps(data, indent=2).encode(), is_atomic=True)
-            self.save_agent_data(agent.id, data)
+            updated = apply_rename_to_agent_data(data, new_name, labels_to_merge)
+            self.write_file(data_path, json.dumps(updated, indent=2).encode(), is_atomic=True)
+            self.save_agent_data(agent_id, updated)
 
-            # Reload and return the updated agent
-            updated_agent = self._load_agent_from_dir(self._get_agent_state_dir(agent))
-            if updated_agent is None:
-                raise AgentNotFoundOnHostError(agent.id, self.id)
-            return updated_agent
+            return DiscoveredAgent(
+                host_id=self.id,
+                agent_id=agent_id,
+                agent_name=new_name,
+                provider_name=self.provider_instance.name,
+                certified_data=updated,
+            )
 
     def destroy_agent(self, agent: AgentInterface) -> None:
         """Destroy an agent and clean up its resources."""
@@ -2326,9 +2433,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """Create a tmux config file for the host with hotkeys for agent management.
 
         The config:
-        1. Sources the user's default tmux config if it exists (~/.tmux.conf)
-        2. Adds a Ctrl-q binding that detaches and destroys the current agent
-        3. Adds a Ctrl-t binding that detaches and stops the current agent
+        1. Use mngr's preferred status-left-length (tmux default is 10)
+        2. Sources the user's default tmux config if it exists (~/.tmux.conf)
+        3. Adds a Ctrl-q binding that detaches and destroys the current agent
+        4. Adds a Ctrl-t binding that detaches and stops the current agent
 
         This uses the tmux session_name format variable in the commands,
         which expands to the current session name at runtime. This approach
@@ -2351,6 +2459,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         lines = [
             "# Mngr host tmux config",
             "# Auto-generated - do not edit",
+            "",
+            "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
+            f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
             "",
             "# Source user's default tmux config if it exists",
             "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
@@ -2455,14 +2566,28 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                         tmux_config_path=tmux_config_path,
                         unset_vars=self.mngr_ctx.config.unset_vars,
                         host_dir=self.host_dir,
+                        tmux_options=self.get_agent_tmux_options(agent),
                         onboarding_text=onboarding_text,
                     )
                     result = self.execute_stateful_command(combined_command, cwd=agent.work_dir)
                     if not result.success:
                         raise AgentStartError(str(agent.name), result.stderr)
 
-    def _get_all_descendant_pids(self, parent_pid: str) -> list[str]:
-        """Recursively get all descendant PIDs of a given parent PID."""
+    def _get_all_descendant_pids(self, parent_pid: str, visited: set[str] | None = None) -> list[str]:
+        """Recursively get all descendant PIDs of a given parent PID.
+
+        Tracks already-visited PIDs in ``visited`` to break cycles that can
+        appear via pid reuse (a long-lived process at pid X dies, the kernel
+        recycles X as a descendant of one of its own descendants, and a
+        naive walk loops forever). Without this, a sufficiently long-lived
+        agent's destroy path could hit Python's recursion limit and crash
+        the caller mid-cleanup.
+        """
+        if visited is None:
+            visited = set()
+        if parent_pid in visited:
+            return []
+        visited.add(parent_pid)
         descendant_pids: list[str] = []
 
         # Get immediate children
@@ -2470,38 +2595,43 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if result.success and result.stdout.strip():
             child_pids = result.stdout.strip().split("\n")
             for child_pid in child_pids:
-                if child_pid:
+                if child_pid and child_pid not in visited:
                     descendant_pids.append(child_pid)
                     # Recursively get descendants of this child
-                    descendant_pids.extend(self._get_all_descendant_pids(child_pid))
+                    descendant_pids.extend(self._get_all_descendant_pids(child_pid, visited))
 
         return descendant_pids
 
     def _collect_session_pids(self, session_name: str) -> list[str]:
         """Collect all pane PIDs and their descendants for a tmux session.
 
-        Uses -s flag to list panes across ALL windows in the session, not just the
-        current window. This is important for sessions with additional command windows.
-
-        Guards with has-session first because list-panes -s does not support the =
-        prefix for exact session matching. Despite the man page saying "if -s is given,
-        target is a session", list-panes resolves its -t via CMD_FIND_WINDOW, so a bare
-        '=name' is parsed as an exact window match, not an exact session match. Without
-        this guard, list-panes -s would fall back to session prefix matching and could
-        return PIDs from a different session (e.g. 'mngr_foo-bar' when targeting 'mngr_foo').
+        Iterates the session's windows and calls ``list-panes`` per window so
+        every operation uses an exact-match target (``=<session>:<window>``).
+        We avoid ``list-panes -s`` for the whole-session case: despite the man
+        page calling its ``-t`` a target-session, tmux's ``cmd-find.c`` ignores
+        the ``=`` exact-match prefix on ``-s``, so a bare-name target would
+        silently fall back to session prefix matching -- letting a colliding
+        sibling session's PIDs leak into the result and get killed downstream.
+        The per-window iteration costs one extra tmux roundtrip per window
+        (cheap, and this is a cleanup path) and removes the prefix-matching
+        risk entirely.
         """
-        # has-session supports = for exact matching -- bail out if session doesn't exist
-        has_result = self.execute_idempotent_command(f"tmux has-session -t '={session_name}' 2>/dev/null")
-        if not has_result.success:
+        windows_result = self.execute_idempotent_command(
+            f"tmux list-windows -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} -F '#I' 2>/dev/null"
+        )
+        if not windows_result.success or not windows_result.stdout.strip():
             return []
 
         all_pids: list[str] = []
-        result = self.execute_idempotent_command(
-            f"tmux list-panes -s -t '{session_name}' -F '#{{pane_pid}}' 2>/dev/null || true"
-        )
-        if result.success and result.stdout.strip():
-            for pane_pid in result.stdout.strip().split("\n"):
-                if pane_pid:
+        window_indices = [w.strip() for w in windows_result.stdout.strip().split("\n") if w.strip()]
+        for window_idx in window_indices:
+            window_target = TmuxWindowTarget(session_name=session_name, window=window_idx)
+            result = self.execute_idempotent_command(
+                f"tmux list-panes -t {window_target.as_shell_arg()} -F '#{{pane_pid}}' 2>/dev/null"
+            )
+            if result.success and result.stdout.strip():
+                pane_pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+                for pane_pid in pane_pids:
                     all_pids.append(pane_pid)
                     all_pids.extend(self._get_all_descendant_pids(pane_pid))
         return all_pids
@@ -2612,7 +2742,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Finally kill the tmux sessions themselves
             for agent in current_agents:
                 session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                self.execute_idempotent_command(f"tmux kill-session -t '={session_name}' 2>/dev/null || true")
+                self.execute_idempotent_command(
+                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()} 2>/dev/null || true"
+                )
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""
@@ -2657,6 +2789,20 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 # New format: dict with command and window_name
                 result.append(NamedCommand(command=cmd["command"], window_name=cmd.get("window_name")))
         return result
+
+    def get_agent_tmux_options(self, agent: AgentInterface) -> AgentTmuxOptions:
+        """Read the agent's persisted tmux window options from data.json.
+
+        Returns default (all-None) options when there is no data.json or no tmux
+        block, so older agents created before this field existed behave as before.
+        """
+        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        try:
+            content = self.read_text_file(data_path)
+        except FileNotFoundError:
+            return AgentTmuxOptions()
+        data = json.loads(content)
+        return AgentTmuxOptions.from_data_dict(data.get("tmux"))
 
     # =========================================================================
     # Agent-Derived Information
@@ -2783,6 +2929,7 @@ def _build_start_agent_shell_command(
     tmux_config_path: Path,
     unset_vars: Sequence[str],
     host_dir: Path,
+    tmux_options: AgentTmuxOptions,
     onboarding_text: str | None = None,
 ) -> str:
     """Build a single shell command that starts an agent and its tmux session.
@@ -2797,11 +2944,10 @@ def _build_start_agent_shell_command(
     If the tmux session already exists, the command exits early (successfully)
     since everything has presumably already been set up.
     """
-    # Bail out early if the session already exists. Use = prefix for exact
-    # matching to avoid prefix-matching a different session (e.g. "mngr_foo"
-    # matching "mngr_foo-bar"). stderr is redirected to suppress the
-    # "can't find session" message when the session doesn't exist yet.
-    guard = f"tmux has-session -t {shlex.quote('=' + session_name)} 2>/dev/null && exit 0"
+    # Bail out early if the session already exists. stderr is redirected to
+    # suppress the "can't find session" message when the session doesn't exist yet.
+    quoted_exact_session = TmuxSessionTarget(session_name=session_name).as_shell_arg()
+    guard = f"tmux has-session -t {quoted_exact_session} 2>/dev/null && exit 0"
 
     steps: list[str] = []
 
@@ -2818,38 +2964,43 @@ def _build_start_agent_shell_command(
     # Code's Ink framework to render at 1 column wide, breaking marker-based
     # message sending. Passing -x/-y appears to use a different tmux code
     # path that sets the PTY dimensions correctly at creation time.
-    # The window will be resized to match the client's terminal when attached.
+    # Width/height come from the agent's tmux options (falling back to the
+    # historical 200x50). Unless window-size is "manual", the window will still be
+    # resized to match the client's terminal when attached.
+    tmux_width = int(tmux_options.width) if tmux_options.width is not None else _DEFAULT_TMUX_WIDTH
+    tmux_height = int(tmux_options.height) if tmux_options.height is not None else _DEFAULT_TMUX_HEIGHT
     steps.append(
         f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
         f" -s {shlex.quote(session_name)}"
-        f" -x 200 -y 50"
+        f" -x {tmux_width} -y {tmux_height}"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # NOTE: Commands below target a session that was just created above in the
-    # same && chain. The exact session definitely exists, so we do NOT use the
-    # = prefix here -- it's unnecessary. The = prefix only provides exact
-    # *session* matching for commands whose -t resolves as target-session (e.g.
-    # has-session, kill-session). For target-pane (e.g. set-option) or
-    # target-window (e.g. list-panes) commands, a bare '=name' is parsed as
-    # an exact window/pane match rather than an exact session match, so it
-    # does not prevent session prefix matching.
+    quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+
+    # Apply the requested resize policy (e.g. "manual" pins the window to the
+    # dimensions above so attaching clients never resize it). window-size is a
+    # window option, so it is set on the agent's window (:0). When unset, tmux's
+    # own default ("latest") is left in place -- today's behavior.
+    if tmux_options.window_size is not None:
+        steps.append(
+            f"tmux set-option -t {quoted_exact_agent_window} window-size {tmux_options.window_size.value.lower()}"
+        )
 
     # Save the user's original default-command (from their ~/.tmux.conf) into
     # the tmux session environment, then set default-command to env_shell_cmd.
     # Because env_shell_cmd uses ${MNGR_SAVED_DEFAULT_TMUX_COMMAND:-${SHELL:-bash}},
     # the initial agent window (created above, before this variable exists) gets
     # the user's login shell, while user-created windows get the saved default.
-    quoted_session = shlex.quote(session_name)
     save_user_shell_script = (
-        f"U=$(tmux show-option -t {quoted_session} -Aqv default-command 2>/dev/null); "
-        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_session} -Aqv default-shell 2>/dev/null) || true; '
+        f"U=$(tmux show-option -t {quoted_exact_agent_window} -Aqv default-command 2>/dev/null); "
+        f'[ -z "$U" ] && U=$(tmux show-option -t {quoted_exact_agent_window} -Aqv default-shell 2>/dev/null) || true; '
         '[ -z "$U" ] && U="${SHELL:-bash}"; '
-        f'tmux set-environment -t {quoted_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
+        f'tmux set-environment -t {quoted_exact_session} MNGR_SAVED_DEFAULT_TMUX_COMMAND "$U"'
     )
     steps.append("bash -c " + shlex.quote(save_user_shell_script))
-    steps.append(f"tmux set-option -t {quoted_session} default-command {shlex.quote(env_shell_cmd)}")
+    steps.append(f"tmux set-option -t {quoted_exact_agent_window} default-command {shlex.quote(env_shell_cmd)}")
 
     # Set a one-shot client-attached hook that shows the onboarding popup
     # when the user first attaches to this tmux session. This must happen
@@ -2869,9 +3020,10 @@ def _build_start_agent_shell_command(
         tmux_escaped = popup_shell_cmd.replace('"', '\\"')
         hook_value = (
             f'display-popup -w {popup_w} -h {popup_h} -E "{tmux_escaped}"'
-            f" ; set-hook -u -t {session_name} client-attached[99]"
+            f" ; set-hook -u -t {quoted_exact_agent_window}"
+            f" client-attached[99]"
         )
-        steps.append(f"tmux set-hook -t {quoted_session} client-attached[99] {shlex.quote(hook_value)}")
+        steps.append(f"tmux set-hook -t {quoted_exact_agent_window} client-attached[99] {shlex.quote(hook_value)}")
 
     # Create additional windows BEFORE sending the agent command. This
     # ensures all windows exist before the agent starts, preventing a race
@@ -2879,28 +3031,27 @@ def _build_start_agent_shell_command(
     # additional windows can be created.
     for idx, named_cmd in enumerate(additional_commands):
         window_name = named_cmd.window_name if named_cmd.window_name else f"cmd-{idx + 1}"
-        window_target = f"{session_name}:{window_name}"
+        quoted_exact_named_window = TmuxWindowTarget(session_name=session_name, window=window_name).as_shell_arg()
 
         steps.append(
-            f"tmux new-window -t {shlex.quote(session_name)}"
+            f"tmux new-window -t {quoted_exact_session}"
             f" -n {shlex.quote(window_name)}"
             f" -c {shlex.quote(str(agent.work_dir))}"
             f" {shlex.quote(env_shell_cmd)}"
         )
-        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} -l -- {shlex.quote(str(named_cmd.command))}")
-        steps.append(f"tmux send-keys -t {shlex.quote(window_target)} Enter")
+        steps.append(f"tmux send-keys -t {quoted_exact_named_window} -l -- {shlex.quote(str(named_cmd.command))}")
+        steps.append(f"tmux send-keys -t {quoted_exact_named_window} Enter")
 
     # If we created additional windows, select the first window (the main agent)
     # before sending the agent command
     if additional_commands:
-        steps.append(f"tmux select-window -t {shlex.quote(session_name + ':0')}")
+        steps.append(f"tmux select-window -t {quoted_exact_agent_window}")
 
     # Send the agent command as literal keys, then Enter to execute.
     # Target window :0 explicitly so this works even after additional windows
     # have been created (which changes the active window).
-    agent_window = shlex.quote(session_name + ":0")
-    steps.append(f"tmux send-keys -t {agent_window} -l -- {shlex.quote(command)}")
-    steps.append(f"tmux send-keys -t {agent_window} Enter")
+    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} -l -- {shlex.quote(command)}")
+    steps.append(f"tmux send-keys -t {quoted_exact_agent_window} Enter")
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
@@ -2919,9 +3070,7 @@ def _build_start_agent_shell_command(
     # Build the process activity monitor script (runs in the background, inspects window :0 where the agent is assumed to be running)
     # Wait up to 10 seconds for the PANE_PID to appear (tmux can take a moment to start)
     max_wait_seconds = 10
-    tmux_list_panes_cmd = (
-        f"tmux list-panes -t {shlex.quote(session_name + ':0')} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
-    )
+    tmux_list_panes_cmd = f"tmux list-panes -t {quoted_exact_agent_window} -F '#{{pane_pid}}' 2>/dev/null | head -n 1"
     process_activity_path = activity_dir / ActivitySource.PROCESS.value.lower()
     monitor_script = (
         f"PANE_PID=$({tmux_list_panes_cmd}); "

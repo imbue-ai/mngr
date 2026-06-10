@@ -40,14 +40,17 @@ from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
+from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
@@ -56,7 +59,6 @@ from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.forward_supervisor import is_forward_info_alive
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import delete_forward_info
@@ -102,6 +104,13 @@ class _LinkPermissionsCliOptions(_LatchkeyCommonCliOptions):
 
     host_id: str
     opaque_path: str
+
+
+class _RegisterAgentCliOptions(_LatchkeyCommonCliOptions):
+    """Backing options object for ``mngr latchkey register-agent``."""
+
+    host_id: str
+    agent_id: str
 
 
 class _ForwardCliOptions(_LatchkeyCommonCliOptions):
@@ -250,10 +259,10 @@ def _create_agent_env_command(ctx: click.Context, **kwargs: Any) -> None:
         "env": dict(setup.env),
         "opaque_permissions_path": str(setup.opaque_permissions_path),
     }
-    # ``emit_final_json`` is the project's standard helper for emitting
+    # ``write_json_line`` is the project's standard helper for emitting
     # a single JSON object on stdout (used by every ``mngr`` command
     # that supports ``--format=json`` final output).
-    emit_final_json(payload)
+    write_json_line(payload)
 
 
 _add_common_latchkey_options(_create_agent_env_command)
@@ -269,6 +278,7 @@ in tunneled mode and emits its result as a single JSON object on stdout:
 {
   "env": {
     "LATCHKEY_GATEWAY": "...",
+    "LATCHKEY_GATEWAY_SECONDARY": "...",
     "LATCHKEY_GATEWAY_PASSWORD": "...",
     "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE": "...",
     "LATCHKEY_DISABLE_COUNTING": "1"
@@ -368,6 +378,88 @@ add_pager_help_option(_link_permissions_command)
 
 
 # =============================================================================
+# Subcommand: register-agent
+# =============================================================================
+
+
+@click.command(name="register-agent")
+@click.option(
+    "--host-id",
+    "host_id",
+    required=True,
+    help="Canonical host ID the agent runs on. Identifies which per-host permissions file to edit.",
+)
+@click.option(
+    "--agent-id",
+    "agent_id",
+    required=True,
+    help="Canonical agent ID to add to the host's allowed-agent enum.",
+)
+@add_common_options
+@click.pass_context
+def _register_agent_command(ctx: click.Context, **kwargs: Any) -> None:
+    """Register ``agent_id`` for the host, granting access to ``/minds-api-proxy/api/v1/agents/<agent_id>/...``.
+
+    Wraps :func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`.
+    The default per-host permissions baseline rejects every Minds API
+    proxy request with an empty allowed-agent enum; this command
+    appends the supplied ``agent_id`` to the enum so the gateway will
+    let that agent through to its own ``/api/v1/agents/<id>/...``
+    subtree. Idempotent: re-running for an already-registered agent is a
+    no-op.
+    """
+    del kwargs
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="latchkey.register-agent",
+        command_class=_RegisterAgentCliOptions,
+        is_format_template_supported=False,
+    )
+
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+
+    try:
+        host_id = HostId(opts.host_id)
+    except ValueError as e:
+        raise click.UsageError(f"--host-id is not a valid host ID: {e}") from e
+    try:
+        agent_id = AgentId(opts.agent_id)
+    except ValueError as e:
+        raise click.UsageError(f"--agent-id is not a valid agent ID: {e}") from e
+
+    try:
+        register_agent_for_host(latchkey.plugin_data_dir, host_id, agent_id)
+    except LatchkeyStoreError as e:
+        raise click.ClickException(f"register_agent_for_host failed: {e}") from e
+
+    logger.info("Registered agent {} on host {}; access to the Minds API proxy granted", agent_id, host_id)
+
+
+_add_common_latchkey_options(_register_agent_command)
+
+CommandHelpMetadata(
+    key="latchkey.register-agent",
+    one_line_description="Register an agent on a host, granting it access to the Minds API proxy",
+    synopsis="mngr latchkey register-agent --host-id ID --agent-id ID [OPTIONS]",
+    description="""Wraps :func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`.
+The per-host ``latchkey_permissions.json`` ships with an empty
+allowed-agent enum on the first rule (the one that gates
+``/minds-api-proxy/api/v1/agents/<id>/...``); this command appends
+the supplied agent ID to that enum so the gateway will let that
+agent through to its own ``/api/v1/agents/<id>/...`` subtree.
+Idempotent: re-running for an already-registered agent is a no-op.""",
+    examples=(
+        (
+            "Register an agent for the Minds API proxy",
+            "mngr latchkey register-agent --host-id $HOST_ID --agent-id $AGENT_ID",
+        ),
+    ),
+).register()
+
+add_pager_help_option(_register_agent_command)
+
+
+# =============================================================================
 # Subcommand: forward
 # =============================================================================
 
@@ -396,9 +488,10 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # detached via ``start_new_session=True`` so we survive embedder
     # restarts (the whole point of the supervisor pattern). Polling
     # ``getppid()`` and SIGTERM'ing ourselves on reparent-to-init would
-    # actively defeat that. SIGHUP is wired into the signal handlers
-    # below for the interactive case (user runs ``mngr latchkey forward``
-    # in a terminal and closes it).
+    # actively defeat that. SIGINT/SIGTERM trigger shutdown; SIGHUP instead
+    # bounces only the ``mngr observe`` child (see the signal handlers below)
+    # so an embedder can refresh our provider set mid-session without
+    # dropping the gateway or any reverse tunnels.
     latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
 
     # Refuse to start if another forward is already alive for this
@@ -448,9 +541,14 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
         latchkey=latchkey,
         tunnel_manager=tunnel_manager,
         concurrency_group=mngr_ctx.concurrency_group,
+        mngr_ctx=mngr_ctx,
     )
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 
+    # This forward's `mngr observe --discovery-only` is the single discovery
+    # observer for the host dir; it writes the shared default discovery log that
+    # minds' `mngr forward --observe-via-file` tails. There is no second observer
+    # to isolate from, so it uses the standard event location.
     consumer = DiscoveryStreamConsumer(
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_binary=opts.mngr_binary,
@@ -459,16 +557,37 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     consumer.add_on_agent_destroyed_callback(destruction_handler)
 
     shutdown_event = threading.Event()
-    _install_signal_handlers(shutdown_event)
+    bounce_event = threading.Event()
+    _install_signal_handlers(shutdown_event, bounce_event)
+
+    # Keep every remote host's VPS credentials/permissions in sync in the
+    # background for the lifetime of this supervisor. Passed the shutdown event
+    # so the watcher stops cleanly on shutdown -- and, if the watcher itself
+    # dies unexpectedly, signals a loud teardown rather than running on with a
+    # silently-dead watcher.
+    discovery_handler.start_remote_state_sync(mngr_ctx.concurrency_group, shutdown_event)
 
     consumer.start()
-    logger.info("Waiting for discovery events; send SIGINT or SIGTERM to shut down.")
+    # Dispatch SIGHUP-driven observe bounces off the signal-handler thread so
+    # slow subprocess teardown/respawn never runs in signal context.
+    mngr_ctx.concurrency_group.start_new_thread(
+        target=_run_sighup_bounce_watcher,
+        args=(bounce_event, shutdown_event, consumer),
+        name="latchkey-forward-sighup-watcher",
+        daemon=True,
+        is_checked=False,
+    )
+    logger.info("Waiting for discovery events; send SIGINT or SIGTERM to shut down, SIGHUP to refresh providers.")
     try:
         # Block until shutdown is signalled. The signal handler sets the
         # event from any thread, including the main thread itself.
         shutdown_event.wait()
     finally:
         logger.info("Shutting down: terminating mngr observe, reverse tunnels, and shared gateway.")
+        # Wake the SIGHUP watcher so it observes ``shutdown_event`` and exits;
+        # it blocks on ``bounce_event`` and the concurrency group joins it on
+        # teardown, so without this nudge a clean shutdown would hang there.
+        bounce_event.set()
         consumer.stop()
         tunnel_manager.cleanup()
         try:
@@ -501,30 +620,72 @@ class _ShutdownSignalHandler(FrozenModel):
         self.shutdown_event.set()
 
 
-def _install_signal_handlers(shutdown_event: threading.Event) -> None:
-    """Wire SIGINT / SIGTERM / SIGHUP to set ``shutdown_event``.
+class _BounceSignalHandler(FrozenModel):
+    """Callable that flips a bounce :class:`threading.Event` when SIGHUP fires.
 
-    All three signals trigger the same coupled-lifetime shutdown path
-    (terminate the gateway and reverse tunnels, exit cleanly). SIGHUP
-    in particular matters for the interactive use case: when the user
-    runs ``mngr latchkey forward`` in a terminal and closes the
-    terminal, the kernel SIGHUP's the foreground process group, and
-    without this handler the python interpreter would die under the
-    default handler before our cleanup ran -- leaving the gateway as
-    an orphan. ``mngr latchkey forward`` is intentionally *not* a
-    reload story: SIGHUP triggers full shutdown, not a config bounce.
+    Mirrors :class:`_ShutdownSignalHandler` (module-level frozen callable, no
+    closures) but requests an observe bounce rather than a shutdown.
     """
-    handler = _ShutdownSignalHandler(shutdown_event=shutdown_event)
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    bounce_event: threading.Event = Field(
+        description="Event flipped to request a bounce of the mngr observe child.",
+    )
+
+    def __call__(self, signum: int, frame: object) -> None:
+        del signum, frame
+        self.bounce_event.set()
+
+
+def _run_sighup_bounce_watcher(
+    bounce_event: threading.Event,
+    shutdown_event: threading.Event,
+    consumer: DiscoveryStreamConsumer,
+) -> None:
+    """Loop until shutdown: on each SIGHUP, bounce the observe child off the signal thread.
+
+    The signal handler only flips ``bounce_event``; this watcher consumes it and
+    does the actual subprocess teardown/respawn, keeping that work out of
+    signal-handler context (which must stay minimal and re-entrant-safe). The
+    loop exits once ``shutdown_event`` is set (checked after each wake), so it
+    does not outlive the forward command.
+    """
+    while not shutdown_event.is_set():
+        bounce_event.wait()
+        bounce_event.clear()
+        if shutdown_event.is_set():
+            return
         try:
-            signal.signal(sig, handler)
+            consumer.bounce_observe()
+        except (OSError, RuntimeError) as e:
+            logger.warning("SIGHUP observe bounce failed: {}", e)
+
+
+def _install_signal_handlers(shutdown_event: threading.Event, bounce_event: threading.Event) -> None:
+    """Wire SIGINT / SIGTERM to shutdown and SIGHUP to an observe bounce.
+
+    SIGINT/SIGTERM trigger the coupled-lifetime shutdown path (terminate the
+    gateway and reverse tunnels, exit cleanly). SIGHUP no longer shuts the
+    forward down: matching ``mngr forward``, it requests a bounce of only the
+    ``mngr observe`` child so an embedder (e.g. the minds desktop client, via
+    :meth:`LatchkeyForwardSupervisor.bounce`) can refresh our provider set
+    mid-session without dropping the gateway or any reverse tunnels.
+
+    ``signal.signal`` only works from the main thread; in pytest's CliRunner /
+    threaded harnesses it can raise, so each install is best-effort and logged.
+    """
+    shutdown_handler = _ShutdownSignalHandler(shutdown_event=shutdown_event)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, shutdown_handler)
         except (ValueError, OSError) as e:
-            # ``signal.signal`` only works from the main thread; in
-            # pytest's CliRunner / threaded harnesses this can raise.
-            # We log and continue so the rest of ``forward`` still
-            # works (the test harness will tear the process down its
-            # own way).
             logger.debug("Could not install handler for signal {}: {}", sig, e)
+    bounce_handler = _BounceSignalHandler(bounce_event=bounce_event)
+    try:
+        signal.signal(signal.SIGHUP, bounce_handler)
+    except (ValueError, OSError) as e:
+        logger.debug("Could not install SIGHUP bounce handler: {}", e)
 
 
 CommandHelpMetadata(
@@ -547,6 +708,9 @@ CommandHelpMetadata(
    are intentional: any agents still alive when this process exits
    will lose their gateway endpoint until the next ``mngr latchkey
    forward`` is started.
+6. On SIGHUP, bounces only the ``mngr observe`` child (the gateway and
+   every reverse tunnel stay up) so a provider-set change made by an
+   embedder takes effect without a full restart.
 
 No filtering flags: every discovered agent gets a tunnel. The plugin
 emits stderr-only logs; stdout stays empty for the lifetime of the
@@ -664,7 +828,7 @@ def _gateway_info_command(ctx: click.Context, **kwargs: Any) -> None:
     except LatchkeyError as e:
         raise click.ClickException(f"Failed to derive gateway password: {e}") from e
 
-    emit_final_json(
+    write_json_line(
         {
             "url": f"http://{latchkey.listen_host}:{info.gateway_port}",
             "password": password,
@@ -712,6 +876,7 @@ add_pager_help_option(_gateway_info_command)
 
 latchkey.add_command(_create_agent_env_command)
 latchkey.add_command(_link_permissions_command)
+latchkey.add_command(_register_agent_command)
 latchkey.add_command(_forward_command)
 latchkey.add_command(_admin_jwt_command)
 latchkey.add_command(_gateway_info_command)

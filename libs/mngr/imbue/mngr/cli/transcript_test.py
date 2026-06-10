@@ -461,18 +461,47 @@ def test_transcript_cli_applies_head(
     assert json.loads(lines[1])["content"] == "msg-1"
 
 
-def test_transcript_cli_no_transcript_gives_error(
+def test_transcript_cli_rejects_agent_type_without_mixin(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_provider,
     temp_mngr_ctx,
 ) -> None:
-    """An agent with no common_transcript source should give a clear error."""
+    """Agent types whose class does not implement HasCommonTranscriptMixin should be rejected up front.
+
+    The default 'generic' agent_type maps to the BaseAgent default class, which
+    does not implement the mixin -- the CLI must fail with a clear error
+    naming the agent and its type, rather than a misleading 'no transcript yet' message.
+    """
     create_agent_with_events_dir(local_provider.host_dir, agent_name="no-transcript-agent")
 
     result = cli_runner.invoke(
         transcript,
         ["no-transcript-agent"],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "no-transcript-agent" in result.output
+    assert "generic" in result.output
+    assert "does not produce a common transcript" in result.output
+
+
+def test_transcript_cli_missing_events_file_for_supporting_type_gives_clear_error(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """A supporting agent type with no transcript events yet still gets the 'no source' error.
+
+    The mixin precheck passes (the type implements it), but the on-disk file is
+    missing, so the original 'No common transcript found' error path runs.
+    """
+    create_agent_with_events_dir(local_provider.host_dir, agent_name="claude-pending-agent", agent_type="claude")
+
+    result = cli_runner.invoke(
+        transcript,
+        ["claude-pending-agent"],
         obj=plugin_manager,
     )
     assert result.exit_code != 0

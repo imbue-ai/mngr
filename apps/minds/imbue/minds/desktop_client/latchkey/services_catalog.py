@@ -14,9 +14,11 @@ HTTP fetch; subsequent accesses are served from the in-memory snapshot.
 
 Shape validation of the gateway response lives in
 :class:`LatchkeyGatewayClient.get_available_services`, which returns a
-typed ``dict[str, AvailableServiceEntry]``. This module only translates
-those typed entries into the dialog-facing :class:`ServicePermissionInfo`
-records, which differ in two ways:
+typed ``dict[str, tuple[AvailableServiceEntry, ...]]`` (each service maps
+to a list of scope entries, since a single service may expose more than
+one detent scope). This module only translates those typed entries into
+the dialog-facing :class:`ServicePermissionInfo` records, which differ in
+two ways:
 
 * a ``name`` field carrying the raw service name (the key in the
   gateway's response), so the rest of the desktop client can pass a
@@ -62,11 +64,22 @@ class ServicePermissionInfo(FrozenModel):
     name: str = Field(description="Raw service name (e.g. 'slack', 'google-gmail').")
     scope: str = Field(description="Detent scope schema; matches the request event's ``scope`` field.")
     display_name: str = Field(description="Human-readable label shown in the dialog header.")
+    description: str = Field(
+        default="",
+        description="Plain-English summary of the scope (detent's ``$comment``); empty when unknown.",
+    )
     permission_schemas: tuple[str, ...] = Field(
         description=(
             "Detent permission schemas the user can grant for this scope. The catch-all "
             "``any`` schema is always injected at index 0 as an available option (not "
             "pre-checked) so the user can opt into unrestricted access if they want."
+        ),
+    )
+    description_by_permission_name: Mapping[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Plain-English summary per permission schema name (detent's ``$comment``). "
+            "Permissions without a summary are omitted; the injected ``any`` never has one."
         ),
     )
 
@@ -77,16 +90,22 @@ def _service_info_from_entry(name: str, entry: AvailableServiceEntry) -> Service
     Prepends the catch-all ``any`` schema as the first available option,
     deduplicating in case the gateway lists it explicitly (harmless but
     redundant). The dialog renders it as an opt-in choice, not a
-    pre-checked default.
+    pre-checked default. Detent's per-schema descriptions are carried
+    over so the dialog can show them next to each permission.
     """
     permission_schemas: tuple[str, ...] = (_ALWAYS_AVAILABLE_PERMISSION,) + tuple(
-        p for p in entry.permissions if p != _ALWAYS_AVAILABLE_PERMISSION
+        permission.name for permission in entry.permissions if permission.name != _ALWAYS_AVAILABLE_PERMISSION
     )
+    description_by_permission_name = {
+        permission.name: permission.description for permission in entry.permissions if len(permission.description) > 0
+    }
     return ServicePermissionInfo(
         name=name,
         scope=entry.scope,
         display_name=entry.display_name,
+        description=entry.description,
         permission_schemas=permission_schemas,
+        description_by_permission_name=description_by_permission_name,
     )
 
 
@@ -113,7 +132,7 @@ class ServicesCatalog(MutableModel):
         description="HTTP client used to fetch the catalog from the gateway.",
     )
 
-    _by_service_name: dict[str, ServicePermissionInfo] | None = PrivateAttr(default=None)
+    _by_service_name: dict[str, tuple[ServicePermissionInfo, ...]] | None = PrivateAttr(default=None)
     _by_scope: dict[str, ServicePermissionInfo] | None = PrivateAttr(default=None)
     _load_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -139,16 +158,24 @@ class ServicesCatalog(MutableModel):
                 self._by_service_name = {}
                 self._by_scope = {}
                 return
-            parsed = {name: _service_info_from_entry(name, entry) for name, entry in entries.items()}
+            parsed = {
+                name: tuple(_service_info_from_entry(name, entry) for entry in service_entries)
+                for name, service_entries in entries.items()
+            }
             self._by_service_name = parsed
-            self._by_scope = {info.scope: info for info in parsed.values()}
-            logger.debug("Loaded latchkey services catalog with {} entries from gateway", len(parsed))
+            self._by_scope = {info.scope: info for infos in parsed.values() for info in infos}
+            logger.debug("Loaded latchkey services catalog with {} services from gateway", len(parsed))
 
-    def get(self, service_name: str) -> ServicePermissionInfo | None:
-        """Return the catalog entry for the raw service name, or ``None``."""
+    def get(self, service_name: str) -> tuple[ServicePermissionInfo, ...]:
+        """Return the catalog entries for the raw service name.
+
+        A service may expose more than one detent scope, so this returns
+        a tuple of :class:`ServicePermissionInfo` (one per scope). An
+        unknown service yields the empty tuple.
+        """
         self._ensure_loaded()
         assert self._by_service_name is not None
-        return self._by_service_name.get(service_name)
+        return self._by_service_name.get(service_name, ())
 
     def get_by_scope(self, scope: str) -> ServicePermissionInfo | None:
         """Return the catalog entry whose ``scope`` schema matches, or ``None``.
@@ -161,8 +188,12 @@ class ServicesCatalog(MutableModel):
         assert self._by_scope is not None
         return self._by_scope.get(scope)
 
-    def as_mapping(self) -> Mapping[str, ServicePermissionInfo]:
-        """Return the catalog as a read-only mapping keyed by service name."""
+    def as_mapping(self) -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
+        """Return the catalog as a read-only mapping keyed by service name.
+
+        Each value is the tuple of :class:`ServicePermissionInfo` records
+        for that service (one per detent scope it exposes).
+        """
         self._ensure_loaded()
         assert self._by_service_name is not None
         return self._by_service_name

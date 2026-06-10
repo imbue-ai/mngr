@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from typing import Any
 from unittest.mock import MagicMock
 
 from imbue.concurrency_group.errors import ProcessError
@@ -15,44 +16,96 @@ from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import ConflictsField
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
+from imbue.mngr_kanpan.data_sources.github import FetchBoardResult
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
+from imbue.mngr_kanpan.data_sources.github import PrInfo
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
-from imbue.mngr_kanpan.data_sources.github import _PrLookup
+from imbue.mngr_kanpan.data_sources.github import _build_board_graphql
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
-from imbue.mngr_kanpan.data_sources.github import _build_pr_branch_index
-from imbue.mngr_kanpan.data_sources.github import _build_unresolved_query
-from imbue.mngr_kanpan.data_sources.github import _fetch_repo_prs
+from imbue.mngr_kanpan.data_sources.github import _check_unresolved_threads
 from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
-from imbue.mngr_kanpan.data_sources.github import _lookup_pr
-from imbue.mngr_kanpan.data_sources.github import _parse_check_status
-from imbue.mngr_kanpan.data_sources.github import _parse_conflicts
-from imbue.mngr_kanpan.data_sources.github import _parse_gh_output
-from imbue.mngr_kanpan.data_sources.github import _parse_pr
+from imbue.mngr_kanpan.data_sources.github import _parse_board_response
+from imbue.mngr_kanpan.data_sources.github import _parse_pr_node
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_state
-from imbue.mngr_kanpan.data_sources.github import _parse_unresolved
-from imbue.mngr_kanpan.data_sources.github import _pr_priority
-from imbue.mngr_kanpan.data_sources.github import fetch_all_prs
+from imbue.mngr_kanpan.data_sources.github import fetch_board
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
 from imbue.mngr_kanpan.testing import make_mngr_ctx_with_cg
 from imbue.mngr_kanpan.testing import make_pr_field
 
+# --- shared builders for the combined-query response shape ---
 
-def _make_pr_lookup(
+
+def _make_pr_node(
     *,
-    created: datetime,
     number: int = 1,
-    branch: str = "test-branch",
-    state: PrState = PrState.OPEN,
-    check_status: CiStatus = CiStatus.PASSING,
-) -> _PrLookup:
-    return _PrLookup(
-        pr=make_pr_field(number=number, head_branch=branch, state=state, created=created),
-        check_status=check_status,
-    )
+    title: str = "test pr",
+    state: str = "OPEN",
+    url: str | None = None,
+    head_branch: str = "test-branch",
+    is_draft: bool = False,
+    mergeable: str = "MERGEABLE",
+    rollup_state: str | None = "SUCCESS",
+    review_threads: list[dict[str, Any]] | None = None,
+    pr_comments: list[dict[str, Any]] | None = None,
+    repo: str = "org/repo",
+) -> dict[str, Any]:
+    """Build a PullRequest node matching the shape returned by the kanpan board query."""
+    return {
+        "number": number,
+        "title": title,
+        "state": state,
+        "url": url or f"https://github.com/{repo}/pull/{number}",
+        "headRefName": head_branch,
+        "isDraft": is_draft,
+        "mergeable": mergeable,
+        "statusCheckRollup": None if rollup_state is None else {"state": rollup_state},
+        "reviewThreads": {"nodes": review_threads or []},
+        "comments": {"nodes": pr_comments or []},
+        "repository": {"nameWithOwner": repo},
+    }
+
+
+def _make_board_response(
+    *,
+    nodes: list[dict[str, Any]] | None = None,
+    has_next_page: bool = False,
+    errors: list[dict[str, Any]] | None = None,
+) -> str:
+    """Build a JSON-encoded `gh api graphql` response for the kanpan board query."""
+    body: dict[str, Any] = {
+        "data": {
+            "s": {
+                "nodes": nodes or [],
+                "pageInfo": {"hasNextPage": has_next_page},
+            }
+        }
+    }
+    if errors is not None:
+        body["errors"] = errors
+    return json.dumps(body)
+
+
+def _make_board_cg(response_json: str, returncode: int = 0) -> MagicMock:
+    """Mock ConcurrencyGroup that returns a single proc carrying the given stdout."""
+    proc = MagicMock()
+    proc.read_stdout.return_value = response_json
+    proc.read_stderr.return_value = ""
+    proc.returncode = returncode
+    cg = MagicMock()
+    cg.run_process_in_background.return_value = proc
+    return cg
+
+
+def _make_thread(*, resolved: bool = False, last_author: str | None = None) -> dict[str, Any]:
+    """Build a reviewThreads node for `_check_unresolved_threads` tests."""
+    node: dict[str, Any] = {"isResolved": resolved}
+    if last_author is not None:
+        node["comments"] = {"nodes": [{"author": {"login": last_author}}]}
+    return node
 
 
 # === GitHubDataSource properties ===
@@ -88,11 +141,8 @@ def test_github_data_source_field_types_disabled() -> None:
 
 def test_get_cached_repo_field_found() -> None:
     repo_field = RepoPathField(path="org/repo", created=datetime(2028, 1, 1, 0, 0, 1, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": repo_field},
-    }
-    result = _get_cached_repo_field(cached, AgentName("a1"))
-    assert result == repo_field
+    cached: dict[AgentName, dict[str, FieldValue]] = {AgentName("a1"): {"repo_path": repo_field}}
+    assert _get_cached_repo_field(cached, AgentName("a1")) == repo_field
 
 
 def test_get_cached_repo_field_not_found() -> None:
@@ -106,521 +156,12 @@ def test_get_cached_repo_field_wrong_type() -> None:
     assert _get_cached_repo_field(cached, AgentName("a1")) is None
 
 
-# === _pr_priority ===
-
-
-def test_pr_priority_open() -> None:
-    assert (
-        _pr_priority(make_pr_field(state=PrState.OPEN, created=datetime(2028, 1, 1, 0, 0, 3, tzinfo=timezone.utc)))
-        == 2
-    )
-
-
-def test_pr_priority_merged() -> None:
-    assert (
-        _pr_priority(make_pr_field(state=PrState.MERGED, created=datetime(2028, 1, 1, 0, 0, 4, tzinfo=timezone.utc)))
-        == 1
-    )
-
-
-def test_pr_priority_closed() -> None:
-    assert (
-        _pr_priority(make_pr_field(state=PrState.CLOSED, created=datetime(2028, 1, 1, 0, 0, 5, tzinfo=timezone.utc)))
-        == 0
-    )
-
-
-# === _build_pr_branch_index ===
-
-
-def test_build_pr_branch_index_empty() -> None:
-    assert _build_pr_branch_index(()) == {}
-
-
-def test_build_pr_branch_index_single() -> None:
-    lookup = _make_pr_lookup(branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 6, tzinfo=timezone.utc))
-    result = _build_pr_branch_index((lookup,))
-    assert "branch-1" in result
-    assert result["branch-1"].pr.number == 1
-
-
-def test_build_pr_branch_index_prefers_open() -> None:
-    closed = _make_pr_lookup(
-        number=1, branch="b", state=PrState.CLOSED, created=datetime(2028, 1, 1, 0, 0, 7, tzinfo=timezone.utc)
-    )
-    open_pr = _make_pr_lookup(
-        number=2, branch="b", state=PrState.OPEN, created=datetime(2028, 1, 1, 0, 0, 8, tzinfo=timezone.utc)
-    )
-    result = _build_pr_branch_index((closed, open_pr))
-    assert result["b"].pr.number == 2
-
-
-# === _lookup_pr ===
-
-
-def test_lookup_pr_found() -> None:
-    lookup = _make_pr_lookup(branch="b", created=datetime(2028, 1, 1, 0, 0, 9, tzinfo=timezone.utc))
-    index = {"repo": {"b": lookup}}
-    assert _lookup_pr(index, "repo", "b") == lookup
-
-
-def test_lookup_pr_not_found() -> None:
-    assert _lookup_pr({}, "repo", "branch") is None
-
-
-def test_lookup_pr_no_repo() -> None:
-    lookup = _make_pr_lookup(branch="b", created=datetime(2028, 1, 1, 0, 0, 10, tzinfo=timezone.utc))
-    assert _lookup_pr({"other": {"b": lookup}}, "repo", "b") is None
-
-
 # === _build_create_pr_url ===
 
 
 def test_build_create_pr_url() -> None:
     url = _build_create_pr_url("org/repo", "my-branch")
     assert url == "https://github.com/org/repo/compare/my-branch?expand=1"
-
-
-# === _parse_conflicts ===
-
-
-def test_parse_conflicts_conflicting() -> None:
-    assert _parse_conflicts('{"mergeable": "CONFLICTING"}') is True
-
-
-def test_parse_conflicts_mergeable() -> None:
-    assert _parse_conflicts('{"mergeable": "MERGEABLE"}') is False
-
-
-def test_parse_conflicts_invalid_json() -> None:
-    assert _parse_conflicts("not json") is False
-
-
-# === _build_unresolved_query ===
-
-
-def test_build_unresolved_query() -> None:
-    query = _build_unresolved_query("org/repo", 42)
-    assert "org" in query
-    assert "repo" in query
-    assert "42" in query
-    assert "reviewThreads" in query
-    assert "comments" in query
-    assert "author" in query
-    assert "login" in query
-
-
-# === _parse_unresolved ===
-
-
-def _make_unresolved_response(
-    threads: list[dict[str, object]] | None = None,
-    pr_comments: list[dict[str, object]] | None = None,
-) -> str:
-    """Build a GraphQL response JSON for _parse_unresolved tests."""
-    pr_data: dict[str, object] = {
-        "reviewThreads": {"nodes": threads or []},
-    }
-    if pr_comments is not None:
-        pr_data["comments"] = {"nodes": pr_comments}
-    return json.dumps({"data": {"repository": {"pullRequest": pr_data}}})
-
-
-def _thread(*, resolved: bool = False, last_author: str | None = None) -> dict[str, object]:
-    """Build a review thread node for _parse_unresolved tests."""
-    node: dict[str, object] = {"isResolved": resolved}
-    if last_author is not None:
-        node["comments"] = {"nodes": [{"author": {"login": last_author}}]}
-    return node
-
-
-def test_parse_unresolved_has_unresolved() -> None:
-    data = _make_unresolved_response(threads=[_thread(resolved=True), _thread(resolved=False)])
-    assert _parse_unresolved(data) is True
-
-
-def test_parse_unresolved_all_resolved() -> None:
-    assert _parse_unresolved(_make_unresolved_response(threads=[_thread(resolved=True)])) is False
-
-
-def test_parse_unresolved_no_threads() -> None:
-    assert _parse_unresolved(_make_unresolved_response()) is False
-
-
-def test_parse_unresolved_invalid_json() -> None:
-    assert _parse_unresolved("not json") is False
-
-
-def test_parse_unresolved_ignore_user_skips_matching_threads() -> None:
-    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
-    assert _parse_unresolved(data, ignore_user="myuser") is False
-
-
-def test_parse_unresolved_ignore_user_keeps_other_threads() -> None:
-    data = _make_unresolved_response(threads=[_thread(last_author="reviewer")])
-    assert _parse_unresolved(data, ignore_user="myuser") is True
-
-
-def test_parse_unresolved_ignore_user_none_counts_all() -> None:
-    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
-    assert _parse_unresolved(data, ignore_user=None) is True
-
-
-def test_parse_unresolved_ignore_user_flags_thread_where_someone_else_responded_last() -> None:
-    """I started the thread but someone else responded and I haven't replied yet."""
-    data = _make_unresolved_response(threads=[_thread(last_author="reviewer")])
-    assert _parse_unresolved(data, ignore_user="myuser") is True
-
-
-def test_parse_unresolved_ignore_user_skips_thread_where_i_responded_last() -> None:
-    """Someone else started the thread but I already replied."""
-    data = _make_unresolved_response(threads=[_thread(last_author="myuser")])
-    assert _parse_unresolved(data, ignore_user="myuser") is False
-
-
-def test_parse_unresolved_ignore_user_empty_comments_counts_as_unresolved() -> None:
-    node: dict[str, object] = {"isResolved": False, "comments": {"nodes": []}}
-    assert _parse_unresolved(_make_unresolved_response(threads=[node]), ignore_user="myuser") is True
-
-
-# --- PR conversation comments ---
-
-
-def test_parse_unresolved_pr_comment_by_other_flags_unresolved() -> None:
-    """Last PR conversation comment is by someone else -- needs response."""
-    data = _make_unresolved_response(pr_comments=[{"author": {"login": "reviewer"}}])
-    assert _parse_unresolved(data, ignore_user="myuser") is True
-
-
-def test_parse_unresolved_pr_comment_by_me_not_flagged() -> None:
-    """Last PR conversation comment is by me -- I already replied."""
-    data = _make_unresolved_response(pr_comments=[{"author": {"login": "myuser"}}])
-    assert _parse_unresolved(data, ignore_user="myuser") is False
-
-
-def test_parse_unresolved_pr_comment_not_checked_without_ignore_user() -> None:
-    """Without ignore_user, PR conversation comments are not checked."""
-    data = _make_unresolved_response(pr_comments=[{"author": {"login": "reviewer"}}])
-    assert _parse_unresolved(data, ignore_user=None) is False
-
-
-def test_parse_unresolved_no_pr_comments_is_clean() -> None:
-    """No PR conversation comments and no unresolved threads -- clean."""
-    data = _make_unresolved_response(pr_comments=[])
-    assert _parse_unresolved(data, ignore_user="myuser") is False
-
-
-# === _fetch_repo_prs ===
-
-
-def _make_fetch_cg(open_json: str, all_json: str) -> MagicMock:
-    """Build a mock ConcurrencyGroup for fetch_all_prs."""
-    open_proc = MagicMock()
-    open_proc.read_stdout.return_value = open_json
-    open_proc.read_stderr.return_value = ""
-    open_proc.returncode = 0
-
-    all_proc = MagicMock()
-    all_proc.read_stdout.return_value = all_json
-    all_proc.read_stderr.return_value = ""
-    all_proc.returncode = 0
-
-    cg = MagicMock()
-    cg.run_process_in_background.side_effect = [open_proc, all_proc]
-    return cg
-
-
-def _make_failing_fetch_cg(stderr: str = "HTTP 504") -> MagicMock:
-    """Build a mock ConcurrencyGroup whose two PR fetches both fail with the given stderr.
-
-    Mirrors the failure shape used by tests that exercise the PR-fetch-failed code
-    paths (returncode=1, empty stdout). The two-process side_effect matches
-    fetch_all_prs's open + all queries.
-    """
-    fail_proc = MagicMock()
-    fail_proc.read_stdout.return_value = ""
-    fail_proc.read_stderr.return_value = stderr
-    fail_proc.returncode = 1
-    cg = MagicMock()
-    cg.run_process_in_background.side_effect = [fail_proc, fail_proc]
-    return cg
-
-
-def _make_open_pr_json(number: int = 1, branch: str = "test-branch") -> str:
-    return json.dumps(
-        [
-            {
-                "number": number,
-                "title": f"PR {number}",
-                "state": "OPEN",
-                "url": f"https://github.com/org/repo/pull/{number}",
-                "headRefName": branch,
-                "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
-                "isDraft": False,
-            }
-        ]
-    )
-
-
-def test_fetch_repo_prs_success() -> None:
-    now = datetime(2028, 1, 1, 0, 0, 11, tzinfo=timezone.utc)
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    repo_path, result = _fetch_repo_prs(cg, "org/repo", now)
-    assert repo_path == "org/repo"
-    assert result.error is None
-    assert len(result.prs) == 1
-    assert result.prs[0].pr.number == 1
-    assert result.prs[0].pr.head_branch == "branch-1"
-    assert result.prs[0].pr.created == now
-
-
-def test_fetch_repo_prs_error() -> None:
-    cg = MagicMock()
-    proc_fail = MagicMock()
-    proc_fail.read_stdout.return_value = ""
-    proc_fail.read_stderr.return_value = "some error"
-    proc_fail.returncode = 1
-    cg.run_process_in_background.side_effect = [proc_fail, proc_fail]
-    repo_path, result = _fetch_repo_prs(cg, "org/repo", datetime(2028, 1, 1, 0, 0, 12, tzinfo=timezone.utc))
-    assert repo_path == "org/repo"
-    assert result.error is not None
-
-
-# === GitHubDataSource.compute ===
-
-
-def test_compute_no_agents() -> None:
-    ds = GitHubDataSource()
-    cg = MagicMock()
-    ctx = make_mngr_ctx_with_cg(cg)
-    fields, errors = ds.compute(agents=(), cached_fields={}, mngr_ctx=ctx)
-    assert fields == {}
-    assert errors == []
-
-
-def test_compute_agents_without_repo() -> None:
-    ds = GitHubDataSource()
-    cg = MagicMock()
-    ctx = make_mngr_ctx_with_cg(cg)
-    agent = make_agent_details(name="a1", initial_branch="mngr/test", labels={})
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert fields == {}
-    assert errors == []
-
-
-def test_compute_mixed_agents_with_and_without_repo() -> None:
-    """Agents lacking a repo (no labels, no cache) must not crash compute()
-    even when other agents in the same call have a repo. Regression test for
-    a KeyError on agent_created[agent.name] when the per-agent staleness map
-    was not populated for unlabeled agents.
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = make_mngr_ctx_with_cg(cg)
-    agent_with = make_agent_details(
-        name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
-    )
-    agent_without = make_agent_details(name="a2", initial_branch="branch-2", labels={})
-    fields, _errors = ds.compute(agents=(agent_with, agent_without), cached_fields={}, mngr_ctx=ctx)
-    assert agent_with.name in fields
-    assert agent_without.name not in fields
-
-
-def test_compute_agents_with_cached_repo_path() -> None:
-    """Uses cached repo_path field from previous cycle if available."""
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    # Use a cg that returns a PR for branch-1
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = make_mngr_ctx_with_cg(cg)
-    # Provide repo path via label (simpler than full cached repo_path)
-    agent_with_label = make_agent_details(
-        name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
-    )
-    fields, errors = ds.compute(agents=(agent_with_label,), cached_fields={}, mngr_ctx=ctx)
-    assert agent_with_label.name in fields
-    assert FIELD_PR in fields[agent_with_label.name]
-    assert FIELD_CI in fields[agent_with_label.name]
-
-
-def test_compute_no_pr_for_branch_generates_create_url_in_pr_slot() -> None:
-    """When no PR found, CreatePrUrlField should be placed in the 'pr' slot."""
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=False, unresolved=False))
-    agent = make_agent_details(
-        name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
-    )
-    # Return empty PR list so no PRs exist for branch
-    cg = _make_fetch_cg("[]", "[]")
-    ctx = make_mngr_ctx_with_cg(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert agent.name in fields
-    assert FIELD_PR in fields[agent.name]
-    create_url_field = fields[agent.name][FIELD_PR]
-    assert isinstance(create_url_field, CreatePrUrlField)
-    assert "no-pr-branch" in create_url_field.url
-
-
-def test_compute_pr_fetch_error_adds_error() -> None:
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert len(errors) > 0
-
-
-def test_compute_pr_fetch_failed_no_cache_emits_fetch_failed_field() -> None:
-    """When the repo's PR fetch fails and no cached PrField exists, the agent
-    gets a PrFetchFailedField in the FIELD_PR slot so it routes into PRS_FAILED.
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
-    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert agent.name in fields
-    pr_field = fields[agent.name].get(FIELD_PR)
-    assert isinstance(pr_field, PrFetchFailedField)
-    assert pr_field.repo == "org/repo"
-
-
-def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
-    """When the repo's PR fetch fails but a cached PrField exists, fall back to
-    the cached field silently (no PrFetchFailedField, no agent flagged in PRS_FAILED).
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    cached_pr = make_pr_field(
-        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
-    )
-    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
-    }
-    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
-    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    assert agent.name in fields
-    pr_field = fields[agent.name].get(FIELD_PR)
-    assert not isinstance(pr_field, PrFetchFailedField)
-    assert pr_field == cached_pr
-    assert fields[agent.name].get(FIELD_CI) == cached_ci
-
-
-def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch_failed_field() -> None:
-    """When the repo's PR fetch fails and the cached PrField is for a different
-    branch than the agent's current one, the cache must NOT be reused -- otherwise
-    we would attribute the old branch's PR to the new branch. We should fall through
-    to PrFetchFailedField, the same as the no-cache case.
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
-    # The cached PR's head_branch ("branch-1") differs from the agent's current branch.
-    stale_cached_pr = make_pr_field(
-        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 15, tzinfo=timezone.utc)
-    )
-    cached_ci = CiField(status=CiStatus.PASSING, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
-    cached: dict[AgentName, dict[str, FieldValue]] = {
-        agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
-    }
-    ctx = make_mngr_ctx_with_cg(_make_failing_fetch_cg())
-    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
-    assert agent.name in fields
-    pr_field = fields[agent.name].get(FIELD_PR)
-    assert isinstance(pr_field, PrFetchFailedField)
-    assert pr_field.repo == "org/repo"
-    # Stale CI must not leak through either.
-    assert FIELD_CI not in fields[agent.name]
-
-
-def test_compute_with_conflicts_and_unresolved() -> None:
-    """Full compute with conflicts and unresolved metadata fetching."""
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=True, ci=True, conflicts=True, unresolved=True))
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-
-    open_pr_json = _make_open_pr_json(1, "branch-1")
-    # First two calls: fetch PRs (open + all)
-    pr_open_proc = MagicMock()
-    pr_open_proc.read_stdout.return_value = open_pr_json
-    pr_open_proc.read_stderr.return_value = ""
-    pr_open_proc.returncode = 0
-
-    pr_all_proc = MagicMock()
-    pr_all_proc.read_stdout.return_value = open_pr_json
-    pr_all_proc.read_stderr.return_value = ""
-    pr_all_proc.returncode = 0
-
-    # Metadata procs for conflicts and unresolved
-    conflicts_proc = MagicMock()
-    conflicts_proc.wait.return_value = 0
-    conflicts_proc.returncode = 0
-    conflicts_proc.read_stdout.return_value = json.dumps({"mergeable": "MERGEABLE"})
-
-    unresolved_proc = MagicMock()
-    unresolved_proc.wait.return_value = 0
-    unresolved_proc.returncode = 0
-    unresolved_threads: dict[str, object] = {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}}
-    unresolved_proc.read_stdout.return_value = json.dumps(unresolved_threads)
-
-    cg = MagicMock()
-    # First 2 calls for PR fetching, next 2 for metadata
-    cg.run_process_in_background.side_effect = [pr_open_proc, pr_all_proc, conflicts_proc, unresolved_proc]
-
-    ctx = make_mngr_ctx_with_cg(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    assert agent.name in fields
-    assert FIELD_PR in fields[agent.name]
-    assert FIELD_CONFLICTS in fields[agent.name]
-    assert FIELD_UNRESOLVED in fields[agent.name]
-    assert isinstance(fields[agent.name][FIELD_CONFLICTS], ConflictsField)
-    assert isinstance(fields[agent.name][FIELD_UNRESOLVED], UnresolvedField)
-
-
-def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> None:
-    """If labels don't carry a remote, we fall back to the cached repo_path
-    and the derived PR/CI fields inherit the cached field's `created`.
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = make_mngr_ctx_with_cg(cg)
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
-    cached_created = datetime(2028, 1, 1, 0, 0, 17, tzinfo=timezone.utc) - timedelta(hours=2)
-    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
-    }
-    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
-    pr = fields[AgentName("a1")][FIELD_PR]
-    ci = fields[AgentName("a1")][FIELD_CI]
-    assert pr.created == cached_created
-    assert ci.created == cached_created
-
-
-def test_compute_uses_now_when_labels_carry_remote() -> None:
-    """Labels are world data and always at least as fresh as the cache, so
-    when they carry a remote we use them and stamp `created=now` -- even if
-    a (potentially stale) cached repo_path is also available.
-    """
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = make_mngr_ctx_with_cg(cg)
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    # Even with a stale cache present, labels should win.
-    stale_cached = datetime(2028, 1, 1, 0, 0, 18, tzinfo=timezone.utc) - timedelta(hours=2)
-    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
-        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
-    }
-    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
-    pr = fields[AgentName("a1")][FIELD_PR]
-    delta = datetime.now(timezone.utc) - pr.created
-    assert delta.total_seconds() < 60
-
-
-def test_compute_disabled_pr_and_ci() -> None:
-    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False, conflicts=False, unresolved=False))
-    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
-    cg = _make_fetch_cg(_make_open_pr_json(1, "branch-1"), _make_open_pr_json(1, "branch-1"))
-    ctx = make_mngr_ctx_with_cg(cg)
-    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
-    # pr=False means no FIELD_PR; ci=False means no FIELD_CI
-    agent_fields = fields.get(agent.name, {})
-    assert FIELD_PR not in agent_fields
-    assert FIELD_CI not in agent_fields
 
 
 # === _parse_pr_state ===
@@ -648,320 +189,527 @@ def test_parse_pr_state_unknown_defaults_to_open() -> None:
     assert _parse_pr_state("DRAFT") == PrState.OPEN
 
 
-# === _parse_check_status ===
+# === CiStatus.from_rollup_state ===
 
 
-def test_parse_check_status_none() -> None:
-    assert _parse_check_status(None) == CiStatus.UNKNOWN
+def test_from_rollup_state_none() -> None:
+    assert CiStatus.from_rollup_state(None) == CiStatus.UNKNOWN
 
 
-def test_parse_check_status_empty_list() -> None:
-    assert _parse_check_status([]) == CiStatus.UNKNOWN
+def test_from_rollup_state_success() -> None:
+    assert CiStatus.from_rollup_state("SUCCESS") == CiStatus.SUCCESS
 
 
-def test_parse_check_status_all_success() -> None:
-    rollup = [
-        {"status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"status": "COMPLETED", "conclusion": "SUCCESS"},
-    ]
-    assert _parse_check_status(rollup) == CiStatus.PASSING
+def test_from_rollup_state_failure() -> None:
+    assert CiStatus.from_rollup_state("FAILURE") == CiStatus.FAILURE
 
 
-def test_parse_check_status_any_failure() -> None:
-    rollup = [
-        {"status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"status": "COMPLETED", "conclusion": "FAILURE"},
-    ]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
+def test_from_rollup_state_pending() -> None:
+    assert CiStatus.from_rollup_state("PENDING") == CiStatus.PENDING
 
 
-def test_parse_check_status_error_conclusion() -> None:
-    rollup = [{"status": "COMPLETED", "conclusion": "ERROR"}]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
+def test_from_rollup_state_unrecognized_is_unknown() -> None:
+    # Future-proofing: any new enum value we don't know about should
+    # render as UNKNOWN rather than crash.
+    assert CiStatus.from_rollup_state("EXPECTED") == CiStatus.UNKNOWN
 
 
-def test_parse_check_status_cancelled_conclusion() -> None:
-    rollup = [{"status": "COMPLETED", "conclusion": "CANCELLED"}]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
+# === _parse_pr_node ===
 
 
-def test_parse_check_status_timed_out_conclusion() -> None:
-    rollup = [{"status": "COMPLETED", "conclusion": "TIMED_OUT"}]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
-
-
-def test_parse_check_status_action_required_conclusion() -> None:
-    rollup = [{"status": "COMPLETED", "conclusion": "ACTION_REQUIRED"}]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
-
-
-def test_parse_check_status_pending() -> None:
-    rollup = [
-        {"status": "COMPLETED", "conclusion": "SUCCESS"},
-        {"status": "IN_PROGRESS", "conclusion": None},
-    ]
-    assert _parse_check_status(rollup) == CiStatus.PENDING
-
-
-def test_parse_check_status_queued() -> None:
-    rollup = [{"status": "QUEUED", "conclusion": None}]
-    assert _parse_check_status(rollup) == CiStatus.PENDING
-
-
-def test_parse_check_status_failure_takes_priority_over_pending() -> None:
-    rollup = [
-        {"status": "IN_PROGRESS", "conclusion": None},
-        {"status": "COMPLETED", "conclusion": "FAILURE"},
-    ]
-    assert _parse_check_status(rollup) == CiStatus.FAILING
-
-
-# === _parse_pr ===
-
-
-def test_parse_pr() -> None:
-    raw = {
-        "number": 42,
-        "title": "Add feature X",
-        "state": "OPEN",
-        "url": "https://github.com/org/repo/pull/42",
-        "headRefName": "mngr/my-agent",
-        "statusCheckRollup": [
-            {"status": "COMPLETED", "conclusion": "SUCCESS"},
-        ],
-    }
-    pr = _parse_pr(raw)
+def test_parse_pr_node_minimal() -> None:
+    node = _make_pr_node(number=42, head_branch="mngr/foo")
+    pr = _parse_pr_node(node, unresolved_ignore_user=None)
     assert pr.number == 42
-    assert pr.title == "Add feature X"
+    assert pr.head_branch == "mngr/foo"
     assert pr.state == PrState.OPEN
-    assert pr.url == "https://github.com/org/repo/pull/42"
-    assert pr.head_branch == "mngr/my-agent"
-    assert pr.check_status == CiStatus.PASSING
+    assert pr.check_status == CiStatus.SUCCESS
     assert pr.is_draft is False
+    assert pr.has_conflicts is False
+    assert pr.has_unresolved is False
 
 
-def test_parse_pr_draft() -> None:
-    raw = {
-        "number": 99,
-        "title": "WIP feature",
-        "state": "OPEN",
-        "url": "https://github.com/org/repo/pull/99",
-        "headRefName": "mngr/wip",
-        "statusCheckRollup": [],
-        "isDraft": True,
-    }
-    pr = _parse_pr(raw)
-    assert pr.is_draft is True
-    assert pr.state == PrState.OPEN
+def test_parse_pr_node_conflicting() -> None:
+    node = _make_pr_node(mergeable="CONFLICTING")
+    pr = _parse_pr_node(node, unresolved_ignore_user=None)
+    assert pr.has_conflicts is True
 
 
-def test_parse_pr_merged_with_no_checks() -> None:
-    raw = {
-        "number": 10,
-        "title": "Fix bug",
-        "state": "MERGED",
-        "url": "https://github.com/org/repo/pull/10",
-        "headRefName": "mngr/fix-bug",
-        "statusCheckRollup": [],
-    }
-    pr = _parse_pr(raw)
-    assert pr.state == PrState.MERGED
+def test_parse_pr_node_no_rollup_is_unknown() -> None:
+    node = _make_pr_node(rollup_state=None)
+    pr = _parse_pr_node(node, unresolved_ignore_user=None)
     assert pr.check_status == CiStatus.UNKNOWN
 
 
-# === _parse_gh_output ===
+def test_parse_pr_node_draft_merged() -> None:
+    node = _make_pr_node(state="MERGED", is_draft=True, rollup_state=None)
+    pr = _parse_pr_node(node, unresolved_ignore_user=None)
+    assert pr.state == PrState.MERGED
+    assert pr.is_draft is True
 
 
-def test_parse_gh_output_success() -> None:
-    raw = [{"number": 1, "title": "PR 1"}]
-    result = _parse_gh_output(json.dumps(raw), 0, "")
-    assert result == raw
+# === _check_unresolved_threads ===
 
 
-def test_parse_gh_output_nonzero_exit_returns_stderr() -> None:
-    result = _parse_gh_output("", 1, "HTTP 504: Gateway Timeout")
-    assert isinstance(result, str)
-    assert "504" in result
+def test_check_unresolved_threads_unresolved() -> None:
+    node = _make_pr_node(review_threads=[_make_thread(resolved=False)])
+    assert _check_unresolved_threads(node, ignore_user=None) is True
 
 
-def test_parse_gh_output_nonzero_exit_falls_back_to_stdout() -> None:
-    result = _parse_gh_output("some output", 1, "")
-    assert isinstance(result, str)
-    assert "some output" in result
+def test_check_unresolved_threads_all_resolved() -> None:
+    node = _make_pr_node(review_threads=[_make_thread(resolved=True)])
+    assert _check_unresolved_threads(node, ignore_user=None) is False
 
 
-def test_parse_gh_output_nonzero_exit_falls_back_to_exit_code() -> None:
-    result = _parse_gh_output("", 128, "")
-    assert isinstance(result, str)
-    assert "128" in result
+def test_check_unresolved_threads_empty() -> None:
+    node = _make_pr_node()
+    assert _check_unresolved_threads(node, ignore_user=None) is False
 
 
-def test_parse_gh_output_invalid_json() -> None:
-    result = _parse_gh_output("not json", 0, "")
-    assert isinstance(result, str)
-    assert "parse error" in result
+def test_check_unresolved_threads_ignore_user_skips_my_last_reply() -> None:
+    node = _make_pr_node(review_threads=[_make_thread(last_author="myuser")])
+    assert _check_unresolved_threads(node, ignore_user="myuser") is False
 
 
-# === fetch_all_prs ===
+def test_check_unresolved_threads_ignore_user_keeps_other_replies() -> None:
+    node = _make_pr_node(review_threads=[_make_thread(last_author="reviewer")])
+    assert _check_unresolved_threads(node, ignore_user="myuser") is True
 
 
-def _make_mock_proc(stdout: str, returncode: int = 0, stderr: str = "") -> MagicMock:
-    """Create a mock RunningProcess with the given output."""
-    proc = MagicMock()
-    proc.read_stdout.return_value = stdout
-    proc.read_stderr.return_value = stderr
-    proc.returncode = returncode
-    return proc
+def test_check_unresolved_threads_ignore_user_none_counts_my_reply() -> None:
+    node = _make_pr_node(review_threads=[_make_thread(last_author="myuser")])
+    assert _check_unresolved_threads(node, ignore_user=None) is True
 
 
-def _make_mock_cg(open_stdout: str, all_stdout: str) -> MagicMock:
-    """Create a mock ConcurrencyGroup returning two background processes."""
+def test_check_unresolved_threads_empty_comments_counts() -> None:
+    thread = {"isResolved": False, "comments": {"nodes": []}}
+    node = _make_pr_node(review_threads=[thread])
+    assert _check_unresolved_threads(node, ignore_user="myuser") is True
+
+
+def test_check_unresolved_threads_pr_comment_by_other_flags() -> None:
+    node = _make_pr_node(pr_comments=[{"author": {"login": "reviewer"}}])
+    assert _check_unresolved_threads(node, ignore_user="myuser") is True
+
+
+def test_check_unresolved_threads_pr_comment_by_me_not_flagged() -> None:
+    node = _make_pr_node(pr_comments=[{"author": {"login": "myuser"}}])
+    assert _check_unresolved_threads(node, ignore_user="myuser") is False
+
+
+def test_check_unresolved_threads_pr_comment_not_checked_without_ignore_user() -> None:
+    node = _make_pr_node(pr_comments=[{"author": {"login": "reviewer"}}])
+    assert _check_unresolved_threads(node, ignore_user=None) is False
+
+
+# === _build_board_graphql ===
+
+
+def test_build_board_graphql_includes_repos_and_branches() -> None:
+    query = _build_board_graphql([("org/a", "feat-1"), ("org/b", "feat-2"), ("org/a", "feat-3")])
+    # repos are deduped and OR'd
+    assert "repo:org/a" in query
+    assert "repo:org/b" in query
+    assert "head:feat-1" in query
+    assert "head:feat-2" in query
+    assert "head:feat-3" in query
+    # author and type filters present
+    assert "author:@me" in query
+    assert "type:pr" in query
+    # response shape we depend on
+    assert "statusCheckRollup" in query
+    assert "mergeable" in query
+    assert "reviewThreads" in query
+    assert "nameWithOwner" in query
+
+
+# === _parse_board_response ===
+
+
+def test_parse_board_response_success() -> None:
+    response = _make_board_response(
+        nodes=[
+            _make_pr_node(number=1, head_branch="b1", repo="org/r"),
+            _make_pr_node(number=2, head_branch="b2", repo="org/r", state="MERGED"),
+        ],
+    )
+    result = _parse_board_response(response, [("org/r", "b1"), ("org/r", "b2")], unresolved_ignore_user=None)
+    assert result.errors == ()
+    assert set(result.prs.keys()) == {("org/r", "b1"), ("org/r", "b2")}
+    assert result.prs[("org/r", "b1")].number == 1
+    assert result.prs[("org/r", "b2")].state == PrState.MERGED
+
+
+def test_parse_board_response_unrequested_pair_skipped() -> None:
+    # Defensive: a node whose (repo, branch) we didn't ask about must be ignored.
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="other-branch", repo="org/r")])
+    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert result.prs == {}
+
+
+def test_parse_board_response_multiple_prs_per_branch_prefers_open() -> None:
+    closed = _make_pr_node(number=10, head_branch="b1", state="CLOSED", repo="org/r")
+    open_pr = _make_pr_node(number=11, head_branch="b1", state="OPEN", repo="org/r")
+    merged = _make_pr_node(number=12, head_branch="b1", state="MERGED", repo="org/r")
+    response = _make_board_response(nodes=[closed, merged, open_pr])
+    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert result.prs[("org/r", "b1")].number == 11
+
+
+def test_parse_board_response_partial_errors_surfaces_messages() -> None:
+    response = _make_board_response(
+        nodes=[_make_pr_node(head_branch="b1", repo="org/r")],
+        errors=[{"message": "Something went wrong", "type": "INTERNAL"}],
+    )
+    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert any("Something went wrong" in e for e in result.errors)
+    # Successful nodes still pass through alongside the errors.
+    assert ("org/r", "b1") in result.prs
+
+
+def test_parse_board_response_invalid_json() -> None:
+    result = _parse_board_response("not json", [("org/r", "b1")], unresolved_ignore_user=None)
+    assert result.prs == {}
+    assert len(result.errors) == 1
+    assert "parse error" in result.errors[0]
+
+
+def test_parse_board_response_pagination_warns() -> None:
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r")], has_next_page=True)
+    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert any("first: 100" in e or "100" in e for e in result.errors)
+
+
+def test_parse_board_response_null_node_skipped() -> None:
+    # A null entry in nodes (defensive guard) should not crash the parser.
+    response = json.dumps(
+        {
+            "data": {
+                "s": {
+                    "nodes": [None, _make_pr_node(head_branch="b1", repo="org/r")],
+                    "pageInfo": {"hasNextPage": False},
+                }
+            }
+        }
+    )
+    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert ("org/r", "b1") in result.prs
+
+
+# === fetch_board ===
+
+
+def test_fetch_board_empty_pairs() -> None:
     cg = MagicMock()
-    open_proc = _make_mock_proc(open_stdout)
-    all_proc = _make_mock_proc(all_stdout)
-    cg.run_process_in_background.side_effect = [open_proc, all_proc]
-    return cg
+    result = fetch_board(cg, repo_branches=[])
+    assert result == FetchBoardResult(prs={})
+    cg.run_process_in_background.assert_not_called()
 
 
-def test_fetch_all_prs_success() -> None:
-    open_prs = [
-        {
-            "number": 1,
-            "title": "PR 1",
-            "state": "OPEN",
-            "url": "https://github.com/org/repo/pull/1",
-            "headRefName": "branch-1",
-            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
-        },
-    ]
-    all_prs = [
-        {
-            "number": 1,
-            "title": "PR 1",
-            "state": "OPEN",
-            "url": "https://github.com/org/repo/pull/1",
-            "headRefName": "branch-1",
-        },
-        {
-            "number": 2,
-            "title": "PR 2",
-            "state": "MERGED",
-            "url": "https://github.com/org/repo/pull/2",
-            "headRefName": "branch-2",
-        },
-    ]
-    cg = _make_mock_cg(json.dumps(open_prs), json.dumps(all_prs))
-    result = fetch_all_prs(cg)
-    assert len(result.prs) == 2
-    assert result.error is None
-    prs_by_number = {pr.number: pr for pr in result.prs}
-    assert prs_by_number[1].state == PrState.OPEN
-    assert prs_by_number[1].check_status == CiStatus.PASSING
-    assert prs_by_number[2].state == PrState.MERGED
-    assert prs_by_number[2].check_status == CiStatus.UNKNOWN
+def test_fetch_board_success() -> None:
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=42)])
+    cg = _make_board_cg(response)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")])
+    assert ("org/r", "b1") in result.prs
+    assert result.prs[("org/r", "b1")].number == 42
+    assert result.errors == ()
 
 
-def test_fetch_all_prs_open_data_preferred_over_all() -> None:
-    open_prs = [
-        {
-            "number": 5,
-            "title": "My PR",
-            "state": "OPEN",
-            "url": "https://github.com/org/repo/pull/5",
-            "headRefName": "branch-5",
-            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "FAILURE"}],
-        },
-    ]
-    all_prs = [
-        {
-            "number": 5,
-            "title": "My PR",
-            "state": "OPEN",
-            "url": "https://github.com/org/repo/pull/5",
-            "headRefName": "branch-5",
-        },
-    ]
-    cg = _make_mock_cg(json.dumps(open_prs), json.dumps(all_prs))
-    result = fetch_all_prs(cg)
-    assert len(result.prs) == 1
-    assert result.prs[0].check_status == CiStatus.FAILING
-
-
-def test_fetch_all_prs_open_query_fails_all_succeeds() -> None:
-    all_prs = [
-        {
-            "number": 3,
-            "title": "PR 3",
-            "state": "MERGED",
-            "url": "https://github.com/org/repo/pull/3",
-            "headRefName": "branch-3",
-        },
-    ]
-    cg = MagicMock()
-    open_proc = _make_mock_proc("", returncode=1, stderr="HTTP 504")
-    all_proc = _make_mock_proc(json.dumps(all_prs))
-    cg.run_process_in_background.side_effect = [open_proc, all_proc]
-
-    result = fetch_all_prs(cg)
-    assert len(result.prs) == 1
-    assert result.prs[0].number == 3
-    assert result.error is None
-
-
-def test_fetch_all_prs_both_queries_fail() -> None:
-    cg = MagicMock()
-    open_proc = _make_mock_proc("", returncode=1, stderr="timeout")
-    all_proc = _make_mock_proc("", returncode=1, stderr="timeout")
-    cg.run_process_in_background.side_effect = [open_proc, all_proc]
-
-    result = fetch_all_prs(cg)
-    assert result.prs == ()
-    assert result.error is not None
-    assert "gh pr list failed" in result.error
-
-
-def test_fetch_all_prs_launch_error() -> None:
+def test_fetch_board_launch_error() -> None:
     cg = MagicMock()
     cg.run_process_in_background.side_effect = ProcessError(
-        command=("gh", "pr", "list"),
+        command=("gh", "api", "graphql"),
         returncode=1,
         stdout="",
         stderr="gh: not found",
     )
-    result = fetch_all_prs(cg)
-    assert result.prs == ()
-    assert result.error is not None
-    assert "gh pr list failed" in result.error
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")])
+    assert result.prs == {}
+    assert len(result.errors) == 1
+    assert "gh api graphql failed" in result.errors[0]
 
 
-def test_fetch_all_prs_invalid_json() -> None:
-    cg = _make_mock_cg("not valid json", "not valid json")
-    result = fetch_all_prs(cg)
-    assert result.prs == ()
-    assert result.error is not None
-    assert "parse" in result.error.lower()
+def test_fetch_board_passes_unresolved_ignore_user() -> None:
+    # When ignore_user matches the last commenter, the PR is not flagged.
+    response = _make_board_response(
+        nodes=[
+            _make_pr_node(
+                head_branch="b1",
+                repo="org/r",
+                review_threads=[_make_thread(resolved=False, last_author="myuser")],
+            )
+        ]
+    )
+    cg = _make_board_cg(response)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")], unresolved_ignore_user="myuser")
+    assert result.prs[("org/r", "b1")].has_unresolved is False
 
 
-def test_fetch_all_prs_empty_list() -> None:
-    cg = _make_mock_cg("[]", "[]")
-    result = fetch_all_prs(cg)
-    assert result.prs == ()
-    assert result.error is None
+# === GitHubDataSource.compute ===
 
 
-def test_fetch_all_prs_passes_cwd(tmp_path: MagicMock) -> None:
-    cg = _make_mock_cg("[]", "[]")
-    fetch_all_prs(cg, cwd=tmp_path)
-    assert cg.run_process_in_background.call_count == 2
-    for call in cg.run_process_in_background.call_args_list:
-        assert call.kwargs.get("cwd") == tmp_path or call[1].get("cwd") == tmp_path
+def test_compute_no_agents() -> None:
+    ds = GitHubDataSource()
+    cg = MagicMock()
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, errors = ds.compute(agents=(), cached_fields={}, mngr_ctx=ctx)
+    assert fields == {}
+    assert errors == []
 
 
-def test_fetch_all_prs_passes_repo() -> None:
-    cg = _make_mock_cg("[]", "[]")
-    fetch_all_prs(cg, repo="org/repo")
-    assert cg.run_process_in_background.call_count == 2
-    for call in cg.run_process_in_background.call_args_list:
-        cmd = call[0][0]
-        assert "--repo" in cmd
-        assert cmd[cmd.index("--repo") + 1] == "org/repo"
+def test_compute_agents_without_repo() -> None:
+    ds = GitHubDataSource()
+    cg = MagicMock()
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="mngr/test", labels={})
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert fields == {}
+    assert errors == []
+
+
+def test_compute_mixed_agents_with_and_without_repo() -> None:
+    """Agents lacking a repo (no labels, no cache) must not crash compute()
+    even when other agents in the same call have a repo.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="branch-1", repo="org/repo")])
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent_with = make_agent_details(
+        name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"}
+    )
+    agent_without = make_agent_details(name="a2", initial_branch="branch-2", labels={})
+    fields, _errors = ds.compute(agents=(agent_with, agent_without), cached_fields={}, mngr_ctx=ctx)
+    assert agent_with.name in fields
+    assert agent_without.name not in fields
+
+
+def test_compute_pr_found_populates_all_fields() -> None:
+    ds = GitHubDataSource()
+    response = _make_board_response(
+        nodes=[
+            _make_pr_node(
+                head_branch="branch-1",
+                repo="org/repo",
+                number=7,
+                mergeable="CONFLICTING",
+                review_threads=[_make_thread(resolved=False)],
+            )
+        ]
+    )
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    af = fields[agent.name]
+    assert FIELD_PR in af and FIELD_CI in af and FIELD_CONFLICTS in af and FIELD_UNRESOLVED in af
+    assert isinstance(af[FIELD_CONFLICTS], ConflictsField) and af[FIELD_CONFLICTS].has_conflicts is True  # ty: ignore[unresolved-attribute]
+    assert isinstance(af[FIELD_UNRESOLVED], UnresolvedField) and af[FIELD_UNRESOLVED].has_unresolved is True  # ty: ignore[unresolved-attribute]
+
+
+def test_compute_no_pr_for_branch_generates_create_url() -> None:
+    """When the fetch succeeds but no PR matches, emit a CreatePrUrlField."""
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    cg = _make_board_cg(_make_board_response(nodes=[]))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(
+        name="a1", initial_branch="no-pr-branch", labels={"remote": "git@github.com:org/repo.git"}
+    )
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    pr_field = fields[agent.name][FIELD_PR]
+    assert isinstance(pr_field, CreatePrUrlField)
+    assert "no-pr-branch" in pr_field.url
+
+
+def test_compute_pr_fetch_error_adds_error() -> None:
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ProcessError(
+        command=("gh", "api", "graphql"), returncode=1, stdout="", stderr="boom"
+    )
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    assert len(errors) > 0
+    # No cache to fall back to -- emit the fetch-failed sentinel.
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert isinstance(pr_field, PrFetchFailedField)
+    assert pr_field.repo == "org/repo"
+
+
+def test_compute_pr_fetch_failed_with_cached_pr_uses_cache() -> None:
+    """Fetch fails but a cached PrField exists for the same branch -- silently
+    fall back to the cached field.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    cached_pr = make_pr_field(
+        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 13, tzinfo=timezone.utc)
+    )
+    cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 14, tzinfo=timezone.utc))
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent.name: {FIELD_PR: cached_pr, FIELD_CI: cached_ci},
+    }
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ProcessError(
+        command=("gh", "api", "graphql"), returncode=1, stdout="", stderr="boom"
+    )
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    assert fields[agent.name].get(FIELD_PR) == cached_pr
+    assert fields[agent.name].get(FIELD_CI) == cached_ci
+
+
+def test_compute_pr_fetch_failed_with_cached_pr_for_different_branch_emits_fetch_failed_field() -> None:
+    """Cache must NOT be reused when its head_branch doesn't match the agent's
+    current branch -- otherwise we'd misattribute the old PR to the new branch.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    agent = make_agent_details(name="a1", initial_branch="branch-2", labels={"remote": "git@github.com:org/repo.git"})
+    stale_cached_pr = make_pr_field(
+        number=42, head_branch="branch-1", created=datetime(2028, 1, 1, 0, 0, 15, tzinfo=timezone.utc)
+    )
+    cached_ci = CiField(status=CiStatus.SUCCESS, created=datetime(2028, 1, 1, 0, 0, 16, tzinfo=timezone.utc))
+    cached: dict[AgentName, dict[str, FieldValue]] = {
+        agent.name: {FIELD_PR: stale_cached_pr, FIELD_CI: cached_ci},
+    }
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = ProcessError(
+        command=("gh", "api", "graphql"), returncode=1, stdout="", stderr="boom"
+    )
+    ctx = make_mngr_ctx_with_cg(cg)
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached, mngr_ctx=ctx)
+    pr_field = fields[agent.name].get(FIELD_PR)
+    assert isinstance(pr_field, PrFetchFailedField)
+    assert pr_field.repo == "org/repo"
+    assert FIELD_CI not in fields[agent.name]
+
+
+def test_compute_conflicts_and_unresolved_not_emitted_for_closed_prs() -> None:
+    """Closed/merged PRs shouldn't render conflict / unresolved columns."""
+    ds = GitHubDataSource()
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="branch-1", repo="org/repo", state="MERGED")])
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    af = fields[agent.name]
+    assert FIELD_PR in af and FIELD_CI in af
+    assert FIELD_CONFLICTS not in af
+    assert FIELD_UNRESOLVED not in af
+
+
+def test_compute_falls_back_to_cached_repo_path_when_labels_lack_remote() -> None:
+    """Labels don't carry a remote: fall back to the cached repo_path and let
+    the derived PR/CI fields inherit the cached field's `created`.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="branch-1", repo="org/repo")])
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={})
+    cached_created = datetime(2028, 1, 1, 0, 0, 17, tzinfo=timezone.utc) - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=cached_created)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    ci = fields[AgentName("a1")][FIELD_CI]
+    assert pr.created == cached_created
+    assert ci.created == cached_created
+
+
+def test_compute_uses_now_when_labels_carry_remote() -> None:
+    """Labels are world data so when they carry a remote we use them and stamp
+    `created=now`, even if a (potentially stale) cached repo_path is present.
+    """
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(conflicts=False, unresolved=False))
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="branch-1", repo="org/repo")])
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    stale_cached = datetime(2028, 1, 1, 0, 0, 18, tzinfo=timezone.utc) - timedelta(hours=2)
+    cached_fields: dict[AgentName, dict[str, FieldValue]] = {
+        AgentName("a1"): {"repo_path": RepoPathField(path="org/repo", created=stale_cached)},
+    }
+    fields, _errors = ds.compute(agents=(agent,), cached_fields=cached_fields, mngr_ctx=ctx)
+    pr = fields[AgentName("a1")][FIELD_PR]
+    delta = datetime.now(timezone.utc) - pr.created
+    assert delta.total_seconds() < 60
+
+
+def test_compute_disabled_pr_and_ci() -> None:
+    ds = GitHubDataSource(config=GitHubDataSourceConfig(pr=False, ci=False, conflicts=False, unresolved=False))
+    response = _make_board_response(nodes=[_make_pr_node(head_branch="branch-1", repo="org/repo")])
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agent = make_agent_details(name="a1", initial_branch="branch-1", labels={"remote": "git@github.com:org/repo.git"})
+    fields, _errors = ds.compute(agents=(agent,), cached_fields={}, mngr_ctx=ctx)
+    agent_fields = fields.get(agent.name, {})
+    assert FIELD_PR not in agent_fields
+    assert FIELD_CI not in agent_fields
+
+
+def test_compute_one_graphql_call_per_refresh() -> None:
+    """Across multiple agents on multiple repos, exactly one HTTP request is made."""
+    ds = GitHubDataSource()
+    response = _make_board_response(
+        nodes=[
+            _make_pr_node(head_branch="b1", repo="org/r1", number=1),
+            _make_pr_node(head_branch="b2", repo="org/r2", number=2),
+            _make_pr_node(head_branch="b3", repo="org/r1", number=3),
+        ]
+    )
+    cg = _make_board_cg(response)
+    ctx = make_mngr_ctx_with_cg(cg)
+    agents = (
+        make_agent_details(name="a1", initial_branch="b1", labels={"remote": "git@github.com:org/r1.git"}),
+        make_agent_details(name="a2", initial_branch="b2", labels={"remote": "git@github.com:org/r2.git"}),
+        make_agent_details(name="a3", initial_branch="b3", labels={"remote": "git@github.com:org/r1.git"}),
+    )
+    fields, _errors = ds.compute(agents=agents, cached_fields={}, mngr_ctx=ctx)
+    assert {a.name for a in agents} <= set(fields.keys())
+    # One single HTTP request covers all three agents across two repos.
+    assert cg.run_process_in_background.call_count == 1
+
+
+def test_compute_query_contains_all_repo_branch_pairs() -> None:
+    """The single GraphQL query should mention every (repo, branch) pair the
+    agents need -- so downstream there is enough information to answer all of
+    them in one round trip.
+    """
+    ds = GitHubDataSource()
+    cg = _make_board_cg(_make_board_response(nodes=[]))
+    ctx = make_mngr_ctx_with_cg(cg)
+    agents = (
+        make_agent_details(name="a1", initial_branch="b1", labels={"remote": "git@github.com:org/r1.git"}),
+        make_agent_details(name="a2", initial_branch="b2", labels={"remote": "git@github.com:org/r2.git"}),
+    )
+    ds.compute(agents=agents, cached_fields={}, mngr_ctx=ctx)
+    sent_cmd = cg.run_process_in_background.call_args[0][0]
+    # cmd is ["gh", "api", "graphql", "-f", "query=..."]
+    assert sent_cmd[:3] == ["gh", "api", "graphql"]
+    query_arg = next(a for a in sent_cmd if a.startswith("query="))
+    assert "repo:org/r1" in query_arg
+    assert "repo:org/r2" in query_arg
+    assert "head:b1" in query_arg
+    assert "head:b2" in query_arg
+
+
+# === PrInfo dataclass sanity ===
+
+
+def test_pr_info_construct() -> None:
+    info = PrInfo(
+        number=1,
+        title="t",
+        state=PrState.OPEN,
+        url="https://example.com/pr/1",
+        head_branch="b",
+        is_draft=False,
+        check_status=CiStatus.SUCCESS,
+        has_conflicts=False,
+        has_unresolved=False,
+    )
+    assert info.number == 1
+    assert info.state == PrState.OPEN

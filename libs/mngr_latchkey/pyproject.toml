@@ -1,23 +1,26 @@
 [project]
 name = "imbue-mngr-latchkey"
-version = "0.1.0"
+version = "0.1.1"
 description = "Latchkey integration plugin for mngr - manages a shared latchkey gateway and per-agent permissions"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.6",
+    "imbue-mngr==0.2.12",
     # Source of the bidirectional socket/channel relay used by the
     # reverse-tunnel paramiko handler; sharing the upstream copy keeps
     # the half-closed-channel fix in a single place.
-    "imbue-mngr-forward==0.1.0",
-    "imbue-common==0.1.15",
-    "concurrency-group==0.1.15",
+    "imbue-mngr-forward==0.1.1",
+    "imbue-common==0.1.19",
+    "concurrency-group==0.1.19",
     "click>=8.0",
     "loguru>=0.7",
     "paramiko>=3.0",
     "pluggy>=1.0",
     "psutil>=5.9",
     "pydantic>=2.0",
+    # Event-based watching of the local credentials / per-host permissions files
+    # so the remote-state sync loop reacts to changes without polling.
+    "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]

@@ -41,7 +41,9 @@ class _StubSSHTunnelManager(SSHTunnelManager):
         ssh_info: RemoteSSHInfo,
         local_port: int,
         remote_port: int = 0,
+        agent_id: str | None = None,
     ) -> int:
+        del agent_id
         self._setup_calls.append((ssh_info, local_port, remote_port))
         if remote_port != 0:
             return remote_port

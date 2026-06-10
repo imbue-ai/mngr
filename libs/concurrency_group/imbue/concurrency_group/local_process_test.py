@@ -243,7 +243,7 @@ def test_run_background_compound_shutdown_event() -> None:
     # RemoteRunningProcess lets shutdown_event be a ReadOnlyEvent, including CompoundEvent, but RunningProcess only allows MutableEvent
     process: RunningProcess = run_background(
         ["sleep", "10"],
-        shutdown_event=compound_event,  # type: ignore[arg-type]
+        shutdown_event=compound_event,  # ty: ignore[invalid-argument-type]
         shutdown_timeout_sec=0.2,
     )
 

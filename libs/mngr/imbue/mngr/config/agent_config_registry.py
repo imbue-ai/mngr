@@ -6,10 +6,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
-from imbue.mngr.config.data_types import AGENT_TYPE_CONCAT_TUPLE_FIELDS
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import merge_tuples
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
@@ -98,30 +96,23 @@ def _apply_custom_overrides_to_parent_config(
     concrete class with the base fields overridden. Iterates over all fields
     that were explicitly set in the custom config (including subclass-specific
     fields like auto_dismiss_dialogs).
+
+    All fields use assign-by-default. Tuple/list/dict fields no longer
+    auto-concatenate across parent inheritance; use the ``field__extend``
+    operator in TOML to opt into additive behavior.
     """
     explicitly_set_fields = custom_config.model_fields_set
     if not explicitly_set_fields - _METADATA_FIELDS:
         return parent_config
 
-    parent_values = parent_config.model_dump()
     custom_values = custom_config.model_dump()
-    updates: list[tuple[str, Any]] = []
-
-    for field_name in explicitly_set_fields:
-        if field_name in _METADATA_FIELDS:
-            continue
-        elif field_name in AGENT_TYPE_CONCAT_TUPLE_FIELDS:
-            # Tuple fields use merge semantics (concatenation)
-            merged = merge_tuples(parent_values[field_name], custom_values[field_name])
-            if merged != parent_values[field_name]:
-                updates.append((field_name, merged))
-        else:
-            # All other fields: override wins
-            updates.append((field_name, custom_values[field_name]))
-
+    updates: list[tuple[str, Any]] = [
+        (field_name, custom_values[field_name])
+        for field_name in explicitly_set_fields
+        if field_name not in _METADATA_FIELDS
+    ]
     if not updates:
         return parent_config
-
     return parent_config.model_copy_update(*updates)
 
 

@@ -24,10 +24,8 @@ from imbue.mngr.cli.label import label
 from imbue.mngr.cli.limit import limit
 from imbue.mngr.cli.message import message
 from imbue.mngr.cli.migrate import migrate
-from imbue.mngr.cli.provision import provision
-from imbue.mngr.cli.pull import pull
-from imbue.mngr.cli.push import push
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.cli.rsync import rsync_command
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
@@ -102,11 +100,14 @@ def default_create_cli_opts() -> CreateCliOptions:
         worktree_base_folder=None,
         start_on_boot=False,
         start_host=True,
-        grant=(),
         extra_provision_command=(),
+        post_host_create_command=(),
         upload_file=(),
         update=False,
         yes=False,
+        tmux_width=None,
+        tmux_height=None,
+        tmux_window_size=None,
     )
 
 
@@ -130,6 +131,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         start=True,
         reconnect=True,
         session_command=None,
+        connect_command=None,
         allow_unknown_host=False,
     )
 
@@ -245,9 +247,10 @@ _HELP_TEST_CASES: list[tuple[click.Command, list[str], str]] = [
     (transcript, ["--help"], "transcript"),
     (message, ["--help"], "message"),
     (migrate, ["--help"], "migrate"),
-    (provision, ["--help"], "provision"),
-    (pull, ["--help"], "pull"),
-    (push, ["--help"], "push"),
+    (rsync_command, ["--help"], "rsync"),
+    (cli, ["git", "--help"], "git"),
+    (cli, ["git", "push", "--help"], "git_push"),
+    (cli, ["git", "pull", "--help"], "git_pull"),
     (rename, ["--help"], "rename"),
     (start, ["--help"], "start"),
     (stop, ["--help"], "stop"),
@@ -285,13 +288,13 @@ _NONEXISTENT_AGENT_CASES: list[tuple[click.Command, list[str], str]] = [
     (limit, ["nonexistent-agent-77234", "--idle-timeout", "300"], "limit"),
     (events, ["nonexistent-agent-34892"], "event"),
     (transcript, ["nonexistent-agent-82341"], "transcript"),
-    (provision, ["nonexistent-agent-77412"], "provision"),
-    (pull, ["nonexistent-agent-66201"], "pull"),
-    (push, ["nonexistent-agent-77312"], "push"),
+    (cli, ["git", "pull", "nonexistent-agent-66201"], "git_pull"),
+    (cli, ["git", "push", "nonexistent-agent-77312"], "git_push"),
     (rename, ["nonexistent-agent-99812", "new-name"], "rename"),
     (snapshot, ["create", "nonexistent-agent-xyz"], "snapshot_create"),
     (snapshot, ["list", "nonexistent-agent-xyz"], "snapshot_list"),
     (start, ["nonexistent-agent-98732"], "start"),
+    (start, ["nonexistent-agent-98733", "--restart"], "start_restart"),
     (stop, ["nonexistent-agent-45721"], "stop"),
 ]
 

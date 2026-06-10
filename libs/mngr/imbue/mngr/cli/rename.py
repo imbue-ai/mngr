@@ -5,9 +5,10 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
+from imbue.mngr.api.discovery_events import emit_agent_discovered
+from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import find_one_agent_and_agents_by_host
-from imbue.mngr.api.find import resolve_to_started_host_and_agent
+from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
 from imbue.mngr.cli.address_params import AGENT_NAME
 from imbue.mngr.cli.common_opts import add_common_options
@@ -16,11 +17,12 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.label import parse_label_string
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import OutputFormat
@@ -58,7 +60,7 @@ def _output_result(
     }
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("rename_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -78,9 +80,14 @@ def _output_result(
 )
 @optgroup.option(
     "--start/--no-start",
-    default=True,
+    default=False,
     show_default=True,
-    help="Automatically start the host if offline (the agent does not need to be running)",
+    help=(
+        "If the host is offline, start it before renaming so the tmux "
+        "session and on-host env file are updated alongside data.json. "
+        "Default: do not start; rename only edits the provider's persisted "
+        "agent data."
+    ),
 )
 @optgroup.option(
     "--host",
@@ -121,29 +128,23 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
         key, value = parse_label_string(label_str)
         labels_to_merge[key] = value
 
-    # Resolve the agent (without requiring the agent process to be running).
-    # Use the sibling find function so the full discovery result is available
-    # for the name-conflict check below without a second discovery pass.
+    # Resolve the agent's metadata. Discovery covers both online and offline
+    # hosts (the latter via the provider's persisted agent data), so we never
+    # need to start the host just to rename.
     host_ref, agent_ref, agents_by_host = find_one_agent_and_agents_by_host(opts.current, mngr_ctx)
-    agent, host = resolve_to_started_host_and_agent(
-        host_ref=host_ref,
-        agent_ref=agent_ref,
-        allow_auto_start=opts.start,
-        mngr_ctx=mngr_ctx,
-    )
 
-    old_name = str(agent.name)
+    old_name = str(agent_ref.agent_name)
 
     # Check if the name is actually changing
-    if agent.name == new_agent_name:
+    if agent_ref.agent_name == new_agent_name:
         _output(f"Agent already named: {new_agent_name}", output_opts)
         return
 
     # Check for name conflicts using the already-loaded agent references
-    for agent_refs in agents_by_host.values():
-        for agent_ref in agent_refs:
-            if agent_ref.agent_name == new_agent_name and agent_ref.agent_id != agent.id:
-                raise UserInputError(f"An agent named '{new_agent_name}' already exists (ID: {agent_ref.agent_id})")
+    for other_refs in agents_by_host.values():
+        for other_ref in other_refs:
+            if other_ref.agent_name == new_agent_name and other_ref.agent_id != agent_ref.agent_id:
+                raise UserInputError(f"An agent named '{new_agent_name}' already exists (ID: {other_ref.agent_id})")
 
     # Handle dry-run mode
     if opts.dry_run:
@@ -152,11 +153,19 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
             _output(f"Would merge labels: {labels_to_merge}", output_opts)
         return
 
-    # Perform the rename (and atomic label merge if any).
-    updated_agent = host.rename_agent(agent, new_agent_name, labels_to_merge=labels_to_merge or None)
+    # Online and offline hosts both implement rename_agent; the offline
+    # variant only edits the provider's persisted data (no tmux/env updates).
+    # With --start, force the host online first so tmux and env files are
+    # updated too; otherwise rename whichever host kind we end up with.
+    provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+    host = provider.get_host(host_ref.host_id)
+    if opts.start and not isinstance(host, OnlineHostInterface):
+        host, _ = ensure_host_started(host, is_start_desired=True, provider=provider)
+    updated_ref = host.rename_agent(agent_ref, new_agent_name, labels_to_merge=labels_to_merge or None)
 
-    # Emit discovery events for renamed agent and host
-    emit_discovery_events_for_host(mngr_ctx.config, host)
+    # Only the renamed agent's metadata changed; the host and other agents
+    # on it are untouched, so a single agent_discovered event suffices.
+    emit_agent_discovered(mngr_ctx.config, updated_ref)
 
     # Warn that the git branch was not renamed (only in human output mode)
     if output_opts.output_format == OutputFormat.HUMAN:
@@ -165,8 +174,8 @@ def rename(ctx: click.Context, **kwargs: Any) -> None:
     # Output the result
     _output_result(
         old_name=old_name,
-        new_name=str(updated_agent.name),
-        agent_id=str(updated_agent.id),
+        new_name=str(updated_ref.agent_name),
+        agent_id=str(updated_ref.agent_id),
         output_opts=output_opts,
     )
 
@@ -179,6 +188,12 @@ CommandHelpMetadata(
     arguments_description="- `CURRENT`: Current name or ID of the agent to rename\n- `NEW-NAME`: New name for the agent",
     description="""Updates the agent's name in its data.json and renames the tmux session
 if the agent is currently running. Git branch names are not renamed.
+
+If the host is offline, the rename is applied to the provider's
+persisted agent data without starting the host; tmux and env-file
+updates are skipped (data.json remains the source of truth for the
+agent's name). Pass --start to force the host online first so tmux
+and the env file are updated alongside data.json.
 
 If a previous rename was interrupted (e.g., the tmux session was renamed
 but data.json was not updated), re-running the command will attempt

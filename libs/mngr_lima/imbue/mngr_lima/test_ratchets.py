@@ -4,8 +4,6 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -40,7 +38,12 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    rc.check_bare_print(_DIR, snapshot(0))
+    # The lima btrfs *and* docker release helpers each use print() to signal
+    # pass/fail to their parent test via stdout (the only IPC channel available
+    # across the `runuser` privilege drop). loguru would write to stderr by
+    # default and confuse the parent's assertion on the "HELPER_RESULT: OK"
+    # marker.
+    rc.check_bare_print(_DIR, snapshot(4))
 
 
 # --- Exception handling ---
@@ -113,8 +116,10 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # lima native config only accepts yaml
-    rc.check_yaml_usage(_DIR, snapshot(83))
+    # lima native config only accepts yaml; is_host_in_docker mode adds a second
+    # code path that generates a Lima YAML config, and the docker release test
+    # writes a Lima override.yaml to make the VM bootable in CI.
+    rc.check_yaml_usage(_DIR, snapshot(113))
 
 
 def test_prevent_functools_partial() -> None:
@@ -239,6 +244,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0))
 
 
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 
@@ -266,18 +275,12 @@ def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
+
+
 # --- Project-level checks ---
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)

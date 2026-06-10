@@ -86,7 +86,7 @@ def test_process_events_running_to_waiting(notification_cg: ConcurrencyGroup) ->
     notifier = RecordingNotifier()
     content = _make_state_change_event(agent_name="my-agent", old_state="RUNNING", new_state="WAITING")
 
-    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg)
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, {})
 
     assert len(notifier.calls) == 1
     assert notifier.calls[0][0] == "Agent waiting"
@@ -97,7 +97,7 @@ def test_process_events_waiting_to_running_ignored(notification_cg: ConcurrencyG
     notifier = RecordingNotifier()
     content = _make_state_change_event(old_state="WAITING", new_state="RUNNING")
 
-    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg)
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, {})
 
     assert len(notifier.calls) == 0
 
@@ -108,7 +108,7 @@ def test_process_events_non_state_change_ignored(notification_cg: ConcurrencyGro
         {"type": "AGENT_STATE", "timestamp": "2026-01-01T00:00:00Z", "event_id": "evt-x", "source": "mngr/agents"}
     )
 
-    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg)
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, {})
 
     assert len(notifier.calls) == 0
 
@@ -118,7 +118,7 @@ def test_process_events_malformed_json_raises(notification_cg: ConcurrencyGroup)
     notifier = RecordingNotifier()
 
     with pytest.raises(json.JSONDecodeError):
-        _process_events("not valid json\n", NotificationsPluginConfig(), notifier, notification_cg)
+        _process_events("not valid json\n", NotificationsPluginConfig(), notifier, notification_cg, {})
 
     assert len(notifier.calls) == 0
 
@@ -133,11 +133,103 @@ def test_process_events_multiple_lines(notification_cg: ConcurrencyGroup) -> Non
         ]
     )
 
-    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg)
+    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg, {})
 
     assert len(notifier.calls) == 2
     assert "agent-a" in notifier.calls[0][1]
     assert "agent-c" in notifier.calls[1][1]
+
+
+def test_process_events_running_unknown_waiting_fires_notification(notification_cg: ConcurrencyGroup) -> None:
+    """The indirect RUNNING -> UNKNOWN -> WAITING sequence fires the notification on the UNKNOWN -> WAITING step."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    lines = "\n".join(
+        [
+            _make_state_change_event(
+                agent_id="agent-1", agent_name="indirect", old_state="RUNNING", new_state="UNKNOWN"
+            ),
+            _make_state_change_event(
+                agent_id="agent-1", agent_name="indirect", old_state="UNKNOWN", new_state="WAITING"
+            ),
+        ]
+    )
+
+    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    assert len(notifier.calls) == 1
+    assert "indirect" in notifier.calls[0][1]
+    # Bit is consumed by the indirect transition firing
+    assert was_running == {}
+
+
+def test_process_events_unknown_running_clears_was_running_bit(notification_cg: ConcurrencyGroup) -> None:
+    """RUNNING -> UNKNOWN -> RUNNING clears the bit so a later UNKNOWN -> WAITING does not fire."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    lines = "\n".join(
+        [
+            _make_state_change_event(
+                agent_id="agent-2", agent_name="recovered", old_state="RUNNING", new_state="UNKNOWN"
+            ),
+            _make_state_change_event(
+                agent_id="agent-2", agent_name="recovered", old_state="UNKNOWN", new_state="RUNNING"
+            ),
+            _make_state_change_event(
+                agent_id="agent-2", agent_name="recovered", old_state="UNKNOWN", new_state="WAITING"
+            ),
+        ]
+    )
+
+    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    # Bit was cleared by UNKNOWN -> RUNNING; the trailing UNKNOWN -> WAITING does not fire.
+    assert len(notifier.calls) == 0
+
+
+def test_process_events_unknown_to_waiting_without_prior_running_does_not_fire(
+    notification_cg: ConcurrencyGroup,
+) -> None:
+    """An UNKNOWN -> WAITING transition with no remembered RUNNING-before-UNKNOWN bit does not fire."""
+    notifier = RecordingNotifier()
+    content = _make_state_change_event(agent_id="agent-3", old_state="UNKNOWN", new_state="WAITING")
+
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, {})
+
+    assert len(notifier.calls) == 0
+
+
+def test_process_events_running_to_unknown_does_not_fire(notification_cg: ConcurrencyGroup) -> None:
+    """RUNNING -> UNKNOWN alone does not fire a notification (only sets the per-agent bit)."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    content = _make_state_change_event(agent_id="agent-4", old_state="RUNNING", new_state="UNKNOWN")
+
+    _process_events(content, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    assert len(notifier.calls) == 0
+    assert was_running == {"agent-4": True}
+
+
+def test_process_events_was_running_bit_is_per_agent(notification_cg: ConcurrencyGroup) -> None:
+    """The was-running-before-UNKNOWN bit must be tracked per agent_id, not globally."""
+    notifier = RecordingNotifier()
+    was_running: dict[str, bool] = {}
+    lines = "\n".join(
+        [
+            # agent-A: RUNNING -> UNKNOWN (sets bit for A)
+            _make_state_change_event(agent_id="agent-A", agent_name="aaa", old_state="RUNNING", new_state="UNKNOWN"),
+            # agent-B: UNKNOWN -> WAITING (bit for B is NOT set; should not fire)
+            _make_state_change_event(agent_id="agent-B", agent_name="bbb", old_state="UNKNOWN", new_state="WAITING"),
+            # agent-A: UNKNOWN -> WAITING (bit IS set; should fire)
+            _make_state_change_event(agent_id="agent-A", agent_name="aaa", old_state="UNKNOWN", new_state="WAITING"),
+        ]
+    )
+
+    _process_events(lines, NotificationsPluginConfig(), notifier, notification_cg, was_running)
+
+    assert len(notifier.calls) == 1
+    assert "aaa" in notifier.calls[0][1]
 
 
 # --- watch_for_waiting_agents ---

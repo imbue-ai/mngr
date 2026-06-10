@@ -37,6 +37,14 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
+from imbue.mngr_ovh.client import build_ovh_client
+from imbue.mngr_ovh.config import OvhProviderConfig
+from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
+from imbue.mngr_ovh.iam_tags import delete_tag
+from imbue.mngr_ovh.iam_tags import get_vps_resource
+from imbue.mngr_ovh.iam_tags import iam_region_code_for_endpoint
+from imbue.mngr_ovh.iam_tags import vps_urn_for
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # Env var name a minds-activated shell uses to flag the pool host DSN
 # for the activated env. Mirrors the field name written into
@@ -154,6 +162,11 @@ _BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
 # mngr stop/start cycles inside the same container).
 _INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
 
+# mngr env-override key that turns off the OVH provider's cancelled-VPS recycling
+# for the inner ``mngr create``. Setting it forces a fresh OVH order instead of
+# reclaiming a cancelled VPS -- useful for testing the fresh-provision path.
+_OVH_ENABLE_RECYCLE_ENV_KEY: Final[str] = "MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED"
+
 # 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
 # Docker image on the leased VPS, which can take 10-20 min (network bound).
 # A previous 10-min cap occasionally killed otherwise-healthy provisions.
@@ -183,9 +196,48 @@ _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 _INSERT_POOL_HOST_SQL: Final[str] = (
     "INSERT INTO pool_hosts "
     "(id, vps_address, vps_instance_id, agent_id, host_id, host_name, ssh_port, ssh_user, "
-    "container_ssh_port, status, attributes, created_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, NOW())"
+    "container_ssh_port, status, attributes, region, created_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, 22, 'root', %s, 'available', %s::jsonb, %s, NOW())"
 )
+
+
+def build_pool_host_insert_values(
+    *,
+    row_id: str,
+    vps_address: str,
+    agent_id: str,
+    host_id: str,
+    host_name: str,
+    container_ssh_port: int,
+    attributes_json: str,
+    # OVH datacenter code the VPS was ordered in; persisted so the connector can
+    # apply region-aware lease filtering/ordering.
+    region: str,
+) -> tuple[str, str, str, str, str, str, int, str, str]:
+    """Build the value tuple for :data:`_INSERT_POOL_HOST_SQL`.
+
+    ``vps_instance_id`` MUST be the OVH service name -- it is what every
+    connector-side OVH teardown call keys on (``vps_urn_for`` and
+    ``set_delete_at_expiration`` in the connector's ``clean_up_pool_host_in_ovh``,
+    the release route, and the hourly cleanup sweep). For these OVH-backed pool
+    hosts the service name is the ``vps_address`` (the ``vps-xxxx.vps.ovh.us``
+    hostname). An earlier version wrote the mngr ``host_id`` (a ``host-...`` id)
+    here, which made every OVH cancellation silently 404 -- VPSes were never
+    cancelled and kept billing. Kept as a pure function so the column-to-value
+    mapping is pinned by a unit test without standing up a real bake.
+    """
+    return (
+        row_id,
+        vps_address,
+        # vps_instance_id: the OVH service name, NOT host_id (see docstring).
+        vps_address,
+        agent_id,
+        host_id,
+        host_name,
+        container_ssh_port,
+        attributes_json,
+        region,
+    )
 
 
 @click.group(name="admin")
@@ -379,7 +431,9 @@ def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
             timeout=120.0,
         )
     if result.returncode != 0:
-        logger.warning("rsync failed (exit {}): {}", result.returncode, result.stderr.strip())
+        raise PoolBakeError(
+            f"rsync of {mngr_source} into {vendor_mngr} failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
 
 
 def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
@@ -438,6 +492,7 @@ def _create_single_pool_host(
     database_url: str,
     region: str,
     extra_tags: tuple[str, ...],
+    is_recycle_enabled: bool,
 ) -> bool:
     """Create a single pool host. Returns True on success.
 
@@ -446,6 +501,10 @@ def _create_single_pool_host(
     ``KEY=VALUE`` strings forwarded as ``MNGR_VPS_EXTRA_TAGS`` to the inner
     ``mngr create``; ``mngr_ovh`` then attaches them as additional OVH IAM
     v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
+
+    When ``is_recycle_enabled`` is False, the inner ``mngr create`` gets the
+    ``MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false`` env override so the
+    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
     """
     suffix = uuid4().hex
     # ``agent_name`` is the contract with ``ImbueCloudHost.create_agent_state``
@@ -497,12 +556,17 @@ def _create_single_pool_host(
         f"--vps-datacenter={region}",
     ]
 
-    pool_create_env: dict[str, str] | None = None
+    pool_create_env: dict[str, str] = {}
     if extra_tags:
-        pool_create_env = {"MNGR_VPS_EXTRA_TAGS": build_extra_tags_env_value(extra_tags)}
+        pool_create_env["MNGR_VPS_EXTRA_TAGS"] = build_extra_tags_env_value(extra_tags)
         logger.info("  Tagging VPS with extra tags: {}", pool_create_env["MNGR_VPS_EXTRA_TAGS"])
+    if not is_recycle_enabled:
+        pool_create_env[_OVH_ENABLE_RECYCLE_ENV_KEY] = "false"
+        logger.info("  Recycling disabled: forcing a fresh OVH VPS order (no cancelled-VPS reuse)")
 
-    create_result = _run_mngr_command(mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env)
+    create_result = _run_mngr_command(
+        mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env or None
+    )
     if create_result.returncode != 0:
         logger.error("mngr create failed: {}", create_result.stderr)
         return False
@@ -521,7 +585,9 @@ def _create_single_pool_host(
 
     stop_result = _run_mngr_command(["stop", full_address])
     if stop_result.returncode != 0:
-        logger.warning("mngr stop failed (continuing): {}", stop_result.stderr)
+        raise PoolBakeError(
+            f"`mngr stop {full_address}` failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
+        )
 
     logger.info("  Ensuring sshd is running in container")
     # Match the cloud-init bump we apply to the host VPS (and the lima
@@ -614,14 +680,17 @@ def _create_single_pool_host(
         timeout=120,
     )
     if chat_destroy.returncode != 0:
-        # Don't fail the bake -- the chat agent may have failed to come up
-        # at all (no API key, slow boot, etc) which is fine for our purposes
-        # since we just need it gone. Warn so an operator notices if every
-        # bake hits this path.
-        logger.warning(
-            "Best-effort destroy of bootstrap chat agent {!r} failed (continuing): {}",
-            bootstrap_chat_agent_name,
-            chat_destroy.stderr.strip(),
+        # Failing the bake instead of warning -- a destroy that errors
+        # out almost always means a vendored-mngr / FCT-template version
+        # skew (e.g. an `agent_types` field the older vendored mngr
+        # doesn't recognize), and shipping a pool host whose internal
+        # bootstrap state we don't actually understand has bitten us
+        # before. Better to abort + clean up than land a half-known
+        # host in the pool.
+        raise PoolBakeError(
+            f"destroying bootstrap chat agent {bootstrap_chat_agent_name!r} via "
+            f"`mngr exec {full_address} {chat_destroy_cmd!r}` failed "
+            f"(exit {chat_destroy.returncode}): {chat_destroy.stderr.strip()}"
         )
 
     logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
@@ -642,15 +711,15 @@ def _create_single_pool_host(
             with conn.cursor() as cur:
                 cur.execute(
                     _INSERT_POOL_HOST_SQL,
-                    (
-                        str(row_id),
-                        vps_address,
-                        host_id,
-                        agent_id,
-                        host_id,
-                        host_name,
-                        _CONTAINER_SSH_PORT,
-                        _json.dumps(attributes),
+                    build_pool_host_insert_values(
+                        row_id=str(row_id),
+                        vps_address=vps_address,
+                        agent_id=agent_id,
+                        host_id=host_id,
+                        host_name=host_name,
+                        container_ssh_port=_CONTAINER_SSH_PORT,
+                        attributes_json=_json.dumps(attributes),
+                        region=region,
                     ),
                 )
     finally:
@@ -717,6 +786,18 @@ def _create_single_pool_host(
     default=None,
     help="Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts.",
 )
+@click.option(
+    "--no-recycle",
+    "is_recycle_enabled",
+    flag_value=False,
+    default=True,
+    help=(
+        "Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH "
+        "provider recycles a cancelled (still-billable) VPS when one is available; pass this to "
+        "test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false "
+        "on the inner `mngr create`."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
@@ -726,6 +807,7 @@ def pool_create(
     management_public_key_file: str,
     database_url: str | None,
     mngr_source: str | None,
+    is_recycle_enabled: bool,
 ) -> None:
     """Create pre-provisioned pool hosts."""
     resolved_database_url = _resolve_pool_database_url(database_url)
@@ -771,6 +853,7 @@ def pool_create(
                 database_url=resolved_database_url,
                 region=region,
                 extra_tags=tags,
+                is_recycle_enabled=is_recycle_enabled,
             )
         except (ConcurrencyGroupError, PoolBakeError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed: {}", i, exc)
@@ -838,6 +921,28 @@ def pool_list(database_url: str | None) -> None:
     )
 
 
+def _cancel_pool_host_vps(service_name: str) -> None:
+    """Strip per-lease OVH tags and cancel the VPS, leaving it blank + recyclable.
+
+    Mirrors the connector's release teardown so ``pool destroy`` can never strand
+    a still-billing VPS: strip every IAM tag except ``mngr-provider`` (so the next
+    bake can recycle the cancelled host), then set ``deleteAtExpiration=True`` via
+    ``OvhVpsClient.destroy_instance``. Reuses ``mngr_ovh`` (reachable through the
+    vps_docker dependency) with OVH AK/AS/CK read from the environment -- the minds
+    ``pool destroy`` wrapper injects them from Vault. Raises on any OVH failure, so
+    the caller does NOT delete the DB row while the VPS is still running.
+    """
+    client = build_ovh_client(OvhProviderConfig())
+    region = iam_region_code_for_endpoint(os.environ.get("OVH_ENDPOINT", "ovh-us"))
+    urn = vps_urn_for(service_name, region_code=region)
+    resource = get_vps_resource(client, urn)
+    if resource is not None:
+        for key in resource.tags:
+            if key != MNGR_PROVIDER_TAG_KEY:
+                delete_tag(client, urn, key)
+    client.destroy_instance(VpsInstanceId(service_name))
+
+
 @pool.command(name="destroy")
 @click.argument("pool_host_id")
 @click.option(
@@ -853,28 +958,53 @@ def pool_list(database_url: str | None) -> None:
     ),
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
-def pool_destroy(pool_host_id: str, database_url: str | None, force: bool) -> None:
-    """Remove a pool_hosts row.
+@click.option(
+    "--skip-vps-cancel",
+    is_flag=True,
+    default=False,
+    help=(
+        "Only drop the DB row; do NOT cancel the OVH VPS. Use exclusively when the "
+        "VPS is already gone/cancelled -- otherwise the default path cancels it so "
+        "no billing orphan is left behind."
+    ),
+)
+def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_vps_cancel: bool) -> None:
+    """Remove a pool_hosts row, cancelling its OVH VPS first (full teardown).
 
-    Note: this does NOT destroy the underlying OVH VPS; that is intentional
-    so an operator can use ``mngr destroy`` themselves and inspect the row
-    state first.
+    By default this cancels the underlying OVH VPS (strip per-lease tags +
+    ``deleteAtExpiration=True``) *before* deleting the row, so it leaves the host
+    in the same blank/cancelled/recyclable state a proper release does -- never a
+    stranded, still-billing VPS. Pass ``--skip-vps-cancel`` only when the VPS is
+    already gone. Cancellation needs OVH credentials in the environment (the minds
+    ``pool destroy`` wrapper injects them from Vault).
     """
     resolved_database_url = _resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, vps_address FROM pool_hosts WHERE id = %s", (pool_host_id,))
+            row = cur.fetchone()
+            if row is None:
+                fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
+            status, vps_address = row
+            if status != "released" and not force:
+                fail_with_json(
+                    f"Row {pool_host_id} is in status '{status}'; pass --force to delete anyway",
+                    error_class="UnsafeDelete",
+                )
+        # Cancel the VPS BEFORE deleting the row: if the cancel fails we keep the
+        # row so the teardown stays retryable (no silent orphan).
+        if not skip_vps_cancel:
+            if not vps_address:
+                fail_with_json(
+                    f"Row {pool_host_id} has no vps_address; cannot cancel its VPS. "
+                    "Pass --skip-vps-cancel if the VPS is already gone.",
+                    error_class="UnsafeDelete",
+                )
+            _cancel_pool_host_vps(vps_address)
         with conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT status FROM pool_hosts WHERE id = %s", (pool_host_id,))
-                row = cur.fetchone()
-                if row is None:
-                    fail_with_json(f"No pool_hosts row with id {pool_host_id}", error_class="NotFound")
-                if row[0] != "released" and not force:
-                    fail_with_json(
-                        f"Row {pool_host_id} is in status '{row[0]}'; pass --force to delete anyway",
-                        error_class="UnsafeDelete",
-                    )
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (pool_host_id,))
     finally:
         conn.close()
-    emit_json({"deleted": True, "pool_host_id": pool_host_id})
+    emit_json({"deleted": True, "pool_host_id": pool_host_id, "vps_cancelled": not skip_vps_cancel})

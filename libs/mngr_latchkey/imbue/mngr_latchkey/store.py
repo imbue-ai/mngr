@@ -41,7 +41,6 @@ the ``mngr_latchkey/`` subdir under the user's latchkey directory; it
 is what :attr:`Latchkey.plugin_data_dir` returns.
 """
 
-import json
 import os
 import uuid
 from datetime import datetime
@@ -49,8 +48,10 @@ from pathlib import Path
 from typing import Final
 
 from loguru import logger
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import JsonValue
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
@@ -205,10 +206,21 @@ class LatchkeyStoreError(Exception):
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file.
 
-    Models the ``schemas`` and ``rules`` sections. Detent's ``include``
-    directive is not modeled; any hand-edited ``include`` entries are
-    silently dropped on the next minds-driven save.
+    Models only the subset of detent's config schema that minds itself
+    produces: the top-level ``rules`` and ``schemas`` sections, with
+    every rule in the plain ``{scope: [permission, ...]}`` shape (the
+    ``{"schemas": [...], "hooks": [...]}`` rule-value form is not used
+    by minds and is not modeled). Detent's ``include`` directive is
+    not modeled either; ``extra="ignore"`` makes Pydantic silently drop
+    any such hand-edited keys on load, so they disappear on the next
+    minds-driven save.
     """
+
+    # Override FrozenModel's ``extra="forbid"`` so hand-edited fields
+    # detent accepts but minds does not produce (notably ``include``)
+    # don't make ``load_permissions`` fail; they're dropped on the next
+    # save instead, matching the previous hand-rolled loader's behavior.
+    model_config = ConfigDict(extra="ignore")
 
     rules: tuple[dict[str, list[str]], ...] = Field(
         default_factory=tuple,
@@ -222,6 +234,11 @@ class LatchkeyPermissionsConfig(FrozenModel):
             "without depending on names from detent's built-in schema catalog."
         ),
     )
+
+
+def hosts_dir(data_dir: Path) -> Path:
+    """Return the directory under ``data_dir`` that holds every per-host subdirectory."""
+    return data_dir / _HOSTS_DIR_NAME
 
 
 def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
@@ -357,18 +374,50 @@ def link_opaque_permissions_to_host(
 def save_permissions(path: Path, config: LatchkeyPermissionsConfig) -> None:
     """Atomically write the permissions config to disk with mode 0o600.
 
-    Used only for the pre-gateway-startup write paths (deny-all default,
-    admin file, per-agent opaque baseline). Reads + per-host edits go
-    through the gateway's ``permissions`` extension instead.
+    Used by the pre-gateway-startup write paths (deny-all default,
+    admin file, per-agent opaque baseline) and by the host-allowed-agent
+    editor (:func:`imbue.mngr_latchkey.agent_setup.register_agent_for_host`).
+    User-driven per-service grants still go through the gateway's
+    ``permissions`` extension instead.
+
+    An empty ``schemas`` dict is omitted from the output (detent
+    accepts both shapes); ``rules`` is always emitted, even when empty.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    serialized: dict[str, JsonValue] = {"rules": [dict(rule) for rule in config.rules]}
-    if config.schemas:
-        serialized["schemas"] = dict(config.schemas)
-
+    # Pydantic's ``exclude=`` drops the field entirely; we drop
+    # ``schemas`` when empty so existing on-disk files (and the
+    # gateway's own writers) keep emitting the same ``{"rules": ...}``
+    # shape they always have.
+    exclude: set[str] = set() if config.schemas else {"schemas"}
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(serialized, indent=2))
+    tmp_path.write_text(config.model_dump_json(indent=2, exclude=exclude))
     tmp_path.chmod(0o600)
     os.replace(tmp_path, path)
     logger.debug("Wrote permissions config to {} ({} rule(s))", path, len(config.rules))
+
+
+def load_permissions(path: Path) -> LatchkeyPermissionsConfig:
+    """Read a permissions config from disk.
+
+    Used by the host-allowed-agent editor (and tests) to read + extend
+    an existing permissions file. The reverse of :func:`save_permissions`:
+    parses the JSON file via Pydantic, which enforces the documented
+    shape (``rules`` is a list of ``{scope: [perm, ...]}`` objects,
+    ``schemas`` is an object of JSON values) and silently drops any
+    other top-level keys (e.g. detent's ``include``) per the model's
+    ``extra="ignore"`` config.
+
+    Raises:
+        LatchkeyStoreError: if the file is missing, unreadable, not
+            valid JSON, or doesn't match the documented schema.
+    """
+    if not path.is_file():
+        raise LatchkeyStoreError(f"Permissions file does not exist: {path}")
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        raise LatchkeyStoreError(f"Failed to read permissions file {path}: {e}") from e
+    try:
+        return LatchkeyPermissionsConfig.model_validate_json(raw)
+    except ValidationError as e:
+        raise LatchkeyStoreError(f"Permissions file {path} is malformed: {e}") from e

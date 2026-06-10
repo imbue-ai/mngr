@@ -31,6 +31,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from tenacity import retry
 from tenacity import retry_if_exception
+from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
@@ -38,6 +39,7 @@ from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
+from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
@@ -46,6 +48,7 @@ from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.errors import ModalProxyTypeError
+from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_environment_not_found_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
@@ -191,6 +194,21 @@ def _should_retry_volume_op(e: BaseException) -> bool:
 _VOLUME_RETRY = retry_if_exception(_should_retry_volume_op)
 _VOLUME_STOP = stop_after_attempt(5)
 _VOLUME_WAIT = wait_exponential(multiplier=1, min=1, max=10)
+
+
+# ---------------------------------------------------------------------------
+# Retry parameters for `modal deploy`
+# ---------------------------------------------------------------------------
+# Modal locks an app for the duration of a mutation, so two deploys targeting
+# the same app name concurrently (e.g. parallel `mngr create` against the same
+# persistent provider app) race and one fails with "The selected app is
+# locked". The lock clears as soon as the other deploy finishes, so retry with
+# backoff. min=2 because a deploy takes several seconds, so retrying sooner just
+# wastes attempts; max=15 and 6 attempts gives ~45s of headroom under the
+# 180s deploy subprocess timeout.
+_DEPLOY_LOCK_RETRY = retry_if_exception_type(ModalProxyAppLockedError)
+_DEPLOY_LOCK_STOP = stop_after_attempt(6)
+_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=15)
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +599,7 @@ class DirectModalInterface(ModalInterface):
     # CLI
     # =====================================================================
 
+    @retry(retry=_DEPLOY_LOCK_RETRY, stop=_DEPLOY_LOCK_STOP, wait=_DEPLOY_LOCK_WAIT, reraise=True)
     def deploy(
         self,
         script_path: Path,
@@ -611,6 +630,11 @@ class DirectModalInterface(ModalInterface):
                 _translate_modal_cli_not_found(e)
         if result.returncode != 0:
             output = (result.stdout + "\n" + result.stderr).strip()
+            # A concurrent modification to the same app is transient: the lock
+            # clears once the other operation finishes, so raise the retryable
+            # error type the deploy retry decorator rides through.
+            if is_app_locked_error(output):
+                raise ModalProxyAppLockedError(f"Failed to deploy {script_path} (app locked): {output}")
             raise ModalProxyError(f"Failed to deploy {script_path}: {output}")
 
     def enable_output_capture(

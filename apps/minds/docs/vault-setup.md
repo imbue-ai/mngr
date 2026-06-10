@@ -36,7 +36,6 @@ secrets/minds/<tier>/cloudflare
 secrets/minds/<tier>/litellm
 secrets/minds/<tier>/litellm-connector
 secrets/minds/<tier>/neon
-secrets/minds/<tier>/paid-accounts
 secrets/minds/<tier>/pool-ssh
 secrets/minds/<tier>/supertokens
 ```
@@ -46,7 +45,9 @@ pushed to Modal -- the connector's runtime doesn't need
 create-project / VPS-management permissions):
 
 ```
-secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN, NEON_ORG_ID
+secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN (every tier);
+                                  #   NEON_ORG_ID (dev only);
+                                  #   NEON_PROJECT_ID (staging / production only)
 secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
                                   #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
@@ -57,9 +58,18 @@ the dev tier's Neon org (not just project-scoped permissions). Every
 `minds env deploy` against a dev env creates a brand-new Neon
 *project* named `minds-<env>` under `NEON_ORG_ID`, with `host_pool`
 and `litellm_cost` databases inside; `minds env destroy` deletes the
-project outright. Staging / production keep a single tier-shared DB
-each (their `secrets/minds/<tier>/neon` and `.../litellm` entries are
-the source of truth for those tiers).
+project outright.
+
+Staging / production keep a single tier-shared project each, named
+by `NEON_PROJECT_ID` in the same Vault entry. The token there only
+needs branch-create + restore scope on that project (a project-scoped
+token is fine and preferable). `minds env deploy` snapshots the
+project's default branch before mutating anything, and `minds env
+recover` restores from that snapshot if the deploy fails -- without
+`NEON_PROJECT_ID`, the deploy refuses to start because it can't be
+rolled back. The actual runtime DSNs for these tiers live in
+`secrets/minds/<tier>/neon` and `.../litellm` (the source of truth
+for the connector + proxy at runtime).
 
 The `ovh` entry is read by `minds env destroy` (to enumerate +
 delete OVH VPSes tagged with the env's `minds_env=<name>` IAM tag) and
@@ -108,13 +118,16 @@ All deploys (dev / staging / production) flow through the unified
 
 ```bash
 # Tier deploys (staging / production):
-eval "$(uv run minds env activate staging)"
+eval "$(uv run minds env activate --deploy staging)"
 uv run minds env deploy --yes-i-mean-staging
 
 # Dev env deploys (per-developer):
-eval "$(uv run minds env activate dev-<your-user>)"
+eval "$(uv run minds env activate --deploy dev-<your-user>)"
 uv run minds env deploy
 ```
+
+(`--deploy` is required: `minds env deploy` refuses without it. See
+`docs/environments.md` for the use-vs-deploy split.)
 
 `minds env deploy` reads `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`
 for the Modal workspace name + the list of services to push from

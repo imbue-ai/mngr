@@ -16,6 +16,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 
 # === Enums ===
 
@@ -89,6 +90,33 @@ class IdleMode(UpperCaseStrEnum):
     RUN = auto()
     CUSTOM = auto()
     DISABLED = auto()
+
+
+class TmuxWindowSize(UpperCaseStrEnum):
+    """Resize policy for an agent's tmux window (tmux ``window-size`` option).
+
+    The lowercase of each value is exactly the token tmux accepts. ``MANUAL``
+    pins the window to its configured size and never auto-resizes to attached
+    clients; ``LATEST`` (tmux's own default) sizes to the most recent client;
+    ``LARGEST`` / ``SMALLEST`` size to the largest / smallest attached client.
+    """
+
+    MANUAL = auto()
+    LATEST = auto()
+    LARGEST = auto()
+    SMALLEST = auto()
+
+
+class TmuxWidth(PositiveInt):
+    """Width, in columns, of an agent's tmux window. Must be > 0."""
+
+    ...
+
+
+class TmuxHeight(PositiveInt):
+    """Height, in rows, of an agent's tmux window. Must be > 0."""
+
+    ...
 
 
 class ActivitySource(UpperCaseStrEnum):
@@ -168,17 +196,6 @@ class UncommittedChangesMode(UpperCaseStrEnum):
     FAIL = auto()
 
 
-class SyncMode(UpperCaseStrEnum):
-    """Direction of sync operation.
-
-    PUSH: local -> agent
-    PULL: agent -> local
-    """
-
-    PUSH = auto()
-    PULL = auto()
-
-
 class SyncDirection(UpperCaseStrEnum):
     """Direction for file synchronization in pair mode."""
 
@@ -237,6 +254,10 @@ class HostState(UpperCaseStrEnum):
     FAILED = auto()
     DESTROYED = auto()
     UNAUTHENTICATED = auto()
+    # The provider that owns this host could not be accessed during the most recent discovery attempt,
+    # so the host's actual state is unknown. Distinct from None on HostDetails.state (which means
+    # "not observed / not applicable"). Emitted by AgentObserver when its provider errored.
+    UNKNOWN = auto()
 
 
 class AgentLifecycleState(UpperCaseStrEnum):
@@ -250,6 +271,11 @@ class AgentLifecycleState(UpperCaseStrEnum):
     # without the config, it can be hard to tell whether the agent is still running or not, because we don't know the process name to expect
     RUNNING_UNKNOWN_AGENT_TYPE = auto()
     DONE = auto()
+    # The provider that owns this agent could not be accessed during the most recent discovery attempt,
+    # so the agent's actual state is unknown. Emitted by AgentObserver for previously-tracked agents
+    # whose provider just failed discovery. Sticky: an agent leaves UNKNOWN only by reappearing in a
+    # snapshot or being explicitly destroyed.
+    UNKNOWN = auto()
 
 
 class AgentId(RandomId):
@@ -439,9 +465,9 @@ class HostLocationAddress(FrozenModel):
     """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
 
     Used wherever a CLI command needs to designate "a place on any host" -- the
-    source for ``mngr create --from``/``mngr pair``, or the target for
-    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
-    captures both.
+    source for ``mngr create --from``/``mngr pair``, the source/destination for
+    ``mngr rsync``, and the target for ``mngr git push``/``mngr git pull``. The
+    host may be local or remote; "hosted" captures both.
 
     Every component is optional. The four meaningful shapes (in addition to a
     bare path string) are:
@@ -458,6 +484,13 @@ class HostLocationAddress(FrozenModel):
     agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
     host: HostAddress | None = Field(default=None, description="Optional host")
     path: Path | None = Field(default=None, description="Optional path")
+    has_trailing_path_slash: bool = Field(
+        default=False,
+        description=(
+            "True if the user-typed PATH ended with ``/``. ``Path`` strips trailing slashes, "
+            "so this flag is the only way to preserve rsync's contents-vs-child semantics."
+        ),
+    )
 
 
 class AgentTypeName(SafeName):
@@ -470,10 +503,6 @@ class UserId(NonEmptyStr):
 
 class PluginName(NonEmptyStr):
     """Name of a plugin."""
-
-
-class Permission(NonEmptyStr):
-    """Permission identifier for agent access control."""
 
 
 class ImageReference(NonEmptyStr):
@@ -581,12 +610,6 @@ class DiscoveredAgent(FrozenModel):
     def start_on_boot(self) -> bool:
         """Return whether this agent should start automatically on host boot."""
         return bool(self.certified_data.get("start_on_boot", False))
-
-    @property
-    def permissions(self) -> tuple["Permission", ...]:
-        """Return the list of permissions assigned to this agent."""
-        permissions_value = self.certified_data.get("permissions", [])
-        return tuple(Permission(p) for p in permissions_value)
 
     @property
     def created_branch_name(self) -> str | None:

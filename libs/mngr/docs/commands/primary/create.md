@@ -9,8 +9,8 @@
 mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
-    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--grant <PERMISSION>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
+    [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
     [--[no-]connect] [--[no-]auto-start] [-y|--yes] [--] [<AGENT_ARGS>...]
@@ -75,6 +75,9 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
+| `--tmux-width` | integer | Width (columns) of the agent's tmux window [default: 200] | None |
+| `--tmux-height` | integer | Height (rows) of the agent's tmux window [default: 50] | None |
+| `--tmux-window-size` | choice (`manual` &#x7C; `latest` &#x7C; `largest` &#x7C; `smallest`) | tmux window resize policy; 'manual' pins the window to its width/height and never resizes on attach [default: latest] | None |
 
 ## Host Options
 
@@ -135,7 +138,6 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--grant` | text | Grant a permission to the agent [repeatable] | None |
 | `--extra-provision-command` | text | Run custom shell command during provisioning [repeatable] | None |
 | `--upload-file` | text | Upload LOCAL:REMOTE file pair [repeatable] | None |
 
@@ -154,6 +156,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--snapshot` | text | Use existing snapshot instead of building | None |
 | `-b`, `--build-arg` | text | Build argument as key=value or --key=value (e.g., -b gpu=h100 -b cpu=2) [repeatable] | None |
 | `-s`, `--start-arg` | text | Argument for start [repeatable] | None |
+| `--post-host-create-command` | text | Shell command to run inside the new host after it is created, before any agent work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable] | None |
 
 ## Host Lifecycle
 
@@ -196,7 +199,7 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Provider Build/Start Arguments
@@ -216,8 +219,8 @@ Provider: lima
                           mngr pre-built image.
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
-    --memory=NGiB         Memory size (default: 4GiB)
-    --disk=NGiB           Disk size (default: 100GiB)
+    --memory=N            Memory in GiB (default: 4)
+    --disk=N              Disk in GiB (default: 100)
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
   Run 'limactl start --help' for the full list.

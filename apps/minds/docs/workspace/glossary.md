@@ -18,4 +18,4 @@ Key concepts in the minds system:
 
 - **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a service name and URL. The desktop client's MngrStreamManager watches these events to discover agent backends.
 
-- **launch mode**: how the agent runs. LOCAL mode runs in a Docker container on the user's machine. LIMA runs in a Lima VM. CLOUD runs in Docker on a Vultr VPS. IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.
+- **launch mode**: how the agent runs. DOCKER mode runs in a Docker container on the user's machine. LIMA runs in a Lima VM. CLOUD runs in Docker on a Vultr VPS. IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.

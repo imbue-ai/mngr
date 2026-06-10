@@ -74,21 +74,19 @@ _DEFAULT_LISTEN_HOST: Final[str] = "127.0.0.1"
 _GATEWAY_BIND_TIMEOUT_SECONDS: Final[float] = 10.0
 _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
-# Most latchkey CLI calls (services info / register / deregister,
-# auth set / clear, create-jwt) are normally instant but can stall on
-# slow keychains. The auth-browser flow waits on a real human and is
-# intentionally untimed.
-_LATCHKEY_CLI_TIMEOUT_SECONDS: Final[float] = 15.0
+# Services-info / create-jwt are normally instant but can stall on slow keychains.
+# The auth-browser flow waits on a real human and is intentionally untimed.
+_SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
+_CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
 # Node-runtime startup on cold filesystems.
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against. 2.9.0 is the first release that ships the gateway
-# extension loader this package depends on (see ``extensions/`` for the
-# .mjs files it materializes into ``LATCHKEY_DIRECTORY/extensions/``).
-LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
+# operate against. 2.14.0 is the first release that supports GitHub git
+# operations over the gateway (including permissions) which is used for backups.
+LATCHKEY_MIN_VERSION: Final[str] = "2.14.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -736,7 +734,7 @@ class Latchkey(MutableModel):
                         "--no-validate",
                         permissions_config_path,
                     ],
-                    timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
+                    timeout=_CREATE_JWT_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
                 )
@@ -777,7 +775,7 @@ class Latchkey(MutableModel):
             with cg:
                 result = cg.run_process_to_completion(
                     command=[self.latchkey_binary, "services", "info", service_name],
-                    timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
+                    timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
                 )
@@ -819,167 +817,6 @@ class Latchkey(MutableModel):
             set_credentials_example=_parse_set_credentials_example(payload, service_name),
         )
 
-    # -- Service registration ------------------------------------------------
-
-    def register_service(self, service_name: str, base_api_url: str) -> None:
-        """Idempotently register a generic latchkey service for ``base_api_url``.
-
-        Wraps ``latchkey services register <name> --base-api-url <url>``
-        with a pre-check so the common steady-state call is a no-op:
-
-        1. Read the currently-registered base URL via
-           ``_read_registered_service_base_url`` (``latchkey services info``).
-        2. If it already equals ``base_api_url``: return immediately --
-           no subprocess work, no log line beyond the info call.
-        3. If a different URL is registered (e.g. the desktop client
-           started on a different port since the last run): deregister
-           first so ``services register`` can rebind to the new URL.
-        4. Run ``latchkey services register``.
-
-        As a race-condition fallback (e.g. a concurrent ``minds run``
-        registered between our step 1 and step 4), an ``already
-        registered`` stderr from step 4 is also treated as success.
-
-        Raises :class:`LatchkeyError` for any other failure mode.
-        """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        existing_url = self._read_registered_service_base_url(service_name, env)
-        if existing_url == base_api_url:
-            return
-        if existing_url is not None:
-            self._deregister_service(service_name, env)
-        cg = ConcurrencyGroup(name="latchkey-services-register")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[
-                    self.latchkey_binary,
-                    "services",
-                    "register",
-                    service_name,
-                    "--base-api-url",
-                    base_api_url,
-                ],
-                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
-                is_checked_after=False,
-                env=env,
-            )
-        if result.returncode == 0:
-            logger.info("Registered latchkey service {} -> {}", service_name, base_api_url)
-            return
-        # The latchkey CLI prints `Error: A service named '<name>' is already registered.`
-        # if registration races against an earlier startup. Treat that as
-        # success; raise for everything else so the caller can decide
-        # whether to abort or degrade.
-        stderr = result.stderr.strip()
-        if "already registered" in stderr.lower():
-            logger.debug("Latchkey service {} already registered (race-condition path)", service_name)
-            return
-        raise LatchkeyError(f"latchkey services register {service_name} exited {result.returncode}: {stderr}")
-
-    def auth_set_header(self, service_name: str, header: str) -> None:
-        """Run ``latchkey auth set <name> -H '<header>'`` to store a credential.
-
-        Always overwrites any existing credential for the service so a
-        rotated token propagates on the next call. Raises
-        :class:`LatchkeyError` on any failure.
-        """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-auth-set")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "set", service_name, "-H", header],
-                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
-                is_checked_after=False,
-                env=env,
-            )
-        if result.returncode != 0:
-            raise LatchkeyError(
-                f"latchkey auth set {service_name} exited {result.returncode}: {result.stderr.strip()}"
-            )
-        logger.debug("Stored latchkey credential for service {}", service_name)
-
-    def _read_registered_service_base_url(self, service_name: str, env: Mapping[str, str] | None) -> str | None:
-        """Return the base URL latchkey has on file for ``service_name``, or ``None`` if not registered."""
-        cg = ConcurrencyGroup(name="latchkey-services-info-for-register")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "services", "info", service_name],
-                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
-                is_checked_after=False,
-                env=env,
-            )
-        if result.returncode != 0:
-            # Almost always means "not registered yet" (latchkey prints
-            # ``Unknown service.`` and exits non-zero). Log at debug so
-            # genuinely-unexpected failure modes -- broken binary,
-            # encryption-key error, etc. -- still leave a trail without
-            # spamming warning on the common first-time setup path.
-            logger.debug(
-                "'latchkey services info {}' exited {}: {}",
-                service_name,
-                result.returncode,
-                result.stderr.strip(),
-            )
-            return None
-        try:
-            payload = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            logger.warning("Could not parse 'latchkey services info {}' output as JSON: {}", service_name, e)
-            return None
-        if not isinstance(payload, dict):
-            logger.warning("'latchkey services info {}' returned non-object JSON", service_name)
-            return None
-        # Latchkey reports the per-instance base URL under ``baseApiUrls``
-        # (array; singleton for RegisteredService). Fall back to a top-level
-        # ``baseApiUrl`` for forward-compat with older latchkey shapes.
-        urls = payload.get("baseApiUrls")
-        if isinstance(urls, list) and urls and isinstance(urls[0], str):
-            return urls[0]
-        base_url = payload.get("baseApiUrl")
-        if isinstance(base_url, str):
-            return base_url
-        return None
-
-    def _deregister_service(self, service_name: str, env: Mapping[str, str] | None) -> None:
-        """Run ``latchkey services deregister`` so register can rebind to a new URL.
-
-        Raises :class:`LatchkeyError` if either ``auth clear`` or
-        ``services deregister`` fails. Propagating the failure is
-        important: if we swallowed it, the subsequent ``services
-        register`` call in :meth:`register_service` would fail with
-        ``already registered`` and be misinterpreted as the
-        race-condition success path, leaving the service bound to the
-        old URL while logging a successful rebind.
-        """
-        # Clear stored credentials first; latchkey refuses to deregister
-        # otherwise.
-        cg_clear = ConcurrencyGroup(name="latchkey-auth-clear")
-        with cg_clear:
-            clear_result = cg_clear.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "clear", service_name],
-                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
-                is_checked_after=False,
-                env=env,
-            )
-        if clear_result.returncode != 0:
-            raise LatchkeyError(
-                f"latchkey auth clear {service_name} exited {clear_result.returncode}: "
-                f"{clear_result.stderr.strip()}"
-            )
-        cg_dereg = ConcurrencyGroup(name="latchkey-services-deregister")
-        with cg_dereg:
-            result = cg_dereg.run_process_to_completion(
-                command=[self.latchkey_binary, "services", "deregister", service_name],
-                timeout=_LATCHKEY_CLI_TIMEOUT_SECONDS,
-                is_checked_after=False,
-                env=env,
-            )
-        if result.returncode != 0:
-            raise LatchkeyError(
-                f"latchkey services deregister {service_name} exited {result.returncode}: "
-                f"{result.stderr.strip()}"
-            )
-
     # -- Interactive auth ----------------------------------------------------
 
     def auth_browser(self, service_name: str) -> tuple[bool, str]:
@@ -989,24 +826,71 @@ class Latchkey(MutableModel):
         from a cancelled browser flow, network failure, or something else --
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
+
+        Some latchkey services require a one-off ``latchkey auth
+        browser-prepare <service>`` step before the regular browser sign-in
+        flow can run;. In such a case, we transparently run ``auth
+        browser-prepare`` and retry ``auth browser`` once.
+        """
+        is_success, detail = self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+        if is_success:
+            return True, ""
+        if "latchkey auth browser-prepare" not in detail.lower():
+            return False, detail
+        logger.info(
+            "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
+            service_name,
+        )
+        is_prepared, prepare_detail = self._run_latchkey_auth_command(
+            log_label="auth browser-prepare",
+            argv=["auth", "browser-prepare", service_name],
+            service_name=service_name,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        return self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+
+    def _run_latchkey_auth_command(
+        self,
+        log_label: str,
+        argv: list[str],
+        service_name: str,
+    ) -> tuple[bool, str]:
+        """Run a single ``latchkey auth ...`` subcommand and translate its exit into ``(is_success, detail)``.
+
+        ``log_label`` is the human-readable name of the subcommand
+        (e.g. ``"auth browser"``, ``"auth browser-prepare"``) used in
+        log lines and the generic failure-message fallback.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-auth-browser")
+        cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:
-            # No timeout: this command waits on a real human completing
-            # the browser sign-in flow, which can take arbitrarily long.
+            # No timeout: ``auth browser`` waits on a real human
+            # completing the browser sign-in flow, which can take
+            # arbitrarily long. ``auth browser-prepare`` is typically
+            # non-interactive but may still hit the network, so we keep
+            # the same untimed treatment.
             result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "browser", service_name],
+                command=[self.latchkey_binary, *argv],
                 timeout=None,
                 is_checked_after=False,
                 env=env,
             )
         if result.returncode == 0:
-            logger.info("latchkey auth browser {} succeeded", service_name)
+            logger.info("latchkey {} {} succeeded", log_label, service_name)
             return True, ""
-        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser failed"
+        message = result.stderr.strip() or result.stdout.strip() or f"latchkey {log_label} failed"
         logger.warning(
-            "latchkey auth browser {} exited {}: {}",
+            "latchkey {} {} exited {}: {}",
+            log_label,
             service_name,
             result.returncode,
             message,

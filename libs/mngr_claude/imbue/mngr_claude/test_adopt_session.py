@@ -132,7 +132,7 @@ def trusted_subprocess_env(
     project_config_dir = tmp_path / ".mngr-adopt-test"
     project_config_dir.mkdir(parents=True, exist_ok=True)
     (project_config_dir / "settings.local.toml").write_text(
-        "[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
+        "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
     )
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     return env

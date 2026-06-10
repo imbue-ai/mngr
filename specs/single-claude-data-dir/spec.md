@@ -7,8 +7,8 @@
 - Some users (especially heavy local-only workflows) prefer the *opposite* trade-off: have every Claude agent share the user's own `CLAUDE_CONFIG_DIR` so credentials, plugins, marketplaces, sessions, and settings just work without copy/symlink shuffling.
 - This spec adds a single opt-in flag, `use_env_config_dir: bool = False`, on `ClaudeAgentConfig`. When `True`, mngr does not create or write to a per-agent config dir; the agent inherits the user's `CLAUDE_CONFIG_DIR` from the shell env.
 - Strict invariant when the flag is on: **mngr never writes to the user's `CLAUDE_CONFIG_DIR` or to `~/.claude.json`**. Trust, dialog dismissal, credential provisioning, keychain prompts, plugin path rewriting, and per-agent settings.json generation are all skipped. The user is responsible for one-time setup (`claude` interactively at least once: trust dialogs, onboarding, credentials).
-- Flag is local-only. Setting it for a non-local host raises a clear error before provisioning. `CLAUDE_CONFIG_DIR` must be set in the parent process env; mngr raises a clear error if it is not.
-- `ORIGINAL_CLAUDE_CONFIG_DIR` is not relevant in this mode and is not set on the agent. `CLAUDE_CONFIG_DIR` is also not explicitly set by mngr on the agent — the agent inherits the parent shell's value (which our pre-check guarantees is non-empty).
+- Flag is local-only. Setting it for a non-local host raises a clear error before provisioning. `CLAUDE_CONFIG_DIR` is read from the parent process env; if unset (or empty), mngr falls back to `~/.claude/`, which is claude's own default. So `use_env_config_dir=True` effectively means "don't touch the config dir at all — inherit whatever the parent shell would have used."
+- `ORIGINAL_CLAUDE_CONFIG_DIR` is not relevant in this mode and is not set on the agent. `CLAUDE_CONFIG_DIR` is also not explicitly set by mngr on the agent — the agent inherits the parent shell's value (or `~/.claude/` when unset, matching claude's own default).
 - Hook scripts in `work_dir/.claude/settings.local.json` and background scripts under `$MNGR_AGENT_STATE_DIR/commands/` are unchanged. Those are per-worktree / per-agent state, not Claude config dir state, so the readiness/permissions/transcript machinery keeps working.
 - Other config fields that conceptually overlap with shared-mode behavior (the `sync_*` family, `override_settings_folder`, `settings_overrides`, `convert_macos_credentials`, `auto_dismiss_dialogs`) are simply ignored when `use_env_config_dir=True`. No validation error is raised. The user takes responsibility for the combinations they pick.
 
@@ -30,9 +30,9 @@
 - Trust handling is delegated to the user. mngr does not call `add_claude_trust_for_path`, `auto_dismiss_claude_dialogs`, `acknowledge_cost_threshold`, `dismiss_effort_callout`, `complete_onboarding`, `accept_bypass_permissions`, or `remove_claude_trust_for_path`. If the user has not pre-trusted the work_dir or pre-dismissed onboarding, Claude's TUI will block at startup; this is documented as the user's responsibility.
 - The "custom API key" approval dialog (`approve_api_key_for_claude`) is **not** called in shared mode (it writes per-agent .claude.json data we no longer produce). If `ANTHROPIC_API_KEY` is supplied via `--env`/`--pass-env`/host env and does not match the user's `primaryApiKey` or `customApiKeyResponses.approved` list in `~/.claude.json`, Claude will challenge in the TUI and deadlock `wait_for_ready_signal`. This is flagged in **Open Questions** below; the spec recommends a preflight warning but no automatic fix.
 - Other config fields are silently ignored when they no longer apply (the `sync_*` family, `override_settings_folder`, `settings_overrides`, `convert_macos_credentials`, `auto_dismiss_dialogs`). `auto_allow_permissions`, `preserve_sessions_on_destroy`, `check_installation`, and `version` continue to work as today since they don't touch the user's config dir.
-- The only hard-error checks are: host-must-be-local (fires in `on_before_provisioning`, message names the flag) and `$CLAUDE_CONFIG_DIR` must be non-empty in the parent process env.
+- The only hard-error check is: host-must-be-local (fires in `on_before_provisioning`, message names the flag). `$CLAUDE_CONFIG_DIR` is read from the env when set, falling back to `~/.claude/` when not — never an error.
 - `claude_config.get_claude_config_dir()` (the standalone function) is unchanged: still reads `CLAUDE_CONFIG_DIR` or falls back to `~/.claude` (per decision 1b).
-- `ClaudeAgent.get_claude_config_dir()` (the instance method) checks the flag: when `True`, it returns the value of `CLAUDE_CONFIG_DIR` (raising a clear error if unset); when `False`, returns the per-agent path as today.
+- `ClaudeAgent.get_claude_config_dir()` (the instance method) checks the flag: when `True`, it returns the value of `CLAUDE_CONFIG_DIR` (or `~/.claude/` when unset); when `False`, returns the per-agent path as today.
 - `claude_config.get_user_claude_config_dir()` and `find_user_claude_config()` are unchanged. They are not called from shared-mode code paths (callers either branch on the flag or only run in the default mode).
 
 ## Implementation Plan
@@ -45,10 +45,9 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
 - Add a new module-level helper:
   ```python
   def resolve_shared_claude_config_dir() -> Path:
-      """Return the value of $CLAUDE_CONFIG_DIR. Raises UserInputError if unset."""
+      """Return $CLAUDE_CONFIG_DIR, falling back to ``~/.claude/`` when unset."""
   ```
-  Raises a `UserInputError` from `imbue.mngr.errors` (already imported via plugin.py) with a message naming `use_env_config_dir` and the missing env var so the user knows which knob to flip.
-- New error class is unnecessary; the existing `UserInputError` / `ConfigError` hierarchy is sufficient.
+  Reads `$CLAUDE_CONFIG_DIR` from the parent process env when non-empty; otherwise returns `Path.home() / ".claude"`. No errors raised — the fallback matches the directory claude itself picks when the env var is unset, so `use_env_config_dir=True` becomes the "don't touch the config dir" knob even on machines where the user never sets `CLAUDE_CONFIG_DIR`.
 
 ### `libs/mngr_claude/imbue/mngr_claude/plugin.py`
 
@@ -77,7 +76,7 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
 #### `ClaudeAgent.modify_env_vars`
 
 - Branch on the flag:
-  - `True`: do not set `CLAUDE_CONFIG_DIR` or `ORIGINAL_CLAUDE_CONFIG_DIR`. Still set `MNGR_EMIT_COMMON_TRANSCRIPT` when `emit_common_transcript=True`.
+  - `True`: do not set `CLAUDE_CONFIG_DIR` or `ORIGINAL_CLAUDE_CONFIG_DIR`.
   - `False`: unchanged.
 
 #### `ClaudeAgent.on_before_provisioning`
@@ -121,14 +120,14 @@ Packaged as a single PR. Branch: `mngr/single-claude-data-dir`.
 
 - New unit tests in `libs/mngr_claude/imbue/mngr_claude/claude_config_test.py`:
   - `test_resolve_shared_claude_config_dir_returns_env_value` — set `CLAUDE_CONFIG_DIR`, assert the helper returns its `Path`.
-  - `test_resolve_shared_claude_config_dir_raises_when_unset` — unset env, assert `UserInputError`.
+  - `test_resolve_shared_claude_config_dir_falls_back_when_unset` / `…_when_empty` — unset / empty env, assert `Path.home() / ".claude"`.
 - New unit tests in `libs/mngr_claude/imbue/mngr_claude/plugin_test.py`:
   - `test_claude_agent_get_claude_config_dir_uses_env_in_shared_mode` — instantiate agent with flag on, monkeypatch env, assert `get_claude_config_dir()` returns the env value.
-  - `test_claude_agent_modify_env_vars_omits_claude_config_dir_in_shared_mode` — assert `CLAUDE_CONFIG_DIR` and `ORIGINAL_CLAUDE_CONFIG_DIR` are not in the resulting dict; `MNGR_EMIT_COMMON_TRANSCRIPT` still present when configured.
+  - `test_claude_agent_modify_env_vars_omits_claude_config_dir_in_shared_mode` — assert `CLAUDE_CONFIG_DIR` and `ORIGINAL_CLAUDE_CONFIG_DIR` are not in the resulting dict.
 - New integration test (offload-only, `test_*.py` style) in `libs/mngr_claude/imbue/mngr_claude/test_shared_config_dir.py`:
   - `test_shared_config_dir_local_agent_does_not_touch_user_config` — create a local agent with `use_env_config_dir=True`, point `CLAUDE_CONFIG_DIR` at a snapshot of a real `~/.claude` (copied to `tmp_path`), capture mtimes of `.claude.json`/`settings.json`/`projects/` before run, start the agent, send a no-op message, destroy, assert mtimes of pre-existing files are unchanged (newly created `projects/<encoded>/...` files are allowed).
   - `test_shared_config_dir_remote_raises` — attempt to create a Modal agent with the flag, assert `UserInputError` from `on_before_provisioning`.
-  - `test_shared_config_dir_unset_env_raises` — `monkeypatch.delenv("CLAUDE_CONFIG_DIR")`, create agent, assert clear error.
+  - `test_shared_config_dir_unset_env_falls_back_to_home` — `monkeypatch.delenv("CLAUDE_CONFIG_DIR")`, create agent, assert `get_claude_config_dir()` resolves to `~/.claude/` and provisioning succeeds.
   - `test_shared_config_dir_adopt_session_writes_under_shared_projects_dir` — `--adopt-session` with an external `.jsonl` file, assert it is copied into `$CLAUDE_CONFIG_DIR/projects/<encoded-work_dir>/`.
 
 ### Docs / changelog
@@ -180,7 +179,7 @@ Phase order is chosen so each phase ends in a working, releasable state.
 ### Edge cases
 
 - `use_env_config_dir=True` + remote host → `on_before_provisioning` raises.
-- `use_env_config_dir=True` + `CLAUDE_CONFIG_DIR` unset → clear error at agent start.
+- `use_env_config_dir=True` + `CLAUDE_CONFIG_DIR` unset → silently falls back to `~/.claude/`. No error.
 - `use_env_config_dir=True` + work_dir is not trusted in the shared config → Claude's TUI blocks; `wait_for_ready_signal` times out; verify the existing trust-dialog indicator catches it (`TrustDialogIndicator` matches "Yes, I trust this folder"). No code change needed, but add an integration test that confirms the error surface is reasonable.
 - `use_env_config_dir=True` + `ANTHROPIC_API_KEY` provided via mngr that doesn't match user's `primaryApiKey` → `CustomApiKeyDialogIndicator` fires; documented in Open Questions.
 - Concurrent agents sharing the same `work_dir` → distinct `--session-id`s, files in same `projects/<encoded>/` but no collision. Acceptable; covered by inspection rather than automated test.

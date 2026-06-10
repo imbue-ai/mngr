@@ -41,7 +41,7 @@ Closing an individual window just tears down that window's views -- the backend 
 
 ### Crash recovery
 
-If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/requests-panel views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
+If the backend exits unexpectedly, every open window switches to the error screen (chrome view expanded to fill the window, content/sidebar/modal views torn down) with the last lines from the log file. Clicking "Retry" from any window restarts the backend once; on success every window reloads to its pre-error URL.
 
 ### Keyboard shortcuts
 
@@ -58,7 +58,7 @@ Each workspace (`/forwarding/{agent-id}/...`) can live in its own window. Unique
 - **Open a blank window**: cmd+N / ctrl+N, `File > New Window`, or the macOS dock menu. Opens a window on the backend's home page (`/`).
 - **Plain sidebar click**: navigates the current window to that workspace -- unless some other window is already on it, in which case that window is focused and the sender is untouched.
 - **Notifications** pointing at `/forwarding/{X}/...` focus the existing window for workspace `X`, or open a new one. Non-workspace notification URLs and `auth_required` events navigate the most-recently-focused window.
-- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json`. On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped.
+- **Session restore**: on quit, every open window's content URL is recorded to `~/.<MINDS_ROOT_NAME>/window-state.json` (as `{ windows: [{ url, x, y, width, height, displayId, lastWorkspaceAgentId }, ...] }`). On next launch (after the backend is ready) one window is reopened per recorded URL. URLs pointing at workspaces that no longer exist are silently dropped. Each window's per-window `lastWorkspaceAgentId` carries the most-recently-opened workspace for that window so its accent paints the titlebar across navigation away from the workspace; it's cleared for matching windows on workspace deletion and for all windows on account sign-out.
 
 ### Environment variables
 
@@ -80,8 +80,9 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
 - **git**: Required for agent creation (cloning repos). Currently copied from the build machine; a statically-linked distribution should be used for production.
+- **lima**: Required for the Lima launch mode (running agents in Linux VMs). Downloaded from GitHub releases during `pnpm build`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still require QEMU on the host machine.
 
-Both are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
+All three are placed in the `resources/` directory (outside the asar archive) and added to `PATH` in the child process environment.
 
 ## Data directory
 
@@ -101,7 +102,7 @@ same shape:
   config.toml             # Optional minds user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
-  window-state.json       # Per-window content URLs, restored on next launch
+  window-state.json       # Per-window content URLs + last-opened workspace, restored on next launch
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories
@@ -141,7 +142,7 @@ deploy-time secrets flow through HCP Vault.
 
 `~/.<root>/config.toml` is optional and holds user-personal
 preferences only (the default account for new workspaces, the
-auto-open behavior for the requests panel). It carries no tier-bound
+auto-open behavior for the inbox). It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 
@@ -149,9 +150,48 @@ URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 
 ### Prerequisites
 
-- Node.js >= 20
-- pnpm >= 10
-- Python >= 3.11, uv, git (for the Python backend)
+- Node.js 24.15.0 (pinned via `.nvmrc` and `engines.node`)
+- pnpm 10.33.4 (pinned via `engines.pnpm`)
+- Python 3.12, uv, git (for the Python backend)
+
+`apps/minds/.npmrc` sets `engine-strict=true`, so `pnpm install` refuses to run on any other Node or pnpm version instead of silently producing a broken install.
+
+### Installing the pinned toolchain
+
+The pins are exact patches (`24.15.0`, `10.33.4`) and `engine-strict=true` will reject anything else. Use the recipes below -- they're the paths that reliably hit the exact versions on any given day.
+
+**Node.js 24.15.0** -- via a version manager:
+
+```bash
+# nvm (https://github.com/nvm-sh/nvm)
+nvm install         # reads apps/minds/.nvmrc
+nvm use             # also reads .nvmrc
+
+# fnm (https://github.com/Schniz/fnm)
+fnm install         # reads .nvmrc
+fnm use             # reads .nvmrc
+```
+
+Run `node --version` from inside `apps/minds/` -- it must print `v24.15.0`.
+
+**pnpm 10.33.4** -- via npm:
+
+```bash
+npm install --global pnpm@10.33.4
+```
+
+Run `pnpm --version` -- it must print `10.33.4`. To swap back to a newer pnpm after working on minds: `npm install --global pnpm@latest`.
+
+**A note on Homebrew**: `brew install node@24` and `brew install pnpm@10` work *if* the kegs currently happen to point at `24.15.0` / `10.33.4`, but Homebrew's `@<major>` formulae move forward through patch releases and there's no clean way to ask for an exact historical patch. Once a keg drifts past the pin, `engine-strict` will reject `pnpm install` and you'll need to switch to the version-manager / npm paths above anyway. If you already have these installed via brew and they still match, great -- just verify with `node --version` / `pnpm --version` before running `pnpm install`.
+
+### Dependency cooldown (minimum release age)
+
+Both package managers are configured to refuse any distribution published less than **14 days** ago, so a freshly-compromised release cannot be pulled into a build (or an end-user install) before it has had time to be noticed and yanked. This applies to transitive dependencies too.
+
+- **JS (pnpm)**: `minimumReleaseAge: 20160` (minutes) in `apps/minds/pnpm-workspace.yaml`. Requires pnpm >= 10.16.0 (we pin 10.33.4).
+- **Python (uv)**: `exclude-newer = "14 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged end-user app).
+
+The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`.
 
 ### Running locally
 
@@ -187,7 +227,7 @@ The new lockfile is shipped in the app bundle. On next launch, `uv sync` install
 ```
 apps/minds/
   package.json              # pnpm + Electron + ToDesktop config
-  todesktop.json            # ToDesktop build settings
+  todesktop.js              # ToDesktop build settings
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Context bridge for renderer IPC
@@ -202,6 +242,6 @@ apps/minds/
       pyproject.toml        # Standalone: declares minds dependency
       uv.lock               # Pinned lockfile for reproducible installs
   scripts/
-    build.js                # Downloads uv/git, copies pyproject to resources/
+    build.js                # Downloads uv/git/lima, copies pyproject to resources/
   resources/                # (gitignored) Built artifacts for packaging
 ```

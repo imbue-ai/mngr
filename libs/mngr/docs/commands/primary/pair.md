@@ -81,13 +81,13 @@ mngr pair [OPTIONS] SOURCE
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
 
-- [mngr push](./push.md) - Push files or git commits to an agent
-- [mngr pull](./pull.md) - Pull files or git commits from an agent
+- [mngr rsync](./rsync.md) - One-shot file sync between local and a remote host or agent
+- [mngr git](./git.md) - Push or pull git commits between local and a remote agent or host
 - [mngr create](./create.md) - Create a new agent
 - [mngr list](./list.md) - List agents to find one to pair with
 

@@ -2,7 +2,8 @@
 """Generate markdown documentation for mngr CLI commands and the PyPI README.
 
 Usage:
-    uv run python scripts/make_cli_docs.py
+    uv run python scripts/make_cli_docs.py            # regenerate the docs in place
+    uv run python scripts/make_cli_docs.py --check     # exit non-zero if any doc is stale
 
 This script generates markdown documentation for all CLI commands
 and writes them to libs/mngr/docs/commands/. It preserves option
@@ -16,8 +17,10 @@ All content comes from two sources:
 - CommandHelpMetadata (description, synopsis, examples, see also, etc.)
 """
 
+import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
 # Force all plugins to load regardless of local config so generated docs
@@ -29,9 +32,9 @@ import click
 from click_option_group import GroupedOption
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
-from imbue.mngr.cli.help import get_topic
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import get_help_metadata
+from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.main import BUILTIN_COMMANDS
 from imbue.mngr.main import PLUGIN_COMMANDS
 from imbue.mngr.main import cli
@@ -42,11 +45,11 @@ PRIMARY_COMMANDS = {
     "create",
     "destroy",
     "exec",
+    "git",
     "list",
     "pair",
-    "pull",
-    "push",
     "rename",
+    "rsync",
     "start",
     "stop",
 }
@@ -70,12 +73,12 @@ SECONDARY_COMMANDS = {
     "observe",
     "ovh",
     "plugin",
-    "provision",
     "schedule",
     "snapshot",
     "tmr",
     "transcript",
     "tutor",
+    "robinhood",
     "usage",
     "wait",
     "notify",
@@ -493,21 +496,21 @@ def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: s
 # ---------------------------------------------------------------------------
 
 
-def generate_command_doc(command_name: str, base_dir: Path) -> None:
-    """Generate markdown documentation for a single command."""
+def build_command_doc(command_name: str, base_dir: Path) -> tuple[Path, str] | None:
+    """Build the (output path, markdown content) for a single command, or None to skip it."""
     cmd = cli.commands.get(command_name)
     if cmd is None:
         print(f"Warning: Command '{command_name}' not found")
-        return
+        return None
 
     # Silently skip hidden commands (internal service commands not intended for users)
     if cmd.hidden:
-        return
+        return None
 
     output_dir = get_output_dir(command_name, base_dir)
     if output_dir is None:
         print(f"Skipping: {command_name} (not in PRIMARY_COMMANDS or SECONDARY_COMMANDS)")
-        return
+        return None
 
     prog_name = f"mngr {command_name}"
     metadata = get_help_metadata(command_name)
@@ -569,17 +572,12 @@ def generate_command_doc(command_name: str, base_dir: Path) -> None:
     )
     content = generation_comment + content
 
-    # Write to file (only if changed)
-    output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"{command_name}.md"
-    existing_content = output_file.read_text() if output_file.exists() else None
-    if content != existing_content:
-        output_file.write_text(content)
-        print(f"Updated: {output_file}")
+    return output_file, content
 
 
-def generate_alias_doc(command_name: str, base_dir: Path) -> None:
-    """Generate markdown documentation for an alias command.
+def build_alias_doc(command_name: str, base_dir: Path) -> tuple[Path, str] | None:
+    """Build the (output path, markdown content) for an alias command, or None to skip it.
 
     Alias commands (like clone, migrate) use UNPROCESSED args and delegate to
     other commands. Their docs are built entirely from CommandHelpMetadata.
@@ -587,12 +585,12 @@ def generate_alias_doc(command_name: str, base_dir: Path) -> None:
     output_dir = get_output_dir(command_name, base_dir)
     if output_dir is None:
         print(f"Skipping: {command_name} (not in ALIAS_COMMANDS)")
-        return
+        return None
 
     metadata = get_help_metadata(command_name)
     if metadata is None:
         print(f"Warning: No help metadata for alias command '{command_name}'")
-        return
+        return None
 
     content_parts: list[str] = []
 
@@ -632,13 +630,8 @@ def generate_alias_doc(command_name: str, base_dir: Path) -> None:
     )
     content = generation_comment + content
 
-    # Write to file (only if changed)
-    output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"{command_name}.md"
-    existing_content = output_file.read_text() if output_file.exists() else None
-    if content != existing_content:
-        output_file.write_text(content)
-        print(f"Updated: {output_file}")
+    return output_file, content
 
 
 GITHUB_BASE_URL = "https://github.com/imbue-ai/mngr/blob/main/"
@@ -653,10 +646,10 @@ def _local_path_to_github_url(match: re.Match[str]) -> str:
     return f"]({GITHUB_BASE_URL}{path})"
 
 
-def generate_pypi_readme(repo_root: Path) -> None:
-    """Generate libs/mngr/README.md from the top-level README.md.
+def build_pypi_readme(repo_root: Path) -> tuple[Path, str]:
+    """Build the (output path, content) for libs/mngr/README.md from the top-level README.md.
 
-    Reads the top-level README (which uses local relative paths) and writes
+    Reads the top-level README (which uses local relative paths) and produces
     a version with GitHub absolute URLs for PyPI rendering.
     """
     source = repo_root / "README.md"
@@ -675,29 +668,86 @@ def generate_pypi_readme(repo_root: Path) -> None:
     )
     content = generation_comment + content
 
-    # Write only if changed
-    existing_content = dest.read_text() if dest.exists() else None
-    if content != existing_content:
-        dest.write_text(content)
-        print(f"Updated: {dest}")
+    return dest, content
+
+
+# The exact command a developer runs to regenerate the docs this script owns.
+REGEN_COMMAND = "uv run python scripts/make_cli_docs.py"
+
+
+def collect_generated_files(repo_root: Path) -> dict[Path, str]:
+    """Return every generated doc file mapped to its expected content.
+
+    This is the single source of truth shared by ``main``'s writer (the default,
+    no-args path, which writes the files) and its checker (the ``--check`` path,
+    which only verifies they are up to date), so the writer and checker cannot
+    drift apart. ``test_cli_docs_are_up_to_date`` drives the checker by invoking
+    the script with ``--check``.
+    """
+    generated: dict[Path, str] = {}
+
+    # PyPI README from top-level README
+    readme_path, readme_content = build_pypi_readme(repo_root)
+    generated[readme_path] = readme_content
+
+    # CLI command docs
+    base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
+    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
+        if cmd.name is not None:
+            result = build_command_doc(cmd.name, base_dir)
+            if result is not None:
+                path, content = result
+                generated[path] = content
+
+    # Alias command docs
+    for command_name in sorted(ALIAS_COMMANDS):
+        result = build_alias_doc(command_name, base_dir)
+        if result is not None:
+            path, content = result
+            generated[path] = content
+
+    return generated
+
+
+def _find_stale_files(generated: dict[Path, str]) -> list[Path]:
+    """Return the generated files whose on-disk content differs from what we'd write."""
+    stale: list[Path] = []
+    for path, content in generated.items():
+        existing_content = path.read_text() if path.exists() else None
+        if content != existing_content:
+            stale.append(path)
+    return stale
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Do not write any files; exit non-zero if any generated doc is out of date.",
+    )
+    args = parser.parse_args()
+
     repo_root = Path(__file__).parent.parent
+    generated = collect_generated_files(repo_root)
+    stale = _find_stale_files(generated)
 
-    # Generate PyPI README from top-level README
-    generate_pypi_readme(repo_root)
+    if args.check:
+        if stale:
+            print("The following generated docs are out of date:")
+            for path in stale:
+                print(f"  - {path.relative_to(repo_root)}")
+            print(f"\nRun this to regenerate them:\n  {REGEN_COMMAND}")
+            sys.exit(1)
+        return
 
-    # Generate CLI command docs
-    base_dir = repo_root / "libs" / "mngr" / "docs" / "commands"
-
-    for cmd in BUILTIN_COMMANDS + PLUGIN_COMMANDS:
-        if cmd.name is not None:
-            generate_command_doc(cmd.name, base_dir)
-
-    # Generate docs for alias commands
-    for command_name in sorted(ALIAS_COMMANDS):
-        generate_alias_doc(command_name, base_dir)
+    for path in stale:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated[path])
+        print(f"Updated: {path}")
 
 
 if __name__ == "__main__":

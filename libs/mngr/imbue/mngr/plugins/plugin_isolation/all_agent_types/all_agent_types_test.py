@@ -10,7 +10,7 @@ def test_all_specified_agent_types_registered(plugin_manager: pluggy.PluginManag
     registered = list_registered_agent_types()
     assert "claude" in registered
     assert "opencode" in registered
-    assert "gemini" in registered
+    assert "antigravity" in registered
 
 
 def test_non_agent_extras_still_blocked(plugin_manager: pluggy.PluginManager) -> None:

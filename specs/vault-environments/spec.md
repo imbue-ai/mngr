@@ -110,7 +110,7 @@
 ### Vault layout (set up out-of-band, documented in repo)
 
 - Cluster: `vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200`, namespace `admin`, KV v2 mount `secrets/`.
-- For each tier (`dev`, `staging`, `production`) and each service file in `.minds/template/*.sh` (`cloudflare`, `litellm`, `litellm-connector`, `neon`, `paid-accounts`, `pool-ssh`, `supertokens`), one Vault secret at `secrets/minds/<tier>/<service>` whose key set matches the keys declared in the corresponding template file.
+- For each tier (`dev`, `staging`, `production`) and each service file in `.minds/template/*.sh` (`cloudflare`, `litellm`, `litellm-connector`, `neon`, `pool-ssh`, `supertokens`), one Vault secret at `secrets/minds/<tier>/<service>` whose key set matches the keys declared in the corresponding template file.
 - A new doc at `apps/minds/docs/vault-setup.md` enumerates the paths and links the template files as the schema.
 
 ### `apps/minds/imbue/minds/config/envs/` — per-tier config

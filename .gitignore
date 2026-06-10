@@ -3,6 +3,9 @@
 **/*.py[codz]
 **/*$py.class
 
+# macOS Finder metadata
+**/.DS_Store
+
 # C extensions
 **/*.so
 
@@ -235,14 +238,16 @@
 # Local working / scratch markdown (not committed)
 **/*.local.md
 
-# so the user can make their own notification script
-**/scripts/notify_user.local.sh
+# Local working / scratch shell scripts (not committed)
+# (covers user notification scripts like scripts/notify_user.local.sh, too)
+**/*.local.sh
 
 # Test output files (slow tests, coverage summaries)
 **/.test_output/
 
 # TMR output directories (reports + test outputs)
 **/tmr_*/
+**/tmr-report/
 
 # Active session marker file (used to detect interrupted sessions)
 **/.claude/active
@@ -265,6 +270,11 @@
 # it to check that per-env .sh files declare every template key.
 !/.minds/template/
 !/.minds/template/**
+# Vault ACL policies for the minds tiers. The HCL is non-sensitive and is
+# the source of truth for the policies pushed to Vault via
+# `vault policy write <name> .minds/policies/<name>.hcl`.
+!/.minds/policies/
+!/.minds/policies/**
 
 # Autofix session artifacts
 **/.autofix/
@@ -314,6 +324,9 @@
 # re-fetch.
 /apps/minds/imbue/minds/desktop_client/static/tailwind.js
 **/.env.swp
+# Vim swap files for any file (`.foo.swp`, `.foo.swo`, etc.) -- generated
+# while a file is open in vim. Never checked in.
+**/.*.sw[a-p]
 
 # `minds env deploy` writes a recover-target file at the monorepo root
 # on failed deploys; `minds env recover` deletes it after rolling back.
@@ -328,3 +341,10 @@
 # ``minds env recover`` so two concurrent invocations against the same
 # env serialize. The file itself is empty and cheap to leave around.
 **/.minds-deploy-lock-*.lock
+**/.antigravitycli/
+
+# Playwright MCP scratch artifacts (mock screenshots, page snapshots)
+**/.playwright-mcp/
+
+# tmr (task-runner) orchestration scratch report
+**/tmr-report/

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Sequence
+from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
@@ -141,6 +142,33 @@ def _build_host_details_from_host(
     return host_details, ssh_activity
 
 
+_FieldGeneratorAgent = TypeVar("_FieldGeneratorAgent")
+_FieldGeneratorHost = TypeVar("_FieldGeneratorHost")
+
+
+def _compute_plugin_fields(
+    field_generators: Mapping[str, Mapping[str, Callable[[_FieldGeneratorAgent, _FieldGeneratorHost], Any]]],
+    agent: _FieldGeneratorAgent,
+    host: _FieldGeneratorHost,
+) -> dict[str, Any]:
+    """Run plugin field generators, building plugin.<plugin_name>.<field> data.
+
+    Shared by the online path (live agent/host) and the offline path
+    (DiscoveredAgent/HostDetails). Fields that evaluate to None are omitted, and
+    plugins that contribute no fields are dropped.
+    """
+    plugin_data: dict[str, Any] = {}
+    for plugin_name, generators in field_generators.items():
+        plugin_fields: dict[str, Any] = {}
+        for field_name, field_generator in generators.items():
+            value = field_generator(agent, host)
+            if value is not None:
+                plugin_fields[field_name] = value
+        if plugin_fields:
+            plugin_data[plugin_name] = plugin_fields
+    return plugin_data
+
+
 def _build_agent_details_from_online_agent(
     agent: AgentInterface,
     host_details: HostDetails,
@@ -168,15 +196,7 @@ def _build_agent_details_from_online_agent(
     idle_seconds = _compute_idle_seconds(user_activity, agent_activity, ssh_activity)
 
     # Compute plugin-specific fields from field generators
-    plugin_data: dict[str, Any] = {}
-    for plugin_name, generators in field_generators.items():
-        plugin_fields: dict[str, Any] = {}
-        for field_name, generator in generators.items():
-            value = generator(agent, host)
-            if value is not None:
-                plugin_fields[field_name] = value
-        if plugin_fields:
-            plugin_data[plugin_name] = plugin_fields
+    plugin_data = _compute_plugin_fields(field_generators, agent, host)
 
     return AgentDetails(
         id=agent.id,
@@ -206,9 +226,11 @@ def _build_agent_details_from_online_agent(
 def build_agent_details_from_offline_ref(
     agent_ref: DiscoveredAgent,
     host_details: HostDetails,
+    offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]] | None = None,
 ) -> AgentDetails:
     """Build AgentDetails from a discovered agent reference when the host is offline."""
     create_time = agent_ref.create_time or datetime(1970, 1, 1, tzinfo=timezone.utc)
+    plugin_data = _compute_plugin_fields(offline_field_generators or {}, agent_ref, host_details)
     return AgentDetails(
         id=agent_ref.agent_id,
         name=agent_ref.agent_name,
@@ -231,7 +253,7 @@ def build_agent_details_from_offline_ref(
         idle_mode=None,
         labels=agent_ref.labels,
         host=host_details,
-        plugin={},
+        plugin=plugin_data,
     )
 
 
@@ -253,6 +275,15 @@ def _discover_agents_on_host(
     host_id: HostId,
 ) -> list[DiscoveredAgent]:
     """Discover agents on a host, disconnecting afterward."""
+    # FIXME: wrap this in a bounded retry (e.g. tenacity) so a *transient*
+    # connection failure (timeout, connection refused, banner reset) is retried
+    # here rather than immediately surfacing to the caller. The retry predicate
+    # must NOT retry permanent failures (HostAuthenticationError / bad key) --
+    # those should fail fast. This is the right layer for it: retrying here means
+    # a brief network blip never reaches discover_hosts_and_agents' offline
+    # fallback at all, which matters most for providers without an offline view
+    # (e.g. SSH), where a transient blip would otherwise propagate as a
+    # ProviderDiscoveryError.
     with connected_host(provider, host_id) as host:
         return host.discover_agents()
 
@@ -446,7 +477,48 @@ class ProviderInstanceInterface(MutableModel, ABC):
                     host_ref.host_id,
                 )
 
-        return {host_ref: future.result() for host_ref, future in future_by_host_ref.items()}
+        results: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+        for host_ref, future in future_by_host_ref.items():
+            try:
+                results[host_ref] = future.result()
+            except HostConnectionError as e:
+                # The host was reachable enough to be discovered, but enumerating
+                # its agents failed (sshd crashed, banner reset, auth failure,
+                # ...). Rather than let that bubble up to
+                # _construct_and_discover_for_provider -- which records a
+                # per-provider error and reports agents=[] / hosts=[] for the
+                # WHOLE provider, making every workspace on it unreachable via
+                # mngr_forward -- recover the host's agents from the provider's
+                # offline view.
+                #
+                # First mirror get_host_and_agent_details' on_connection_error
+                # call so providers that cache per-host state (docker's container
+                # cache, modal/lima/vps_docker host caches) drop the wedged entry;
+                # otherwise the next discovery cycle keeps re-hitting the stale
+                # handle.
+                self.on_connection_error(host_ref.host_id)
+                # The offline view recovers the host's persisted records: a docker
+                # container that is RUNNING but whose sshd has died still exposes
+                # its agent records via the docker daemon (labels + on-host-volume
+                # data), so its workspaces stay visible -- matching the behavior of
+                # a fully-stopped container.
+                #
+                # Any provider whose hosts can raise HostConnectionError is assumed
+                # to implement to_offline_host: the local provider never opens a
+                # connection (so it never reaches here), and every remote provider
+                # persists host/agent state. If to_offline_host nonetheless fails
+                # (no offline view, or no persisted record for a host we just
+                # discovered), that signals a broken invariant / corrupt state, so
+                # we let it propagate rather than masking it as an empty agent list.
+                offline_agents = self.to_offline_host(host_ref.host_id).discover_agents()
+                logger.debug(
+                    "Falling back to offline agent enumeration for host {} ({}) after connection error: {}",
+                    host_ref.host_id,
+                    host_ref.host_name,
+                    e,
+                )
+                results[host_ref] = offline_agents
+        return results
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:
@@ -458,6 +530,9 @@ class ProviderInstanceInterface(MutableModel, ABC):
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
+        | None = None,
+        # Field generators for offline agents, computing plugin fields from (DiscoveredAgent, HostDetails).
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
         | None = None,
         # Called when an error occurs for a specific agent or the host itself.
         # If the callback raises, the error propagates (ABORT semantics).
@@ -473,6 +548,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         is_authentication_failure = False
         initial_host: HostInterface | None = None
+        # Resolved before the try so the offline fallback (HostConnectionError) can use it too.
+        resolved_offline_field_generators = offline_field_generators or {}
         try:
             host = self.get_host(host_ref.host_id)
             initial_host = host
@@ -512,9 +589,19 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
                     # If this host is offline, or if we failed to find the agent on the online host
                     if agent_details is None:
-                        agent_details = build_agent_details_from_offline_ref(agent_ref, host_details)
+                        agent_details = build_agent_details_from_offline_ref(
+                            agent_ref, host_details, resolved_offline_field_generators
+                        )
 
                     agent_details_list.append(agent_details)
+                except HostConnectionError:
+                    # A connection failure means the whole host is unreachable,
+                    # not just this one agent. Let it propagate to the outer
+                    # ``except HostConnectionError`` handler, which clears the
+                    # per-host connection cache and falls back to the offline
+                    # view for every agent. (HostConnectionError is a MngrError
+                    # subclass, so without this it would be swallowed per-agent.)
+                    raise
                 except MngrError as e:
                     if on_error is not None:
                         on_error(agent_ref, e)
@@ -526,7 +613,11 @@ class ProviderInstanceInterface(MutableModel, ABC):
                             host_ref.host_id,
                             e,
                         )
-                        agent_details_list.append(build_agent_details_from_offline_ref(agent_ref, host_details))
+                        agent_details_list.append(
+                            build_agent_details_from_offline_ref(
+                                agent_ref, host_details, resolved_offline_field_generators
+                            )
+                        )
 
         except HostConnectionError as e:
             self.on_connection_error(host_ref.host_id)
@@ -535,7 +626,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
             is_authentication_failure = isinstance(e, HostAuthenticationError)
             host_details, _ssh_activity = _build_host_details_from_host(host, host_ref, is_authentication_failure)
             agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details) for agent_ref in agent_refs
+                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+                for agent_ref in agent_refs
             ]
 
         finally:
@@ -606,9 +698,27 @@ class ProviderInstanceInterface(MutableModel, ABC):
         only accessed by mngr and contains trusted metadata.
 
         Returns None if the provider does not support host volumes or if
-        no volume exists for the given host.
+        no volume exists for the given host. Providers whose volume lookup is a
+        lazy reference (e.g. Modal) confirm existence with a network probe here;
+        callers that only need a reference and want to skip that probe should use
+        :meth:`get_volume_reference_for_host`.
         """
         return None
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Like :meth:`get_volume_for_host`, but skips any network existence probe:
+        it returns a possibly-unverified reference (operations on a since-deleted
+        volume fail at access time). Used by ``make_readable_offline_host`` to
+        construct a readable offline host cheaply, with no per-host probe during
+        host discovery.
+
+        The default delegates to :meth:`get_volume_for_host` -- correct for
+        providers that have no existence probe (their lookup is already cheap).
+        Providers that *do* probe (Modal) override this to skip it.
+        """
+        return self.get_volume_for_host(host)
 
     # =========================================================================
     # Host Mutation Methods

@@ -10,15 +10,20 @@
     "start": "electron .",
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
+    "todesktop:beforeInstall": "./scripts/download-binaries.js",
     "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
     "postinstall": "bash scripts/fetch_tailwind.sh"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.11.1"
+    "latchkey": "^2.15.4"
   },
   "devDependencies": {
-    "electron": "35.7.5",
+    "electron": "40.10.1",
     "@todesktop/cli": "^1.8.0"
+  },
+  "engines": {
+    "node": "24.15.0",
+    "pnpm": "10.33.4"
   }
 }

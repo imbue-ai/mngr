@@ -30,3 +30,19 @@ export GOOGLE_CLIENT_SECRET=
 # providers configured on the SuperTokens core itself.
 export GITHUB_CLIENT_ID=
 export GITHUB_CLIENT_SECRET=
+
+# Fixed API key that authenticates the paid-list admin CRUD endpoints
+# (`/paid/*`) used to manage the `paid_domains` / `paid_emails` tables.
+# Distinct from every other auth path: the connector accepts this key
+# ONLY on `/paid/*` (and rejects SuperTokens / tunnel tokens there), and
+# rejects this key everywhere else. Generate a long random value (e.g.
+# `openssl rand -hex 32`). Leave empty to disable the paid-list admin API
+# on this server. `mngr imbue_cloud admin paid ...` reads the same value
+# from $MINDS_PAID_ADMIN_KEY on the operator's machine.
+export MINDS_PAID_ADMIN_KEY=
+
+# Optional: how long (seconds) the connector caches a per-email paid-status
+# lookup in memory before re-querying the tables. Unset uses the built-in
+# default (60s). Set to 0 to disable caching entirely. Each container caches
+# independently, so a CRUD change propagates within this window.
+export MINDS_PAID_LIST_CACHE_TTL_SECONDS=

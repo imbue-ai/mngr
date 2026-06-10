@@ -31,19 +31,20 @@ _MINDS_PREFIX: Final[str] = "minds"
 # :mod:`imbue.minds.cli.env`:
 #
 #   * ``staging`` -- the reserved staging tier name.
-#   * ``dev-<rest>`` -- any dev env. ``<rest>`` matches
-#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN` after the
-#     ``dev-`` prefix; kept inlined here so this module stays free of
-#     ``imbue.mngr.*`` / pydantic imports (see module docstring).
+#   * ``dev-<rest>`` / ``ci-<rest>`` -- any dynamic env (developer dev
+#     env or CI ephemeral env, respectively). Together they mirror
+#     :data:`imbue.minds.envs.primitives.DEV_ENV_NAME_PATTERN`; kept
+#     inlined here so this module stays free of ``imbue.mngr.*`` /
+#     pydantic imports (see module docstring).
 #
 # Production has no suffix (``minds`` alone). Anything that does not
 # fit this pattern is treated as ``unset`` by ``resolve_minds_root_name``
 # and falls back to production with a warning.
 _STAGING_SUFFIX_PATTERN: Final[str] = r"staging"
-_DEV_SUFFIX_PATTERN: Final[str] = r"dev-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
-_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DEV_SUFFIX_PATTERN})"
+_DYNAMIC_SUFFIX_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,33}[a-z0-9]"
+_ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{_DYNAMIC_SUFFIX_PATTERN})"
 # The full set of legal MINDS_ROOT_NAME values is ``minds`` (production),
-# ``minds-staging``, or ``minds-dev-<rest>``.
+# ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 
@@ -349,6 +350,12 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    # Same rationale as in ``set_imbue_cloud_provider_for_account``: the
+    # startup ``apply_bootstrap`` call no-ops on a freshly-created
+    # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
+    # so existing users who never re-signin still get the suppression
+    # block on their next minds startup.
+    _ensure_mngr_settings(root_name)
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
         return
@@ -373,9 +380,8 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             continue
         try:
             # Reconcile only fills in missing blocks; it must not re-enable a
-            # provider that was previously auto-disabled by an auth-error
-            # observation. Re-enable happens only on an explicit signin
-            # event.
+            # provider that the user previously disabled via the providers
+            # panel. Re-enable happens only on an explicit signin event.
             set_imbue_cloud_provider_for_account(
                 email,
                 connector_url=connector_url,
@@ -389,18 +395,17 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
 
 
-def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
-    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
+    """Return ``<mngr_host_dir>/profiles/<active-profile>``, or None if unresolved.
 
-    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
-    ``get_active_profile_dir``: the active profile id lives in
-    ``<host_dir>/config.toml`` and the accounts index lives at
-    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
-    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
-    import (which transitively pulls in mngr).
+    The active profile id lives in ``<mngr_host_dir>/config.toml`` under the
+    ``profile`` key and each profile's state lives at
+    ``<mngr_host_dir>/profiles/<profile>/``. Returns None when mngr hasn't been
+    initialized in this host_dir yet (no ``config.toml`` / no ``profile`` key) or
+    when the config can't be read. Resolution is inlined here (rather than imported
+    from mngr) so bootstrap stays free of any ``imbue.mngr.*`` import.
     """
-    host_dir = mngr_host_dir_for(root_name)
-    config_path = host_dir / "config.toml"
+    config_path = mngr_host_dir / "config.toml"
     if not config_path.is_file():
         return None
     try:
@@ -411,10 +416,38 @@ def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
     profile_id = config_data.get("profile")
     if not isinstance(profile_id, str) or not profile_id:
         return None
-    return host_dir / "profiles" / profile_id / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
+    return mngr_host_dir / "profiles" / profile_id
+
+
+def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
+    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+
+    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
+    ``get_active_profile_dir``: the active profile id lives in
+    ``<host_dir>/config.toml`` and the accounts index lives at
+    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
+    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
+    import (which transitively pulls in mngr).
+    """
+    profile_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if profile_dir is None:
+        return None
+    return profile_dir / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
 
 
 _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
+
+# Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
+# block so the imbue_cloud slow (rebuild) path runs the agent container under
+# gVisor with the runsc hardening args. These mirror the forever-claude-template
+# ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
+# ``VpsDockerProviderConfig``) forwards them onto the delegated vps_docker
+# provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
+# host-setup so a leased host that lacks runsc has it installed before the
+# container is rebuilt under it.
+_IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
+_IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+_IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
 
 class BootstrapError(ValueError):
@@ -452,16 +485,8 @@ def _resolve_active_settings_path(root_name: str) -> Path | None:
     ``config.toml`` / a profile dir). Callers should treat ``None`` as
     "skip silently" since there's nothing useful to write yet.
     """
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    root_config_path = mngr_host_dir / "config.toml"
-    if not root_config_path.exists():
-        return None
-    root_config = tomllib.loads(root_config_path.read_text())
-    profile_id = root_config.get("profile")
-    if not profile_id:
-        return None
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    if not settings_dir.exists():
+    settings_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if settings_dir is None or not settings_dir.exists():
         return None
     return settings_dir / "settings.toml"
 
@@ -497,17 +522,30 @@ def set_imbue_cloud_provider_for_account(
     loaded ``ClientEnvConfig``.
 
     When ``force_enable`` is True (signin events), ``is_enabled`` is set to
-    True even if the block was previously disabled by an auth-error
-    auto-disable. When False (bootstrap reconcile on a returning user),
-    any pre-existing ``is_enabled`` value is preserved so a previously
-    auto-disabled account stays disabled until the user signs in again.
+    True even if the block was previously disabled (e.g. via the providers
+    panel's Disable button). When False (bootstrap reconcile on a returning
+    user), any pre-existing ``is_enabled`` value is preserved so an account
+    the user previously disabled stays disabled until they sign in again.
 
     Returns ``True`` when the file was modified, so callers know whether
     to bounce ``mngr observe`` (the running process needs a restart to
     see the new provider instance).
+
+    Always (re-)runs :func:`_ensure_mngr_settings` before touching the
+    per-account block. ``apply_bootstrap`` calls ``_ensure_mngr_settings``
+    at minds-startup, but for a freshly-created ``MINDS_ROOT_NAME`` the
+    mngr profile dir doesn't exist yet at that point, so the call
+    silently no-ops. By the time a signin fires this function, mngr has
+    been initialized (the in-process ``mngr forward`` subprocess does
+    that), so the second call lands the suppression block + recursive-
+    disable that the first call missed. Without this, the auto-created
+    default ``[providers.imbue_cloud]`` instance trips every
+    ``mngr observe`` cycle with ``MissingConnectorUrlError`` and the
+    first ``mngr create`` against this env fails outright.
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
+    _ensure_mngr_settings(root_name)
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None:
         return False
@@ -526,6 +564,9 @@ def set_imbue_cloud_provider_for_account(
         and existing.get("account") == email
         and existing.get("connector_url") == connector_url
         and existing_is_enabled == desired_is_enabled
+        and existing.get("docker_runtime") == _IMBUE_CLOUD_DOCKER_RUNTIME
+        and existing.get("install_gvisor_runtime") == _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+        and existing.get("default_start_args") == list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     ):
         return False
     new_block = tomlkit.table()
@@ -534,6 +575,11 @@ def set_imbue_cloud_provider_for_account(
     new_block["connector_url"] = connector_url
     if desired_is_enabled is not None:
         new_block["is_enabled"] = desired_is_enabled
+    # Run the rebuilt agent container under gVisor with the runsc hardening args
+    # (see the module constants above).
+    new_block["docker_runtime"] = _IMBUE_CLOUD_DOCKER_RUNTIME
+    new_block["install_gvisor_runtime"] = _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+    new_block["default_start_args"] = list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     providers[provider_name] = new_block
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)
@@ -544,9 +590,9 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
     """Return whether ``[providers.imbue_cloud_<slug>]`` is currently enabled.
 
     Reads the ``is_enabled`` field from the active mngr settings.toml so
-    the desktop UI can render "Signed out" on a chip whose provider was
-    auto-disabled by an observed auth error. Treats a missing entry or
-    a missing ``is_enabled`` field as enabled (per mngr's default), and
+    the desktop UI can render "Signed out" on a chip whose provider the
+    user disabled via the providers panel. Treats a missing entry or a
+    missing ``is_enabled`` field as enabled (per mngr's default), and
     returns True when the settings file can't be located so the UI never
     erroneously claims an account is signed out before the bootstrap
     has finished writing the block.
@@ -571,35 +617,73 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
     return bool(is_enabled)
 
 
-def disable_imbue_cloud_provider_for_account(email: str, *, root_name: str | None = None) -> bool:
-    """Mark ``[providers.imbue_cloud_<slug>]`` as ``is_enabled = false``.
+def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
+    """Return provider names that minds' active settings file marks ``is_enabled = false``.
 
-    Called by minds when discovery surfaces an unrecoverable auth error
-    for ``email`` (e.g. SuperTokens "token theft detected", or the refresh
-    token expiring past the family lifetime). Disabling the entry makes
-    subsequent ``mngr observe`` cycles skip this provider so the rest of
-    the discovery pipeline keeps working until the user signs in again.
-    Idempotent: a no-op if the block doesn't exist or is already
-    disabled. Returns ``True`` when the file was modified.
+    Used by the providers panel to enumerate the disabled set (which discovery
+    skips and so are absent from the FullDiscoverySnapshotEvent). Reads only
+    minds' active settings file -- providers defined only in mngr's own
+    settings.toml with is_enabled=false are not surfaced here. Returns an
+    empty list when the file does not exist yet (fresh install).
     """
     if root_name is None:
         root_name = resolve_minds_root_name()
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None or not settings_path.exists():
+        return []
+    parsed = tomllib.loads(settings_path.read_text())
+    providers = parsed.get("providers")
+    if not isinstance(providers, dict):
+        return []
+    disabled: list[str] = []
+    for name, block in providers.items():
+        if isinstance(block, dict) and block.get("is_enabled") is False:
+            disabled.append(name)
+    return sorted(disabled)
+
+
+def set_provider_is_enabled(provider_name: str, is_enabled: bool, *, root_name: str | None = None) -> bool:
+    """Set ``is_enabled`` for the named provider in minds' active settings file.
+
+    Generic over any provider name -- used by minds' providers panel toggle to
+    let the user disable an errored provider (silencing its noise) or re-enable
+    a previously-disabled one. Always writes to minds' active settings file.
+    If ``[providers.<provider_name>]`` does not exist there, creates it with
+    just ``is_enabled = <is_enabled>`` as an override on top of mngr's merged
+    config. Enable writes ``is_enabled = true`` explicitly (symmetric with
+    Disable).
+
+    Idempotent: returns ``True`` only when the file was actually modified.
+    Returns ``False`` (and does nothing) when the minds root is not yet set up
+    (no active settings file path can be resolved).
+    """
+    if root_name is None:
+        root_name = resolve_minds_root_name()
+    settings_path = _resolve_active_settings_path(root_name)
+    if settings_path is None:
         return False
-    provider_name = imbue_cloud_provider_name_for_account(email)
-    doc = tomlkit.loads(settings_path.read_text())
+    if settings_path.exists():
+        doc = tomlkit.loads(settings_path.read_text())
+    else:
+        doc = tomlkit.document()
     providers = doc.get("providers")
     if not isinstance(providers, dict):
-        return False
+        providers = tomlkit.table()
+        doc["providers"] = providers
     existing = providers.get(provider_name)
     if not isinstance(existing, dict):
+        # Block doesn't exist yet -- create it with just is_enabled.
+        new_block = tomlkit.table()
+        new_block["is_enabled"] = is_enabled
+        providers[provider_name] = new_block
+        _atomic_write_settings(settings_path, doc)
+        logger.info("Created provider block for {} with is_enabled={} in {}", provider_name, is_enabled, settings_path)
+        return True
+    if existing.get("is_enabled") == is_enabled:
         return False
-    if existing.get("is_enabled") is False:
-        return False
-    existing["is_enabled"] = False
+    existing["is_enabled"] = is_enabled
     _atomic_write_settings(settings_path, doc)
-    logger.info("imbue_cloud provider {} disabled in {}", provider_name, settings_path)
+    logger.info("Set provider {} is_enabled={} in {}", provider_name, is_enabled, settings_path)
     return True
 
 

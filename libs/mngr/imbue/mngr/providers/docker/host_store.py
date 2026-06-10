@@ -10,8 +10,8 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostConfig
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -28,6 +28,16 @@ class ContainerConfig(HostConfig):
         default=(), description="Raw docker run arguments for replay on snapshot restore"
     )
     image: str | None = Field(default=None, description="Base Docker image name")
+    # Sticky per-host mount-strategy choice. Defaults to False so records
+    # written before this field existed deserialize to the legacy shared-volume
+    # behavior they were actually created with. New hosts created when the
+    # provider config has `isolate_host_volumes=True` persist True here, and
+    # subsequent start/restart/snapshot-restore replays the same value
+    # regardless of any later config change.
+    is_isolated_host_volume: bool = Field(
+        default=False,
+        description="Whether this host was created with isolated volume-subpath mounting",
+    )
 
 
 class HostRecord(FrozenModel):
@@ -110,7 +120,7 @@ class DockerHostStore(MutableModel):
         try:
             agent_entries = self.volume.listdir(agent_dir)
             for entry in agent_entries:
-                if entry.file_type != VolumeFileType.DIRECTORY:
+                if entry.file_type != FileType.DIRECTORY:
                     self.volume.remove_file(entry.path)
         except (FileNotFoundError, OSError) as e:
             logger.trace("No agent data to clean up for {}: {}", host_id, e)
@@ -135,7 +145,7 @@ class DockerHostStore(MutableModel):
             return []
 
         for entry in entries:
-            if entry.file_type != VolumeFileType.FILE or not entry.path.endswith(".json"):
+            if entry.file_type != FileType.FILE or not entry.path.endswith(".json"):
                 continue
             # Extract host_id from filename
             filename = entry.path.rsplit("/", 1)[-1]
@@ -169,7 +179,7 @@ class DockerHostStore(MutableModel):
 
         agent_records: list[dict[str, Any]] = []
         for entry in entries:
-            if entry.file_type != VolumeFileType.FILE or not entry.path.endswith(".json"):
+            if entry.file_type != FileType.FILE or not entry.path.endswith(".json"):
                 continue
             try:
                 content = self.volume.read_file(entry.path)

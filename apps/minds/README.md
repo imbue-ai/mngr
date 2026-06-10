@@ -50,3 +50,7 @@ minds run
 - [Glossary of key concepts](./docs/workspace/glossary.md)
 - [Desktop app](./docs/desktop-app.md)
 - [Latchkey permissions](./docs/latchkey-permissions.md)
+
+## Testing live deployments
+
+The `apps/minds/deployment_tests/` suite exercises real deployed minds services and the deploy process itself, driven by an operator-invoked orchestrator (`just minds-test-deployment`). See [`apps/minds/deployment_tests/README.md`](./deployment_tests/README.md) for the runbook and [`specs/minds-deployment-tests.md`](../../specs/minds-deployment-tests.md) for the full design.

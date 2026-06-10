@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal]
+mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
 ```
 
 Destroy agent(s) and clean up resources.
@@ -52,6 +52,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | `--gc`, `--no-gc` | boolean | Run garbage collection after destroying agents to clean up orphaned resources (default: enabled) | `True` |
 | `-b`, `--remove-created-branch` | boolean | Delete the git branch that mngr created for the agent's work directory | `False` |
 | `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow GC to remove the git worktree directory (default: enabled) | `True` |
+| `--dry-run` | boolean | Show what would be destroyed without actually destroying anything | `False` |
 
 ## Common
 
@@ -66,7 +67,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -113,6 +114,12 @@ $ mngr destroy --session mngr-my-agent
 
 ```bash
 $ mngr list --ids | mngr destroy - --force
+```
+
+**Preview what would be destroyed**
+
+```bash
+$ mngr list --ids | mngr destroy - --dry-run
 ```
 
 **Custom format template output**

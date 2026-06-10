@@ -10,8 +10,11 @@ from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.polling import poll_until
@@ -22,11 +25,18 @@ from imbue.mngr.utils.polling import poll_until
 SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
+# Set in the environment of a custom connect command so that any nested mngr
+# invocation it makes (e.g. a script that calls `mngr connect` to do the real
+# attach) falls back to the builtin connect instead of re-running the custom
+# command, which would recurse indefinitely.
+CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
 
+
+@pure
 def build_post_attach_resize_script(session_name: str) -> str:
     """Build a shell command that resizes tmux windows and sends SIGWINCH.
 
-    After a tmux client attaches, resize all windows to match the client
+    After a tmux client attaches, resize each window to match the client
     (resize-window -A), then explicitly send SIGWINCH to each pane's child
     processes. The explicit SIGWINCH is needed because resize-window -A can
     be a no-op (and thus not trigger SIGWINCH) when the window already
@@ -36,15 +46,23 @@ def build_post_attach_resize_script(session_name: str) -> str:
     dependency on matching the agent's process name, which is unreliable
     (on macOS, Claude's process title shows as its version number rather
     than "claude").
+
+    The session component is rendered via :class:`TmuxSessionTarget`;
+    ``:$W`` stays as a literal shell-variable suffix so the loop iterates
+    over windows at runtime.
     """
+    session_target = TmuxSessionTarget(session_name=session_name).as_shell_arg()
     return (
-        f"tmux list-windows -t '={session_name}' -F '#I' | "
-        f"xargs -I{{}} tmux resize-window -t '{session_name}':{{}} -A; "
-        f"tmux list-panes -t '{session_name}' -F '#{{pane_pid}}' | "
-        f"xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null"
+        f"tmux list-windows -t {session_target} -F '#I' | "
+        f"while read W; do "
+        f"tmux resize-window -t {session_target}:$W -A; "
+        f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
+        f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
+        f"done"
     )
 
 
+@pure
 def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str:
     """Build a shell script that tracks SSH activity while running tmux.
 
@@ -65,6 +83,16 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
+    # Force a terminal resize after attaching to trigger SIGWINCH delivery, but
+    # skip it when the agent's window is pinned ("manual" window-size) so the
+    # configured dimensions survive an interactive attach. The check runs on the
+    # remote host at attach time (window-size is a window option, read via -wv).
+    agent_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    resize_step = (
+        f"(sleep 3; "
+        f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
+        f"{build_post_attach_resize_script(session_name)}; fi) 2>/dev/null & "
+    )
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -74,10 +102,12 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        # Force a terminal resize after attaching to trigger SIGWINCH delivery.
-        f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
-        # actually attach
-        f"tmux attach -t '={session_name}'; "
+        f"{resize_step}"
+        # actually attach. Route the -t target through TmuxSessionTarget so the
+        # = exact-match prefix and shell-escaping rule are uniform with the rest
+        # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
+        # bug this guards against).
+        f"tmux attach -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}; "
         "kill $MNGR_ACTIVITY_PID 2>/dev/null; "
         # Check for signal files written by tmux key bindings (Ctrl-q writes "destroy", Ctrl-t writes "stop")
         f"SIGNAL_FILE='{signal_file}'; "
@@ -101,7 +131,11 @@ def build_ssh_base_args(
 
     Raises MngrError if no known_hosts file is configured and
     is_unknown_host_allowed is False.
+    Raises BinaryNotInstalledError if the ssh binary is not installed (ssh is an
+    optional dependency, only needed to attach to remote agents).
     """
+    SSH.require()
+
     pyinfra_host = host.connector.host
     ssh_host = pyinfra_host.name
     ssh_user = pyinfra_host.data.get("ssh_user")
@@ -167,7 +201,14 @@ def resolve_connect_command(
     cli_connect_command: str | None,
     mngr_ctx: MngrContext,
 ) -> str | None:
-    """Resolve the connect command from a CLI option or global config."""
+    """Resolve the connect command from a CLI option or global config.
+
+    Returns None (i.e. use the builtin connect) when already running inside a
+    custom connect command, so a connect command that itself invokes mngr does
+    not recurse indefinitely.
+    """
+    if os.environ.get(CONNECT_COMMAND_ACTIVE_ENV_VAR):
+        return None
     if cli_connect_command is not None:
         return cli_connect_command
     return mngr_ctx.config.connect_command
@@ -188,6 +229,8 @@ def run_connect_command(
     env["MNGR_AGENT_NAME"] = agent_name
     env["MNGR_SESSION_NAME"] = session_name
     env["MNGR_HOST_IS_LOCAL"] = "true" if is_local else "false"
+    # Guard against infinite recursion if the connect command invokes mngr again.
+    env[CONNECT_COMMAND_ACTIVE_ENV_VAR] = "1"
     logger.debug("Running custom connect command: {}", connect_command)
     os.execvpe("sh", ["sh", "-c", connect_command], env)
 
@@ -224,6 +267,14 @@ def connect_to_agent(
             # Copy and remove TMUX so tmux allows the nested attachment
             env = dict(os.environ)
             del env["TMUX"]
+        # Pass the raw `=name` form straight to argv. We deliberately do NOT
+        # route this through TmuxSessionTarget.as_shell_arg() (the helper used
+        # everywhere else in the codebase): as_shell_arg() shlex-quotes the
+        # value for safe interpolation into a shell command string, but argv
+        # to os.execvpe is verbatim, so an extra layer of shell-quoting would
+        # wrong-shape the argument whenever session_name contains a
+        # shell-special character. The leading `=` still forces tmux's
+        # exact-session matching (same rule TmuxSessionTarget encodes).
         os.execvpe("tmux", ["tmux", "attach", "-t", f"={session_name}"], env)
     else:
         ssh_args = _build_ssh_args(host, connection_opts)

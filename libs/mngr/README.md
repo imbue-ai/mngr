@@ -201,9 +201,11 @@ mngr schedule --template my-daily-hook "look at any flaky tests over the past da
 
 ```bash
 mngr connect my-agent       # directly connect to remote agents via SSH for debugging
-mngr pull my-agent          # pull changes from an agent to your local machine
-mngr push my-agent          # push your changes to an agent
-mngr pair my-agent          # or sync changes continuously!
+mngr rsync my-agent ./       # rsync changes from an agent to your local machine
+mngr rsync ./ my-agent       # rsync your changes to an agent
+mngr git pull my-agent       # pull git commits from an agent
+mngr git push my-agent       # push git commits to an agent
+mngr pair my-agent           # or sync changes continuously!
 ```
 
 **mngr is easy to learn:**
@@ -230,7 +232,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 ```
 This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies, optional extras, and a default agent type for `mngr create`. You can [review the script](https://github.com/imbue-ai/mngr/blob/main/scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `git`, `tmux`, `jq`; optional: `ssh`, `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 
@@ -245,8 +247,10 @@ uv tool upgrade imbue-mngr
 
 **For development:**
 ```bash
-git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages && uv tool install -e libs/mngr
+git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
+
+A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure that's on your PATH) that always runs the checkout you're working in -- so editing the source, or switching git worktrees, takes effect immediately with no per-worktree setup. (Don't `uv tool install -e libs/mngr` for development: that pins a single global `mngr` to one clone, which silently runs the wrong code when you work in another worktree.)
 
 ## Shell completion
 
@@ -295,12 +299,11 @@ mngr <command> [options]
 
 ### For moving data in and out:
 
-- [`pull`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/pull.md): Pull data from agent
-- [`push`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/push.md): Push data to agent
+- [`rsync`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/rsync.md): Rsync files between local and a remote host or agent
+- [`git`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/git.md): Push or pull git commits between local and a remote host or agent
 - [`pair`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/primary/pair.md): Continually sync data with an agent
 - [`message`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/message.md): Send a message to an agent
 - [`transcript`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/transcript.md): View the message transcript for an agent
-- [`provision`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/provision.md): Re-run provisioning on an agent (useful for syncing config and auth)
 
 ### For maintenance:
 
@@ -388,9 +391,10 @@ As well as the code for some plugins that we maintain, including:
 
 - [libs/mngr_modal/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_modal/README.md)
 - [libs/mngr_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_claude/README.md)
+- [libs/mngr_robinhood/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_robinhood/README.md)
 - [libs/mngr_pair/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_opencode/README.md)
-- [libs/mngr_gemini/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_gemini/README.md)
+- [libs/mngr_antigravity/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_antigravity/README.md)
 
 The repo also contains code for some dependencies and related projects, including:
 

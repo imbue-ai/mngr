@@ -13,14 +13,36 @@ This module owns:
 - the cooperative IAM-tag lock that prevents two concurrent ``mngr create``s
   from clobbering each other on the same candidate
 - un-cancelling the chosen VPS via the ``PUT /serviceInfos`` read-modify-write
-- swapping the ``mngr-host-id`` IAM tag to point at the new host
+- swapping the ``mngr-host-id`` IAM tag to point at the new host and
+  (over)writing the new owner's extra IAM tags (e.g. ``minds_env``) so a
+  cross-env recycle reflects the env that now owns the VPS
 
 The caller (``OvhProvider._provision_vps``) is responsible for the
 shared post-selection steps (rebuild, TOFU pin, container setup).
+
+**Recycle eligibility requires the ``mngr-provider`` IAM tag.** Candidate
+selection runs through :func:`list_vps_resources_for_provider`, which
+filters to VPSes whose ``mngr-provider`` tag matches the running
+provider instance's name. So a VPS that was ordered by mngr but whose
+provisioning aborted *before* the post-delivery tag attach (e.g. an OVH
+order that didn't deliver before ``vps_boot_timeout`` elapsed) is
+**invisible** to the recycle path and would leak indefinitely on its
+own.
+
+The recovery mechanism for that case is the pending-order marker
+pattern in ``pending_orders.py`` + ``OvhProvider._reconcile_pending_orders``:
+``_provision_vps`` writes a marker on
+:class:`OvhOrderDeliveryTimeoutError`, and every subsequent
+``mngr create`` polls each marker's order once before its own
+provisioning. Any newly-delivered VPS gets tagged + cancelled in that
+sweep, becomes a recycle candidate, and is claimed by the very next
+``_maybe_claim_recycled_vps`` call -- or by a later bake's call if
+delivery is still pending now.
 """
 
 import time
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from typing import Final
@@ -35,6 +57,7 @@ from imbue.mngr_ovh.client import RecycleHandle
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
 from imbue.mngr_ovh.iam_tags import attach_tag
+from imbue.mngr_ovh.iam_tags import attach_tags
 from imbue.mngr_ovh.iam_tags import delete_tag
 from imbue.mngr_ovh.iam_tags import get_vps_resource
 from imbue.mngr_ovh.iam_tags import list_vps_resources_for_provider
@@ -62,13 +85,21 @@ def try_recycle_cancelled_vps(
     requested_region: str,
     safety_margin_hours: int,
     max_candidates: int,
+    # Owner/env IAM tags (e.g. ``minds_env=staging``) to (over)write onto the
+    # recycled VPS so it reflects the *current* bake's owner, matching what a
+    # fresh order would attach. Reserved keys are already rejected upstream by
+    # ``parse_extra_tags_env``.
+    extra_tags: Mapping[str, str],
 ) -> RecycleHandle | None:
     """Lock a cancelled VPS and re-tag it for ``new_host_id``. Returns a handle, or None.
 
     Side effects on success:
     1. The chosen VPS gets a transient ``mngr-recycling-by`` IAM lock tag.
     2. Its old ``mngr-host-id`` IAM tag is replaced with ``new_host_id``.
-    3. ``deleteAtExpiration`` is **NOT** flipped here; the caller flips it
+    3. Each ``extra_tags`` pair is attached (overwriting any stale value),
+       so a VPS recycled across envs ends up owned by the new env rather
+       than still advertising the previous owner's ``minds_env`` tag.
+    4. ``deleteAtExpiration`` is **NOT** flipped here; the caller flips it
        via ``finalize_recycle`` once the rebuild + container setup + host
        record write have all succeeded.
 
@@ -79,6 +110,16 @@ def try_recycle_cancelled_vps(
     Returns ``None`` for any of: no candidates, all candidates failed
     safety filters, lock acquisition lost a race, mid-recycle API error.
     In all those cases the caller should fall through to ordering fresh.
+
+    Eligibility filter: candidates are sourced via
+    :func:`list_vps_resources_for_provider`, which only returns VPSes
+    whose ``mngr-provider`` IAM tag matches ``provider_name``. A VPS that
+    mngr ordered but failed to tag (e.g. an order whose delivery timed
+    out before ``_provision_vps``'s tag-immediately-on-first-sight step
+    ran) is invisible here. ``OvhProvider._reconcile_pending_orders``
+    (driven by the pending-order markers in ``pending_orders.py``) is
+    what attaches that tag retroactively so the orphan becomes a
+    recycle candidate.
     """
     if client.is_unconfigured:
         return None
@@ -102,6 +143,7 @@ def try_recycle_cancelled_vps(
             candidate=candidate,
             new_host_id=new_host_id,
             lock_value=lock_value,
+            extra_tags=extra_tags,
         )
         if handle is not None:
             logger.info(
@@ -134,7 +176,7 @@ def finalize_recycle(client: OvhVpsClient, handle: RecycleHandle) -> bool:
     client.discard_recycle_handle(handle.service_name)
     try:
         client.set_renew_at_expiration(handle.service_name, delete_at_expiration=False)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.error(
             "OVH recycle: un-cancel of {} failed at finalize ({}); VPS will auto-decommission at end of month",
             handle.service_name,
@@ -183,7 +225,7 @@ def _select_candidates(
     """
     try:
         all_resources = list_vps_resources_for_provider(client, provider_name=provider_name)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         # Surface as WARNING (not DEBUG): every ``mngr create`` will silently
         # fall back to ordering a fresh VPS if discovery is broken, which is
         # surprising and expensive (OVH bills monthly per VPS). Operators
@@ -283,8 +325,13 @@ def _try_recycle_one(
     candidate: _Candidate,
     new_host_id: HostId,
     lock_value: str,
+    extra_tags: Mapping[str, str],
 ) -> RecycleHandle | None:
     """Lock + re-tag a candidate. Returns a handle on success, ``None`` on failure.
+
+    Re-tags the VPS for the new owner: swaps ``mngr-host-id`` and
+    (over)writes ``extra_tags`` (e.g. ``minds_env``) so a VPS recycled from
+    one env to another no longer advertises the previous owner's tags.
 
     Does **not** un-cancel: that step is deferred to ``finalize_recycle``,
     called by the caller after the host record has been written, so a
@@ -300,7 +347,7 @@ def _try_recycle_one(
     urn = candidate.urn
     try:
         attach_tag(client, urn, MNGR_RECYCLING_LOCK_TAG_KEY, lock_value)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.debug("OVH recycle: failed to acquire lock on {} ({}); skipping", candidate.service_name, e)
         return None
     if not _confirm_lock_held(client, urn, lock_value):
@@ -309,8 +356,14 @@ def _try_recycle_one(
         return None
     try:
         _swap_host_id_tag(client, urn, new_host_id)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.warning("OVH recycle: host-id tag swap failed on {} ({}); aborting", candidate.service_name, e)
+        _release_lock(client, urn, lock_value)
+        return None
+    try:
+        attach_tags(client, urn, extra_tags)
+    except MngrError as e:
+        logger.warning("OVH recycle: extra-tag attach failed on {} ({}); aborting", candidate.service_name, e)
         _release_lock(client, urn, lock_value)
         return None
     return RecycleHandle(urn=urn, service_name=candidate.service_name, lock_value=lock_value)
@@ -369,7 +422,7 @@ def _release_lock(client: OvhVpsClient, urn: str, lock_value: str) -> None:
     """
     try:
         resource = get_vps_resource(client, urn)
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.warning("OVH recycle: failed to re-read lock tag on {} before release: {}", urn, e)
         return
     if resource is None:

@@ -37,6 +37,8 @@ _MNGR_LOG_SOURCE="logs/stream_transcript"
 _MNGR_LOG_FILE="$MNGR_AGENT_STATE_DIR/events/logs/stream_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
+# shellcheck source=mngr_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh"
 
 # -- Per-session state (bash 4+ associative arrays) --
 # Note: explicit =() is required for set -u compatibility (empty associative
@@ -45,8 +47,9 @@ declare -A _FILE_BY_SID=()    # session_id -> resolved file path ("" if not yet 
 declare -A _OFFSET_BY_SID=()  # session_id -> lines already emitted from this session
 _KNOWN_HISTORY_LINES=0        # lines of the history file already processed
 
-# UUID lookup set, built once at startup for offset reconciliation
-declare -A _OUTPUT_UUIDS=()
+# UUID lookup set, populated by mngr_transcript_build_id_set during
+# reconciliation and cleared once reconciliation finishes.
+declare -A _MNGR_TRANSCRIPT_ID_SET=()
 
 # -- Helpers --
 
@@ -93,76 +96,21 @@ _try_resolve_file() {
     return 1
 }
 
-# Extract the uuid field from a single JSONL line (no jq, for speed).
-_extract_uuid() {
-    grep -o '"uuid": *"[^"]*"' <<< "$1" 2>/dev/null | head -1 | cut -d'"' -f4
-}
-
 # -- Reconciliation (restart recovery) --
-
-# Build UUID lookup set from all lines in the output file.
-# Called once at startup and again if a late-appearing file needs reconciliation.
-_build_output_uuid_set() {
-    _OUTPUT_UUIDS=()
-    if [ ! -s "$OUTPUT_FILE" ]; then
-        return
-    fi
-    while IFS= read -r uuid; do
-        [ -n "$uuid" ] && _OUTPUT_UUIDS["$uuid"]=1
-    done < <(grep -o '"uuid": *"[^"]*"' "$OUTPUT_FILE" | cut -d'"' -f4)
-    log_debug "Built UUID set with ${#_OUTPUT_UUIDS[@]} entries"
-}
-
-# Find the true offset for a session file by working backwards from the end
-# to find the last line whose UUID is already in the output file. This
-# handles crash recovery correctly: if we crashed after emitting lines
-# N+1..M but before saving the offset, the backwards scan finds line M
-# (the actual last emitted line) rather than the stale stored offset N.
-_reconcile_offset() {
-    local sid="$1"
-    local session_file="$2"
-
-    local file_lines
-    file_lines=$(_line_count "$session_file")
-
-    # If output is empty, everything needs to be emitted
-    if [ ${#_OUTPUT_UUIDS[@]} -eq 0 ]; then
-        echo 0
-        return
-    fi
-
-    # If session file is empty, nothing to reconcile
-    if [ "$file_lines" -eq 0 ]; then
-        echo 0
-        return
-    fi
-
-    # Work backwards through the file to find the last emitted line
-    log_debug "Reconciling offset for $sid (file_lines=$file_lines)"
-    local reverse_idx=0
-    while IFS= read -r line; do
-        reverse_idx=$((reverse_idx + 1))
-        local uuid
-        uuid=$(_extract_uuid "$line")
-        if [ -n "$uuid" ] && [ "${_OUTPUT_UUIDS[$uuid]+exists}" ]; then
-            local found=$((file_lines - reverse_idx + 1))
-            log_debug "Found last emitted line at $found for $sid"
-            echo "$found"
-            return
-        fi
-    done < <(tac "$session_file")
-
-    echo 0
-}
+#
+# Field extraction, id-set construction, and reverse-scan reconciliation
+# come from mngr_transcript_lib.sh. The shared helpers operate on the
+# global _MNGR_TRANSCRIPT_ID_SET, populated by mngr_transcript_build_id_set.
 
 # -- Session processing --
 
 # Check a session file for new lines and append them to the output.
-# Uses sed with a bounded range to avoid a TOCTOU race: wc -l captures the
-# line count at time T1, and sed reads exactly lines offset+1..file_lines.
-# If Claude appends more lines between T1 and the sed read, those extra lines
-# are NOT emitted (they'll be picked up on the next poll cycle), and the
-# saved offset accurately reflects what was actually emitted.
+# The shared mngr_transcript_emit_lines_range uses sed with a bounded range
+# to avoid a TOCTOU race: wc -l captures the line count at time T1, and
+# sed reads exactly lines offset+1..file_lines. If Claude appends more
+# lines between T1 and the sed read, those extra lines are NOT emitted
+# (they'll be picked up on the next poll cycle), and the saved offset
+# accurately reflects what was actually emitted.
 _emit_new_lines() {
     local sid="$1"
     local session_file="${_FILE_BY_SID[$sid]}"
@@ -176,7 +124,7 @@ _emit_new_lines() {
     fi
 
     local start=$((offset + 1))
-    sed -n "${start},${file_lines}p" "$session_file" >> "$OUTPUT_FILE"
+    mngr_transcript_emit_lines_range "$session_file" "$start" "$file_lines" "$OUTPUT_FILE"
 
     local new_count=$((file_lines - offset))
     _OFFSET_BY_SID[$sid]=$file_lines
@@ -222,14 +170,14 @@ _initialize() {
     log_info "Loaded ${#_FILE_BY_SID[@]} session(s) from history"
 
     # Build UUID set from the output file for reconciliation
-    _build_output_uuid_set
+    mngr_transcript_build_id_set "$OUTPUT_FILE" "uuid"
 
     # Resolve files and reconcile offsets for all known sessions
     for sid in "${!_FILE_BY_SID[@]}"; do
         if _try_resolve_file "$sid"; then
             local stored="${_OFFSET_BY_SID[$sid]}"
             local reconciled
-            reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
+            reconciled=$(mngr_transcript_reconcile_offset "${_FILE_BY_SID[$sid]}" "uuid")
             _OFFSET_BY_SID[$sid]=$reconciled
             if [ "$reconciled" != "$stored" ]; then
                 log_info "Reconciled offset for $sid: $stored -> $reconciled"
@@ -239,7 +187,7 @@ _initialize() {
     done
 
     # Free the UUID set -- not needed until next reconciliation
-    _OUTPUT_UUIDS=()
+    _MNGR_TRANSCRIPT_ID_SET=()
 }
 
 # -- Poll cycle (shared by main loop and single-pass mode) --
@@ -255,15 +203,15 @@ _run_one_cycle() {
             fi
             # File just appeared -- reconcile against the output file to
             # find the true offset (handles both fresh starts and restarts)
-            _build_output_uuid_set
+            mngr_transcript_build_id_set "$OUTPUT_FILE" "uuid"
             stored="${_OFFSET_BY_SID[$sid]}"
-            reconciled=$(_reconcile_offset "$sid" "${_FILE_BY_SID[$sid]}")
+            reconciled=$(mngr_transcript_reconcile_offset "${_FILE_BY_SID[$sid]}" "uuid")
             _OFFSET_BY_SID[$sid]=$reconciled
             if [ "$reconciled" != "$stored" ]; then
                 log_info "Reconciled late-appearing session $sid: $stored -> $reconciled"
                 _save_offset "$sid" "$reconciled"
             fi
-            _OUTPUT_UUIDS=()
+            _MNGR_TRANSCRIPT_ID_SET=()
         fi
 
         _emit_new_lines "$sid"

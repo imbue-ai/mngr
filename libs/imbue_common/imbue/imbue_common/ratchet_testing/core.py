@@ -6,6 +6,7 @@ from datetime import timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import Self
 from typing import TypeVar
 
@@ -17,6 +18,21 @@ from pydantic_core import core_schema
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
+
+# Common binary file extensions that should be excluded from ratchet scans that
+# read file contents as text. .read_text() raises UnicodeDecodeError on these.
+# Used by both the project-local ratchets and the repo-wide test_meta_ratchets.py.
+BINARY_FILE_EXCLUSION: Final[tuple[str, ...]] = (
+    "*.png",
+    "*.ico",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.pdf",
+    "*.zip",
+    "*.gz",
+)
 
 
 class FileExtension(NonEmptyStr):
@@ -113,8 +129,10 @@ def _get_all_files_with_extension(
 
     Uses git ls-files with --cached and --others to include both tracked
     and untracked files while respecting .gitignore rules. Filters the
-    result to only files that actually exist on disk, so deleted files
-    that are still in the git index are excluded.
+    result to regular files on disk (following symlinks), so deleted files
+    that are still in the git index are excluded -- as are symlinks that
+    resolve to a directory (e.g. a tracked symlink into a skills tree),
+    which git lists as a blob but which cannot be read as a file.
     """
     glob_pattern = f"*{extension}" if extension is not None else "*"
     try:
@@ -129,7 +147,7 @@ def _get_all_files_with_extension(
         raise GitCommandError(f"Failed to list files in {folder_path}") from e
 
     file_paths = [folder_path / line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return tuple(f for f in file_paths if f.exists())
+    return tuple(f for f in file_paths if f.is_file())
 
 
 def _get_non_ignored_files_with_extension(

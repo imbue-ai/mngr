@@ -61,18 +61,19 @@ Agent data is persisted alongside host records at `host_state/<host_id>/<agent_i
 
 #### volumes/ (per-host persistent storage)
 
-When `is_host_volume_created` is True (the default), each host gets a dedicated sub-folder at `volumes/<host_id>/` on the state volume. 
-This directory is **bind-mounted into the host container** by mounting the entire Docker named volume into the container and then symlinking the `host_dir` (e.g., `/mngr`) to `<mount_path>/volumes/<host_id>/`.
+When `is_host_volume_created` is True (the default), each host gets a dedicated sub-folder at `volumes/<host_id>/` on the state volume. How that sub-folder is exposed inside the host container depends on the `isolate_host_volumes` provider config field:
 
-The symlink setup is handled by `build_check_and_install_packages_command` (from `ssh_host_setup.py`), the same mechanism used by the Modal provider.
+- **`isolate_host_volumes=True` (isolated mode).** The host container is started with `--mount type=volume,source=<state_volume>,target=<host_dir>,volume-subpath=volumes/<host_id>`, which binds *only* that sub-folder at `host_dir`. Sibling `volumes/vol-*` sub-folders are not visible inside the container. Requires Docker Engine >= 25.0 (the version that introduced `volume-subpath`); creation fails fast if the daemon is older. No symlink is needed -- `host_dir` is the mount.
+- **`isolate_host_volumes=False` or `None` (shared mode -- today's default).** The host container is started with `-v <state_volume>:/mngr-state:rw`, which mounts the full state volume. `build_check_and_install_packages_command` (from `ssh_host_setup.py`) then symlinks `host_dir` (e.g. `/mngr`) to `/mngr-state/volumes/<host_id>/`. The container can see all sibling `vol-*` sub-folders under the same `user_id`.
 
-This gives us:
+The effective mode is stored per-host in `ContainerConfig.is_isolated_host_volume` inside the `HostRecord`. Subsequent start/restart/snapshot-restore replays the stored value, so a host's mount strategy never changes after creation regardless of later config edits. Records written before this field existed default it to `False`, preserving today's behavior for pre-existing hosts.
+
+Either mode gives us:
 - **Persistent host data**: all files written to `host_dir` by agents are stored on the Docker named volume, not in the container's overlay filesystem.
-- **Offline access**: data is readable via the state container (and `get_volume_for_host()`) even when the host container is stopped.
-- **Shared volume**: both the state container and host containers mount the same Docker named volume, so mngr can read host-written data directly.
+- **Offline access**: data is readable via the state container (and `get_volume_for_host()`) even when the host container is stopped -- the state container always mounts the full state volume regardless of which mode the individual hosts use.
 
-When `is_host_volume_created` is False, `host_dir` is a regular directory inside the container (created via `mkdir -p`), and `get_volume_for_host()` returns None. 
-Data is still preserved across stop/start (Docker preserves the container filesystem), but is not accessible while the container is stopped.
+When `is_host_volume_created` is False, `host_dir` is a regular directory inside the container (created via `mkdir -p`), and `get_volume_for_host()` returns None.
+Data is still preserved across stop/start (Docker preserves the container filesystem), but is not accessible while the container is stopped. The combination `is_host_volume_created=False, isolate_host_volumes=True` is rejected at config-load time.
 
 When a host is destroyed via `destroy_host()`, the container is removed but the volume directory and host record are preserved. They are removed later by `delete_host()`.
 
@@ -98,18 +99,24 @@ SSH setup is performed via `docker exec`. The shared helpers in `providers/ssh_h
 ```
 create_host(name, image, ...)
     1. Pull base image (or build from Dockerfile)
-    2. Create host volume directory at volumes/<host_id>/ (if enabled)
-    3. Run container: docker run -d --name <prefix><name> -p :22
-       -v <state_volume>:/mngr-state:rw ...
-    4. Install packages via docker exec; symlink host_dir ->
-       /mngr-state/volumes/<host_id>/ (if volume enabled, else mkdir)
-    5. Configure SSH via docker exec
-    6. Start sshd via docker exec (detached)
-    7. Wait for sshd to accept connections
-    8. Create pyinfra Host object
-    9. Write HostRecord to state volume
-    10. Create shutdown.sh script on the host
-    11. Start activity watcher
+    2. If isolate_host_volumes=True, verify Docker Engine >= 25.0 (fail fast otherwise)
+    3. Create host volume directory at volumes/<host_id>/ (if enabled).
+       Required in both shared and isolated mode -- the latter because
+       `volume-subpath` fails if the path is missing inside the volume.
+    4. Run container: docker run -d --name <prefix><name> -p :22 ...
+       - shared mode:   -v <state_volume>:/mngr-state:rw
+       - isolated mode: --mount type=volume,source=<state_volume>,target=<host_dir>,
+                              volume-subpath=volumes/<host_id>
+    5. Install packages via docker exec.
+       - shared mode:   symlink host_dir -> /mngr-state/volumes/<host_id>/
+       - isolated mode: mkdir -p host_dir (no symlink; the mount IS host_dir)
+    6. Configure SSH via docker exec
+    7. Start sshd via docker exec (detached)
+    8. Wait for sshd to accept connections
+    9. Create pyinfra Host object
+    10. Write HostRecord to state volume (persists is_isolated_host_volume)
+    11. Create shutdown.sh script on the host
+    12. Start activity watcher
 ```
 
 ### Stop

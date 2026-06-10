@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.capture import capture
 from imbue.mngr.cli.create import create
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import tmux_session_cleanup
@@ -68,7 +69,7 @@ def test_capture_outputs_pane_content(
         )
 
         wait_for(
-            lambda: "CAPTURE_TEST_MARKER" in capture_tmux_pane_contents(session_name),
+            lambda: "CAPTURE_TEST_MARKER" in capture_tmux_pane_contents(TmuxWindowTarget(session_name=session_name)),
             timeout=5.0,
             error_message="Echo output did not appear in tmux pane",
         )

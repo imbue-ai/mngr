@@ -1,0 +1,44 @@
+# CI tier deploy config -- read by `minds env deploy` for any ci env.
+#
+# Mirrors the dev tier today: every CI env is dynamic (a per-test
+# ``ci-<timestamp>-<uuid>`` env stood up by the deployment-tests
+# orchestrator) and gets its own Modal environment named after the
+# env. The Vault prefix is its own ``secrets/minds/ci`` namespace --
+# currently mirrored from ``secrets/minds/dev`` so the two tiers
+# share credentials, but kept as a separate namespace so we can
+# diverge later without churning the test scaffolding.
+
+modal_workspace = "minds-dev"
+vault_path_prefix = "secrets/minds/ci"
+cloudflare_domain = "minds-dev.com"
+
+# Vault-backed per-env Modal Secrets. Same shape as dev: each name
+# corresponds to a Vault entry at ``<vault_path_prefix>/<name>``.
+[secrets]
+services = [
+    "cloudflare",
+    "litellm",
+    "neon",
+    "pool-ssh",
+    "supertokens",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    # The rsc app references `ovh-<tier>-<deploy_id>` via Secret.from_name, so
+    # this must be pushed or `modal deploy rsc-<tier>` fails.
+    "ovh",
+]
+
+# Tier-shape flags consumed by `minds env deploy` / `destroy`. Matches
+# the dev tier: every CI env is dynamic, creates its own resources,
+# writes per-env local state, and does not track a per-tier generation
+# id (each env is independent).
+[lifecycle]
+creates_resources = true
+modal_env_strategy = "PER_ENV"
+writes_local_state = true
+tracks_generation = false
+
+# Default paid-access entries seeded (seed-if-absent) into paid_domains after
+# migrations, so CI / deployment-test envs can exercise paid features.
+[paid]
+domains = ["imbue.com"]

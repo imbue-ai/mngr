@@ -52,13 +52,13 @@ mngr help [OPTIONS] [TOPIC]...
 - idle_detection - Idle Detection
 - modal_usage - Using Modal
 - multi_target - Commands that target from multiple hosts/agents
-- permissions - Permissions
 - plugins - Plugins
 - provider_backends - Provider Backends
 - providers - Provider Instances
 - provisioning - Provisioning
 - resource_cleanup - Resource Cleanup
 - snapshot - Snapshots
+- usage_cron_recipes - mngr usage: Cron automation recipes
 
 ## Examples
 

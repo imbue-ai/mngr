@@ -32,6 +32,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
 from imbue.mngr.hosts.host import _is_transient_ssh_error
@@ -42,6 +43,7 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
 from imbue.mngr.interfaces.host import AgentLabelOptions
 from imbue.mngr.interfaces.host import AgentProvisioningOptions
+from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import NamedCommand
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -53,6 +55,9 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import TmuxHeight
+from imbue.mngr.primitives import TmuxWidth
+from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import get_short_random_string
@@ -141,7 +146,6 @@ def test_discover_agents_returns_refs_with_certified_data(
         "id": str(agent_id),
         "name": "test-agent",
         "type": "claude",
-        "permissions": ["read", "write"],
         "work_dir": "/tmp/work",
     }
     (agent_dir / "data.json").write_text(json.dumps(agent_data))
@@ -154,7 +158,6 @@ def test_discover_agents_returns_refs_with_certified_data(
     assert refs[0].host_id == host.id
     assert refs[0].certified_data == agent_data
     assert refs[0].agent_type == "claude"
-    assert refs[0].permissions == ("read", "write")
     assert refs[0].work_dir == Path("/tmp/work")
 
 
@@ -657,6 +660,7 @@ def _build_command_with_defaults(
     additional_commands: list[NamedCommand] | None = None,
     unset_vars: list[str] | None = None,
     onboarding_text: str | None = None,
+    tmux_options: AgentTmuxOptions | None = None,
 ) -> str:
     """Call _build_start_agent_shell_command with standard test defaults."""
     return _build_start_agent_shell_command(
@@ -668,6 +672,7 @@ def _build_command_with_defaults(
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=unset_vars if unset_vars is not None else [],
         host_dir=host_dir,
+        tmux_options=tmux_options if tmux_options is not None else AgentTmuxOptions(),
         onboarding_text=onboarding_text,
     )
 
@@ -697,6 +702,45 @@ def test_build_start_agent_shell_command_produces_single_command(
     # Should contain the process monitor
     assert "nohup" in result
     assert "pane_pid" in result
+
+
+def test_build_start_agent_shell_command_uses_default_dimensions_when_unset(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """With default (all-None) tmux options, the historical 200x50 size is used and no resize policy is set."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=AgentTmuxOptions())
+
+    assert "-x 200 -y 50" in result
+    assert "window-size" not in result
+
+
+def test_build_start_agent_shell_command_uses_custom_dimensions(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """Custom width/height are passed to new-session's -x/-y."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(width=TmuxWidth(2048), height=TmuxHeight(256))
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert "-x 2048 -y 256" in result
+
+
+def test_build_start_agent_shell_command_sets_manual_window_size_on_agent_window(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """A manual window-size emits a set-option targeting the agent window (:0)."""
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    options = AgentTmuxOptions(window_size=TmuxWindowSize.MANUAL)
+    result = _build_command_with_defaults(agent, temp_host_dir, tmux_options=options)
+
+    assert f"set-option -t =mngr-{agent.name}:0 window-size manual" in result
 
 
 def test_build_start_agent_shell_command_includes_unset_vars(
@@ -767,6 +811,7 @@ def test_build_start_agent_shell_command_send_keys_uses_end_of_options_separator
         tmux_config_path=Path("/tmp/tmux.conf"),
         unset_vars=[],
         host_dir=temp_host_dir,
+        tmux_options=AgentTmuxOptions(),
     )
 
     send_keys_l_lines = [line for line in result.split(" && ") if "send-keys" in line and " -l " in line]
@@ -2632,6 +2677,25 @@ def test_host_create_host_tmux_config_creates_file(
     assert "C-t" in content
 
 
+def test_host_create_host_tmux_config_widens_status_left_before_user_config(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The config must set status-left-length before sourcing the user's config.
+
+    Ordering is what makes the widening overridable: a status-left-length set in
+    the user's ~/.tmux.conf is sourced afterwards and therefore wins.
+    """
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
+
+    widen_line = f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}"
+    assert widen_line in content
+    assert content.index(widen_line) < content.index("source-file"), (
+        "status-left-length must be set before the user config is sourced so the user can override it"
+    )
+
+
 # =========================================================================
 # Tests for Host._build_env_shell_command
 # =========================================================================
@@ -2990,7 +3054,7 @@ def test_remove_tags_syncs_to_certified_data(
 def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:
     """_merge_agent_type_provisioning should return the original options when agent config has no provisioning."""
     agent_config = AgentTypeConfig()
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result is options
 
@@ -2999,6 +3063,7 @@ def test_merge_agent_type_provisioning_prepends_extra_provision_commands() -> No
     """Agent type extra_provision_command should be prepended before CLI commands."""
     agent_config = AgentTypeConfig(extra_provision_command=("echo agent_type",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(extra_provision_commands=("echo cli",)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3009,6 +3074,7 @@ def test_merge_agent_type_provisioning_prepends_upload_files() -> None:
     """Agent type upload_file specs should be parsed and prepended."""
     agent_config = AgentTypeConfig(upload_file=("local.txt:/remote.txt",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(
             upload_files=(UploadFileSpec(local_path=Path("cli.txt"), remote_path=Path("/cli.txt")),),
         ),
@@ -3024,6 +3090,7 @@ def test_merge_agent_type_provisioning_prepends_env_vars() -> None:
     """Agent type env should be parsed and prepended to environment.env_vars."""
     agent_config = AgentTypeConfig(env=("AGENT_TYPE_VAR=1",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_vars=(EnvVar(key="CLI_VAR", value="2"),),
         ),
@@ -3039,6 +3106,7 @@ def test_merge_agent_type_provisioning_prepends_env_files() -> None:
     """Agent type env_file should be parsed and prepended to environment.env_files."""
     agent_config = AgentTypeConfig(env_file=("/etc/agent.env",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         environment=AgentEnvironmentOptions(
             env_files=(Path("/etc/cli.env"),),
         ),
@@ -3051,6 +3119,7 @@ def test_merge_agent_type_provisioning_prepends_create_directories() -> None:
     """Agent type create_directory should be parsed and prepended."""
     agent_config = AgentTypeConfig(create_directory=("/tmp/mydir",))
     options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
         provisioning=AgentProvisioningOptions(create_directories=(Path("/tmp/existing"),)),
     )
     result = _merge_agent_type_provisioning(agent_config, options)
@@ -3063,7 +3132,7 @@ def test_merge_agent_type_provisioning_combines_provisioning_and_env() -> None:
         extra_provision_command=("echo setup",),
         env=("KEY=val",),
     )
-    options = CreateAgentOptions()
+    options = CreateAgentOptions(agent_type=AgentTypeName("generic"))
     result = _merge_agent_type_provisioning(agent_config, options)
     assert result.provisioning.extra_provision_commands == ("echo setup",)
     assert result.environment.env_vars == (EnvVar(key="KEY", value="val"),)

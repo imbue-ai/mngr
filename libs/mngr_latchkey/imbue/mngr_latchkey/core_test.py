@@ -9,9 +9,15 @@ from uuid import uuid4
 import psutil
 import pytest
 from pydantic import PrivateAttr
+from watchdog.events import FileModifiedEvent
+from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
@@ -23,11 +29,14 @@ from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
-from imbue.mngr_latchkey.ssh_tunnel import RemoteSSHInfo
-from imbue.mngr_latchkey.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
+from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -111,8 +120,8 @@ def test_initialize_accepts_newer_version(tmp_path: Path) -> None:
 
 
 def test_initialize_tolerates_leading_v_prefix(tmp_path: Path) -> None:
-    """Some CLIs print ``v2.9.0`` rather than the bare semver string."""
-    binary = _make_version_binary(tmp_path, version_output="v2.9.0")
+    """Some CLIs print ``v<version>`` rather than the bare semver string."""
+    binary = _make_version_binary(tmp_path, version_output=f"v{LATCHKEY_MIN_VERSION}")
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     manager.initialize()
 
@@ -187,7 +196,7 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -290,7 +299,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
-        assert mjs_files == ["permission_requests.mjs", "permissions.mjs"]
+        assert mjs_files == ["minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
         # The destination files must be non-empty -- ``importlib.resources``
         # silently produces empty reads if the wheel does not actually
         # ship the .mjs payloads.
@@ -303,12 +312,26 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         assert services_json_path.is_file()
         services_catalog = json.loads(services_json_path.read_text())
         assert isinstance(services_catalog, dict) and len(services_catalog) > 0
-        for service_name, entry in services_catalog.items():
+        for service_name, entries in services_catalog.items():
             assert isinstance(service_name, str) and len(service_name) > 0
-            assert set(entry.keys()) == {"scope", "display_name", "permissions"}
-            assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
-            assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
-            assert isinstance(entry["permissions"], list)
+            # Each service maps to a list of scope entries (a service may
+            # expose more than one detent scope).
+            assert isinstance(entries, list) and len(entries) > 0
+            for entry in entries:
+                assert {"scope", "display_name", "permissions"} <= set(entry.keys())
+                assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
+                assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+                # The scope-level ``description`` carries detent's ``$comment``
+                # summary. It is optional -- consumers must not depend on it --
+                # so only assert its type when present.
+                assert isinstance(entry.get("description", ""), str)
+                # Each permission is an object whose ``name`` is required; the
+                # ``description`` (detent's ``$comment``) is colocated with it
+                # but optional.
+                assert isinstance(entry["permissions"], list)
+                for permission in entry["permissions"]:
+                    assert isinstance(permission["name"], str) and len(permission["name"]) > 0
+                    assert isinstance(permission.get("description", ""), str)
         manager.stop_gateway()
 
 
@@ -375,7 +398,7 @@ def test_start_gateway_sets_extension_permissions_root_env_var(tmp_path: Path) -
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -446,7 +469,7 @@ def test_concurrent_start_gateway_spawns_at_most_one_subprocess(tmp_path: Path) 
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys, time\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -554,7 +577,7 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.stderr.write('No encryption key available.\\n')\n"
         "sys.exit(1)\n"
@@ -582,7 +605,7 @@ def test_create_permissions_override_jwt_propagates_failure(tmp_path: Path) -> N
         "#!/usr/bin/env python3\n"
         "import sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         "sys.exit(2)\n"
     )
@@ -609,7 +632,7 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
         "#!/usr/bin/env python3\n"
         "import os, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         f"open({str(report_path)!r}, 'w').write(os.environ.get('LATCHKEY_GATEWAY', '<unset>'))\n"
         "print('jwt')\n"
@@ -629,7 +652,7 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    sys.exit(0)\n"
@@ -668,7 +691,9 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
 # -- Discovery handler --
 
 
-def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Path) -> None:
+def test_discovery_handler_spawns_shared_gateway_for_every_provider(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Every provider triggers the shared gateway to start; a second call is a no-op."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -685,10 +710,11 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
                 latchkey=manager,
                 tunnel_manager=tunnel_manager,
                 concurrency_group=cg,
+                mngr_ctx=temp_mngr_ctx,
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
-                handler(AgentId(), None, provider_name)
+                handler(AgentId(), HostId(), None, provider_name)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
             # ``start_gateway`` is idempotent and returns the bound port even
@@ -721,12 +747,16 @@ class _RecordingTunnelManager(SSHTunnelManager):
         return 0
 
 
-def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
+def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
+    # The ``local`` provider has no outer host, so the handler falls back to the
+    # desktop-side reverse tunnel (rather than the VPS-resident gateway path).
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
     # The handler dispatches tunnel setup onto a CG worker thread, so
     # exit the CG (joining its threads) before asserting on the
@@ -738,14 +768,23 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, ssh_info, "docker")
+        handler(agent_id, HostId(), ssh_info, "local")
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
         # when the gateway is already running, so the test can use it as
         # the supported way to read the live port.
         host_side_port = manager.start_gateway(cg)
+
+        # Tunnel setup runs on a CG worker thread (now behind a provider-lookup
+        # that resolves the local provider has no outer host), so poll until it
+        # records before asserting rather than racing the worker.
+        _poll_event = threading.Event()
+        _deadline = time.monotonic() + 5.0
+        while time.monotonic() < _deadline and not tunnel_manager._calls:
+            _poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
@@ -757,7 +796,9 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         manager.stop_gateway()
 
 
-def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: Path) -> None:
+def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Agents discovered without SSH info skip reverse-tunnel setup.
 
     Without an SSH route the handler cannot forward the host-side gateway
@@ -772,15 +813,16 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
         manager.stop_gateway()
 
 
-def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
+def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -795,10 +837,174 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
     assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
+
+
+class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
+    """Handler stub that forces the VPS branch and records provisioning instead of running it."""
+
+    _provisioned: list[tuple[AgentId, HostId]] = PrivateAttr(default_factory=list)
+
+    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
+        return True
+
+    def _run_remote_gateway_provisioning(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> None:
+        try:
+            self._provisioned.append((agent_id, host_id))
+        finally:
+            with self._pending_lock:
+                self._pending_remote_agents.discard(str(agent_id))
+
+
+def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tunnel(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A VPS agent gets BOTH the desktop reverse tunnel and the VPS-resident gateway provisioning."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        host_side_port = manager.start_gateway(cg)
+
+        # Provisioning runs on its own fire-and-forget CG thread; poll for it.
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        # Both paths ran: the desktop gateway is reverse-tunneled onto the
+        # agent-side port AND the VPS-resident gateway provisioning was dispatched.
+        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+        assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+class _SyncRecordingHandler(LatchkeyDiscoveryHandler):
+    """Handler stub that records ``_sync_state_to_host`` calls instead of opening VPS connections."""
+
+    _synced: list[tuple[str, bool, bool]] = PrivateAttr(default_factory=list)
+
+    def _sync_state_to_host(
+        self,
+        host_id_str: str,
+        provider_name: str,
+        *,
+        do_permissions: bool,
+        do_credentials: bool,
+    ) -> None:
+        self._synced.append((host_id_str, do_permissions, do_credentials))
+
+
+def _make_sync_recording_handler(
+    tmp_path: Path, temp_mngr_ctx: MngrContext, cg: ConcurrencyGroup
+) -> _SyncRecordingHandler:
+    return _SyncRecordingHandler(
+        latchkey=FakeLatchkey(latchkey_directory=tmp_path),
+        tunnel_manager=SSHTunnelManager(),
+        concurrency_group=cg,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def test_remote_state_sync_initial_pass_does_permissions_then_credentials_for_known_hosts(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host_id_str = str(HostId())
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        with handler._remote_hosts_lock:
+            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
+        handler._sync_all_known_hosts()
+        # Full initial sync requests both permissions and credentials for the host.
+        assert handler._synced == [(host_id_str, True, True)]
+
+
+def test_remote_state_watch_handler_routes_credential_and_permission_changes(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host_id = HostId()
+    host_id_str = str(host_id)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        with handler._remote_hosts_lock:
+            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
+
+        credentials_path = local_credentials_path(tmp_path)
+        permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
+        event_handler = _LatchkeyStateChangeHandler(
+            credentials_path=credentials_path,
+            plugin_data_dir=handler.latchkey.plugin_data_dir,
+            known_remote_host_ids=handler._known_remote_host_ids,
+            on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
+            on_host_permissions_changed=handler._sync_permissions_to_host,
+        )
+
+        # A change to the credentials file pushes credentials (only) to all hosts.
+        event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
+        assert handler._synced == [(host_id_str, False, True)]
+
+        # A change to a host's permissions file pushes permissions (only) to that host.
+        handler._synced.clear()
+        event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
+        assert handler._synced == [(host_id_str, True, False)]
+
+        # An unrelated path (e.g. the gateway log) is ignored.
+        handler._synced.clear()
+        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_gateway.log")))
+        assert handler._synced == []
+
+        # A permissions file for an unknown host is ignored.
+        handler._synced.clear()
+        unknown_permissions = permissions_path_for_host(handler.latchkey.plugin_data_dir, HostId())
+        event_handler.dispatch(FileModifiedEvent(str(unknown_permissions)))
+        assert handler._synced == []
+
+        # Regression: the watchdog observer stores handlers in a set, so the
+        # handler must be hashable and schedulable (a MutableModel would raise
+        # ``TypeError: unhashable type`` here).
+        assert hash(event_handler) is not None
+        Observer().schedule(event_handler, str(tmp_path), recursive=False)
+
+
+def test_remote_state_watch_sentinel_fails_loudly_when_observer_dies(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        # A stopped observer that did NOT stop because of shutdown is a watcher
+        # failure -- the sentinel must raise loudly.
+        observer = Observer()
+        observer.start()
+        observer.stop()
+        observer.join()
+        shutdown_event = threading.Event()
+        with pytest.raises(RemoteGatewayError, match="stopped unexpectedly"):
+            handler._fail_loudly_if_observer_dies(observer, shutdown_event)
+
+        # When the observer stops *because* of shutdown, that is expected -- no raise.
+        shutdown_event.set()
+        handler._fail_loudly_if_observer_dies(observer, shutdown_event)
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
@@ -814,7 +1020,7 @@ def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, count
         "#!/usr/bin/env python3\n"
         "import os, socket, signal, sys\n"
         'if sys.argv[1] == "--version":\n'
-        "    print('2.9.0')\n"
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
         "    sys.exit(0)\n"
         'if sys.argv[1] == "ensure-browser":\n'
         "    counter_path = os.environ['FAKE_LATCHKEY_COUNTER']\n"
@@ -1101,159 +1307,102 @@ def test_auth_browser_uses_auth_browser_subcommand(tmp_path: Path) -> None:
     assert record == {"argv": ["auth", "browser", "slack"], "env_LATCHKEY_DIRECTORY": str(tmp_path)}
 
 
-# -- register_service / auth_set_header --
-
-
-def _make_registry_binary(
+def _make_prepare_required_binary(
     tmp_path: Path,
     *,
-    existing_base_api_url: str | None = None,
-    register_exit_code: int = 0,
-    register_stderr: str = "",
-    deregister_exit_code: int = 0,
-    deregister_stderr: str = "",
+    prepare_exit_code: int = 0,
+    prepare_stderr: str = "",
 ) -> Path:
-    """Stub ``latchkey`` that emulates ``services info`` / ``services register`` / ``auth set`` / ``auth clear`` / ``services deregister``.
+    """Build a fake latchkey CLI that mimics the 'requires preparation first' workflow.
 
-    Records the argv of every invocation to ``latchkey_report.jsonl``.
-    The reported ``services info`` payload is driven by
-    ``existing_base_api_url`` (None => return a missing-service error, mimicking
-    latchkey when the service is not registered).
+    ``auth browser <service>`` exits 1 with latchkey's actual error
+    message until ``auth browser-prepare <service>`` has been run; the
+    prepare step writes a sentinel file that subsequent ``auth browser``
+    calls look for. ``prepare_exit_code`` / ``prepare_stderr`` let tests
+    force the prepare step itself to fail.
     """
     script = tmp_path / "latchkey"
     report_path = tmp_path / "latchkey_report.jsonl"
-    existing_payload_literal = (
-        "None"
-        if existing_base_api_url is None
-        else repr({"baseApiUrls": [existing_base_api_url], "credentialStatus": "valid"})
-    )
+    prepared_marker = tmp_path / "prepared_marker"
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
+        "argv = sys.argv[1:]\n"
         f"with open({str(report_path)!r}, 'a') as f:\n"
-        "    f.write(json.dumps({'argv': sys.argv[1:]}) + '\\n')\n"
-        "if sys.argv[1:3] == ['services', 'info']:\n"
-        f"    payload = {existing_payload_literal}\n"
-        "    if payload is None:\n"
-        "        sys.stderr.write('Unknown service.\\n')\n"
+        "    f.write(json.dumps({'argv': argv, 'env_LATCHKEY_DIRECTORY': os.environ.get('LATCHKEY_DIRECTORY', '')}) + '\\n')\n"
+        f"prepared_marker = {str(prepared_marker)!r}\n"
+        "if argv[:2] == ['auth', 'browser-prepare']:\n"
+        f"    if {prepare_exit_code} == 0:\n"
+        "        open(prepared_marker, 'w').close()\n"
+        f"    if {prepare_stderr!r}:\n"
+        f"        sys.stderr.write({prepare_stderr!r})\n"
+        f"    sys.exit({prepare_exit_code})\n"
+        "if argv[:2] == ['auth', 'browser']:\n"
+        "    if not os.path.exists(prepared_marker):\n"
+        "        service = argv[2] if len(argv) > 2 else '<svc>'\n"
+        "        sys.stderr.write(\n"
+        "            'Error: Service ' + service + ' requires preparation first. '\n"
+        '            "Run \'latchkey auth browser-prepare " + service + "\' before logging in.\\n"\n'
+        "        )\n"
         "        sys.exit(1)\n"
-        "    print(json.dumps(payload))\n"
         "    sys.exit(0)\n"
-        "if sys.argv[1:3] == ['services', 'register']:\n"
-        f"    if {register_stderr!r}:\n"
-        f"        sys.stderr.write({register_stderr!r})\n"
-        f"    sys.exit({register_exit_code})\n"
-        "if sys.argv[1:3] == ['services', 'deregister']:\n"
-        f"    if {deregister_stderr!r}:\n"
-        f"        sys.stderr.write({deregister_stderr!r})\n"
-        f"    sys.exit({deregister_exit_code})\n"
-        "if sys.argv[1:3] == ['auth', 'set']:\n"
-        "    sys.exit(0)\n"
-        "if sys.argv[1:3] == ['auth', 'clear']:\n"
-        "    sys.exit(0)\n"
-        "sys.stderr.write(f'unexpected argv: {sys.argv!r}')\n"
-        "sys.exit(99)\n"
+        "sys.exit(2)\n"
     )
     script.chmod(0o755)
     return script
 
 
-def _read_recorded_argv(tmp_path: Path) -> list[list[str]]:
+def _read_recording_report(tmp_path: Path) -> list[dict[str, object]]:
     report_path = tmp_path / "latchkey_report.jsonl"
-    if not report_path.exists():
-        return []
-    return [json.loads(line)["argv"] for line in report_path.read_text().splitlines() if line.strip()]
+    return [json.loads(line) for line in report_path.read_text().splitlines() if line.strip()]
 
 
-def test_register_service_registers_new_service(tmp_path: Path) -> None:
-    binary = _make_registry_binary(tmp_path, existing_base_api_url=None)
+def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required(tmp_path: Path) -> None:
+    """Auto-recovery path: latchkey signals preparation-required, we prepare and retry."""
+    binary = _make_prepare_required_binary(tmp_path)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    latchkey.register_service("minds", "http://127.0.0.1:9100")
+    is_success, detail = latchkey.auth_browser("slack")
 
-    argvs = _read_recorded_argv(tmp_path)
-    assert ["services", "register", "minds", "--base-api-url", "http://127.0.0.1:9100"] in argvs
-
-
-def test_register_service_is_noop_when_already_registered_at_same_url(tmp_path: Path) -> None:
-    binary = _make_registry_binary(tmp_path, existing_base_api_url="http://127.0.0.1:9100")
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    latchkey.register_service("minds", "http://127.0.0.1:9100")
-
-    argvs = _read_recorded_argv(tmp_path)
-    assert all(argv[:2] != ["services", "register"] for argv in argvs)
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    argv_calls = [record["argv"] for record in records]
+    assert argv_calls == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+        ["auth", "browser", "slack"],
+    ]
 
 
-def test_register_service_re_registers_when_url_changed(tmp_path: Path) -> None:
-    binary = _make_registry_binary(tmp_path, existing_base_api_url="http://127.0.0.1:8000")
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-
-    latchkey.register_service("minds", "http://127.0.0.1:9100")
-
-    argvs = _read_recorded_argv(tmp_path)
-    register_calls = [argv for argv in argvs if argv[:2] == ["services", "register"]]
-    deregister_calls = [argv for argv in argvs if argv[:2] == ["services", "deregister"]]
-    assert deregister_calls, f"expected deregister, got {argvs}"
-    assert register_calls and register_calls[-1][4] == "http://127.0.0.1:9100"
-
-
-def test_register_service_tolerates_already_registered_race(tmp_path: Path) -> None:
-    binary = _make_registry_binary(
+def test_auth_browser_reports_failure_when_browser_prepare_fails(tmp_path: Path) -> None:
+    """If the prepare step itself fails, surface that failure and do not retry the browser flow."""
+    binary = _make_prepare_required_binary(
         tmp_path,
-        existing_base_api_url=None,
-        register_exit_code=1,
-        register_stderr="Error: A service named 'minds' is already registered.\n",
+        prepare_exit_code=1,
+        prepare_stderr="prepare blew up",
     )
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    latchkey.register_service("minds", "http://127.0.0.1:9100")
+
+    is_success, detail = latchkey.auth_browser("slack")
+
+    assert is_success is False
+    assert detail == "prepare blew up"
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [
+        ["auth", "browser", "slack"],
+        ["auth", "browser-prepare", "slack"],
+    ]
 
 
-def test_register_service_raises_on_unknown_error(tmp_path: Path) -> None:
-    binary = _make_registry_binary(
-        tmp_path,
-        existing_base_api_url=None,
-        register_exit_code=1,
-        register_stderr="Error: backend on fire.\n",
-    )
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    with pytest.raises(LatchkeyError):
-        latchkey.register_service("minds", "http://127.0.0.1:9100")
-
-
-def test_register_service_raises_when_deregister_fails_during_rebind(tmp_path: Path) -> None:
-    """A failing ``services deregister`` must surface as ``LatchkeyError``.
-
-    Otherwise the following ``services register`` would error with
-    ``already registered`` and be swallowed by the race-condition
-    fallback, leaving the service bound to the old URL while the call
-    site logs a successful rebind.
-    """
-    binary = _make_registry_binary(
-        tmp_path,
-        existing_base_api_url="http://127.0.0.1:8000",
-        deregister_exit_code=1,
-        deregister_stderr="Error: deregister failed.\n",
-    )
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    with pytest.raises(LatchkeyError):
-        latchkey.register_service("minds", "http://127.0.0.1:9100")
-
-
-def test_auth_set_header_passes_header_through(tmp_path: Path) -> None:
-    binary = _make_registry_binary(tmp_path)
+def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> None:
+    """A failure without the preparation-required marker is returned as-is, with no extra calls."""
+    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="user cancelled")
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
 
-    latchkey.auth_set_header("minds", "Authorization: Bearer abc.def")
+    is_success, detail = latchkey.auth_browser("slack")
 
-    argvs = _read_recorded_argv(tmp_path)
-    assert ["auth", "set", "minds", "-H", "Authorization: Bearer abc.def"] in argvs
-
-
-def test_auth_set_header_raises_on_non_zero_exit(tmp_path: Path) -> None:
-    binary = tmp_path / "latchkey"
-    binary.write_text("#!/usr/bin/env python3\nimport sys\nsys.stderr.write('nope')\nsys.exit(2)\n")
-    binary.chmod(0o755)
-    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
-    with pytest.raises(LatchkeyError):
-        latchkey.auth_set_header("minds", "Authorization: Bearer abc.def")
+    assert is_success is False
+    assert detail == "user cancelled"
+    argv_calls = [record["argv"] for record in _read_recording_report(tmp_path)]
+    assert argv_calls == [["auth", "browser", "slack"]]

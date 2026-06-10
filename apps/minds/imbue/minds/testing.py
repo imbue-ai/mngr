@@ -3,9 +3,11 @@ import subprocess
 from pathlib import Path
 from typing import Final
 
+import pytest
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 
@@ -161,6 +163,26 @@ def find_agent(agent_name: str) -> dict[str, object] | None:
     if agents:
         return agents[0]
     return None
+
+
+def stub_mngr_host_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_name: str) -> Path:
+    """Redirect ``Path.home()`` to ``tmp_path`` and seed a minimal mngr profile.
+
+    Returns the active ``settings.toml`` path (the file itself may not exist
+    on return -- callers populate it as needed). The bootstrap helpers refuse
+    to write anything until ``config.toml`` and the matching profile dir
+    exist, so we materialize them up front. ``Path.home()`` consults ``$HOME``
+    on Linux/macOS, so swapping that in via ``monkeypatch.setenv`` is enough
+    to redirect the helpers without touching ``Path`` itself.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    mngr_host_dir = mngr_host_dir_for(root_name)
+    mngr_host_dir.mkdir(parents=True, exist_ok=True)
+    profile_id = "testprofile"
+    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
+    settings_dir = mngr_host_dir / "profiles" / profile_id
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    return settings_dir / "settings.toml"
 
 
 def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:

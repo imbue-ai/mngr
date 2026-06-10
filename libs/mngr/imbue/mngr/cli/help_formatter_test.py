@@ -19,6 +19,7 @@ from imbue.mngr.cli.help_formatter import get_help_metadata
 from imbue.mngr.cli.help_formatter import get_pager_command
 from imbue.mngr.cli.help_formatter import help_option_callback
 from imbue.mngr.cli.help_formatter import is_interactive_terminal
+from imbue.mngr.cli.help_formatter import render_markdown
 from imbue.mngr.cli.help_formatter import run_pager
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.config.data_types import MngrConfig
@@ -582,6 +583,9 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--reconnect",
             "--session-command",
             "--connect-command",
+            "--tmux-width",
+            "--tmux-height",
+            "--tmux-window-size",
         }
     ),
     "start": frozenset({"--connect-command"}),
@@ -589,7 +593,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "destroy": frozenset(),
     "message": frozenset({"--provider"}),
     "exec": frozenset(),
-    "provision": frozenset({"--bootstrap", "--destroy-on-fail", "--host", "--pass-env"}),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
         {
@@ -601,45 +604,13 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--remove-ssh-key",
         }
     ),
-    "pull": frozenset(
+    "rsync": frozenset(
         {
-            "--all-branches",
-            "--branch",
-            "--delete",
-            "--destination",
-            "--exclude",
-            "--exclude-file",
-            "--force-git",
-            "--include-file",
             "--include-gitignored",
-            "--merge",
-            "--rebase",
-            "--rsync-arg",
-            "--rsync-args",
-            "--source-host",
-            "--source-path",
-            "--stdin",
-            "--tags",
-            "--target",
-            "--target-agent",
-            "--target-branch",
-            "--target-host",
-            "--target-path",
-            "--uncommitted-changes",
-            "--uncommitted-source",
         }
     ),
-    "push": frozenset(
-        {
-            "--delete",
-            "--exclude",
-            "--rsync-only",
-            "--source-branch",
-            "--target-host",
-            "--target-path",
-            "--uncommitted-changes",
-        }
-    ),
+    "git.push": frozenset(),
+    "git.pull": frozenset(),
     "pair": frozenset(
         {
             "--require-git",
@@ -918,6 +889,27 @@ def test_wrap_text_wraps_long_lines() -> None:
     assert len(lines) > 1
     assert lines[0].startswith("  ")
     assert lines[1].startswith("    ")
+
+
+# =============================================================================
+# render_markdown link rewriting
+# =============================================================================
+
+# Link-target resolution is unit-tested in markdown_render_test.py; these cover
+# that render_markdown threads link_base through to the rich renderer.
+_DOC_URL = "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/docs/cron_recipes.md"
+
+
+def test_render_markdown_passthrough_when_not_ansi() -> None:
+    """Without ANSI, markdown (and its relative links) is returned unchanged."""
+    md = "See [x](../y.md)."
+    assert render_markdown(md, use_ansi=False, width=80, link_base=_DOC_URL) == md
+
+
+def test_render_markdown_rewrites_links_when_ansi() -> None:
+    """With ANSI and a link_base, relative links are rewritten to absolute URLs."""
+    output = render_markdown("[x](../README.md#y)", use_ansi=True, width=80, link_base=_DOC_URL)
+    assert "https://github.com/imbue-ai/mngr/blob/v1.2.3/libs/mngr_usage/README.md#y" in output
 
 
 # =============================================================================

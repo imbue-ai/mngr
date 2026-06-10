@@ -38,6 +38,7 @@ with ``--force``, Modal deploys overwrite), so they don't need rollback
 -- the operator can just re-run ``minds env deploy``.
 """
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
@@ -65,7 +66,7 @@ from imbue.minds.envs.local_store import env_root_exists
 from imbue.minds.envs.local_store import read_client_config_file
 from imbue.minds.envs.local_store import write_client_config
 from imbue.minds.envs.local_store import write_secrets_file
-from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentFn
+from imbue.minds.envs.mngr_agent_cleanup import DestroyMngrAgentsFn
 from imbue.minds.envs.mngr_agent_cleanup import destroy_all_mngr_agents_in_env
 from imbue.minds.envs.paths import client_config_file
 from imbue.minds.envs.paths import env_root_dir
@@ -82,6 +83,7 @@ from imbue.minds.envs.per_env_deploy import push_per_env_modal_secret
 from imbue.minds.envs.per_env_deploy import stop_modal_app
 from imbue.minds.envs.per_env_deploy import tier_connector_url
 from imbue.minds.envs.per_env_deploy import tier_litellm_proxy_url
+from imbue.minds.envs.primitives import DeployStrategy
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.envs.providers.neon_db import NeonProjectRecord
 from imbue.minds.envs.providers.ovh_tags import OvhCredentials
@@ -111,6 +113,14 @@ from imbue.mngr_ovh.iam_tags import IamResource
 # enumerate + delete only that env's tunnels (vs walking every tunnel
 # on the shared dev-tier CF account).
 MINDS_ENV_NAME_KEY: Final[str] = "MINDS_ENV_NAME"
+
+# Env-var name the deployed connector reads at request time to drive
+# its broken-healthcheck injection (see app.py::get_health_liveness).
+# When set in the operator's environment at `minds env deploy` time,
+# we propagate it into the per-deploy litellm-connector Modal Secret
+# so the deployed container sees it. This is the injection point
+# `test_deploy_rollback` uses to drive the auto-rollback path.
+INJECT_BROKEN_HEALTHCHECK_ENV_VAR: Final[str] = "MINDS_INJECT_BROKEN_HEALTHCHECK"
 
 
 class ProviderCredentials(FrozenModel):
@@ -152,6 +162,55 @@ class ProviderCredentials(FrozenModel):
     ovh_credentials: OvhCredentials = Field(description="Dev-tier OVH AK/AS/CK credentials (shared across dev envs).")
 
 
+# Tiers whose default deploy strategy is RECREATE: dev (every personal
+# dev env) and ci (every CI ephemeral env stood up by the deployment-
+# tests orchestrator). Operator deploys against these almost always
+# follow a "deploy then immediately observe" pattern where a stale warm
+# container that keeps serving the prior version's behavior is the
+# opposite of what the operator wants. Shared tiers (staging,
+# production) fall through to ROLLOVER for zero-downtime.
+_DEFAULT_RECREATE_TIERS: Final[frozenset[str]] = frozenset({"dev", "ci"})
+
+
+def resolve_deploy_strategy(
+    *,
+    explicit: DeployStrategy | None,
+    tier: str,
+    had_migrations: bool,
+) -> DeployStrategy:
+    """Pick the Modal deploy strategy from operator override + deploy context.
+
+    Policy (operator-documented):
+
+    1. ``explicit`` wins. ``--hard`` / ``--soft`` on the CLI resolve to
+       :attr:`DeployStrategy.RECREATE` / :attr:`DeployStrategy.ROLLOVER`
+       respectively and we always honour them. Pass ``None`` to defer
+       to the default policy.
+    2. If a migration was applied this deploy, use ``RECREATE``. Old
+       code against a freshly-migrated DB schema is a combination the
+       deployed binary has not been tested against; cycling all
+       containers immediately is the safe choice even for a
+       "backwards-compatible" migration.
+    3. Otherwise, ``RECREATE`` for the per-env tiers (``dev`` for
+       personal dev envs and ``ci`` for CI ephemeral envs stood up by
+       the deployment-tests orchestrator). The operator's flow on
+       these tiers is "deploy and immediately observe", and the
+       stale-warm-container window (several minutes for Modal's
+       default rollover) silently masks new code's behavior.
+    4. Otherwise (staging / production with no migration applied),
+       ``ROLLOVER``. Shared tiers prioritize zero-downtime; the
+       operator can opt in to ``RECREATE`` with ``--hard`` when they
+       need it.
+    """
+    if explicit is not None:
+        return explicit
+    if had_migrations:
+        return DeployStrategy.RECREATE
+    if tier in _DEFAULT_RECREATE_TIERS:
+        return DeployStrategy.RECREATE
+    return DeployStrategy.ROLLOVER
+
+
 # Type aliases for the injectable provider callables. Tests substitute
 # fakes here; the CLI wires the real provider modules at runtime.
 # ``CreateNeonProjectFn`` provisions a per-dev-env Neon project (named
@@ -166,7 +225,7 @@ ListOvhInstancesFn = Callable[[DevEnvName, OvhCredentials], tuple[IamResource, .
 DeleteOvhInstancesFn = Callable[[tuple[IamResource, ...], OvhCredentials], None]
 ModalEnvOpFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None]
-# (modal_env, tier, min_containers, deploy_id, cg) -> deployed URL.
+# (modal_env, tier, min_containers, deploy_id, strategy, cg) -> deployed URL.
 # ``modal_env`` is the dev env name for dev-tier deploys or the tier's
 # stable Modal env (``main`` by convention) for shared-tier deploys.
 # ``min_containers`` is the per-app warm-pool size from the tier's
@@ -174,8 +233,11 @@ PushPerEnvSecretFn = Callable[[str, dict[str, str], str, ConcurrencyGroup], None
 # UTC-timestamp deploy id minted at the start of this deploy run;
 # the implementation threads it into the modal subprocess env as
 # ``MINDS_DEPLOY_ID`` so the deployed app pins to the matching
-# ``<svc>-<tier>-<id>`` Modal Secrets.
-DeployModalAppFn = Callable[[str, str, int, str, ConcurrencyGroup], AnyUrl]
+# ``<svc>-<tier>-<id>`` Modal Secrets. ``strategy`` is forwarded to
+# ``modal deploy --strategy`` so a single deploy can cycle both apps
+# the same way (see :class:`DeployStrategy`).
+# (modal_env, tier, min_containers, scaledown_window, deploy_id, strategy, cg) -> deployed URL.
+DeployModalAppFn = Callable[[str, str, int, int, str, DeployStrategy, ConcurrencyGroup], AnyUrl]
 # (app_name, modal_env, cg) -> None. Used by tier destroys to ``modal
 # app stop`` each deployed app. Idempotent in the underlying call.
 StopModalAppFn = Callable[[str, str, ConcurrencyGroup], None]
@@ -190,6 +252,9 @@ ListModalSecretsFn = Callable[[str, ConcurrencyGroup], tuple[str, ...]]
 # schema_migrations runner against the per-env host_pool DB. Tests
 # pass a no-op fake; the real implementation shells out to psql.
 ApplyPoolHostsMigrationsFn = Callable[[SecretStr, ConcurrencyGroup], tuple[Path, ...]]
+# (host_pool_dsn, domains, emails, cg) -> None. Seed-if-absent default paid
+# domains/emails into the host_pool DB after migrations. Tests pass a no-op fake.
+SeedPaidListDefaultsFn = Callable[[SecretStr, tuple[str, ...], tuple[str, ...], ConcurrencyGroup], None]
 # (app_name, modal_env, cg) -> latest deployed version id, or None for
 # never-deployed. Used at deploy start to capture pre-deploy state so
 # ``minds env recover`` can `modal app rollback` to it on failure.
@@ -233,6 +298,10 @@ ListCloudflareTunnelsFn = Callable[[DevEnvName, str, SecretStr], tuple[str, ...]
 # (tunnel_ids, account_id, api_token) -> None. Deletes the listed tunnels.
 DeleteCloudflareTunnelsFn = Callable[[tuple[str, ...], str, SecretStr], None]
 ReadPerEnvSecretValuesFn = Callable[[str, str, dict[str, str], ConcurrencyGroup], dict[str, str]]
+# (name, cg) -> None. Removes the env's mngr Docker state container +
+# backing volume, targeting the one exact container by name. No-op when
+# there is no Docker daemon. Real impl lives in ``envs.docker_cleanup``.
+CleanupStateContainerFn = Callable[[DevEnvName, ConcurrencyGroup], None]
 
 
 class Providers(FrozenModel):
@@ -287,6 +356,12 @@ class Providers(FrozenModel):
             "Runs the schema_migrations runner against the per-env host_pool DB."
         ),
     )
+    seed_paid_list_defaults: SeedPaidListDefaultsFn = Field(
+        description=(
+            "(host_pool_dsn, domains, emails, cg) -> seed-if-absent the tier's default "
+            "paid domains/emails into the host_pool DB after migrations."
+        ),
+    )
     get_modal_app_latest_version: GetModalAppLatestVersionFn = Field(
         description="(app_name, modal_env, cg) -> latest deployed version id, or None for never-deployed.",
     )
@@ -315,11 +390,19 @@ class Providers(FrozenModel):
             "definitive failure or timeout."
         ),
     )
-    destroy_mngr_agent: DestroyMngrAgentFn = Field(
+    destroy_mngr_agents: DestroyMngrAgentsFn = Field(
         description=(
-            "(agent_id, mngr_host_dir, mngr_prefix, cg) -> `mngr destroy <agent_id>` "
+            "(agent_ids, mngr_host_dir, mngr_prefix, cg) -> single `mngr destroy -f <ids...>` "
             "with the env's MNGR_* vars exported. Used before cloud teardown so the env's "
             "agents stop cleanly before their resources go away."
+        ),
+    )
+    cleanup_state_container: CleanupStateContainerFn = Field(
+        description=(
+            "(name, cg) -> remove the env's mngr Docker state container + backing volume. "
+            "Targets the one exact container by name; no-op when there is no Docker daemon. "
+            "Run right after the mngr-agent teardown so the singleton state container "
+            "(which `mngr destroy` does not touch) doesn't outlive the env."
         ),
     )
     wipe_supertokens_app_data: WipeSuperTokensAppFn = Field(
@@ -432,6 +515,7 @@ def deploy_env(
     credentials: ProviderCredentials,
     providers: Providers,
     parent_concurrency_group: ConcurrencyGroup,
+    explicit_strategy: DeployStrategy | None = None,
 ) -> DeployedEnv:
     """Provision (or upgrade) the activated env -- unified path for every tier.
 
@@ -504,6 +588,7 @@ def deploy_env(
             modal_workspace=modal_workspace,
             tier_vault_prefix=tier_vault_prefix,
             modal_env=modal_env,
+            explicit_strategy=explicit_strategy,
         )
 
 
@@ -520,6 +605,7 @@ def _deploy_env_locked(
     modal_workspace: str,
     tier_vault_prefix: str,
     modal_env: str,
+    explicit_strategy: DeployStrategy | None,
 ) -> DeployedEnv:
     """The body of :func:`deploy_env`, run inside the per-env flock."""
     # Refuse-on-stale-recover-target check now happens INSIDE the lock
@@ -696,6 +782,34 @@ def _deploy_env_locked(
         if applied:
             logger.info("Applied {} pool-hosts migration(s): {}", len(applied), [m.name for m in applied])
 
+    # Seed the tier's default paid domains/emails (seed-if-absent) now that the
+    # paid_domains / paid_emails tables exist. Runs every deploy for every tier;
+    # idempotent and a no-op when the tier configures no defaults.
+    paid_domains = tuple(str(d) for d in deploy_config.paid.domains)
+    paid_emails = tuple(str(e) for e in deploy_config.paid.emails)
+    if paid_domains or paid_emails:
+        with info_span(
+            "Seeding default paid-list entries (domains={}, emails={})", list(paid_domains), list(paid_emails)
+        ):
+            providers.seed_paid_list_defaults(host_pool_dsn, paid_domains, paid_emails, parent_concurrency_group)
+
+    # Resolve the Modal deploy strategy now that we know whether a
+    # migration ran. Done here (rather than at the CLI boundary) so the
+    # decision sees the full deploy context the policy depends on; the
+    # CLI only knows about ``--hard`` / ``--soft``.
+    deploy_strategy = resolve_deploy_strategy(
+        explicit=explicit_strategy,
+        tier=tier,
+        had_migrations=bool(applied),
+    )
+    logger.info(
+        "Modal deploy strategy for env {!r} (tier {!r}, had_migrations={}): {}",
+        str(name),
+        tier,
+        bool(applied),
+        deploy_strategy.value,
+    )
+
     # Step 2: tier generation id -- only when this tier exposes one.
     generation_id: str | None = None
     if lifecycle.tracks_generation:
@@ -759,6 +873,14 @@ def _deploy_env_locked(
         if generation_id is not None:
             connector_secret_overrides.setdefault(GENERATION_ID_KEY, generation_id)
         connector_secret_overrides.setdefault(MINDS_ENV_NAME_KEY, str(name))
+        # When the operator sets MINDS_INJECT_BROKEN_HEALTHCHECK at deploy time,
+        # propagate it into the deployed connector's Modal Secret so the
+        # in-container healthcheck returns 500 and the auto-rollback path
+        # fires. Used by `test_deploy_rollback` to drive that flow; unset
+        # in every real deploy.
+        broken_healthcheck = os.environ.get(INJECT_BROKEN_HEALTHCHECK_ENV_VAR)
+        if broken_healthcheck:
+            connector_secret_overrides.setdefault(INJECT_BROKEN_HEALTHCHECK_ENV_VAR, broken_healthcheck)
         connector_secret_name = timestamped_secret_name("litellm-connector", tier, deploy_id)
         with info_span("Pushing derived Modal Secret {!r}", connector_secret_name):
             providers.push_per_env_modal_secret(
@@ -773,26 +895,44 @@ def _deploy_env_locked(
     # Step 5: modal deploys.
     litellm_proxy_min_containers = int(deploy_config.min_containers.litellm_proxy)
     connector_min_containers = int(deploy_config.min_containers.connector)
+    litellm_proxy_scaledown_window = int(deploy_config.scaledown_window.litellm_proxy)
+    connector_scaledown_window = int(deploy_config.scaledown_window.connector)
 
     with info_span(
-        "Deploying llm-{} into env {!r} (min_containers={})",
+        "Deploying llm-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         litellm_proxy_min_containers,
+        litellm_proxy_scaledown_window,
+        deploy_strategy.value,
     ):
         litellm_proxy_url = providers.deploy_litellm_proxy(
-            modal_env, tier, litellm_proxy_min_containers, deploy_id, parent_concurrency_group
+            modal_env,
+            tier,
+            litellm_proxy_min_containers,
+            litellm_proxy_scaledown_window,
+            deploy_id,
+            deploy_strategy,
+            parent_concurrency_group,
         )
     _assert_deploy_url_matches(actual=litellm_proxy_url, expected=expected_litellm_proxy_url, app=f"llm-{tier}")
 
     with info_span(
-        "Deploying rsc-{} into env {!r} (min_containers={})",
+        "Deploying rsc-{} into env {!r} (min_containers={}, scaledown_window={}, strategy={})",
         tier,
         modal_env,
         connector_min_containers,
+        connector_scaledown_window,
+        deploy_strategy.value,
     ):
         connector_url = providers.deploy_remote_service_connector(
-            modal_env, tier, connector_min_containers, deploy_id, parent_concurrency_group
+            modal_env,
+            tier,
+            connector_min_containers,
+            connector_scaledown_window,
+            deploy_id,
+            deploy_strategy,
+            parent_concurrency_group,
         )
     _assert_deploy_url_matches(actual=connector_url, expected=expected_connector_url, app=f"rsc-{tier}")
 
@@ -907,11 +1047,12 @@ def _resolve_host_pool_dsn_for_migrations(
 ) -> SecretStr:
     """Return the DSN ``apply_pool_hosts_migrations`` should target for this tier.
 
-    Dev tier (``creates_resources=true``): use the per-env host_pool DSN
-    from the freshly-created or adopted Neon project record. Shared
-    tier (``creates_resources=false``): read ``DATABASE_URL`` from the
-    operator-managed ``secrets/minds/<tier>/neon`` Vault entry (single
-    shared DB where pool_hosts + litellm tables co-exist).
+    Per-env tiers (dev / ci, ``creates_resources=true``): use the per-env
+    host_pool DSN from the freshly-created or adopted Neon project
+    record. Shared tier (``creates_resources=false``): read
+    ``DATABASE_URL`` from the operator-managed
+    ``secrets/minds/<tier>/neon`` Vault entry (single shared DB where
+    pool_hosts + litellm tables co-exist).
 
     Raises :class:`MindError` if the shared-tier Vault entry is missing
     or lacks ``DATABASE_URL`` -- we'd otherwise silently skip migrations
@@ -1078,7 +1219,8 @@ def destroy_env(
     # resources they reference.
     if keep_agents:
         logger.warning(
-            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown. "
+            "minds env destroy {!r}: --keep-agents passed; skipping mngr-agent teardown "
+            "(and the Docker state-container cleanup, since kept agents still rely on it). "
             "Run `mngr destroy <agent>` manually for any agents bound to this env.",
             str(name),
         )
@@ -1086,11 +1228,19 @@ def destroy_env(
         with info_span("Destroying mngr agents under env {!r}", str(name)):
             destroyed_count = destroy_all_mngr_agents_in_env(
                 name,
-                destroy_agent=providers.destroy_mngr_agent,
+                destroy_agents=providers.destroy_mngr_agents,
                 parent_concurrency_group=parent_concurrency_group,
             )
             if destroyed_count:
                 logger.info("Destroyed {} mngr agent(s) under env {!r}", destroyed_count, str(name))
+
+        # Step 1b: remove the env's mngr Docker state container + backing
+        # volume. The singleton state container is independent of individual
+        # agents (it is not torn down by `mngr destroy`), so it must be removed
+        # explicitly -- before the env root, and the profile it derives user_id
+        # from, are gone. Skipped under keep_agents since kept agents need it.
+        with info_span("Cleaning up Docker state container for env {!r}", str(name)):
+            providers.cleanup_state_container(name, parent_concurrency_group)
 
     # Step 2: OVH VPSes tagged with this env.
     with info_span("Cleaning up OVH VPSes tagged for env {!r}", str(name)):

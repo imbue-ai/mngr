@@ -1,4 +1,7 @@
 import json
+from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,14 +12,23 @@ from click.testing import CliRunner
 from imbue.mngr.cli.create import create
 from imbue.mngr.cli.rename import rename
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
@@ -280,3 +292,124 @@ def test_rename_json_output(
     assert output["old_name"] == agent_name
     assert output["new_name"] == new_name
     assert "agent_id" in output
+
+
+# =============================================================================
+# Offline path tests (OfflineHost.rename_agent)
+# =============================================================================
+
+
+class _RecordingMockProvider(MockProviderInstance):
+    """MockProviderInstance whose persist_agent_data actually updates ``mock_agent_data``.
+
+    The base mock leaves ``persist_agent_data`` as the no-op default, which
+    would lose the rename. This override mirrors what a real provider does:
+    upsert the record keyed by ``id``.
+    """
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        new_record = dict(agent_data)
+        target_id = new_record.get("id")
+        for i, record in enumerate(self.mock_agent_data):
+            if record.get("id") == target_id:
+                self.mock_agent_data[i] = new_record
+                return
+        self.mock_agent_data.append(new_record)
+
+
+def _make_offline_host_with_agent(
+    temp_mngr_ctx: MngrContext,
+    agent_record: dict[str, object],
+) -> OfflineHost:
+    """Construct an OfflineHost backed by a recording mock provider."""
+    host_id = HostId.generate()
+    provider = _RecordingMockProvider(
+        name=ProviderInstanceName("mock"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_agent_data=[agent_record],
+    )
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="offline-host",
+        stop_reason=HostState.STOPPED.value,
+        created_at=now,
+        updated_at=now,
+    )
+    return OfflineHost(
+        id=host_id,
+        certified_host_data=certified_data,
+        provider_instance=provider,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def _make_offline_agent_ref(host: OfflineHost, agent_id: AgentId, agent_name: str) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=host.id,
+        agent_id=agent_id,
+        agent_name=AgentName(agent_name),
+        provider_name=host.provider_instance.name,
+        certified_data={"id": str(agent_id), "name": agent_name},
+    )
+
+
+def test_offline_host_rename_agent_updates_persisted_data(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """OfflineHost.rename_agent should rewrite name (and optionally labels) in persisted data."""
+    agent_id = AgentId.generate()
+    host = _make_offline_host_with_agent(
+        temp_mngr_ctx,
+        {"id": str(agent_id), "name": "offline-agent", "labels": {"existing": "old"}},
+    )
+    agent_ref = _make_offline_agent_ref(host, agent_id, "offline-agent")
+
+    updated_ref = host.rename_agent(
+        agent_ref,
+        AgentName("renamed-offline"),
+        labels_to_merge={"new_key": "new_val", "existing": "updated"},
+    )
+
+    assert str(updated_ref.agent_name) == "renamed-offline"
+    assert updated_ref.agent_id == agent_id
+
+    records = host.provider_instance.list_persisted_agent_data_for_host(host.id)
+    assert len(records) == 1
+    assert records[0]["name"] == "renamed-offline"
+    assert records[0]["labels"] == {"existing": "updated", "new_key": "new_val"}
+
+
+def test_offline_host_rename_agent_no_labels_preserves_existing(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """rename_agent with no labels_to_merge should leave existing labels intact."""
+    agent_id = AgentId.generate()
+    host = _make_offline_host_with_agent(
+        temp_mngr_ctx,
+        {"id": str(agent_id), "name": "before", "labels": {"keep": "me"}},
+    )
+    agent_ref = _make_offline_agent_ref(host, agent_id, "before")
+
+    host.rename_agent(agent_ref, AgentName("after"), labels_to_merge=None)
+
+    records = host.provider_instance.list_persisted_agent_data_for_host(host.id)
+    assert records[0]["name"] == "after"
+    assert records[0]["labels"] == {"keep": "me"}
+
+
+def test_offline_host_rename_agent_raises_when_agent_not_found(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """rename_agent should raise when the agent is missing from persisted data."""
+    agent_id = AgentId.generate()
+    other_id = AgentId.generate()
+    host = _make_offline_host_with_agent(
+        temp_mngr_ctx,
+        {"id": str(other_id), "name": "someone-else"},
+    )
+    agent_ref = _make_offline_agent_ref(host, agent_id, "missing")
+
+    with pytest.raises(AgentNotFoundOnHostError):
+        host.rename_agent(agent_ref, AgentName("whatever"), labels_to_merge=None)

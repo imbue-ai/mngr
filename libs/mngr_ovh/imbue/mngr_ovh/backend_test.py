@@ -105,3 +105,67 @@ def test_f1_extra_tags_parsed_before_recycle_or_order() -> None:
 def test_f1_provision_vps_imports_parse_extra_tags_env() -> None:
     """Sanity: the backend module imports ``parse_extra_tags_env`` so the F1 fix works at all."""
     assert hasattr(backend_module, "parse_extra_tags_env")
+
+
+# -- Pending-order reconciliation invariants ----------------------------------
+#
+# ``_reconcile_pending_orders`` MUST run at the top of ``_provision_vps``,
+# specifically BEFORE ``_maybe_claim_recycled_vps``, so any orphan that
+# was delivered between bakes is tagged + cancelled in time for the
+# recycle path to claim it as a candidate for the CURRENT bake. If
+# reconcile ran AFTER recycle, an orphan adopted this bake would only
+# be eligible on the NEXT bake -- the immediate recovery the design
+# promises wouldn't happen. Same source-text pinning style as F1.
+
+
+def test_reconcile_pending_orders_runs_before_recycle_check() -> None:
+    """Source-position invariant: ``_reconcile_pending_orders`` precedes ``_maybe_claim_recycled_vps``.
+
+    Catches a future refactor that accidentally moves the reconcile
+    sweep after the recycle check (which would defer orphan recovery
+    by one full bake cycle).
+    """
+    source = Path(inspect.getsourcefile(OvhProvider) or "").read_text()
+    provision_match = re.search(r"def _provision_vps\(.*?(?=\n    def |\n\nclass |\Z)", source, re.DOTALL)
+    assert provision_match is not None, "could not locate _provision_vps in backend.py source"
+    body = provision_match.group(0)
+
+    reconcile_pos = body.find("_reconcile_pending_orders(")
+    recycle_pos = body.find("_maybe_claim_recycled_vps(")
+    order_pos = body.find("order_and_wait_for_vps(")
+
+    assert reconcile_pos != -1, "OvhProvider._provision_vps must call _reconcile_pending_orders() at startup"
+    assert recycle_pos != -1, "OvhProvider._provision_vps must call _maybe_claim_recycled_vps(...)"
+    assert order_pos != -1, "OvhProvider._provision_vps must call order_and_wait_for_vps(...)"
+
+    assert reconcile_pos < recycle_pos, (
+        f"Invariant violation: _reconcile_pending_orders (pos {reconcile_pos}) must run BEFORE "
+        f"_maybe_claim_recycled_vps (pos {recycle_pos}) in _provision_vps. If reconcile runs "
+        "after recycle, any orphan adopted this bake won't be eligible until the NEXT bake -- "
+        "the immediate same-bake recovery the design promises wouldn't happen."
+    )
+    assert reconcile_pos < order_pos, (
+        f"Invariant violation: _reconcile_pending_orders (pos {reconcile_pos}) must run BEFORE "
+        f"order_and_wait_for_vps (pos {order_pos}) in _provision_vps. Otherwise the bake places "
+        "a fresh order even when an adoptable orphan is available."
+    )
+
+
+def test_provision_vps_writes_marker_on_delivery_timeout() -> None:
+    """Source-position invariant: the ``OvhOrderDeliveryTimeoutError`` except block calls ``write_pending_order_marker``.
+
+    The reconcile sweep is useless if the failure path doesn't deposit
+    a marker for it to find. Pin that call here so a refactor can't
+    silently drop the marker write.
+    """
+    source = Path(inspect.getsourcefile(OvhProvider) or "").read_text()
+    provision_match = re.search(r"def _provision_vps\(.*?(?=\n    def |\n\nclass |\Z)", source, re.DOTALL)
+    assert provision_match is not None
+    body = provision_match.group(0)
+    timeout_except_pos = body.find("except OvhOrderDeliveryTimeoutError")
+    marker_write_pos = body.find("write_pending_order_marker(")
+    assert timeout_except_pos != -1, "_provision_vps must catch OvhOrderDeliveryTimeoutError"
+    assert marker_write_pos != -1, "_provision_vps must write a pending-order marker on timeout"
+    assert timeout_except_pos < marker_write_pos < len(body), (
+        "write_pending_order_marker must appear inside the OvhOrderDeliveryTimeoutError except block"
+    )

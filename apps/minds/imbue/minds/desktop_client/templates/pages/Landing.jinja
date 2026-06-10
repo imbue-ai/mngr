@@ -1,0 +1,477 @@
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id #}
+{#
+  Landing page: list of accessible workspaces with per-row health, backup,
+  and telegram status. Subscribes to the chrome SSE so the page reloads
+  when a destroy completes (or any other workspace-list change lands).
+#}
+{% set _scripts %}
+<script>
+  (function () {
+    var rendered = (document.querySelector('[data-landing-agent-ids]') || {}).dataset || {};
+    var renderedIds = (rendered.landingAgentIds || '').split(',').filter(function (s) { return s.length > 0; });
+    var renderedSet = new Set(renderedIds);
+
+    var healthStatusByAgent = {};
+
+    function getRow(agentId) {
+      return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
+    }
+
+    function applyRowHealth(agentId, status) {
+      var row = getRow(agentId);
+      if (!row) return;
+      var badge = row.querySelector('.landing-health-badge');
+      if (!badge) return;
+      if (status === 'stuck') {
+        badge.textContent = 'Server not responding';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+      } else if (status === 'restarting') {
+        badge.textContent = 'Restarting...';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+      } else if (status === 'restart_failed') {
+        badge.textContent = 'Restart failed';
+        badge.className = 'landing-health-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium bg-amber-100 text-amber-800';
+      } else {
+        badge.textContent = '';
+        badge.className = 'landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium';
+      }
+    }
+
+    window.landingRowClick = function (event, row) {
+      var agentId = row.dataset.agentId;
+      var status = healthStatusByAgent[agentId];
+      if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
+        var ret = row.dataset.defaultHref || '';
+        window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+      } else {
+        window.location = row.dataset.defaultHref;
+      }
+    };
+
+    window.landingRestartClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      var ret = row.dataset.defaultHref || '';
+      window.location = '/agents/' + encodeURIComponent(agentId)
+        + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+    };
+
+    var pendingToggleClickedAtByProvider = {};
+    var lastEventAt = null;
+    var lastFullSnapshotAt = null;
+    var renderedProviders = null;
+
+    function relativeAgo(iso) {
+      if (!iso) return '—';
+      var t = Date.parse(iso);
+      if (isNaN(t)) return '—';
+      var secs = Math.max(0, Math.round((Date.now() - t) / 1000));
+      if (secs < 60) return secs + 's ago';
+      if (secs < 3600) return Math.round(secs / 60) + 'm ago';
+      if (secs < 86400) return Math.round(secs / 3600) + 'h ago';
+      return Math.round(secs / 86400) + 'd ago';
+    }
+
+    function tickFreshness() {
+      var el = document.querySelector('[data-providers-last-event]');
+      if (el) el.textContent = relativeAgo(lastEventAt);
+      var el2 = document.querySelector('[data-providers-last-snapshot]');
+      if (el2) el2.textContent = relativeAgo(lastFullSnapshotAt);
+    }
+    setInterval(tickFreshness, 1000);
+
+    function badgeClassForStatus(status) {
+      if (status === 'ok') return 'bg-emerald-100 text-emerald-800';
+      if (status === 'error') return 'bg-red-100 text-red-800';
+      if (status === 'disabled') return 'bg-zinc-100 text-zinc-700';
+      return 'bg-zinc-100 text-zinc-700';
+    }
+
+    function badgeLabelForStatus(status) {
+      if (status === 'ok') return 'OK';
+      if (status === 'error') return 'Error';
+      if (status === 'disabled') return 'Disabled';
+      return status;
+    }
+
+    function renderProvidersSummary(entries) {
+      var summary = document.querySelector('[data-providers-summary]');
+      if (!summary) return;
+      var enabledCount = 0;
+      var errorCount = 0;
+      entries.forEach(function (entry) {
+        if (entry.status !== 'disabled') enabledCount += 1;
+        if (entry.status === 'error') errorCount += 1;
+      });
+      var providerWord = enabledCount === 1 ? 'provider' : 'providers';
+      var text = enabledCount + ' ' + providerWord + ' enabled';
+      if (errorCount > 0) {
+        var errorWord = errorCount === 1 ? 'error' : 'errors';
+        text += ' (' + errorCount + ' ' + errorWord + ')';
+      }
+      summary.textContent = text;
+    }
+
+    function renderProviders(payload) {
+      var panel = document.querySelector('[data-providers-panel]');
+      var list = document.querySelector('[data-providers-list]');
+      if (!panel || !list) return;
+      var entries = (payload && payload.providers) || [];
+      if (entries.length === 0) {
+        panel.hidden = true;
+        list.innerHTML = '';
+        return;
+      }
+      panel.hidden = false;
+      renderProvidersSummary(entries);
+      list.innerHTML = '';
+      entries.forEach(function (entry) {
+        var row = document.createElement('div');
+        // Same surface as Card.jinja: ``.minds-card`` carries the
+        // bg/border/rounded (no baseline shadow); the Tailwind utilities
+        // handle the tight padding + flex layout. Keep this string in
+        // sync with Card.jinja's class output when extending the
+        // primitive.
+        row.className = 'minds-card flex items-center gap-3 px-4 py-2.5';
+        row.dataset.providerName = entry.name;
+
+        var nameEl = document.createElement('span');
+        nameEl.className = 'font-medium text-zinc-900';
+        nameEl.textContent = entry.name;
+        row.appendChild(nameEl);
+
+        if (entry.backend) {
+          var backendEl = document.createElement('span');
+          backendEl.className = 'text-xs text-zinc-500';
+          backendEl.textContent = entry.backend;
+          row.appendChild(backendEl);
+        }
+
+        var badge = document.createElement('span');
+        badge.className = 'inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ' + badgeClassForStatus(entry.status);
+        badge.textContent = badgeLabelForStatus(entry.status);
+        row.appendChild(badge);
+
+        if (entry.status === 'error' && entry.error_message) {
+          var err = document.createElement('span');
+          err.className = 'flex-1 text-xs text-zinc-700 truncate';
+          err.title = (entry.error_type || '') + ': ' + entry.error_message;
+          err.textContent = (entry.error_type || '') + ': ' + entry.error_message;
+          row.appendChild(err);
+        } else {
+          var spacer = document.createElement('span');
+          spacer.className = 'flex-1';
+          row.appendChild(spacer);
+        }
+
+        var pendingClickedAt = pendingToggleClickedAtByProvider[entry.name];
+        var snapshotAt = lastFullSnapshotAt ? Date.parse(lastFullSnapshotAt) : 0;
+        var isPending = pendingClickedAt && (!lastFullSnapshotAt || pendingClickedAt > snapshotAt);
+
+        var btn = document.createElement('button');
+        btn.className = 'px-2 py-1 text-xs rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700';
+        if (isPending) {
+          btn.disabled = true;
+          btn.textContent = 'Waiting…';
+        } else if (entry.status === 'disabled') {
+          btn.textContent = 'Enable';
+          btn.onclick = function () { toggleProvider(entry.name, true); };
+        } else {
+          btn.textContent = 'Disable';
+          btn.onclick = function () { toggleProvider(entry.name, false); };
+        }
+        row.appendChild(btn);
+
+        list.appendChild(row);
+      });
+      renderedProviders = entries;
+    }
+
+    function toggleProvider(name, isEnabled) {
+      pendingToggleClickedAtByProvider[name] = Date.now();
+      renderProviders({ providers: renderedProviders || [] });
+      fetch('/api/providers/' + encodeURIComponent(name) + '/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_enabled: isEnabled }),
+      }).then(function (response) {
+        if (!response.ok) {
+          console.error('Provider toggle for', name, 'returned HTTP', response.status);
+          delete pendingToggleClickedAtByProvider[name];
+          renderProviders({ providers: renderedProviders || [] });
+        }
+      }).catch(function (err) {
+        console.error('Provider toggle for', name, 'failed:', err);
+        delete pendingToggleClickedAtByProvider[name];
+        renderProviders({ providers: renderedProviders || [] });
+      });
+    }
+
+    (function wireProvidersToggle() {
+      var btn = document.querySelector('[data-providers-toggle]');
+      var details = document.querySelector('[data-providers-details]');
+      var chevron = document.querySelector('[data-providers-chevron]');
+      if (!btn || !details || !chevron) return;
+      btn.addEventListener('click', function () {
+        var willShow = details.hidden;
+        details.hidden = !willShow;
+        chevron.textContent = willShow ? '▾' : '▸';
+      });
+    })();
+
+    var BACKUP_BADGE_BASE = 'landing-backup-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ';
+    var BACKUP_RECENT_CREATE_MS = 75 * 60 * 1000;
+    var BACKUP_CHECKING_TEXT = 'Checking backups…';
+
+    function applyBackupBadge(agentId, status) {
+      var row = getRow(agentId);
+      if (!row) return;
+      var badge = row.querySelector('.landing-backup-badge');
+      if (!badge) return;
+      var state = status && status.state;
+      var text = '';
+      var tone = 'bg-zinc-100 text-zinc-500';
+      if (state === 'BACKING_UP') {
+        text = 'Backing up…'; tone = 'bg-blue-100 text-blue-800';
+      } else if (state === 'BACKED_UP') {
+        text = 'Backed up ' + relativeAgo(status.last_success_at); tone = 'bg-emerald-100 text-emerald-800';
+      } else if (state === 'NEVER') {
+        text = 'Backup pending'; tone = 'bg-amber-100 text-amber-800';
+      } else if (state === 'UNKNOWN') {
+        text = 'Backup status unknown'; tone = 'bg-zinc-100 text-zinc-500';
+      } else {
+        var createdMs = status && status.created_at ? Date.parse(status.created_at) : NaN;
+        if (!isNaN(createdMs) && (Date.now() - createdMs) < BACKUP_RECENT_CREATE_MS) {
+          text = 'Created ' + relativeAgo(status.created_at); tone = 'bg-zinc-100 text-zinc-500';
+        } else {
+          text = 'No backups'; tone = 'bg-zinc-100 text-zinc-500';
+        }
+      }
+      badge.textContent = text;
+      badge.className = BACKUP_BADGE_BASE + tone;
+      var download = row.querySelector('.landing-backup-download');
+      if (download) {
+        if (state === 'BACKED_UP') {
+          download.textContent = 'download';
+          download.classList.remove('hidden');
+          download.onclick = function (ev) { return window.backupExport(ev, agentId); };
+        } else {
+          download.classList.add('hidden');
+          download.onclick = null;
+        }
+      }
+    }
+
+    window.backupExport = function (ev, agentId) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      var link = ev.currentTarget;
+      if (link.getAttribute('data-exporting') === '1') return false;
+      link.setAttribute('data-exporting', '1');
+      link.style.pointerEvents = 'none';
+      var original = link.textContent;
+      link.innerHTML = '<span class="spinner spinner-accent inline-block w-3 h-3 align-middle"></span> exporting…';
+      function restore(text) {
+        link.textContent = text;
+        link.style.pointerEvents = '';
+        link.removeAttribute('data-exporting');
+      }
+      fetch('/api/backup-export/' + encodeURIComponent(agentId)).then(function (resp) {
+        if (!resp.ok) throw new Error('export failed: ' + resp.status);
+        var disp = resp.headers.get('Content-Disposition') || '';
+        var match = /filename="?([^"]+)"?/.exec(disp);
+        var name = match ? match[1] : (agentId + '-backup.zip');
+        return resp.blob().then(function (blob) { return { blob: blob, name: name }; });
+      }).then(function (result) {
+        var url = URL.createObjectURL(result.blob);
+        var anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = result.name;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+        restore(original);
+      }).catch(function (err) {
+        console.error('Backup export failed:', err);
+        link.textContent = 'export failed';
+        setTimeout(function () { restore(original); }, 3000);
+      });
+      return false;
+    };
+
+    function showBackupChecking() {
+      document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
+        badge.textContent = BACKUP_CHECKING_TEXT;
+        badge.className = BACKUP_BADGE_BASE + 'bg-zinc-100 text-zinc-500';
+      });
+    }
+
+    function clearBackupChecking() {
+      document.querySelectorAll('.landing-backup-badge').forEach(function (badge) {
+        if (badge.textContent === BACKUP_CHECKING_TEXT) {
+          badge.textContent = '';
+          badge.className = 'landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium';
+        }
+      });
+    }
+
+    function loadBackupStatus() {
+      showBackupChecking();
+      fetch('/api/backup-status').then(function (response) {
+        return response.ok ? response.json() : {};
+      }).then(function (data) {
+        Object.keys(data).forEach(function (agentId) { applyBackupBadge(agentId, data[agentId]); });
+        clearBackupChecking();
+      }).catch(function (err) {
+        console.error('Backup status fetch failed:', err);
+        clearBackupChecking();
+      });
+    }
+    loadBackupStatus();
+
+    var es = null;
+    function connect() {
+      if (es) es.close();
+      es = new EventSource('/_chrome/events');
+      es.onmessage = function (event) {
+        var data;
+        try { data = JSON.parse(event.data); } catch (e) { return; }
+        if (data.type === 'system_interface_status') {
+          var aid = data.agent_id;
+          if (data.status === 'healthy') delete healthStatusByAgent[aid];
+          else healthStatusByAgent[aid] = data.status;
+          applyRowHealth(aid, data.status);
+          return;
+        }
+        if (data.type === 'providers_state') {
+          lastEventAt = data.last_event_at;
+          lastFullSnapshotAt = data.last_full_snapshot_at;
+          var snapshotAt = lastFullSnapshotAt ? Date.parse(lastFullSnapshotAt) : 0;
+          Object.keys(pendingToggleClickedAtByProvider).forEach(function (name) {
+            if (pendingToggleClickedAtByProvider[name] <= snapshotAt) {
+              delete pendingToggleClickedAtByProvider[name];
+            }
+          });
+          renderProviders(data);
+          tickFreshness();
+          return;
+        }
+        if (data.type !== 'workspaces' || !Array.isArray(data.workspaces)) return;
+        var liveIds = data.workspaces.map(function (w) { return w.id; });
+        var liveSet = new Set(liveIds);
+        var differs = liveIds.length !== renderedSet.size
+          || liveIds.some(function (id) { return !renderedSet.has(id); })
+          || renderedIds.some(function (id) { return !liveSet.has(id); });
+        if (differs) {
+          es.close();
+          location.reload();
+        }
+      };
+      es.onerror = function () {
+        if (!es) return;
+        es.close();
+        es = null;
+        setTimeout(connect, 5000);
+      };
+    }
+    connect();
+  })();
+</script>
+{% endset %}
+<Base title="Projects" scripts={{ _scripts }}>
+  <PageContainer>
+    {% if agent_ids %}
+      <div class="flex items-center justify-between mb-5" data-landing-agent-ids="{{ agent_ids | map('string') | join(',') }}">
+        <h1 class="text-xl font-semibold text-zinc-900">Projects</h1>
+        <ButtonLink href="/create" variant="primary">Create</ButtonLink>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        {% for agent_id in agent_ids %}
+          {% set destroying_status = destroying_status_by_agent_id.get(agent_id | string) %}
+          {# Precompute row-local strings so the Card invocation stays readable.
+             JinjaX component attributes are literal strings by default; the
+             ':' prefix turns one into a Python expression. #}
+          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(85% 0.08 230)") ~ ";" %}
+          {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
+          {% set destroying_href = "/destroying/" ~ agent_id %}
+          {% if destroying_status %}
+            <Card tag="a" layout="row" interactive
+                  extra="accent-spine relative overflow-hidden"
+                  :href="destroying_href"
+                  :style="accent_style">
+              <span class="flex-1 font-medium text-zinc-500 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              {% if destroying_status == 'running' %}
+                <StatusBadge extra="gap-2">
+                  <Spinner size="sm" />
+                  Destroying...
+                </StatusBadge>
+              {% else %}
+                <StatusBadge variant="error">Destroy failed</StatusBadge>
+              {% endif %}
+            </Card>
+          {% else %}
+            <Card layout="row" interactive
+                  extra="accent-spine relative overflow-hidden"
+                  :style="accent_style"
+                  :data-agent-id="agent_id"
+                  :data-default-href="goto_href"
+                  onclick="window.landingRowClick(event, this)">
+              <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
+              <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
+              <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
+              <Button variant="ghost" size="icon"
+                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                      title="Restart workspace"
+                      aria-label="Restart workspace">
+                <Icon24 name="restart" />
+              </Button>
+              <Button variant="ghost" size="icon"
+                      onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
+                      title="Settings"
+                      aria-label="Workspace settings">
+                <Icon24 name="settings" />
+              </Button>
+            </Card>
+          {% endif %}
+        {% endfor %}
+      </div>
+    {% else %}
+      {% if is_discovering %}
+        <div class="flex items-center justify-center min-h-[80vh]">
+          <p class="text-zinc-400 text-center">Discovering agents...</p>
+        </div>
+        <script>setTimeout(function() { location.reload(); }, 2000);</script>
+      {% else %}
+        <div class="text-center py-12">
+          <p class="text-zinc-400 mb-6">No projects yet</p>
+          <ButtonLink href="/create" variant="primary">Create</ButtonLink>
+        </div>
+      {% endif %}
+    {% endif %}
+
+    {# Providers panel: rendered empty server-side, populated by the SSE
+       providers_state event. Collapsed by default to a one-line summary
+       ("X providers enabled (N errors)" + chevron); user clicks the
+       summary to expand into the full list + freshness counters. #}
+    <section class="mt-10 pt-6 border-t border-zinc-200" data-providers-panel hidden>
+      <button type="button" data-providers-toggle
+              class="w-full flex items-center justify-between text-left text-sm text-zinc-700 hover:text-zinc-900 bg-transparent border-0 cursor-pointer p-0">
+        <span data-providers-summary>0 providers enabled</span>
+        <span data-providers-chevron class="text-zinc-400 ml-2">&#9656;</span>
+      </button>
+      <div data-providers-details class="mt-3" hidden>
+        <div class="flex items-center justify-end mb-3">
+          <div class="text-xs text-zinc-500 flex gap-4">
+            <span>last event <span data-providers-last-event>&mdash;</span></span>
+            <span>last snapshot <span data-providers-last-snapshot>&mdash;</span></span>
+          </div>
+        </div>
+        <div class="flex flex-col gap-1.5" data-providers-list></div>
+      </div>
+    </section>
+  </PageContainer>
+</Base>

@@ -46,7 +46,7 @@ if [[ "$PROVIDED_TOKEN" != "$EXPECTED_TOKEN" ]]; then
     exit 1
 fi
 
-exec tmux attach -t "mngr-<agent_name>"
+exec tmux attach -t "=mngr-<agent_name>"
 ```
 
 The script:

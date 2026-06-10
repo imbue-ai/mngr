@@ -55,7 +55,7 @@ run_args = "--no-cov -p no:xdist"
 retry_count = 1
 # Exclude docker/docker_sdk tests -- they need a Docker daemon which Modal sandboxes don't have.
 # Those tests run in a separate GitHub runner job (test-docker) until offload Docker-in-Docker support lands.
-filters = "-m 'acceptance and not docker and not docker_sdk'"
+filters = "-m 'acceptance and not docker and not docker_sdk and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal-acceptance.jsonl"

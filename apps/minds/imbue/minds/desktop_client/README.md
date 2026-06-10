@@ -2,7 +2,12 @@
 
 The local desktop client is a FastAPI app that handles authentication and traffic forwarding. It is the gateway through which users access all their workspaces.
 
-Each workspace already runs its own `minds_workspace_server`, which serves the dockview UI and exposes its services under `/service/<name>/...` paths (handling Service Worker bootstrap, path rewriting, cookie scoping, and WebSocket shims internally). The desktop client's job is to route browser traffic for `<agent-id>.localhost:PORT/*` to the correct workspace server -- it does not rewrite paths or inject anything itself.
+> For UI / template work (JinjaX components, the primitive catalog,
+> visual-diff workflow, JinjaX gotchas), see
+> [`templates/README.md`](templates/README.md) -- read that BEFORE adding
+> inline Tailwind to a template.
+
+Each workspace already runs its own `system_interface`, which serves the dockview UI and exposes its services under `/service/<name>/...` paths (handling Service Worker bootstrap, path rewriting, cookie scoping, and WebSocket shims internally). The desktop client's job is to route browser traffic for `<agent-id>.localhost:PORT/*` to the correct system interface -- it does not rewrite paths or inject anything itself.
 
 This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
 
@@ -41,7 +46,7 @@ Authentication is global (one session grants access to all agents). The desktop 
     accepts JSON body with git_url, starts agent creation, returns agent_id and status
 
 `/api/create-agent/{agent_id}/status` route (GET, JSON API, requires auth):
-    returns current creation status (CLONING, CREATING, DONE, FAILED) and redirect_url when done
+    returns current creation status (INITIALIZING, CLONING_REPO, CHECKING_OUT_BRANCH, PROVISIONING_AI, CREATING_WORKSPACE, WAITING_FOR_READY, DONE, FAILED) and redirect_url when done
 
 `/creating/{agent_id}` route (requires auth):
     shows a progress page that polls /api/create-agent/{agent_id}/status
@@ -50,19 +55,19 @@ Authentication is global (one session grants access to all agents). The desktop 
 `<agent-id>.localhost:PORT/*` (subdomain catch-all, requires auth):
     a host-header middleware and a catch-all WebSocket route recognize
     `<agent-id>.localhost(:port)` hosts and byte-forward the HTTP or
-    WebSocket request to that workspace's minds_workspace_server (resolved
+    WebSocket request to that workspace's system_interface (resolved
     via the backend resolver, optionally through an SSH tunnel). Unknown
     subdomains return 404; unauthenticated HTML navigations redirect to
     the bare-origin landing page so the user can sign in.
 
 ## Proxying design
 
-Because the desktop client only byte-forwards requests to the per-workspace `minds_workspace_server`, each workspace keeps its own origin (an `<agent-id>.localhost` subdomain). Within each workspace origin, the workspace server is responsible for multiplexing the workspace's individual services under `/service/<name>/...`:
+Because the desktop client only byte-forwards requests to the per-workspace `system_interface`, each workspace keeps its own origin (an `<agent-id>.localhost` subdomain). Within each workspace origin, the system interface is responsible for multiplexing the workspace's individual services under `/service/<name>/...`:
 
-- On first navigation to a service, the workspace server returns a bootstrap page that installs a Service Worker scoped to `/service/<name>/`.
+- On first navigation to a service, the system interface returns a bootstrap page that installs a Service Worker scoped to `/service/<name>/`.
 - The SW intercepts all same-origin requests and rewrites paths to include the prefix.
 - HTML responses have a WebSocket shim injected to rewrite WS URLs.
 - Cookie paths in `Set-Cookie` headers are rewritten to scope under the service prefix.
 - WebSocket connections are proxied bidirectionally.
 
-See `service_dispatcher.py` in the system_interface workspace server (now at `forever-claude-template/apps/system_interface/imbue/minds_workspace_server/`) for the service-side implementation.
+See `service_dispatcher.py` in the system_interface (at `forever-claude-template/apps/system_interface/imbue/system_interface/`) for the service-side implementation.

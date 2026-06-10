@@ -10,6 +10,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentConfigT
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -123,7 +124,7 @@ class BaseHeadlessAgent(BaseAgent[AgentConfigT], StreamingHeadlessAgentMixin):
         """Return the path to the stderr output file for this agent."""
         ...
 
-    def _preflight_send_message(self, tmux_target: str) -> None:
+    def _preflight_send_message(self, tmux_target: TmuxWindowTarget) -> None:
         """Headless agents do not accept interactive messages."""
         raise SendMessageError(
             str(self.name),

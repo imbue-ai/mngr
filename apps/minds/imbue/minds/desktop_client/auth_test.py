@@ -1,9 +1,10 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from imbue.minds.desktop_client.auth import FileAuthStore
-from imbue.minds.errors import ApiTokenError
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import OneTimeCode
 
@@ -34,6 +35,37 @@ def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
     key_b = store_b.get_signing_key()
 
     assert key_a.get_secret_value() == key_b.get_secret_value()
+
+
+def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: Path) -> None:
+    """Concurrent first-time callers must all converge on a single signing key.
+
+    Regression test for a race that surfaced in the minds Electron e2e CI job:
+    FastAPI runs sync route handlers on a threadpool, so on a fresh data
+    directory the startup burst of requests all reached signing-key generation
+    at once. The old lazy implementation let each thread generate a *different*
+    key and race to write (last writer wins) -- invalidating the cookie just
+    signed with an earlier key -- or read the file mid-write and raise
+    SigningKeyError. Either way the next request looked unauthenticated.
+    """
+    store = FileAuthStore(data_directory=tmp_path / "auth")
+    thread_count = 32
+    # Release every worker simultaneously so they genuinely contend on the
+    # first-time generation path; the timeout turns a hang into a clear failure.
+    barrier = threading.Barrier(thread_count, timeout=30)
+
+    def _read_key() -> str:
+        barrier.wait()
+        return store.get_signing_key().get_secret_value()
+
+    with ThreadPoolExecutor(max_workers=thread_count) as pool:
+        futures = [pool.submit(_read_key) for _ in range(thread_count)]
+        # ``future.result()`` re-raises any SigningKeyError from a worker.
+        keys = {future.result() for future in futures}
+
+    assert len(keys) == 1, "concurrent callers generated divergent signing keys"
+    on_disk_key = (tmp_path / "auth" / "signing_key").read_text().strip()
+    assert keys == {on_disk_key}, "in-memory signing key diverged from the persisted one"
 
 
 def test_get_signing_key_raises_for_empty_key_file(tmp_path: Path) -> None:
@@ -134,71 +166,6 @@ def test_get_signing_key_raises_on_write_error(tmp_path: Path) -> None:
     store = FileAuthStore(data_directory=auth_path)
     with pytest.raises(SigningKeyError):
         store.get_signing_key()
-
-
-def test_get_api_token_generates_token_on_first_access(tmp_path: Path) -> None:
-    store = _make_auth_store(tmp_path)
-    token = store.get_api_token()
-    assert len(token.get_secret_value()) > 32
-
-
-def test_get_api_token_returns_same_token_on_subsequent_access(tmp_path: Path) -> None:
-    store = _make_auth_store(tmp_path)
-    first = store.get_api_token()
-    second = store.get_api_token()
-    assert first.get_secret_value() == second.get_secret_value()
-
-
-def test_get_api_token_persists_across_instances(tmp_path: Path) -> None:
-    auth_dir = tmp_path / "auth"
-    token_a = FileAuthStore(data_directory=auth_dir).get_api_token()
-    token_b = FileAuthStore(data_directory=auth_dir).get_api_token()
-    assert token_a.get_secret_value() == token_b.get_secret_value()
-
-
-def test_get_api_token_file_has_restricted_permissions(tmp_path: Path) -> None:
-    store = _make_auth_store(tmp_path)
-    store.get_api_token()
-    token_path = tmp_path / "auth" / "api_token"
-    permissions = token_path.stat().st_mode & 0o777
-    assert permissions == 0o600
-
-
-def test_get_api_token_raises_for_empty_token_file(tmp_path: Path) -> None:
-    auth_dir = tmp_path / "auth"
-    auth_dir.mkdir(parents=True)
-    (auth_dir / "api_token").write_text("")
-    store = FileAuthStore(data_directory=auth_dir)
-    with pytest.raises(ApiTokenError):
-        store.get_api_token()
-
-
-def test_get_api_token_raises_on_read_error(tmp_path: Path) -> None:
-    """If an existing api_token file is not readable, ApiTokenError is raised.
-
-    Locks in the contract that read-time failures surface as the
-    caller-appropriate ``ApiTokenError`` (not ``SigningKeyError``, not
-    a bare ``OSError``) so bearer-token auth can keep catching exactly
-    that one class. Mirrors ``test_get_signing_key_raises_on_read_error``.
-    """
-    auth_dir = tmp_path / "auth"
-    auth_dir.mkdir(parents=True)
-    # Make "api_token" a directory -- read_text on a directory raises
-    # IsADirectoryError (a subclass of OSError). Triggers a real OS error
-    # that works regardless of whether we're running as root.
-    (auth_dir / "api_token").mkdir()
-
-    store = FileAuthStore(data_directory=auth_dir)
-    with pytest.raises(ApiTokenError):
-        store.get_api_token()
-
-
-def test_api_token_is_distinct_from_signing_key(tmp_path: Path) -> None:
-    """The two secrets are stored in separate files and rotated independently."""
-    store = _make_auth_store(tmp_path)
-    signing = store.get_signing_key().get_secret_value()
-    token = store.get_api_token().get_secret_value()
-    assert signing != token
 
 
 def test_validate_code_returns_false_on_json_decode_error(tmp_path: Path) -> None:

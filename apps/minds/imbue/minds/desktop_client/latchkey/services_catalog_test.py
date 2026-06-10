@@ -15,17 +15,20 @@ def _make_catalog(payload: dict[str, object]) -> ServicesCatalog:
 def test_catalog_get_returns_entry_for_known_service() -> None:
     catalog = _make_catalog(
         {
-            "slack": {
-                "scope": "slack-api",
-                "display_name": "Slack",
-                "permissions": ["slack-read-all", "slack-write-all"],
-            },
+            "slack": [
+                {
+                    "scope": "slack-api",
+                    "display_name": "Slack",
+                    "permissions": [{"name": "slack-read-all"}, {"name": "slack-write-all"}],
+                },
+            ],
         },
     )
 
-    info = catalog.get("slack")
+    infos = catalog.get("slack")
 
-    assert info is not None
+    assert len(infos) == 1
+    info = infos[0]
     assert info.name == "slack"
     assert info.scope == "slack-api"
     assert info.display_name == "Slack"
@@ -36,15 +39,62 @@ def test_catalog_get_returns_entry_for_known_service() -> None:
     assert "slack-write-all" in info.permission_schemas
 
 
+def test_catalog_exposes_scope_and_permission_descriptions() -> None:
+    """Detent's scope and per-permission descriptions are carried onto the dialog-facing record."""
+    catalog = _make_catalog(
+        {
+            "slack": [
+                {
+                    "scope": "slack-api",
+                    "display_name": "Slack",
+                    "description": "Any interaction with the Slack API.",
+                    "permissions": [
+                        {"name": "slack-read-all", "description": "All read operations."},
+                        {"name": "slack-write-all"},
+                    ],
+                },
+            ],
+        },
+    )
+
+    info = catalog.get("slack")[0]
+
+    assert info.description == "Any interaction with the Slack API."
+    # Permissions without a description are omitted from the map; the
+    # injected ``any`` never has one either.
+    assert info.description_by_permission_name == {"slack-read-all": "All read operations."}
+
+
+def test_catalog_get_returns_all_entries_for_multi_scope_service() -> None:
+    """A service that exposes more than one scope yields one entry per scope."""
+    catalog = _make_catalog(
+        {
+            "google": [
+                {"scope": "google-gmail-api", "display_name": "Gmail", "permissions": [{"name": "gmail-read"}]},
+                {"scope": "google-drive-api", "display_name": "Drive", "permissions": [{"name": "drive-read"}]},
+            ],
+        },
+    )
+
+    infos = catalog.get("google")
+
+    assert tuple(info.scope for info in infos) == ("google-gmail-api", "google-drive-api")
+    # Both scopes are independently resolvable by scope lookup.
+    assert catalog.get_by_scope("google-gmail-api") is not None
+    assert catalog.get_by_scope("google-drive-api") is not None
+
+
 def test_catalog_get_by_scope_indexes_by_schema_name() -> None:
     """The catalog must support reverse lookup so request events (which carry the scope) can be resolved."""
     catalog = _make_catalog(
         {
-            "slack": {
-                "scope": "slack-api",
-                "display_name": "Slack",
-                "permissions": [],
-            },
+            "slack": [
+                {
+                    "scope": "slack-api",
+                    "display_name": "Slack",
+                    "permissions": [],
+                },
+            ],
         },
     )
 
@@ -58,7 +108,7 @@ def test_catalog_get_by_scope_indexes_by_schema_name() -> None:
 def test_catalog_returns_none_for_unknown_keys() -> None:
     catalog = _make_catalog({})
 
-    assert catalog.get("nonexistent") is None
+    assert catalog.get("nonexistent") == ()
     assert catalog.get_by_scope("nonexistent-api") is None
 
 
@@ -66,36 +116,40 @@ def test_catalog_dedups_explicit_any_in_permissions() -> None:
     """A gateway that explicitly lists ``any`` must not produce two ``any`` checkboxes."""
     catalog = _make_catalog(
         {
-            "demo": {
-                "scope": "demo-api",
-                "display_name": "Demo",
-                "permissions": ["any", "demo-read"],
-            },
+            "demo": [
+                {
+                    "scope": "demo-api",
+                    "display_name": "Demo",
+                    "permissions": [{"name": "any"}, {"name": "demo-read"}],
+                },
+            ],
         },
     )
 
-    info = catalog.get("demo")
+    infos = catalog.get("demo")
 
-    assert info is not None
-    assert info.permission_schemas == ("any", "demo-read")
+    assert len(infos) == 1
+    assert infos[0].permission_schemas == ("any", "demo-read")
 
 
 def test_catalog_handles_empty_permissions_list() -> None:
     """Services with no granular permissions still expose ``any`` as an available option."""
     catalog = _make_catalog(
         {
-            "linear": {
-                "scope": "linear-api",
-                "display_name": "Linear",
-                "permissions": [],
-            },
+            "linear": [
+                {
+                    "scope": "linear-api",
+                    "display_name": "Linear",
+                    "permissions": [],
+                },
+            ],
         },
     )
 
-    info = catalog.get("linear")
+    infos = catalog.get("linear")
 
-    assert info is not None
-    assert info.permission_schemas == ("any",)
+    assert len(infos) == 1
+    assert infos[0].permission_schemas == ("any",)
 
 
 def test_catalog_is_cached_after_first_fetch() -> None:
@@ -104,7 +158,7 @@ def test_catalog_is_cached_after_first_fetch() -> None:
     class _CountingFakeClient(FakeLatchkeyGatewayClient):
         fetch_count: int = 0
 
-        def get_available_services(self) -> dict[str, AvailableServiceEntry]:
+        def get_available_services(self) -> dict[str, tuple[AvailableServiceEntry, ...]]:
             # Bump the counter then defer to the base implementation,
             # which validates the configured payload the same way the
             # real client would.
@@ -113,7 +167,7 @@ def test_catalog_is_cached_after_first_fetch() -> None:
 
     client = _CountingFakeClient(
         available_services_payload={
-            "slack": {"scope": "slack-api", "display_name": "Slack", "permissions": []},
+            "slack": [{"scope": "slack-api", "display_name": "Slack", "permissions": []}],
         },
     )
     catalog = ServicesCatalog(gateway_client=client)
@@ -134,13 +188,13 @@ def test_catalog_returns_empty_when_gateway_unreachable() -> None:
     """
 
     class _FailingClient(LatchkeyGatewayClient):
-        def get_available_services(self) -> dict[str, AvailableServiceEntry]:
+        def get_available_services(self) -> dict[str, tuple[AvailableServiceEntry, ...]]:
             raise LatchkeyGatewayClientError("connection refused")
 
     client = _FailingClient()
     catalog = ServicesCatalog(gateway_client=client)
 
-    assert catalog.get("slack") is None
+    assert catalog.get("slack") == ()
     assert catalog.get_by_scope("slack-api") is None
     assert dict(catalog.as_mapping()) == {}
 
@@ -153,7 +207,7 @@ def test_catalog_returns_empty_when_payload_is_malformed() -> None:
     test only pins that *any* validation error from the client surfaces
     as the unknown-scope fallback rather than crashing the dialog.
     """
-    catalog = _make_catalog({"broken": {"display_name": "X", "permissions": []}})
+    catalog = _make_catalog({"broken": [{"display_name": "X", "permissions": []}]})
 
-    assert catalog.get("broken") is None
+    assert catalog.get("broken") == ()
     assert dict(catalog.as_mapping()) == {}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -371,20 +372,75 @@ class SnapshotInfo(FrozenModel):
     )
 
 
-class VolumeFileType(UpperCaseStrEnum):
-    """Type of entry in a volume listing."""
+class FileType(UpperCaseStrEnum):
+    """Type of a filesystem entry in a directory listing.
+
+    The full set of POSIX entry types. Producers populate this to the fidelity
+    their source allows: a host (``OuterHost.list_directory``) classifies the
+    real ``stat`` mode and can report any of these values, while a bare
+    :class:`~imbue.mngr.interfaces.volume.Volume` typically only distinguishes
+    ``FILE`` from ``DIRECTORY`` (e.g. Modal's volume API exposes nothing finer),
+    so a volume-backed listing only ever yields those two.
+    """
 
     FILE = auto()
     DIRECTORY = auto()
+    SYMLINK = auto()
+    PIPE = auto()
+    SOCKET = auto()
+    BLOCK = auto()
+    CHARACTER = auto()
+    OTHER = auto()
+
+    @classmethod
+    def from_stat_mode(cls, mode: int) -> "FileType":
+        """Classify a ``stat``/``lstat`` ``st_mode`` into a :class:`FileType`.
+
+        Matches on the file-type bits (``S_IFMT``) against the seven standard
+        POSIX types. Symlinks are reported as ``SYMLINK`` (callers should
+        ``lstat`` so a symlink is classified by its own mode rather than its
+        target's). ``OTHER`` is reached only for non-standard type bits mngr
+        never creates -- e.g. a Solaris door/event-port or a BSD whiteout -- or
+        a mode with no recognized type bits.
+        """
+        match stat.S_IFMT(mode):
+            case stat.S_IFDIR:
+                return cls.DIRECTORY
+            case stat.S_IFLNK:
+                return cls.SYMLINK
+            case stat.S_IFREG:
+                return cls.FILE
+            case stat.S_IFIFO:
+                return cls.PIPE
+            case stat.S_IFSOCK:
+                return cls.SOCKET
+            case stat.S_IFBLK:
+                return cls.BLOCK
+            case stat.S_IFCHR:
+                return cls.CHARACTER
+            case _:
+                return cls.OTHER
 
 
 class VolumeFile(FrozenModel):
-    """An entry listed from a volume directory."""
+    """An entry from a directory listing (on a volume or a host filesystem).
+
+    Despite the historical name, this is the shared listing-entry type returned
+    by every :class:`~imbue.mngr.interfaces.host.HostFileReadInterface`
+    ``list_directory`` implementation, not just bare volumes.
+    """
 
     path: str = Field(description="Path of the entry within the volume")
-    file_type: VolumeFileType = Field(description="Whether this entry is a file or directory")
+    file_type: FileType = Field(description="The kind of filesystem entry (file, directory, symlink, ...)")
     mtime: int = Field(description="Last modification time as Unix timestamp")
     size: int = Field(description="Size in bytes")
+    permissions: str | None = Field(
+        default=None,
+        description=(
+            "Permissions string (e.g. ``-rw-r--r--``) when the source can report it. "
+            "Hosts populate this from the entry's stat mode; bare volumes leave it None."
+        ),
+    )
 
 
 class VolumeInfo(FrozenModel):
@@ -501,7 +557,7 @@ class AgentDetails(FrozenModel):
     start_on_boot: bool = Field(description="Whether agent starts on host boot")
 
     state: AgentLifecycleState = Field(
-        description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE)"
+        description="Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)"
     )
     url: str | None = Field(default=None, description="Agent URL (reported)")
     start_time: datetime | None = Field(default=None, description="Last start time (reported)")

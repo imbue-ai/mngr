@@ -17,8 +17,8 @@ TARGET can be an agent ID (agent-*), host ID (host-*), or an agent/host name.
 If TARGET is omitted, it is read from stdin (one line, must be an ID like agent-* or host-*).
 
 States can be provided as positional arguments after TARGET, via the repeatable --state option, or both.
-Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE) and
-all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED).
+Valid states include all agent lifecycle states (STOPPED, RUNNING, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN) and
+all host states (BUILDING, STARTING, RUNNING, STOPPING, STOPPED, PAUSED, CRASHED, FAILED, DESTROYED, UNAUTHENTICATED, UNKNOWN).
 
 If no states are specified, waits for any terminal state (the target stops running).
 
@@ -65,7 +65,7 @@ mngr wait [OPTIONS] [TARGET] [STATES]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Other Options

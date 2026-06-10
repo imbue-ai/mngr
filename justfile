@@ -66,11 +66,22 @@ test-offload-acceptance args="":
     : "${MODAL_TOKEN_ID:?must be set}"
     : "${MODAL_TOKEN_SECRET:?must be set}"
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run so
+    # every fanned-out sandbox lands in the same env (Modal caps workspaces
+    # at 1500 envs; without this, a single run mints dozens to hundreds).
+    # The shared env name matches mngr_test-YYYY-MM-DD-HH-MM-SS-* so the
+    # hourly cleanup script will sweep it if the trap below ever fails.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    # Install the trap *before* `modal environment create` so a SIGINT
+    # between create and the next line still cleans up; '|| true' on delete
+    # absorbs the not-found case if the env is already gone.
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-acceptance.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -86,14 +97,53 @@ test-offload-release args="":
     # so the two stay in sync.
     just _generate-release-dockerfile
     just _generate-dockerignore
-    trap "rm -f .dockerignore" EXIT
+    # Pre-create a single shared Modal environment for this offload run.
+    # See `test-offload-acceptance` for the full rationale.
+    SHARED_ENV="mngr_test-$(date -u +%Y-%m-%d-%H-%M-%S)-shared-$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)"
+    trap 'uv run modal environment delete "$SHARED_ENV" --yes >/dev/null 2>&1 || true; rm -f .dockerignore' EXIT
+    uv run modal environment create "$SHARED_ENV"
 
     # MODAL_IMAGE_BUILDER_VERSION=2025.06 is required for enable_docker support (Docker-in-Docker alpha).
     MODAL_IMAGE_BUILDER_VERSION=2025.06 offload -c offload-modal-release.toml run --trace \
         --env "MODAL_TOKEN_ID=$MODAL_TOKEN_ID" \
         --env "MODAL_TOKEN_SECRET=$MODAL_TOKEN_SECRET" \
         --env "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY" \
+        --env "MNGR_TEST_SHARED_MODAL_ENV_NAME=$SHARED_ENV" \
         --env "IS_RELEASE=1" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
+# Run the minds-snapshot-resume test suite against a pre-built Modal
+# image produced by ``scripts/snapshot_minds_e2e_state.py``.
+# Usage:
+#     just test-offload-minds-snapshot im-01...    # required: snapshot image id
+#     just test-offload-minds-snapshot im-01... '--filter test_foo'
+# The snapshot image already has the entire mngr checkout, the FCT
+# workspace's Docker container (in a stopped state), and dockerd's
+# /var/lib/docker tree baked in -- so offload skips its normal image-
+# setup phase entirely and boots straight from the snapshot via
+# ``--override-image-id`` (offload v0.9.6+).
+test-offload-minds-snapshot snapshot_image_id args="":
+    #!/bin/bash
+    set -ueo pipefail
+    : "${MODAL_TOKEN_ID:?must be set}"
+    : "${MODAL_TOKEN_SECRET:?must be set}"
+    if [ -z "{{snapshot_image_id}}" ]; then
+        echo "Usage: just test-offload-minds-snapshot <snapshot-image-id> [args...]" >&2
+        echo "Generate the image id by running: uv run python scripts/snapshot_minds_e2e_state.py" >&2
+        exit 2
+    fi
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
+    offload -c offload-modal-minds-snapshot.toml run --trace \
+        --override-image-id "{{snapshot_image_id}}" \
         --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
         --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
 
@@ -110,7 +160,7 @@ _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -148,6 +198,49 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# Run the opt-in live Claude Agent SDK tests (libs/mngr_robinhood). These make real,
+# paid API calls and are excluded from every CI run. ANTHROPIC_API_KEY must already be
+# exported (e.g. `set -a; source .env; set +a`). Pass extra pytest args via `args`.
+test-sdk-live args="":
+  RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
+
+# === minds deployment / services test orchestrator ===
+# Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
+# and apps/minds/deployment_tests/README.md for the full design + usage.
+
+# Full run: shared env stand-up + sequential pytest x2 + teardown.
+minds-test-deployment *args:
+  uv run python apps/minds/scripts/test_deployments.py run {{args}}
+
+# Wipe everything from prior runs that the ledger still tracks as active or leaked.
+minds-test-deployment-cleanup:
+  uv run python apps/minds/scripts/test_deployments.py cleanup
+
+# Local iterate: stand up one shared env + print a ready-to-paste pytest command.
+minds-test-deployment-up role="default":
+  uv run python apps/minds/scripts/test_deployments.py up "{{role}}"
+
+# Local iterate: tear down whatever `minds-test-deployment-up` last stood up.
+minds-test-deployment-down role="default":
+  uv run python apps/minds/scripts/test_deployments.py down "{{role}}"
+
+# Point minds_services tests at an already-deployed dev env (e.g. dev-josh).
+minds-test-services-against env_name *tests:
+  uv run python apps/minds/scripts/test_deployments.py services-against "{{env_name}}" {{tests}}
+
+# Run only the minds_deployment pytest batch (each test mints its own ephemeral env).
+# No shared env stand-up, no mail.tm account -- fast iteration for the deploy tests.
+minds-test-deployment-only *tests:
+  uv run python apps/minds/scripts/test_deployments.py deployment-only {{tests}}
+
+# End-to-end acceptance test that drives the real Electron minds app to create
+# a local Docker workspace from forever-claude-template. Wraps the invocation
+# with `xvfb-run` so it works on headless Linux CI runners. macOS users with
+# a real display can run the underlying pytest directly without xvfb-run.
+# Requires apps/minds/node_modules/ to be installed (`cd apps/minds && pnpm install`).
+minds-test-electron *args:
+  xvfb-run -a uv run pytest apps/minds/test_desktop_client_e2e.py::test_create_local_docker_workspace_via_electron -v --no-cov --cov-fail-under=0 {{args}}
 
 # Download the Tailwind Play CDN JS bundle for the minds desktop client.
 # Idempotent and SHA-pinned via apps/minds/scripts/fetch_tailwind.sh -- the
@@ -214,7 +307,8 @@ deploy *args:
     uv run minds env deploy {{args}}
 
 # Start the minds desktop client (electron) in dev mode against the
-# activated env. Sources .env (for ANTHROPIC_API_KEY etc.) and sets
+# activated env. Sources .env if present, scrubs any ambient
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL (see below), and sets
 # MINDS_WORKSPACE_* env vars so the create-form auto-fills "repository",
 # "name", and "branch":
 #   MINDS_WORKSPACE_GIT_URL = .external_worktrees/forever-claude-template/
@@ -223,6 +317,11 @@ deploy *args:
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 #   MINDS_WORKSPACE_NAME    = "mindtest".
+# Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
+# tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
+# (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
+# the shell. The opt-in is what makes dev iteration work on ANY tier --
+# including staging / production -- instead of only on per-developer dev envs.
 #
 # Always re-syncs the live mngr working tree into the FCT worktree's
 # vendor/mngr/ first, so the very first Create after starting the app
@@ -259,7 +358,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -296,7 +395,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     if [ -f .env ]; then
@@ -304,7 +403,19 @@ minds-start agent_name="mindtest" branch="":
         . .env
         set +a
     fi
+    # Scrub ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL from the environment
+    # the desktop client inherits. In dev these are typically exported by
+    # the shell rc of whoever runs `just minds-start`, and the client
+    # would otherwise forward them into every agent it creates -- silently
+    # overriding the auth mode picked in the create form. A real packaged
+    # macOS app launched from Finder never sources shell rc files, so this
+    # leak is a dev-environment artifact; unsetting here is the
+    # proportionate fix. `unset` of an already-unset var is a no-op.
+    unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
+    # Explicit opt-in so the desktop client honors the MINDS_WORKSPACE_* vars
+    # on any tier (the form ignores them otherwise; see _operator_workspace_default).
+    export MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else
@@ -330,6 +441,9 @@ minds-start agent_name="mindtest" branch="":
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
     fi
+    # Put the Node version apps/minds pins (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
@@ -429,6 +543,10 @@ minds-stop:
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
+    #!/bin/bash
+    set -ueo pipefail
+    # Match apps/minds's pinned Node (.nvmrc) so pnpm's engine-strict passes.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
 # Sync this repo's mngr changes (and the FCT worktree's template state)
@@ -536,13 +654,14 @@ forward-system-interface agent_name:
     fi
 
     # Inject the token where the agent's cloudflare-tunnel service
-    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
-    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
-    # copies, then atomic-rename so the watcher never observes a
-    # half-written file. CF tokens are base64url-y, so single-quoting
-    # the value is safe.
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it:
+    # runtime/secrets/cloudflare_tunnel.env, one of the per-secret env files
+    # in the runtime/secrets/ directory. We own that file outright, so just
+    # write it via an atomic rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting the
+    # value is safe.
     uv run mngr exec "$AGENT_ID" \
-        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+        "mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN' > runtime/secrets/cloudflare_tunnel.env.tmp && mv runtime/secrets/cloudflare_tunnel.env.tmp runtime/secrets/cloudflare_tunnel.env"
 
     URL=$(uv run mngr imbue_cloud tunnels services add \
         "$TUNNEL_NAME" system_interface http://localhost:8000 \

@@ -465,7 +465,10 @@ def _update_row_mark(state: _KanpanState, walker_idx: int, mark_key: str | None)
         name_markup = _flatten_markup_to_attr(name_markup, "muted")
     attr_map_widget = state.list_walker[walker_idx]
     row: _SelectableRow = attr_map_widget.original_widget
-    name_text: Text = row.contents[0][0]
+    # The first column of a row built by `_build_agent_row` is always the name
+    # cell, which is a `Text` (or `_HyperlinkText` subclass); urwid types
+    # `.contents` only as `Widget`, so this downcast is safe by construction.
+    name_text: Text = row.contents[0][0]  # ty: ignore[invalid-assignment]
     name_text.set_text(name_markup)
 
 
@@ -637,23 +640,27 @@ def _submit_batch_item(
     executor: ThreadPoolExecutor, item: _BatchWorkItem
 ) -> Future[subprocess.CompletedProcess[str]] | None:
     """Submit a single batch work item to the executor."""
-    if isinstance(item.cmd, MarkableBuiltinCommand):
-        match item.cmd.role:
-            case MarkableBuiltinRole.DELETE:
-                names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
-                return executor.submit(_run_destroy, names)
-            case MarkableBuiltinRole.PUSH:
-                if item.entry is None or item.entry.work_dir is None:
-                    return None
-                return executor.submit(_run_git_push, str(item.entry.work_dir))
-            case _:
-                assert_never(item.cmd.role)
-    if isinstance(item.cmd, ActionBuiltinCommand):
-        # Non-markable builtins never reach batch dispatch.
-        return None
-    if item.cmd.command:
-        return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
-    return None
+    match item.cmd:
+        case MarkableBuiltinCommand():
+            match item.cmd.role:
+                case MarkableBuiltinRole.DELETE:
+                    names = [str(n) for n in item.batch_names] if item.batch_names else [str(item.name)]
+                    return executor.submit(_run_destroy, names)
+                case MarkableBuiltinRole.PUSH:
+                    if item.entry is None or item.entry.work_dir is None:
+                        return None
+                    return executor.submit(_run_git_push, str(item.entry.work_dir))
+                case _:
+                    assert_never(item.cmd.role)
+        case ActionBuiltinCommand():
+            # Non-markable builtins never reach batch dispatch.
+            return None
+        case CustomCommand():
+            if item.cmd.command:
+                return executor.submit(_run_shell_command_sync, item.cmd.command, str(item.name))
+            return None
+        case _:
+            assert_never(item.cmd)
 
 
 def _execute_next_in_batch(

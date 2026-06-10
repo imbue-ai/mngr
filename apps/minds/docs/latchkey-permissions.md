@@ -20,38 +20,68 @@ and how the agent receives the answer.
    * 403 with `Error: Request not permitted by the user.`: the user has
      authenticated but has not allowed this kind of request.
 3. **Agent writes a request event.** On any of the blocked outcomes, the
-   agent appends a `LatchkeyPermissionRequestEvent` to
+   agent appends a `LatchkeyPredefinedPermissionRequestEvent` to
    `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` with the latchkey
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
 4. **Desktop notifies the user.** The desktop client tails the agent's
    request events file via `mngr events --follow`, adds a card to the
-   right-side requests inbox panel, and surfaces a notification.
+   inbox drawer, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
-   `/requests/<event_id>`, which renders a single-scope permission dialog:
-   * The list of [Detent](https://github.com/imbue-ai/detent) permission
-     schemas the user can grant for that scope, fetched from the latchkey
-     gateway's `GET /permissions/available` endpoint and cached in
-     process for the lifetime of the desktop client.
+   `/inbox?selected=<event_id>` in a **modal overlay** over the current
+   window (a transparent full-window `WebContentsView` stacked above the
+   workspace, with a dim backdrop). The user's workspace view is never
+   navigated away, so dismissing the dialog -- via Approve/Deny, the close
+   button, a backdrop click, or Escape -- returns them to their work with
+   no context lost. (Opened directly in a browser, with no modal host, the
+   page degrades to a dimmed, centered card and dismissal navigates home.)
+   The page renders a single-scope permission dialog:
+   * The dialog header names the service plainly (no monospace pill) and
+     attributes the agent's rationale prominently as
+     "`<workspace>` says:" -- this is the main place the requesting
+     agent's name is surfaced. There is no separate "Workspace:" line.
+   * By default the dialog shows a **simple, informative view**: a
+     single summary sentence ("Approving will grant `<workspace>` and its
+     sibling agents the following permissions:") above a read-only list
+     of the permissions that will be granted on Approve (no checkboxes),
+     plus only the Approve / Deny buttons. This keeps the common case
+     approachable for non-technical users.
+   * A small **"Adjust"** link, rendered inside the permission list, reveals
+     the full **editor view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
+     permission schema available for that scope. The available schemas
+     are fetched from the latchkey gateway's `GET /permissions/available`
+     endpoint and cached in process for the lifetime of the desktop
+     client. The checkbox inputs always exist in the page (the editor is
+     merely hidden by default), so the simple view's Approve still
+     submits the pre-checked set.
    * The detent ``any`` schema (matches every request inside the scope) is
-     prepended as the first checkbox so the user can opt into unrestricted
-     access if they want. It is **not** pre-checked.
-   * The dialog pre-checks the union of (a) permissions already granted
-     for that scope on the agent's host and (b) the permissions the agent
-     declared in the request event. Approving without changes grants
-     exactly that union; ticking more broadens it, unticking narrows or
-     revokes. The dialog therefore doubles as a revocation UI.
+     prepended as the first checkbox in the editor so the user can opt
+     into unrestricted access if they want. It is **not** pre-checked,
+     and so never appears in the simple view's read-only list.
+   * The dialog pre-checks (and the simple view lists) the union of (a)
+     permissions already granted for that scope on the agent's host and
+     (b) the permissions the agent declared in the request event.
+     Approving without changes grants exactly that union; opening the
+     editor and ticking more broadens it, unticking narrows or revokes.
+     The editor therefore doubles as a revocation UI.
    * The Approve button stays disabled while zero boxes are checked,
      so if the agent submitted an empty ``permissions`` tuple and the
-     user has no prior grants for the scope, the user must actively
-     pick something before approving.
+     user has no prior grants for the scope, the simple view shows a
+     prompt to use "Adjust" and the user must actively pick something
+     there before approving.
 6. **User approves.** The desktop client:
    1. Runs `latchkey services info <service>` to read `credentialStatus`,
       `authOptions`, and `setCredentialsExample`.
    2. If credentials are not `valid` and the service advertises a
       `browser` auth option (or latchkey reports no `authOptions` at all,
       treated as the legacy fallback), runs `latchkey auth browser <service>`
-      synchronously; cancellation/failure produces an `AUTH_FAILED` outcome.
+      synchronously (transparently running the one-off `latchkey auth
+      browser-prepare <service>` step first when latchkey asks for it).
+      Cancellation or failure of either step produces a `FAILED` outcome:
+      the grant is **not** applied and the request stays pending (no
+      response event is written), so the dialog surfaces the reason and the
+      user can click Approve again to retry. A failed approval is never
+      recorded as a denial.
    3. If credentials are not `valid` and the service does not advertise a
       `browser` auth option (e.g. Coolify, where `authOptions = ["set"]`),
       the grant is **refused** and the request stays pending. The dialog
@@ -61,10 +91,13 @@ and how the agent receives the answer.
       proceeds normally once credentials are valid.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
       enforces the chosen schemas on the next request.
-   5. Appends a `GRANTED` (or `AUTH_FAILED`) response event to
-      `~/.minds/events/requests/events.jsonl`.
-   6. Sends the agent a plain-English `mngr message` describing the
-      decision; the agent wakes up and decides whether to retry.
+   5. On success, appends a `GRANTED` response event to
+      `~/.minds/events/requests/events.jsonl`. (A `FAILED` approval writes
+      no response event and leaves the request pending; see step 6.2.)
+   6. On a `GRANTED` outcome, sends the agent a plain-English `mngr message`
+      describing the decision; the agent wakes up and decides whether to
+      retry. A `FAILED` or manual-credentials outcome leaves the request
+      pending and notifies only the user (in the dialog), not the agent.
 7. **User denies.** The desktop client appends a `DENIED` response event
    and sends the agent a plain-English denial message. `latchkey_permissions.json`
    is not touched.
@@ -104,6 +137,40 @@ latchkey 2.8.0 features:
   inject the JWT before the agent id is known, eliminating a
   previously-fragile post-create injection step.
 
+## Minds API access through the gateway
+
+Minds itself exposes a small REST API on the desktop-client bare
+origin (`/api/v1/...`: agent notifications, Telegram bot setup, the
+WebDAV file-sharing mount). Agents reach it through the same latchkey
+gateway they use for every other outbound HTTP call, via the bundled
+`minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
+no per-agent reverse SSH tunnel for the Minds API anymore.
+
+Authentication uses one central `MINDS_API_KEY` per `minds run`,
+freshly generated in memory at startup and never handed to agents.
+The `minds-api-proxy` extension reads it from the
+`LATCHKEY_EXTENSION_MINDS_API_KEY` env var (published to the supervisor
+by `minds run`, which restarts the supervisor on every startup so the
+current key always wins) and injects `Authorization: Bearer <key>` on
+every forwarded request, overwriting any header the agent supplied.
+The desktop client matches the same value on the inbound side. The
+key rotates per minds startup; nothing else in the monorepo reads it
+from disk, so there is no on-disk copy to keep in sync.
+
+Per-agent isolation comes from the latchkey gateway's permissions
+file. The agent baseline grants every agent one shared call --
+`POST /minds-api-proxy/api/v1/agents/<...>/notifications` -- so any
+workspace the desktop client created can always notify the user. For
+the other routes (Telegram setup, future `/api/v1/agents/<id>/*` endpoints,
+the WebDAV mount), agent creation installs a *per-agent* rule + inline
+schemas in the host's permissions file: the scope schema
+`minds-api-self-<agent_id>` mirrors `latchkey-self.invalid` and the
+permission schema `minds-api-proxy-call-<agent_id>` pins the URL
+path to `/minds-api-proxy/api/v1/agents/<agent_id>/...`. Because the
+file is keyed per host, an agent on host A cannot reach the API on
+behalf of an agent on host B: host A's permissions file does not list
+B's agent id at all.
+
 The gateway's *default* permissions config
 (`~/.minds/latchkey_default_permissions.json`) is materialized with
 empty `rules` too, so any request that somehow bypasses the JWT
@@ -121,7 +188,9 @@ permission schemas the dialog offers) lives alongside the latchkey
 gateway extension at
 [`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
 and is fetched at desktop-client runtime via the gateway's
-`GET /permissions/available` endpoint. Each entry has the shape:
+`GET /permissions/available` endpoint. Each service maps to a *list* of
+scope entries (a single service may expose more than one detent scope).
+Each entry has the shape:
 
 * `scope` -- the detent scope schema the service owns; used as the rule
   key in `latchkey_permissions.json` and as the value the agent puts
@@ -156,12 +225,15 @@ monorepo.
 ## Peer-mind operations
 
 Agents can create new peer minds (siblings, not children) and follow
-their creation through to completion through the same latchkey curl
-pipeline they use for third-party services:
+their creation through to completion via the gateway's `minds-api-proxy`
+extension (see "Minds API access through the gateway" above) -- the
+same path agents already use for the `/api/v1/...` REST API:
 
 ```bash
 # Spawn a peer.
-latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' \
+curl -X POST "$LATCHKEY_GATEWAY/minds-api-proxy/api/create-agent" \
+  -H "X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
+  -H "X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" \
   -H 'Content-Type: application/json' \
   -d '{
     "git_url": "https://github.com/example/template",
@@ -170,50 +242,46 @@ latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' \
   }'
 
 # Poll its creation status (use the ``agent_id`` from the spawn response).
-latchkey curl 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/status'
+curl "$LATCHKEY_GATEWAY/minds-api-proxy/api/create-agent/creation-XXXX/status" \
+  -H "X-Latchkey-Gateway-Password: $LATCHKEY_GATEWAY_PASSWORD" \
+  -H "X-Latchkey-Gateway-Permissions-Override: $LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"
 
-# Stream creation logs (server-sent events).
-latchkey curl -N 'http://127.0.0.1:9100/api/create-agent/creation-XXXX/logs'
+# Stream creation logs (server-sent events): same shape with -N and the
+# .../logs path.
 ```
 
-Latchkey injects the agent-invisible `Authorization: Bearer ...` header
-itself. The agent must never see the token directly. Three pieces wire
-this together; all are set up by `minds run` at startup:
+The proxy injects the agent-invisible `Authorization: Bearer
+<MINDS_API_KEY>` header itself (overwriting anything the agent
+supplied), and the desktop client's `/api/create-agent`,
+`/api/create-agent/{id}/status`, and `/api/create-agent/{id}/logs`
+endpoints accept that central key as an alternative to the browser
+session cookie. The agent never sees the key.
 
-* **The `minds` service is registered with latchkey** against the
-  desktop client's base URL (`http://127.0.0.1:<port>`). `minds run`
-  calls `latchkey services register minds --base-api-url ...` and
-  re-registers when the port changes across restarts.
-* **A bearer token is persisted** at `<minds-data-dir>/auth/api_token`
-  with mode 0o600 and stored in latchkey's encrypted credential store
-  via `latchkey auth set minds -H 'Authorization: Bearer <token>'`. The
-  desktop client's `/api/create-agent`, `/api/create-agent/{id}/status`,
-  and `/api/create-agent/{id}/logs` endpoints accept the token as an
-  alternative to the browser session cookie.
-* **A detent scope named `minds`, with three named permissions**, is
-  materialized inline in every per-agent `latchkey_permissions.json`
-  baseline (defined in
-  `libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`). The scope
-  schema gates `domain=127.0.0.1` AND `path` under `/api/create-agent`;
-  the named permissions `minds-create`, `minds-status`, and `minds-logs`
-  each match a specific `(method, path)` pair. The scope is not added
-  to detent's built-in catalog so the rule stays self-contained and
-  minds owns the schema definition. Future operations (destroy / list
-  peer minds) will be added as additional named permissions under the
-  same scope.
+Unlike the always-granted per-agent notifications route, the peer-spawn
+paths are gated behind a user-facing grant: **a detent scope named
+`minds`, with three named permissions**, is materialized inline in
+every per-agent `latchkey_permissions.json` baseline (defined in
+`libs/mngr_latchkey/imbue/mngr_latchkey/agent_setup.py`). The scope
+schema gates `domain=latchkey-self.invalid` AND `path` under
+`/minds-api-proxy/api/create-agent`; the named permissions
+`minds-create`, `minds-status`, and `minds-logs` each match a specific
+`(method, path)` pair. The scope is not added to detent's built-in
+catalog so the rule stays self-contained and minds owns the schema
+definition. Future operations (destroy / list peer minds) will be
+added as additional named permissions under the same scope.
 
-Because the `latchkey gateway` itself spawns curl on the desktop host
-(see "End-to-end flow" above), `127.0.0.1` in the request URL resolves
-to the desktop's loopback regardless of which compute backend the
-calling agent runs on. The string `http://127.0.0.1:<minds-port>` is
-identical for Docker, LIMA, Vultr, and IMBUE_CLOUD agents.
+Note that `latchkey services info minds` reports
+`credentialStatus=unknown` -- `minds` is a catalog scope served by a
+gateway extension, not a registered latchkey service with its own
+stored credential. The grant flow treats `unknown` as "proceed": only
+`missing` / `invalid` credentials trigger the auth setup path.
 
 ### First-spawn flow
 
 On a fresh install, the first peer-spawn attempt hits the standard
 permission-request dialog:
 
-1. Agent runs `latchkey curl -X POST 'http://127.0.0.1:9100/api/create-agent' ...`.
+1. Agent POSTs to `$LATCHKEY_GATEWAY/minds-api-proxy/api/create-agent`.
 2. Gateway evaluates the request against the agent's permissions file.
    No `minds` rule yet, so detent denies. Gateway returns 403 with
    `Request not permitted by the user.`.
@@ -224,11 +292,11 @@ permission-request dialog:
    `minds-create`, `minds-status`, and `minds-logs`.
 5. Desktop writes e.g. `{"minds": ["any"]}` into the agent's permissions
    file via the gateway's `permissions` extension.
-6. Agent retries the curl. Detent now matches; gateway looks up the
-   `minds` service, injects the bearer header, and forwards. Minds
-   validates the token and returns `{"agent_id": "<creation_id>", "status": "CLONING"}`.
-7. Agent polls `GET /api/create-agent/<creation_id>/status` and may
-   stream `GET /api/create-agent/<creation_id>/logs` -- both are
+6. Agent retries the request. Detent now matches; the `minds-api-proxy`
+   extension injects the bearer header and forwards. Minds validates
+   the key and returns `{"agent_id": "<creation_id>", "status": "CLONING"}`.
+7. Agent polls `GET .../api/create-agent/<creation_id>/status` and may
+   stream `GET .../api/create-agent/<creation_id>/logs` -- both are
    covered by the same grant -- until `agent_id` is populated. The new
    mind then appears in the UI agent list as a peer of the creating
    mind.

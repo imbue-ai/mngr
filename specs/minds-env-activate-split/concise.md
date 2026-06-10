@@ -1,0 +1,29 @@
+# Split `minds env activate` into use-mode vs deploy-mode
+
+## Overview
+
+- `minds env activate <name>` today exports both *use-side* shell state (data root, mngr profile, client config path) and a *deploy-side* var (`MODAL_PROFILE`, pinning the Modal CLI to the tier's workspace). The two are unrelated -- a user who only wants to *use* a deployed tier has no reason to pin a Modal workspace they have no token for.
+- Bundling them causes concrete breakage. With `MODAL_PROFILE` set to a workspace the user has no Modal token for, `mngr observe`'s Modal discovery fails on every poll; `BackendResolver.get_agent_display_info` returns nothing; Latchkey's permission dialog refuses to render. The repo-local `.mngr/settings.toml` hard-enables the modal provider, so this bites every developer running `minds run` from inside the mngr monorepo.
+- This spec splits activation in two: default `minds env activate <name>` exports only use-side vars; opt-in `minds env activate --deploy <name>` additionally exports `MODAL_PROFILE` and pre-validates the operator's Modal setup. Deploy/destroy/recover commands refuse to run unless deploy-mode is active.
+- The split has no effect on the packaged Electron build (which writes use-side vars itself from the bundled config and never deploys) and no effect on `deployment_tests/helpers.py` (which already injects `MODAL_PROFILE` directly into the pytest subprocess env, independent of shell activation).
+- Out of scope: the related `mngr observe` warning-vs-error log-level fix, the UI banner for blocking error states, and any change to how repo-local `.mngr/settings.toml` enables providers. Those are being handled separately.
+
+## Expected Behavior
+
+- `minds env activate <name>` (no flag) exports `MINDS_ROOT_NAME`, `MNGR_HOST_DIR`, `MNGR_PREFIX`, `MINDS_CLIENT_CONFIG_PATH`, and emits `unset MODAL_PROFILE`. The shell can now run `minds run`, `mngr ...`, browse agents, hit Latchkey -- everything except deploy/destroy/recover.
+- `minds env activate --deploy <name>` exports the same four use-side vars, additionally exports `MODAL_PROFILE=<tier's modal_workspace>`, and **hard-refuses** if `~/.modal.toml` has no profile matching that workspace -- the error names the missing profile and points at `modal token set --profile <workspace>`. Skipped only when the tier's `deploy.toml` has no `modal_workspace` (or the literal `CHANGE_ME` placeholder), matching today's behavior.
+- `minds env deactivate` continues to `unset` all five vars (`MODAL_PROFILE` stays in the unset list), so a previously deploy-activated shell fully reverts.
+- `minds env deploy` / `minds env destroy` / `minds env recover` refuse to run when the shell is not deploy-activated. "Deploy-activated" means `MODAL_PROFILE` is set **and** equals the tier's `modal_workspace` from `deploy.toml`. A missing `MODAL_PROFILE`, or one that doesn't match the activated tier, is a hard error pointing the operator at the right re-activation command.
+- A previously deploy-activated shell that gets re-activated with plain `activate` (no `--deploy`) flips back to use-only mode: the new `unset MODAL_PROFILE` line removes the stale workspace pin before the next `modal ...` shellout can pick it up, and the deploy/destroy/recover refusal then fires correctly until the operator re-activates with `--deploy`.
+- The first line printed by `activate` is unchanged (`# Activated env 'staging'. Source via: ...`). Mode is implicit in whether `MODAL_PROFILE` appears in the export list.
+- All tiers (`production` / `staging` / `dev-<user>` / `ci-<...>`) behave identically with respect to the split. The only per-tier difference is the `modal_workspace` value pulled from each tier's `deploy.toml`.
+- `deployment_tests/helpers.py` is unchanged. It already constructs subprocess envs with `MODAL_PROFILE` injected directly via `modal_profile_for_tier_or_none`, parallel to the shell-activation path, and the split doesn't touch that helper.
+- The packaged Electron app is unchanged. It writes only the use-side vars from `_bundled/` and never invokes `minds env deploy`, so the new gate has nothing to refuse.
+
+## Changes
+
+- Add a `--deploy` flag to `minds env activate`. Default activation drops `MODAL_PROFILE` from the exports it emits and instead emits `unset MODAL_PROFILE`. `--deploy` adds the `MODAL_PROFILE=<workspace>` export as today, plus a precondition check against `~/.modal.toml` that hard-fails with a `modal token set --profile <workspace>` hint when the matching profile is missing.
+- Wire a deploy-mode-required check into `minds env deploy`, `minds env destroy`, and `minds env recover`. The check reads `MODAL_PROFILE` from the env, compares against the activated tier's `modal_workspace` (loaded from `deploy.toml`), and refuses on mismatch or absence with a prescriptive error: tell the operator they activated for use only, give them the exact `eval "$(uv run minds env activate --deploy <name>)"` to run, and briefly explain that activation now distinguishes use-mode from deploy-mode.
+- Update `minds env activate`'s docstring and the user-facing docs (`apps/minds/docs/environments.md`, the README usage snippets, and any help text that references `eval "$(...)"`) to describe both modes and call out that deploy/destroy/recover require `--deploy`.
+- Add unit / acceptance test coverage: plain `activate` emits `unset MODAL_PROFILE` and does not emit a `MODAL_PROFILE=` line; `--deploy` emits the export and fails when `~/.modal.toml` lacks the matching profile; `minds env deploy` (and destroy/recover) refuses without deploy-mode and with a tier-mismatched `MODAL_PROFILE`, and succeeds with a correctly deploy-activated shell.
+- No code changes to `deployment_tests/helpers.py`, the Electron bundler, or the repo-local `.mngr/settings.toml`. No changes to which env vars get pinned for use-mode (still the same four).

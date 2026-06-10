@@ -459,8 +459,8 @@ def test_input_handler_unknown_key_consumed() -> None:
 
 
 def test_field_cell_text_present() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failing", color="light red")})
-    assert _field_cell_text(entry, "ci") == "failing"
+    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
+    assert _field_cell_text(entry, "ci") == "failure"
 
 
 def test_field_cell_text_absent() -> None:
@@ -469,10 +469,10 @@ def test_field_cell_text_absent() -> None:
 
 
 def test_field_cell_markup_with_color() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failing", color="light red")})
+    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
     markup = _field_cell_markup(entry, "ci")
     assert isinstance(markup, tuple)
-    assert markup[1] == "failing"
+    assert markup[1] == "failure"
 
 
 def test_field_cell_markup_no_color() -> None:
@@ -542,7 +542,7 @@ def test_build_field_color_palette_none_snapshot() -> None:
 
 
 def test_build_field_color_palette_with_colors() -> None:
-    entry = _make_entry(cells={"ci": CellDisplay(text="failing", color="light red")})
+    entry = _make_entry(cells={"ci": CellDisplay(text="failure", color="light red")})
     snapshot = make_board_snapshot(entries=(entry,))
     entries, names = _build_field_color_palette(snapshot)
     assert len(entries) == 2
@@ -629,19 +629,19 @@ def _make_ci_def() -> _ColumnDef:
 
 
 def _ci_widget_attr(row: Any) -> str | None:
-    """Return the attribute name of the 'failing' CI cell in a built row, or None."""
+    """Return the attribute name of the 'failure' CI cell in a built row, or None."""
     for widget, _options in row.contents:
         if not isinstance(widget, Text):
             continue
         text, attribs = widget.get_text()
-        if text == "failing":
+        if text == "failure":
             return attribs[0][0] if attribs else None
     return None
 
 
 def test_build_agent_row_stale_field_uses_stale_attr() -> None:
     now = datetime(2027, 1, 1, 0, 0, 4, tzinfo=timezone.utc)
-    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=3600))
+    ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=3600))
     entry = _make_entry(
         section=BoardSection.STILL_COOKING,
         fields={FIELD_CI: ci},
@@ -655,7 +655,7 @@ def test_build_agent_row_stale_field_uses_stale_attr() -> None:
 
 def test_build_agent_row_fresh_field_keeps_color_attr() -> None:
     now = datetime(2027, 1, 1, 0, 0, 5, tzinfo=timezone.utc)
-    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=60))
+    ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=60))
     entry = _make_entry(
         section=BoardSection.STILL_COOKING,
         fields={FIELD_CI: ci},
@@ -670,7 +670,7 @@ def test_build_agent_row_fresh_field_keeps_color_attr() -> None:
 def test_build_agent_row_muted_section_overrides_stale() -> None:
     """A muted row stays uniformly muted even if its fields are stale."""
     now = datetime(2027, 1, 1, 0, 0, 6, tzinfo=timezone.utc)
-    ci = CiField(status=CiStatus.FAILING, created=now - timedelta(seconds=3600))
+    ci = CiField(status=CiStatus.FAILURE, created=now - timedelta(seconds=3600))
     entry = _make_entry(
         section=BoardSection.MUTED,
         fields={FIELD_CI: ci},
@@ -758,9 +758,9 @@ def test_field_cell_markup_fn_call() -> None:
 # =============================================================================
 
 
-def test_field_cell_markup_ci_failing_uses_color_attr() -> None:
-    """CI FAILING cell has color='light red', so markup uses field_ci_light_red attr."""
-    ci = CiField(status=CiStatus.FAILING, created=datetime(2027, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
+def test_field_cell_markup_ci_failure_uses_color_attr() -> None:
+    """CI FAILURE cell has color='light red', so markup uses field_ci_light_red attr."""
+    ci = CiField(status=CiStatus.FAILURE, created=datetime(2027, 1, 1, 0, 0, 13, tzinfo=timezone.utc))
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},
@@ -786,9 +786,9 @@ def test_field_cell_markup_ci_pending_uses_color_attr() -> None:
     assert markup[1] == cell.text
 
 
-def test_field_cell_markup_ci_passing_uses_color_attr() -> None:
-    """CI PASSING cell has color='light green', so markup uses field_ci_light_green attr."""
-    ci = CiField(status=CiStatus.PASSING, created=datetime(2027, 1, 1, 0, 0, 15, tzinfo=timezone.utc))
+def test_field_cell_markup_ci_success_uses_color_attr() -> None:
+    """CI SUCCESS cell has color='light green', so markup uses field_ci_light_green attr."""
+    ci = CiField(status=CiStatus.SUCCESS, created=datetime(2027, 1, 1, 0, 0, 15, tzinfo=timezone.utc))
     cell = ci.display()
     entry = _make_entry(
         fields={FIELD_CI: ci},

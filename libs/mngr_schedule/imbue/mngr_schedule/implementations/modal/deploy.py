@@ -343,7 +343,7 @@ def _build_package_mode_dockerfile(mngr_dockerfile_content: str) -> str:
             if not install_replacement_added:
                 result_lines.append("")
                 result_lines.append("# Install mngr from PyPI (PACKAGE mode)")
-                result_lines.append("RUN uv pip install --system mngr mngr-schedule")
+                result_lines.append("RUN uv pip install --system imbue-mngr imbue-mngr-schedule")
                 install_replacement_added = True
             continue
 

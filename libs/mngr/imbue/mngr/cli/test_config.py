@@ -14,10 +14,16 @@ def test_config_list_shows_merged_config(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test config list shows the merged configuration."""
+    """Test config list --all shows the merged configuration including defaults.
+
+    ``mngr config list`` without ``--all`` only lists keys that have been
+    explicitly written to a TOML scope; in this clean test environment that's
+    empty. ``--all`` includes default-valued fields so ``prefix`` (which has a
+    default of ``mngr-``) appears.
+    """
     result = cli_runner.invoke(
         config,
-        ["list"],
+        ["list", "--all"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -30,7 +36,30 @@ def test_config_list_with_json_format(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test config list with JSON output format."""
+    """Test config list --all with JSON output format."""
+    result = cli_runner.invoke(
+        config,
+        ["list", "--all", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    assert "config" in output
+    assert "prefix" in output["config"]
+
+
+def test_config_list_without_all_omits_default_only_keys(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Without ``--all``, keys that only have default values are omitted.
+
+    Regression test for the previous implementation where ``--all`` was a
+    no-op: the default view dumped every field regardless of whether the user
+    had ever written it to a TOML file.
+    """
     result = cli_runner.invoke(
         config,
         ["list", "--format", "json"],
@@ -41,7 +70,9 @@ def test_config_list_with_json_format(
     assert result.exit_code == 0
     output = json.loads(result.output)
     assert "config" in output
-    assert "prefix" in output["config"]
+    # In the clean test env no TOML scopes are written; ``prefix`` (a default-
+    # only field here) must not appear in the explicit-keys-only listing.
+    assert "prefix" not in output["config"]
 
 
 def test_config_list_with_scope_shows_file_path(
@@ -62,7 +93,7 @@ def test_config_list_with_scope_shows_file_path(
 
     # Create the settings.toml in the profile directory
     user_config_path = profile_dir / "settings.toml"
-    user_config_path.write_text('prefix = "custom-"\n')
+    user_config_path.write_text('prefix = "custom-"\nis_allowed_in_pytest = true\n')
 
     result = cli_runner.invoke(
         config,
@@ -284,7 +315,7 @@ def test_config_unset_removes_value(
     config_dir = temp_git_repo / f".{mngr_test_root_name}"
     config_dir.mkdir()
     config_path = config_dir / "settings.toml"
-    config_path.write_text('prefix = "test-"\ndefault_host_dir = "/tmp/keep"\n')
+    config_path.write_text('is_allowed_in_pytest = true\nprefix = "test-"\ndefault_host_dir = "/tmp/keep"\n')
 
     # Then unset it
     result = cli_runner.invoke(
@@ -313,11 +344,11 @@ def test_config_unset_nonexistent_key_fails(
     """Test config unset with nonexistent key returns an error."""
     monkeypatch.chdir(temp_git_repo)
 
-    # Create an empty config (using the test root name)
+    # Create a config with only the pytest opt-in (using the test root name)
     config_dir = temp_git_repo / f".{mngr_test_root_name}"
     config_dir.mkdir()
     config_path = config_dir / "settings.toml"
-    config_path.write_text("")
+    config_path.write_text("is_allowed_in_pytest = true\n")
 
     result = cli_runner.invoke(
         config,
@@ -378,3 +409,126 @@ def test_config_path_with_json_format(
     output = json.loads(result.output)
     assert "paths" in output
     assert len(output["paths"]) > 0
+
+
+def test_config_list_schema_preserves_generic_type_parameters(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config list --schema` should render parameterised generics with their args.
+
+    Regression test: ``_render_annotation`` previously returned just ``"list"``
+    for ``list[str]`` (via ``__name__``), losing the type parameter -- which
+    defeats the schema's purpose of telling users what values a setting takes.
+    The renderer must emit ``"list[str]"`` (or equivalent) for parameterised
+    annotations.
+    """
+    result = cli_runner.invoke(
+        config,
+        ["list", "--schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    output = json.loads(result.output)
+    rows_by_key = {row["key"]: row for row in output["schema"]}
+    # ``unset_vars: list[str]`` should keep the [str] in the rendered type.
+    unset_vars_type = rows_by_key["unset_vars"]["type"]
+    assert "list" in unset_vars_type and "str" in unset_vars_type, (
+        f"expected unset_vars type to mention both 'list' and 'str', got: {unset_vars_type!r}"
+    )
+
+
+def test_config_list_schema_lists_top_level_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr config list --schema` should enumerate the well-known top-level MngrConfig fields.
+
+    Spot-checks the discovery surface so the schema view stays useful for
+    surfacing settable keys via the documented entry points (MNGR__*,
+    --setting, mngr config set).
+    """
+    result = cli_runner.invoke(
+        config,
+        ["list", "--schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    keys = {row["key"] for row in output["schema"]}
+    assert {"prefix", "default_host_dir", "unset_vars", "headless"} <= keys
+
+
+def test_config_list_schema_rejects_scope_combination(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """``--schema`` is global; pairing it with ``--scope`` is a UsageError.
+
+    The schema is derived from ``MngrConfig.model_fields``, not from any
+    scope-specific TOML file, so combining the two flags has no meaningful
+    interpretation. Reject it loudly so the user picks one.
+    """
+    result = cli_runner.invoke(
+        config,
+        ["list", "--schema", "--scope", "user"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--schema and --scope cannot be combined" in result.output
+
+
+def test_config_extend_writes_extend_suffixed_key(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config extend` should write a ``field__extend`` entry, not the bare field.
+
+    Locks down the on-disk TOML shape that downstream tooling and the
+    resolver rely on -- a regression here would silently change semantics
+    from "extend the base value" to "replace it".
+    """
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["extend", "unset_vars", '["FROM_EXTEND"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
+    content = config_path.read_text()
+    assert 'unset_vars__extend = ["FROM_EXTEND"]' in content, content
+
+
+def test_config_set_with_extend_suffix_routes_to_extend(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mngr_test_root_name: str,
+) -> None:
+    """`mngr config set KEY__extend VALUE` should produce the same on-disk
+    shape as `mngr config extend KEY VALUE`.
+
+    This is the documented alias spelling for users who don't know about the
+    separate `extend` verb; the routing in _config_set_impl must end up at
+    the same TOML write.
+    """
+    monkeypatch.chdir(temp_git_repo)
+    result = cli_runner.invoke(
+        config,
+        ["set", "unset_vars__extend", '["FROM_SET_EXTEND"]', "--scope", "project"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
+    content = config_path.read_text()
+    assert 'unset_vars__extend = ["FROM_SET_EXTEND"]' in content, content

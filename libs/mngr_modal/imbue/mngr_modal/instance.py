@@ -48,6 +48,7 @@ from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import derive_offline_host_state
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -503,9 +504,31 @@ class ModalProviderInstance(BaseProviderInstance):
         the sandbox. Returns None if the volume does not exist or if
         host volume creation is disabled.
 
-        Probes the volume with a listdir to verify it actually exists, since
-        volume_from_name returns a lazy reference that doesn't fail
-        for deleted volumes.
+        Probes the volume with a ``listdir`` to verify it actually exists, since
+        ``volume_from_name`` returns a lazy reference that doesn't fail for a
+        deleted volume. Callers that only need a reference and want to skip that
+        network probe should use :meth:`get_volume_reference_for_host`.
+        """
+        host_volume = self.get_volume_reference_for_host(host)
+        if host_volume is None:
+            return None
+        try:
+            # Probe the volume to verify it exists (from_name returns lazy references).
+            host_volume.volume.listdir("/")
+        except (ModalProxyNotFoundError, ModalProxyInvalidError):
+            return None
+        return host_volume
+
+    @handle_modal_auth_error
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        """Return a host-volume *reference* without verifying it exists.
+
+        Cheap: constructs the lazy ``volume_from_name`` reference and skips the
+        ``listdir`` existence probe that :meth:`get_volume_for_host` performs, so
+        this does no network round-trip beyond resolving the reference. Returns
+        None only when host volumes are disabled for this provider. A reference
+        to a since-deleted volume is still returned; operations on it fail at
+        access time.
         """
         if not self.config.is_host_volume_created:
             return None
@@ -515,12 +538,9 @@ class ModalProviderInstance(BaseProviderInstance):
             vol_iface = self._modal_interface.volume_from_name(
                 volume_name, create_if_missing=False, environment_name=self.environment_name
             )
-            # Probe the volume to verify it exists (from_name returns lazy references)
-            vol_iface.listdir("/")
-            modal_volume = ModalVolume.model_construct(modal_volume=vol_iface)
-            return HostVolume.model_construct(volume=modal_volume)
         except (ModalProxyNotFoundError, ModalProxyInvalidError):
             return None
+        return HostVolume.model_construct(volume=ModalVolume.model_construct(modal_volume=vol_iface))
 
     # =========================================================================
     # Volume-based Host Record Methods
@@ -1628,14 +1648,16 @@ log "=== Shutdown script completed ==="
         the host record.
         """
         host_id = HostId(host_record.certified_host_data.host_id)
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=host_record.certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
-            on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
-                callback_host_id, certified_data
-            ),
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=host_record.certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+                on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
+                    callback_host_id, certified_data
+                ),
+            )
         )
 
     # =========================================================================
@@ -1777,6 +1799,12 @@ log "=== Shutdown script completed ==="
             )
             if isinstance(e, ModalProxyRemoteError):
                 raise MngrError(f"Failed to create Modal sandbox: {e}\n{build_log}") from None
+            elif isinstance(e, ModalProxyInvalidError):
+                # An invalid argument (e.g. a non-existent --snapshot image id) is a
+                # user/config error, not an internal bug. Surface it as a clean
+                # MngrError so the CLI prints a single-line message instead of
+                # dumping a raw Python traceback.
+                raise MngrError(f"Failed to create Modal host: {e}") from None
             else:
                 raise
 
@@ -2470,6 +2498,8 @@ log "=== Shutdown script completed ==="
         agent_refs: Sequence[DiscoveredAgent],
         field_generators: Mapping[str, Mapping[str, Callable[[AgentInterface, OnlineHostInterface], Any]]]
         | None = None,
+        offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]]
+        | None = None,
         on_error: Callable[[DiscoveredAgent | DiscoveredHost, BaseException], None] | None = None,
     ) -> tuple[HostDetails, list[AgentDetails]]:
         """Build HostDetails and AgentDetails via a single SSH command."""
@@ -2484,12 +2514,25 @@ log "=== Shutdown script completed ==="
 
                 # For offline hosts, fall back to the default per-field collection
                 if not isinstance(host, Host):
-                    return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                    return super().get_host_and_agent_details(
+                        host_ref,
+                        agent_refs,
+                        field_generators=field_generators,
+                        offline_field_generators=offline_field_generators,
+                        on_error=on_error,
+                    )
 
                 # Collect all data in one SSH command
                 with trace_span("Collecting listing data for {}", host_ref.host_id, _is_trace_span_enabled=False):
                     try:
                         raw = self._collect_all_listing_data_via_ssh(host)
+                    except HostConnectionError:
+                        # Connection failures must reach the outer
+                        # ``except HostConnectionError`` handler so the per-host
+                        # connection cache is cleared and we fall back to the
+                        # default listing. (HostConnectionError is a MngrError
+                        # subclass, so without this it would be swallowed here.)
+                        raise
                     except MngrError as e:
                         if on_error:
                             on_error(host_ref, e)
@@ -2503,7 +2546,13 @@ log "=== Shutdown script completed ==="
                     host_ref.host_id,
                     e,
                 )
-                return super().get_host_and_agent_details(host_ref, agent_refs, field_generators, on_error)
+                return super().get_host_and_agent_details(
+                    host_ref,
+                    agent_refs,
+                    field_generators=field_generators,
+                    offline_field_generators=offline_field_generators,
+                    on_error=on_error,
+                )
             finally:
                 if host is not None:
                     host.disconnect()

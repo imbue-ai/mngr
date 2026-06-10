@@ -21,11 +21,35 @@ both recognize.
 import pytest
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
+from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
 
 suppress_warnings()
+register_marker(
+    "minds_deployment: tests that exercise the minds deploy process itself by minting their own "
+    "ephemeral CI env. Driven by `just minds-test-deployment`; never collected by the standard "
+    "CI test runs or `just test-quick`."
+)
+register_marker(
+    "minds_services: tests that exercise the deployed services of a pre-stood-up shared CI env. "
+    "Driven by `just minds-test-deployment`; never collected by the standard CI test runs or "
+    "`just test-quick`."
+)
+register_marker(
+    "minds_electron: tests that drive the Electron minds desktop app end-to-end via Playwright "
+    "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
+    "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
+    "Electron + docker spin-up does not serialize behind every other docker-marked test."
+)
+register_marker(
+    "minds_snapshot_resume: tests that assume the sandbox was booted from a Modal snapshot "
+    "produced by `scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker "
+    "container already on disk). Run only via `just test-offload-minds-snapshot <image-id>` -- "
+    "explicitly excluded from every other offload run because they would fail anywhere without "
+    "the snapshot's pre-baked state."
+)
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
 

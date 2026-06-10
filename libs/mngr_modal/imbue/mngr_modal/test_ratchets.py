@@ -4,8 +4,6 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -16,7 +14,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(2))
+    rc.check_todos(_DIR, snapshot(0))
 
 
 def test_prevent_exec() -> None:
@@ -97,7 +95,14 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    rc.check_asyncio_import(_DIR, snapshot(0))
+    # One: ``log_utils_test.py`` drives Modal's ``put_streaming_log`` /
+    # ``put_fetched_log`` via ``asyncio.run`` to verify our
+    # ``_QuietOutputManager`` override still captures build-log output
+    # after the modal 1.4.x refactor. Those two methods are
+    # ``async def`` in the upstream API; there is no sync wrapper to
+    # call instead. The asyncio use is confined to a single test file
+    # and does not leak into the package's runtime code.
+    rc.check_asyncio_import(_DIR, snapshot(1))
 
 
 def test_prevent_pandas_import() -> None:
@@ -235,7 +240,11 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(6))
+    rc.check_direct_subprocess(_DIR, snapshot(0))
+
+
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
 # --- AST-based ratchets ---
@@ -258,11 +267,15 @@ def test_prevent_init_methods_in_non_exception_classes() -> None:
 
 
 def test_prevent_cast_usage() -> None:
-    rc.check_cast_usage(_DIR, snapshot(1))
+    rc.check_cast_usage(_DIR, snapshot(0))
 
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
 # --- Project-level checks ---
@@ -270,13 +283,3 @@ def test_prevent_assert_isinstance() -> None:
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)

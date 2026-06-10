@@ -1,37 +1,28 @@
 import json
 import secrets
+import threading
 from abc import ABC
 from abc import abstractmethod
-from collections.abc import Callable
 from enum import auto
 from pathlib import Path
 from typing import Final
-from typing import TypeVar
 
 from loguru import logger
 from pydantic import Field
-from pydantic import SecretStr
+from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.minds.errors import ApiTokenError
-from imbue.minds.errors import MindError
 from imbue.minds.errors import SigningKeyError
 from imbue.minds.primitives import CookieSigningKey
-from imbue.minds.primitives import MindsApiToken
 from imbue.minds.primitives import OneTimeCode
-
-_SecretT = TypeVar("_SecretT", bound=SecretStr)
+from imbue.mngr.utils.file_utils import atomic_write
 
 _SIGNING_KEY_LENGTH: Final[int] = 64
 
-_API_TOKEN_LENGTH: Final[int] = 48
-
 _SIGNING_KEY_FILENAME: Final[str] = "signing_key"
-
-_API_TOKEN_FILENAME: Final[str] = "api_token"
 
 _CODES_FILENAME: Final[str] = "one_time_codes.json"
 
@@ -66,10 +57,6 @@ class AuthStoreInterface(MutableModel, ABC):
         """Return the cookie signing key, generating one if it does not exist."""
 
     @abstractmethod
-    def get_api_token(self) -> MindsApiToken:
-        """Return the minds API bearer token, generating one if it does not exist."""
-
-    @abstractmethod
     def add_one_time_code(
         self,
         code: OneTimeCode,
@@ -81,6 +68,16 @@ class FileAuthStore(AuthStoreInterface):
     """File-based auth store that persists codes in JSON and signing key on disk."""
 
     data_directory: Path = Field(frozen=True, description="Directory for auth data files")
+
+    # Serializes first-time signing-key generation. FastAPI dispatches sync
+    # route handlers on a threadpool, so on a fresh data directory the desktop
+    # client's startup burst (``/authenticate`` plus the ``/`` redirect target,
+    # ``/_chrome``, and ``/welcome`` -- each of which calls ``get_signing_key``)
+    # can all reach generation concurrently. Without this lock they would mint
+    # *different* keys and race to write; the last writer wins and silently
+    # invalidates the cookie just signed with an earlier key, so the next
+    # request's ``verify_session_cookie`` fails and the user looks logged out.
+    _generation_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def validate_and_consume_code(
         self,
@@ -115,67 +112,50 @@ class FileAuthStore(AuthStoreInterface):
             return True
 
     def get_signing_key(self) -> CookieSigningKey:
-        return self._load_or_generate_secret(
-            filename=_SIGNING_KEY_FILENAME,
-            secret_byte_length=_SIGNING_KEY_LENGTH,
-            log_span_label="Generating new signing key",
-            read_error_message="Cannot read signing key from {path}",
-            empty_error_message="Signing key file is empty: {path}",
-            write_error_message="Cannot write signing key to {path}",
-            error_class=SigningKeyError,
-            wrap=CookieSigningKey,
-        )
+        key_path = self.data_directory / _SIGNING_KEY_FILENAME
 
-    def get_api_token(self) -> MindsApiToken:
-        return self._load_or_generate_secret(
-            filename=_API_TOKEN_FILENAME,
-            secret_byte_length=_API_TOKEN_LENGTH,
-            log_span_label="Generating new minds API token",
-            read_error_message="Cannot read API token from {path}",
-            empty_error_message="API token file is empty: {path}",
-            write_error_message="Cannot write API token to {path}",
-            error_class=ApiTokenError,
-            wrap=MindsApiToken,
-        )
+        # Fast path: a key already exists, so no generation (or locking) needed.
+        existing = self._read_signing_key(key_path)
+        if existing is not None:
+            return existing
 
-    def _load_or_generate_secret(
-        self,
-        *,
-        filename: str,
-        secret_byte_length: int,
-        log_span_label: str,
-        read_error_message: str,
-        empty_error_message: str,
-        write_error_message: str,
-        error_class: type[MindError],
-        wrap: Callable[[str], _SecretT],
-    ) -> _SecretT:
-        """Read a 0o600-permissioned secret file, generating it on first access.
+        # Generate exactly one key even under concurrent first-time access.
+        with self._generation_lock:
+            # Re-check under the lock: another thread may have generated the key
+            # while we were blocked acquiring it.
+            existing = self._read_signing_key(key_path)
+            if existing is not None:
+                return existing
 
-        Shared between :meth:`get_signing_key` and :meth:`get_api_token`.
-        The error-message templates each accept a ``{path}`` placeholder
-        so each caller can supply its own wording without the helper
-        having to know about the specific secret kind.
+            with log_span("Generating new signing key"):
+                new_key = secrets.token_urlsafe(_SIGNING_KEY_LENGTH)
+                try:
+                    # atomic_write replaces the file in a single step, so a
+                    # concurrent reader never observes an empty or partially
+                    # written key file.
+                    atomic_write(key_path, new_key)
+                    key_path.chmod(0o600)
+                except OSError as e:
+                    raise SigningKeyError(f"Cannot write signing key to {key_path}") from e
+                return CookieSigningKey(new_key)
+
+    def _read_signing_key(self, key_path: Path) -> CookieSigningKey | None:
+        """Return the persisted signing key, or ``None`` if it does not exist yet.
+
+        Raises :class:`SigningKeyError` if the file exists but cannot be read or
+        is empty. Since :func:`atomic_write` never leaves an empty key file, an
+        empty file means genuine corruption -- refuse to silently mint a
+        replacement, which would invalidate every live session's cookie.
         """
-        secret_path = self.data_directory / filename
-        if secret_path.exists():
-            try:
-                secret_value = secret_path.read_text().strip()
-            except OSError as e:
-                raise error_class(read_error_message.format(path=secret_path)) from e
-            if not secret_value:
-                raise error_class(empty_error_message.format(path=secret_path))
-            return wrap(secret_value)
-
-        with log_span(log_span_label):
-            new_secret = secrets.token_urlsafe(secret_byte_length)
-            try:
-                self.data_directory.mkdir(parents=True, exist_ok=True)
-                secret_path.write_text(new_secret)
-                secret_path.chmod(0o600)
-            except OSError as e:
-                raise error_class(write_error_message.format(path=secret_path)) from e
-            return wrap(new_secret)
+        if not key_path.exists():
+            return None
+        try:
+            key_value = key_path.read_text().strip()
+        except OSError as e:
+            raise SigningKeyError(f"Cannot read signing key from {key_path}") from e
+        if not key_value:
+            raise SigningKeyError(f"Signing key file is empty: {key_path}")
+        return CookieSigningKey(key_value)
 
     def add_one_time_code(
         self,

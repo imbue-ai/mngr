@@ -73,7 +73,7 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 **Build flow:**
 
 1. `pnpm build` assembles the Electron app:
-   - Copies `electron/pyproject.toml` and its lockfile into the resources directory
+   - Copies `electron/pyproject/pyproject.toml` and its lockfile into the resources directory
    - Downloads platform-specific `uv` and `git` binaries into the resources directory
    - Packages the Electron code (main.js, preload.js, HTML pages, assets)
 2. `pnpm exec todesktop build` uploads the assembled app to ToDesktop, which:
@@ -115,7 +115,7 @@ All Electron code lives in `apps/minds/` alongside the existing Python code:
 apps/minds/
   package.json              # pnpm, Electron, ToDesktop config
   pnpm-lock.yaml
-  todesktop.json            # ToDesktop for Electron config
+  todesktop.js              # ToDesktop for Electron config
   electron/
     main.js                 # Electron main process entry point
     preload.js              # Preload script (minimal for now)
@@ -127,8 +127,9 @@ apps/minds/
     assets/
       icon.svg              # Placeholder brain icon
       icon.png              # Generated from SVG for Electron (multiple sizes)
-    pyproject.toml          # Standalone: declares imbue-minds dependency
-    uv.lock                 # Pinned lockfile for reproducible installs
+    pyproject/
+      pyproject.toml        # Standalone: declares imbue-minds dependency
+      uv.lock               # Pinned lockfile for reproducible installs
   # ... existing Python code unchanged ...
   imbue/minds/
   pyproject.toml            # Existing monorepo pyproject.toml (unchanged)
@@ -397,7 +398,7 @@ This uses an OS-level lock (file lock on Linux, named mutex on macOS). No custom
 
 The update flow is:
 
-1. Developer bumps the `imbue-minds` version in `electron/pyproject.toml` and regenerates the lockfile
+1. Developer bumps the `imbue-minds` version in `electron/pyproject/pyproject.toml` and regenerates the lockfile
 2. Developer commits and runs `pnpm exec todesktop build`
 3. ToDesktop builds new installers, signs them, publishes to update server
 4. Running Minds apps check for updates in the background (ToDesktop handles this)
@@ -409,21 +410,23 @@ This coupling means Python and Electron updates are atomic from the user's persp
 
 ## Standalone pyproject.toml
 
-The file at `electron/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app:
+The file at `electron/pyproject/pyproject.toml` is separate from the monorepo's `apps/minds/pyproject.toml`. It exists solely to tell `uv sync` what to install inside the Electron app:
 
 ```toml
 [project]
 name = "minds-desktop"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = "==3.12.13"
 dependencies = [
-    "imbue-minds>=0.1.0",
+    "minds>=0.1.0",
+    "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-modal>=0.2.0",
 ]
 ```
 
-This is intentionally minimal. `imbue-minds` transitively pulls in `mngr`, `mngr-claude-mind`, and all other Python dependencies. The lockfile (`uv.lock`) pins everything.
+This is intentionally minimal. `minds` transitively pulls in `mngr` and the rest of the core Python dependencies; `imbue-mngr-claude` and `imbue-mngr-modal` are listed explicitly so the plugins are installed. The lockfile (`uv.lock`) pins everything.
 
-When cutting a new release, the developer updates the version pin (e.g., `imbue-minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
+When cutting a new release, the developer updates the version pin (e.g., `minds>=0.2.0`) and regenerates the lockfile with `uv lock`. This lockfile is committed and shipped in the Electron app bundle.
 
 ## App Identity
 

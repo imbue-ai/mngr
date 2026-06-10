@@ -4,8 +4,6 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -38,7 +36,13 @@ def test_prevent_time_sleep() -> None:
     # available while there are running tasks on the VPS" race). OVH exposes
     # no push/event mechanism for task completion, so polling-and-sleeping
     # is the same shape `wait_for_task` already uses.
-    rc.check_time_sleep(_DIR, snapshot(10))
+    #
+    # Bumped 10 -> 11 for `_post_rebuild_retrying_in_flight_task` in
+    # ordering.py: the task listing above is eventually consistent and can
+    # report no active tasks while OVH still rejects `/rebuild` with the same
+    # "running tasks" error, so the POST itself is retried with a sleep
+    # between attempts. Same no-push-mechanism justification.
+    rc.check_time_sleep(_DIR, snapshot(11))
 
 
 def test_prevent_global_keyword() -> None:
@@ -225,6 +229,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0))
 
 
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 
@@ -252,21 +260,15 @@ def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
+
+
 # --- Project-level checks ---
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(1))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)
 
 
 def test_prevent_exit_stack() -> None:

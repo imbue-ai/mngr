@@ -28,6 +28,7 @@ Only after doing all of the above should you begin writing code.
 
 # Important commands and conventions:
 
+- The `mngr` on your PATH is the dev shim (`scripts/mngr`), which routes `mngr` (and anything that shells out to it, e.g. minds) to the checkout you're working in instead of a stale global install. A pre-commit hook installs it automatically (a symlink in `~/.local/bin`) and verifies it's on PATH; if it fails, put `~/.local/bin` on your PATH ahead of any venv bin (then `hash -r`) -- do not bypass it.
 - Never run `uv sync`, always run `uv sync --all-packages` instead
 - Never pipe the output of a non-instant command through `grep`, `jq`, `awk`, `head`, `tail`, or similar without preserving the full output. If you later need something that was discarded, you have to rerun the entire command. Instead, write the output to a file first and then filter the file, or use `tee` to capture and filter simultaneously (e.g. `some_command | tee /tmp/some_command_output.txt | grep pattern`).
 
@@ -59,6 +60,7 @@ Only after doing all of the above should you begin writing code.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
+- `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so production code must not read files outside it at runtime unless they're shipped into the package (e.g. via wheel `force-include`, as the help-topic docs are).
 - To reiterate: code correctness and quality is the most important concern when writing code.
 
 # Running tests
@@ -83,6 +85,8 @@ Only after doing all of the above should you begin writing code.
 # Ratchets
 
 Each project has a `test_ratchets.py` file containing automated code quality checks ("ratchets"). Each ratchet tracks a count of violations for a specific anti-pattern (e.g. raising built-in exceptions, using monkeypatch.setattr). The count can only stay the same or decrease -- increasing it fails the test. To add or modify ratchets, use `/writing-ratchet-tests`.
+
+When your change *reduces* a ratchet's violations, lock in the improvement by tightening its recorded count: run `uv run pytest --inline-snapshot=trim <path/to/test_ratchets.py>` (scoped to the affected file(s), and without xdist so inline-snapshot stays enabled).
 
 Ratchets are guidance and reminders about good code, not rules to be blindly obeyed. When a ratchet fires on your code:
 
@@ -130,13 +134,18 @@ If instructed not to commit:
 
 # Changelog
 
-Every PR must include a changelog entry file. CI will fail if it is missing.
+Every PR must include one changelog entry file **per project it touches**. CI will fail if any are missing.
 
-- Create the file at `changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
-  - Example: branch `mngr/add-feature` -> `changelog/mngr-add-feature.md`
-- The file should briefly describe the user-visible changes in the PR.
-- A nightly agent consolidates entries into `UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `CHANGELOG.md` (concise AI-generated summary).
+- A "project" is a directory under `libs/` or `apps/` (e.g. `mngr`, `minds`), or the synthetic top-level `dev/` directory for root-level files (`scripts/`, `.github/`, `justfile`, repo-root docs, top-level config).
+- Each project holds its own changelog artifacts inside its own directory: `<project_dir>/changelog/` (per-PR entries), `<project_dir>/CHANGELOG.md` (concise summary), `<project_dir>/UNABRIDGED_CHANGELOG.md` (verbatim).
+- For each project a PR touches, create one entry file at `<project_dir>/changelog/<branch-name>.md`, where slashes in the branch name are replaced with dashes.
+  - Example: branch `mngr/add-mngr-feature-and-minds-fix` touches `libs/mngr` and `apps/minds`, so create both `libs/mngr/changelog/mngr-add-mngr-feature-and-minds-fix.md` and `apps/minds/changelog/mngr-add-mngr-feature-and-minds-fix.md`.
+  - A PR that only edits `scripts/` and CI workflows is a `dev`-only PR: `dev/changelog/<branch>.md`.
+- Each file should briefly describe the user-visible changes in the PR that pertain to *that* project. Same-PR entries can repeat shared context if it helps readers of each project's changelog.
+  - If the entry uses a list, separate the bullets with a double newline (a blank line between each bullet).
+- A nightly agent fans each project's entries into that project's `<project_dir>/UNABRIDGED_CHANGELOG.md` (full verbatim entries) and `<project_dir>/CHANGELOG.md` (concise AI-generated summary).
 - The changelog consolidation agent's own PRs (`mngr/changelog-consolidation-*`) are exempt from this requirement.
+- There is no separate "this file is a changelog file, so it doesn't count" exemption: adding a `<project_dir>/changelog/<branch>.md` entry is itself an edit under that project, and inherently satisfies the requirement. A PR that *only* touches a project's consolidated `CHANGELOG.md` (e.g. a manual correction) still owes a per-PR entry describing the correction.
 
 # Silly error workarounds
 

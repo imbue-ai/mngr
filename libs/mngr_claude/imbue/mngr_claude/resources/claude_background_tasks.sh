@@ -9,18 +9,17 @@
 #   2. Transcript streaming: launches stream_transcript.sh which watches
 #      all session JSONL files and streams new lines to
 #      $MNGR_AGENT_STATE_DIR/logs/claude_transcript/events.jsonl
-#   3. Common transcript (optional): if MNGR_EMIT_COMMON_TRANSCRIPT=1,
-#      launches common_transcript.sh which converts the raw transcript
-#      into an agent-agnostic common format at
-#      $MNGR_AGENT_STATE_DIR/events/claude/common_transcript/events.jsonl
+#   3. Common transcript (optional): launches common_transcript.sh, which
+#      converts the raw transcript into an agent-agnostic common format at
+#      $MNGR_AGENT_STATE_DIR/events/claude/common_transcript/events.jsonl,
+#      only if that script is present in commands/. ClaudeAgent.provision()
+#      skips writing the converter when emit_common_transcript=False, so
+#      disabled-emit takes effect simply via the on-disk -x check.
 #
 # Usage: claude_background_tasks.sh <tmux_session_name>
 #
 # Requires environment variables:
 #   MNGR_AGENT_STATE_DIR  - the agent's state directory (contains commands/)
-#
-# Optional environment variables:
-#   MNGR_EMIT_COMMON_TRANSCRIPT - set to "1" to enable common transcript conversion
 #
 # Uses a pidfile to prevent duplicate instances for the same session.
 
@@ -62,13 +61,29 @@ if [ -x "$STREAM_SCRIPT" ]; then
     log_info "Started transcript streaming (PID: $_STREAM_PID)"
 fi
 
-# Optionally start common transcript conversion in the background
+# Optionally start common transcript conversion in the background. The
+# converter script is only on disk when ClaudeAgent.provision() decided to
+# emit the common transcript, so this -x check is the single gate.
 COMMON_TRANSCRIPT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/common_transcript.sh"
 _COMMON_TRANSCRIPT_PID=""
-if [ "${MNGR_EMIT_COMMON_TRANSCRIPT:-}" = "1" ] && [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
+if [ -x "$COMMON_TRANSCRIPT_SCRIPT" ]; then
     bash "$COMMON_TRANSCRIPT_SCRIPT" &
     _COMMON_TRANSCRIPT_PID=$!
     log_info "Started common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
+fi
+
+# Optionally start the response-streaming watcher. Like the common transcript
+# converter, this script is only on disk when ClaudeAgent.provision() decided to
+# enable streaming (streaming_snapshot_interval_seconds > 0), so its presence is
+# the single gate. It reads the poll interval from the stream_interval file under
+# $MNGR_AGENT_STATE_DIR/plugin/claude/ (env-var propagation into this subshell is
+# unreliable, so the interval is passed via a file instead).
+STREAM_SNAPSHOT_SCRIPT="$MNGR_AGENT_STATE_DIR/commands/stream_snapshot.py"
+_STREAM_SNAPSHOT_PID=""
+if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
+    python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+    _STREAM_SNAPSHOT_PID=$!
+    log_info "Started response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
 fi
 
 _cleanup() {
@@ -82,13 +97,20 @@ _cleanup() {
         kill "$_COMMON_TRANSCRIPT_PID" 2>/dev/null
         wait "$_COMMON_TRANSCRIPT_PID" 2>/dev/null || true
     fi
+    # Stop the response stream snapshot watcher
+    if [ -n "$_STREAM_SNAPSHOT_PID" ] && kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
+        kill "$_STREAM_SNAPSHOT_PID" 2>/dev/null
+        wait "$_STREAM_SNAPSHOT_PID" 2>/dev/null || true
+    fi
     rm -f "$_MNGR_ACT_LOCK"
 }
 trap _cleanup EXIT
 
 log_info "Background tasks started for session $SESSION_NAME"
 
-while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+# `=` is tmux's exact-match prefix; without it the loop would never exit when
+# our session is gone but a prefix-collision sibling is alive.
+while tmux has-session -t "=$SESSION_NAME" 2>/dev/null; do
     # Update activity timestamp if agent is actively processing
     if [ -f "$MNGR_AGENT_STATE_DIR/active" ]; then
         printf '{"time": %d, "source": "activity_updater"}' \
@@ -112,6 +134,16 @@ while tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
             bash "$COMMON_TRANSCRIPT_SCRIPT" &
             _COMMON_TRANSCRIPT_PID=$!
             log_info "Restarted common transcript converter (PID: $_COMMON_TRANSCRIPT_PID)"
+        fi
+    fi
+
+    # Restart the response stream snapshot watcher if it died unexpectedly
+    if [ -n "$_STREAM_SNAPSHOT_PID" ] && ! kill -0 "$_STREAM_SNAPSHOT_PID" 2>/dev/null; then
+        log_warn "Response stream snapshot watcher died, restarting"
+        if [ -f "$STREAM_SNAPSHOT_SCRIPT" ]; then
+            python3 "$STREAM_SNAPSHOT_SCRIPT" "$SESSION_NAME" &
+            _STREAM_SNAPSHOT_PID=$!
+            log_info "Restarted response stream snapshot watcher (PID: $_STREAM_SNAPSHOT_PID)"
         fi
     fi
 

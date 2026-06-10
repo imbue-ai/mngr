@@ -50,11 +50,11 @@ run_args = "--cov-fail-under=0 -p no:xdist"
 
 [groups.all]
 retry_count = 0
-filters = "-m 'not acceptance and not release and not flaky'"
+filters = "-m 'not acceptance and not release and not flaky and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [groups.flaky]
 retry_count = 4
-filters = "-m 'flaky and not acceptance and not release'"
+filters = "-m 'flaky and not acceptance and not release and not sdk_live and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 [history]
 path = "offload-history-modal.jsonl"

@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     openssh-server \
     procps \
+    restic \
     ripgrep \
     rsync \
     tini \
@@ -71,6 +72,17 @@ ARG CLAUDE_CODE_VERSION="2.1.141"
 RUN curl -fsSL https://claude.ai/install.sh > /tmp/install_claude.sh && ( if [ -n "$CLAUDE_CODE_VERSION" ]; then cat /tmp/install_claude.sh | bash -s "$CLAUDE_CODE_VERSION"; else cat /tmp/install_claude.sh | bash; fi && test -x /root/.local/bin/claude ) || ( cat /tmp/install_claude.sh && exit 1 )
 ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION}
 
+# Node.js, pinned to apps/minds/package.json's engines.node. Required by the
+# mngr_latchkey gateway's .mjs extensions (run under node) and by minds Python
+# tests that evaluate apps/minds/todesktop.js via `node -e`.
+ARG NODE_VERSION="24.15.0"
+RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-connrefused \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${ARCH}.tar.gz" \
+        | tar -xz -C /usr/local --strip-components=1 && \
+    test -x /usr/local/bin/node
+ENV NODE_VERSION=${NODE_VERSION}
+
 # without this, there are some annoying bugs on modal's side with snapshotting
 ENV UV_LINK_MODE=copy
 
@@ -85,8 +97,13 @@ ENV UV_LINK_MODE=copy
 # only cargo-installed tool in the image, so the toolchain has no further
 # purpose. If a future tool needs to be cargo-installed, install it in
 # this same RUN before the cleanup line.
-ARG OFFLOAD_VERSION=0.9.5
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+# OFFLOAD_VERSION is exported inline (not a Dockerfile ARG) because mngr_modal
+# ships each Dockerfile instruction to Modal as its own `dockerfile_commands`
+# call (per-layer caching, see `_build_image_from_dockerfile_contents`). ARGs
+# don't carry across separate calls, so an ARG above would expand to empty in
+# the RUN below and `cargo install offload@` would error.
+RUN export OFFLOAD_VERSION=0.9.7 \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
     && /root/.cargo/bin/cargo install offload@${OFFLOAD_VERSION} --locked --root /opt/offload \
     && cp /opt/offload/bin/offload /usr/local/bin/offload \
@@ -108,6 +125,23 @@ WORKDIR /code/mngr/
 # COPY lands files owned by root:root by default, so no chown is needed.
 COPY . /code/mngr/
 
+# Bootstrap the source tree for the keyframe shape: if the COPY above
+# only carried current.tar.gz + a .checkpoint marker (the keyframe
+# shape produced by scripts/make_tar_of_repo.sh), extract the tarball
+# inline so the post-COPY RUN below can find the script it's trying
+# to invoke. We delete the tarball + checkpoint afterwards so the
+# script's own equivalent extraction step is a no-op when it runs
+# next. No-op for the real-source-tree shape where current.tar.gz
+# isn't present.
+#
+# The condition is phrased "if tarball present" rather than "if script
+# absent" so this RUN doesn't trip the mngr_schedule PACKAGE-mode
+# install-section-end sentinel (which matches on the substring
+# "scripts/post-source-setup.sh").
+RUN if [ -f /code/mngr/current.tar.gz ]; then \
+        cd /code/mngr && tar xzf current.tar.gz && rm -f current.tar.gz *.checkpoint; \
+    fi
+
 # THE single, only post-COPY RUN. All source-dependent setup
 # (current.tar.gz extraction, .git normalization, image_commit_hash,
 # uv sync, editable installs) lives in scripts/post-source-setup.sh.
@@ -116,7 +150,15 @@ COPY . /code/mngr/
 # the same image state as a from-scratch Dockerfile build. Adding any
 # other RUN step below this line causes drift between the two paths.
 # Don't.
-RUN bash scripts/post-source-setup.sh
+#
+# The script path is absolute so this RUN works regardless of WORKDIR
+# inheritance. mngr_modal's `_build_image_from_dockerfile_contents`
+# ships each Dockerfile instruction to Modal as its own per-layer
+# `dockerfile_commands` call (FROM base + instruction), and WORKDIR
+# set in an earlier layer does NOT carry through into the next
+# layer's RUN cwd -- it defaults to /. The script itself `cd`s into
+# /code/mngr first thing, so this only matters for finding the script.
+RUN bash /code/mngr/scripts/post-source-setup.sh
 
 # Run idly forever while being responsive to SIGTERM.
 # PID 1 must explicitly install signal handlers in order to respect signals.

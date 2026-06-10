@@ -105,7 +105,7 @@ per-developer dev envs.
 ## Step 4: Push the Vault changes to Modal and redeploy
 
 ```bash
-eval "$(uv run minds env activate production)"
+eval "$(uv run minds env activate --deploy production)"
 uv run minds env deploy --yes-i-mean-production
 ```
 
@@ -138,6 +138,15 @@ uv run mngr imbue_cloud admin pool create \
 ```
 
 The `--attributes` JSON describes what the row will match against. The minds desktop client always sends `repo_branch_or_tag` in its lease request (the resolved FCT branch in dev, or the latest semver tag in production), so that key needs to be present on every row that should ever be leased. Other dimensions (`cpus`, `memory_gb`, `gpu_count`) can be set if you want a more constrained pool generation; they're only required on the row when the lease request also includes them.
+
+### Fast path vs. slow path
+
+When a user creates an imbue_cloud workspace, minds makes up to two `mngr create` calls:
+
+1. **Fast path** (`fast_mode=require`): lease a pool host whose `attributes` exactly match (including `repo_branch_or_tag`) and adopt its pre-baked agent. This is fast because the host is fully baked.
+2. **Slow path** (`fast_mode=prevent`): if no exact match exists, the provider raises `FastPathUnavailableError`; minds automatically retries, this time leasing *any* available host (resource attributes only -- `repo_branch_or_tag` is dropped), destroying its baked container, and rebuilding it from the FCT `Dockerfile`. This is slower (a full container build) but works whenever the pool has any free host of the right size.
+
+So a pool whose rows are baked at an older `repo_branch_or_tag` no longer hard-fails newer workspace creations -- they fall back to the slow path. Keeping the pool baked at the current version is still worthwhile because it keeps creations on the fast path. Only when the pool is genuinely empty (no `available` rows) does creation fail, with `ImbueCloudLeaseUnavailableError`.
 
 To rsync the local mngr working tree into the FCT worktree's `vendor/mngr/` for the duration of the bake (dev-loop pattern), pass `--mngr-source <monorepo-root>`. The bake resets `vendor/mngr/` to HEAD when it finishes, so the worktree stays clean wrt mngr churn.
 

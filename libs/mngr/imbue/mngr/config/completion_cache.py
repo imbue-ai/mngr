@@ -18,8 +18,16 @@ COMPLETION_CACHE_FILENAME: Final[str] = ".command_completions.json"
 def get_completion_cache_dir() -> Path:
     """Return the directory used for completion cache files.
 
-    Uses MNGR_COMPLETION_CACHE_DIR if set, otherwise the mngr host directory
-    (MNGR_HOST_DIR or ~/.mngr). The directory is created if it does not exist.
+    Resolution order:
+    1. ``MNGR_COMPLETION_CACHE_DIR`` env var. This is a "special" env var
+       (single underscore) like ``MNGR_ROOT_NAME`` / ``MNGR_PREFIX`` /
+       ``MNGR_HOST_DIR``: it isn't a parsed ``MngrConfig`` field, because tab
+       completion runs in a lightweight pre-reader path that intentionally
+       skips full config loading. The double-underscore ``MNGR__*`` form is
+       not recognised here.
+    2. The mngr host directory (``MNGR_HOST_DIR`` or ``~/.mngr``).
+
+    The directory is created if it does not exist.
     """
     env_dir = os.environ.get("MNGR_COMPLETION_CACHE_DIR")
     if env_dir:
@@ -43,7 +51,17 @@ class CompletionCacheData(NamedTuple):
     host_name_options: list[str] = []
     plugin_name_options: list[str] = []
     plugin_names: list[str] = []
+    # Installable plugin package names (PyPI) for completing `mngr plugin add`,
+    # distinct from `plugin_names` (entry-point names of installed plugins).
+    catalog_package_names: list[str] = []
+    # Currently-installed plugin package names (uv-tool receipt extras) for
+    # completing `mngr plugin remove`, which only accepts already-installed
+    # packages.
+    installed_plugin_package_names: list[str] = []
     config_keys: list[str] = []
     positional_nargs_by_command: dict[str, int | None] = {}
     positional_completions: dict[str, list[list[str]]] = {}
     config_value_choices: dict[str, list[str]] = {}
+    # Candidates for the `mngr help` positional arg: every top-level command name
+    # plus every registered help topic key.
+    help_targets: list[str] = []

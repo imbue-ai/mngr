@@ -13,6 +13,7 @@ from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import PluginMngrError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -112,7 +113,7 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
     # so it serves as the startup ready indicator.
     TUI_READY_INDICATOR = "pi v"
 
-    def _send_enter_and_validate(self, tmux_target: str) -> None:
+    def _send_enter_and_validate(self, tmux_target: TmuxWindowTarget) -> None:
         # Pi has no UserPromptSubmit hook and no input-row placeholder that
         # disappears during typing, so submission can't be confirmed
         # post-Enter. The earlier paste-visibility check is what gives us
@@ -248,13 +249,17 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                 logger.info("Transferring settings.json to per-agent config dir...")
                 host.write_text_file(config_dir / "settings.json", settings_source.read_text())
 
+            # Transfer the resource directories with a single rsync rather than
+            # one write_file per file. A per-file upload opens an SFTP channel
+            # per file (a full round-trip over the SSH tunnel) and does not
+            # scale to large resource sets -- see github issue 1825.
+            include_args: list[str] = []
             for dir_name in ("skills", "prompts", "extensions", "themes"):
-                source = home_pi / dir_name
-                if source.exists() and source.is_dir():
-                    for file_path in source.rglob("*"):
-                        if file_path.is_file():
-                            relative = file_path.relative_to(home_pi)
-                            host.write_file(config_dir / relative, file_path.read_bytes())
+                if (home_pi / dir_name).is_dir():
+                    include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
+            if include_args:
+                include_args.append("--exclude=*")
+                host.copy_local_directory(home_pi, config_dir, " ".join(include_args))
 
     def provision(
         self,

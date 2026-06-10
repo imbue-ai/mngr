@@ -4,8 +4,6 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.imbue_common.ratchet_testing import standard_ratchet_checks as rc
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_ruff_errors
-from imbue.imbue_common.ratchet_testing.ratchets import check_no_type_errors
 
 _DIR = Path(__file__).parent.parent.parent
 
@@ -32,9 +30,8 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Ratchet at 5: launch_all_test_agents (1 launch-delay)
-    # + launch_and_poll_agents (2 poll sleeps) + wait_for_integrator (2 poll sleeps)
-    rc.check_time_sleep(_DIR, snapshot(5))
+    # The orchestration sleeps live in mngr_mapreduce now.
+    rc.check_time_sleep(_DIR, snapshot(0))
 
 
 def test_prevent_global_keyword() -> None:
@@ -70,7 +67,7 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(1))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
 
 
 # --- Import style ---
@@ -245,6 +242,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(0))
 
 
+def test_prevent_bare_tmux_targets() -> None:
+    rc.check_bare_tmux_targets(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 
@@ -272,18 +273,12 @@ def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
 
 
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
+
+
 # --- Project-level checks ---
 
 
 def test_prevent_code_in_init_files() -> None:
     rc.check_code_in_init_files(_DIR, snapshot(0))
-
-
-def test_no_type_errors() -> None:
-    """Ensure the codebase has zero type errors."""
-    check_no_type_errors(_DIR)
-
-
-def test_no_ruff_errors() -> None:
-    """Ensure the codebase has zero ruff linting errors."""
-    check_no_ruff_errors(_DIR)

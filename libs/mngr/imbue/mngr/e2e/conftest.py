@@ -1,28 +1,43 @@
 import os
+import pty
 import shlex
 import shutil
 import signal
 import stat
+import subprocess
+import sys
 import tempfile
 import textwrap
+import threading
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pluggy
 import pytest
 import tomlkit
 from loguru import logger
 
+from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
 from imbue.mngr_modal.backend import truncate_modal_name
+from imbue.skitwright.data_types import CommandResult
+from imbue.skitwright.data_types import OutputLine
+from imbue.skitwright.data_types import OutputSource
 from imbue.skitwright.runner import run_command
 from imbue.skitwright.session import Session
+
+# Launches its single argument as a shell command under a pseudo-terminal, so
+# that a tmux-attaching command (``mngr connect``/``conn``) gets a real terminal
+# and attaches instead of failing with "open terminal failed: not a terminal".
+# Run via ``python -c`` in a background subprocess by ``run_connecting_command``.
+_PTY_CONNECT_LAUNCHER = "import pty, sys; raise SystemExit(pty.spawn(['sh', '-c', sys.argv[1]]))"
 
 
 class E2eSession(Session):
@@ -52,7 +67,7 @@ class E2eSession(Session):
             (f"mngr exec {agent_name} 'tmux list-sessions 2>&1'", "tmux sessions"),
             (
                 f'mngr exec {agent_name} \'SESSION=$(tmux list-sessions -F "#{{session_name}}" 2>/dev/null | head -1);'
-                f' tmux capture-pane -p -t "$SESSION" 2>&1 || echo no-pane\'',
+                f' tmux capture-pane -p -t "=$SESSION" 2>&1 || echo no-pane\'',
                 "claude pane",
             ),
             (
@@ -79,6 +94,140 @@ class E2eSession(Session):
                 diag_parts.append(f"\n[{label}] error: {exc!r}")
         return "\n".join(diag_parts)
 
+    def _has_tmux_client(self, session_target: str) -> bool:
+        """Return True if a tmux client is attached to the given session target."""
+        result = subprocess.run(
+            ["tmux", "list-clients", "-t", session_target],
+            env=self._env,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+
+    def run_connect_interactively(
+        self,
+        command: str,
+        agent_name: str,
+        timeout: float = 30.0,
+        comment: str | None = None,
+    ) -> CommandResult:
+        """Run an interactive ``mngr connect``-style command under a PTY and detach.
+
+        ``mngr connect`` execs ``tmux attach`` for a local agent, which requires a
+        real terminal and blocks until the client detaches. The plain pipe-based
+        :meth:`run` therefore cannot exercise it -- ``tmux attach`` aborts with
+        "open terminal failed: not a terminal". This helper instead:
+
+          1. spawns the command with its stdio wired to a pseudo-terminal,
+          2. waits until a tmux client has attached to the agent's session,
+          3. detaches that client from outside via ``tmux detach-client``,
+
+        after which ``tmux attach`` exits 0 and the command returns cleanly. The
+        captured terminal output and exit code are recorded in the transcript and
+        returned as a :class:`CommandResult`, exactly like :meth:`run`.
+
+        Only valid for local agents (remote agents connect over SSH, not a local
+        tmux attach). The session name is derived as ``{MNGR_PREFIX}{agent_name}``,
+        matching :func:`connect_to_agent`.
+        """
+        session_name = f"{self._env.get('MNGR_PREFIX', '')}{agent_name}"
+        # Leading "=" forces tmux exact-session matching (same rule the connect
+        # code uses), so we never target a different session by prefix.
+        session_target = f"={session_name}"
+
+        env = dict(self._env)
+        # The fixture sets a global ``connect_command`` (the no-op asciinema
+        # recorder) under ``[commands.connect]`` so that the plain pipe-based
+        # ``run`` can exercise ``mngr conn`` without a real tmux attach. That
+        # override would also intercept the standalone connect here, leaving no
+        # client to poll for. Setting MNGR_CONNECT_COMMAND_ACTIVE makes
+        # ``resolve_connect_command`` fall back to the builtin attach (the same
+        # mechanism a connect_command uses when it re-invokes mngr), so this
+        # helper exercises the real ``tmux attach`` it is designed to detach.
+        env[CONNECT_COMMAND_ACTIVE_ENV_VAR] = "1"
+        # mngr refuses to attach when it detects it is already inside a tmux
+        # session (the nested-tmux guard). When the test runner itself runs under
+        # tmux, ``$TMUX``/``$TMUX_PANE`` leak in and trip that guard, so the
+        # builtin attach errors out and no client ever appears. Drop them so the
+        # connect attaches to the fixture's isolated tmux server (selected via
+        # ``TMUX_TMPDIR``); the teardown clears ``$TMUX`` for the same reason.
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            env=env,
+            cwd=str(self._cwd),
+            start_new_session=True,
+        )
+        # The child holds its own copy of the slave; close ours so that reading
+        # the master sees EOF once the child exits.
+        os.close(slave_fd)
+
+        captured = bytearray()
+
+        def _read_chunk() -> bytes:
+            # Returns b"" on EOF (child closed the PTY) or on the EIO that Linux
+            # raises when the last writer of a PTY exits -- both mean "done".
+            try:
+                return os.read(master_fd, 4096)
+            except OSError:
+                return b""
+
+        def _drain() -> None:
+            chunk = _read_chunk()
+            while chunk:
+                captured.extend(chunk)
+                chunk = _read_chunk()
+
+        reader = threading.Thread(target=_drain)
+        reader.start()
+
+        # Wait until the connect process has attached a client to the session,
+        # then detach it so `tmux attach` (and thus the connect command) exits 0.
+        attached = poll_until(
+            condition=lambda: self._has_tmux_client(session_target),
+            timeout=timeout,
+            poll_interval=0.2,
+        )
+        if attached:
+            subprocess.run(
+                ["tmux", "detach-client", "-s", session_name],
+                env=self._env,
+                capture_output=True,
+            )
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+        reader.join()
+        os.close(master_fd)
+
+        # A PTY merges stdout/stderr into one terminal stream and uses CRLF line
+        # endings; normalize so transcript lines are clean.
+        text = captured.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        output_lines = tuple(OutputLine(source=OutputSource.STDOUT, text=line) for line in text.split("\n") if line)
+        exit_code = 124 if timed_out else (proc.returncode if proc.returncode is not None else -1)
+        result = CommandResult(
+            command=command,
+            exit_code=exit_code,
+            stdout=text,
+            stderr="",
+            output_lines=output_lines,
+        )
+        self._transcript.record(result, comment=comment)
+        return result
+
     def write_tutorial_block(self, block: str) -> None:
         """Write the original tutorial script block to the test output directory.
 
@@ -87,6 +236,66 @@ class E2eSession(Session):
         """
         cleaned = textwrap.dedent(block).strip() + "\n"
         (self.output_dir / "tutorial_block.txt").write_text(cleaned)
+
+    def run_connecting_command(
+        self,
+        command: str,
+        agent_name: str,
+        comment: str | None = None,
+        timeout: float = 30.0,
+    ) -> CommandResult:
+        """Run an interactive ``mngr connect``/``conn`` command and verify it attaches.
+
+        ``mngr connect`` replaces itself with ``tmux attach``, which blocks until
+        the user detaches and requires a real terminal, so it cannot be exercised
+        with :meth:`run` (that either hangs when stdin is a tty or fails with
+        "open terminal failed: not a terminal" when it is not).
+
+        Instead this launches ``command`` under a pseudo-terminal in a background
+        subprocess (so the tmux attach succeeds), then polls ``tmux list-clients``
+        until a client is attached to the agent's session -- the observable effect
+        of a successful connect. The background process is then terminated, which
+        detaches the client while leaving the agent's tmux session running.
+
+        Returns a synthetic :class:`CommandResult` (exit code 0 if a client
+        attached within ``timeout``, else 124) that is also recorded in the
+        transcript, so callers can assert with ``expect(...).to_succeed()``.
+        """
+        session_name = f"{self._env.get('MNGR_PREFIX', '')}{agent_name}"
+        socket_path = Path(self._env["TMUX_TMPDIR"]) / f"tmux-{os.getuid()}" / "default"
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _PTY_CONNECT_LAUNCHER, command],
+            env=self._env,
+            cwd=str(self._cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            process_group=0,
+        )
+        try:
+            attached = poll_until(
+                condition=lambda: _is_client_attached(socket_path, session_name),
+                timeout=timeout,
+                poll_interval=0.5,
+            )
+        finally:
+            _terminate_process_group(proc)
+
+        detail = (
+            f"client attached to tmux session '{session_name}'"
+            if attached
+            else f"no client attached to tmux session '{session_name}' within {timeout}s"
+        )
+        result = CommandResult(
+            command=command,
+            exit_code=0 if attached else 124,
+            stdout=detail + "\n",
+            stderr="",
+            output_lines=(OutputLine(source=OutputSource.STDOUT, text=detail),),
+        )
+        self._transcript.record(result, comment=comment)
+        return result
 
 
 _E2E_DIR = Path(__file__).resolve().parent
@@ -161,7 +370,9 @@ _e2e_test_failed: dict[str, bool] = {}
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Generator[None, None, None]:
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[None]
+) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
     """Track whether the test call phase failed, for use in e2e fixture teardown."""
     outcome = yield
     rep = outcome.get_result()
@@ -200,6 +411,42 @@ def _is_pid_alive(pid: int) -> bool:
         return False
     except OSError:
         return True
+
+
+def _is_client_attached(socket_path: Path, session_name: str) -> bool:
+    """Return True if a tmux client is attached to the given session.
+
+    ``tmux list-clients -t =<session>`` lists only clients attached to that exact
+    session, so any non-empty output means a client is attached. Returns False
+    while the server is still starting (non-zero exit) or no client has attached.
+    """
+    completed = subprocess.run(
+        ["tmux", "-S", str(socket_path), "list-clients", "-t", f"={session_name}"],
+        capture_output=True,
+        text=True,
+    )
+    return completed.returncode == 0 and completed.stdout.strip() != ""
+
+
+def _terminate_process_group(proc: "subprocess.Popen[bytes]") -> None:
+    """Terminate a background process group, escalating to SIGKILL if needed.
+
+    The connect command is launched with ``process_group=0`` so the whole tree
+    (python -> sh -> mngr -> tmux attach) can be torn down at once. Killing it
+    detaches the tmux client without stopping the agent's tmux session.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
 
 
 def _stop_asciinema_processes(test_output_dir: Path) -> None:
@@ -253,6 +500,12 @@ def _setup_test_profile(host_dir: Path) -> str:
     # Write config.toml pointing to this profile
     config_path = host_dir / ROOT_CONFIG_FILENAME
     config_path.write_text(f'profile = "{profile_id}"\n')
+
+    # Opt this profile's config into pytest runs. The subprocess mngr inherits
+    # PYTEST_CURRENT_TEST and loads this profile's settings.toml, so without
+    # is_allowed_in_pytest = true (it defaults to False) the config loader would
+    # refuse to run.
+    (profile_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
@@ -413,14 +666,50 @@ def e2e(
     # Remote providers (Modal, Docker) are left enabled so that e2e tests
     # exercise the full discovery path. Tests that trigger Modal (via
     # mngr list, mngr destroy --gc, etc.) need @pytest.mark.modal.
+    # is_allowed_in_pytest opts this local-layer config into the pytest run.
+    # Every config file loaded during a pytest run must opt in individually, and
+    # this one is loaded alongside the profile's settings.toml.
+    #
+    # allow_settings_key_assignment_narrowing opts the harness into the
+    # assign-by-default merge semantics (the documented future default). It is
+    # required because connect_command lives in this local layer under
+    # ``[commands.create]``/``[commands.start]``, while tutorial tests legitimately
+    # set other ``commands.create.*`` keys (e.g. provider) at the project scope.
+    # Both spellings land in the command's single ``defaults`` map, so the
+    # higher-precedence local layer would otherwise be flagged as narrowing the
+    # lower-precedence project layer. Opting in keeps connect_command winning
+    # (highest precedence) while letting project-scope command settings persist.
     settings_path = project_config_dir / "settings.local.toml"
+    # Set a default agent type. `mngr create --type` no longer has a
+    # source-coded default (it was dropped in favor of a user-config value that
+    # scripts/install.sh writes during installation). Real users get this from
+    # the installer; the e2e fixture mirrors that here so tutorial commands that
+    # omit --type (e.g. `mngr create my-task --provider modal`) run as written.
+    # "claude" matches the historical source default these tests relied on.
     settings_path.write_text(
+        "is_allowed_in_pytest = true\n"
+        "allow_settings_key_assignment_narrowing = true\n"
+        "\n"
         "[commands.create]\n"
+        'type = "claude"\n'
         'connect_command = "mngr-e2e-connect"\n'
         "\n"
         "[commands.start]\n"
         'connect_command = "mngr-e2e-connect"\n'
+        "\n"
+        "[commands.connect]\n"
+        'connect_command = "mngr-e2e-connect"\n'
     )
+
+    # NOTE: the project-scope ``settings.toml`` is deliberately NOT seeded here.
+    # ``mngr config edit``/``config set`` tutorial tests assert on the genuine
+    # first-use behavior, where the project config file does not yet exist (e.g.
+    # ``config edit`` creates it from a template, and ``config set`` writes a
+    # fresh file). Those tests therefore read the project file back with ``cat``
+    # rather than a follow-up ``mngr`` command, since a freshly-created project
+    # file does not carry the ``is_allowed_in_pytest`` opt-in. The opt-in for
+    # commands that load merged config comes from the profile ``settings.toml``
+    # and the project ``settings.local.toml`` seeded above.
 
     # Ensure .claude/settings.local.json is gitignored. Remote providers
     # (Modal, Docker) need to write Claude hooks to this file, and the

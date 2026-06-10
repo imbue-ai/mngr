@@ -6,35 +6,152 @@ demand. Outcome JSON shape is a contract between the agents and this
 module; orchestration does not parse it. Parsed outcomes are cached
 in-process (test-agent outcomes and the integrator outcome are
 immutable once an agent has published them, so caching is safe).
+
+The HTML template, the CSS, and the panel JS live under ``report_assets/``
+and are rendered with Jinja2. This module's job is to assemble the
+context dict the template renders against.
+
+The test-mapreduce-specific data types (``TestResult``, ``Change``, etc.)
+also live here -- they're only used by this module. Framework-side types
+live in ``imbue.mngr_mapreduce.data_types``.
 """
 
 import html
 import json
-from collections.abc import Iterable
 from collections.abc import Sequence
+from enum import auto
+from importlib.resources import files
 from pathlib import Path
 
+from jinja2 import Environment
+from jinja2 import PackageLoader
+from jinja2 import select_autoescape
 from loguru import logger
 from markdown_it import MarkdownIt
+from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_CSS
 from imbue.mngr.utils.detail_renderer import ASCIINEMA_PLAYER_JS
 from imbue.mngr.utils.detail_renderer import DETAIL_CSS
 from imbue.mngr.utils.detail_renderer import render_test_detail
-from imbue.mngr_tmr.data_types import AgentKind
-from imbue.mngr_tmr.data_types import AgentMetadata
-from imbue.mngr_tmr.data_types import Change
-from imbue.mngr_tmr.data_types import ChangeKind
-from imbue.mngr_tmr.data_types import ChangeStatus
-from imbue.mngr_tmr.data_types import IntegratorResult
-from imbue.mngr_tmr.data_types import ReportSection
-from imbue.mngr_tmr.data_types import TestMapReduceResult
-from imbue.mngr_tmr.data_types import TestResult
-from imbue.mngr_tmr.data_types import TestRunInfo
+from imbue.mngr_mapreduce.data_types import AgentKind
+from imbue.mngr_mapreduce.data_types import AgentMetadata
 from imbue.mngr_tmr.prompts import INTEGRATOR_OUTCOME_FILENAME
 from imbue.mngr_tmr.prompts import TESTING_AGENT_OUTCOME_FILENAME
-from imbue.mngr_tmr.utils import should_pull_changes_from_outcome as _should_pull_outcome
+
+
+class ChangeKind(UpperCaseStrEnum):
+    """What kind of change the agent attempted."""
+
+    IMPROVE_TEST = auto()
+    FIX_TEST = auto()
+    FIX_IMPL = auto()
+    FIX_TUTORIAL = auto()
+
+
+class ChangeStatus(UpperCaseStrEnum):
+    """Whether the change succeeded."""
+
+    SUCCEEDED = auto()
+    FAILED = auto()
+    BLOCKED = auto()
+
+
+class Change(FrozenModel):
+    """One change the agent attempted."""
+
+    status: ChangeStatus = Field(description="Whether the change succeeded, failed, or is blocked")
+    summary_markdown: str = Field(description="Markdown description of what was done or attempted")
+
+
+class ReportSection(UpperCaseStrEnum):
+    """Derived section for HTML report grouping and coloring.
+
+    BLOCKED is reserved for results where the coding agent itself decided
+    the work was too complex (i.e. produced changes whose status is BLOCKED).
+    FAILED is reserved for infrastructure failures: launch failures, agent
+    timeouts, missing details, etc. -- cases where the agent never had a
+    chance to produce a real verdict.
+    """
+
+    NON_IMPL_FIXES = auto()
+    IMPL_FIXES = auto()
+    BLOCKED = auto()
+    FAILED = auto()
+    CLEAN_PASS = auto()
+    RUNNING = auto()
+
+
+class TestRunInfo(FrozenModel):
+    """Metadata for a single test run within an agent's work."""
+
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
+    run_name: str = Field(description="The --mngr-e2e-run-name value used for this run")
+    description_markdown: str = Field(description="Brief description of what this run was for")
+
+
+class TestResult(FrozenModel):
+    """Result reported by a test agent, read from its outcome JSON."""
+
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
+    changes: dict[ChangeKind, Change] = Field(
+        default_factory=dict, description="Changes the agent attempted, keyed by kind"
+    )
+    errored: bool = Field(
+        default=False, description="Whether an infrastructure error prevented the agent from working"
+    )
+    tests_passing_before: bool | None = Field(
+        default=None, description="Were tests passing before any changes? None if unknown."
+    )
+    tests_passing_after: bool | None = Field(
+        default=None, description="Are tests passing after all changes? None if unknown."
+    )
+    summary_markdown: str = Field(default="", description="Overall markdown summary of what happened")
+    test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="List of test runs performed, in order")
+
+
+class IntegratorResult(FrozenModel):
+    """Result from the integrator agent that cherry-picks fix branches."""
+
+    agent_name: AgentName | None = Field(default=None, description="Name of the integrator agent")
+    squashed_branches: tuple[str, ...] = Field(default=(), description="Branches in the squashed non-impl commit")
+    squashed_commit_hash: str | None = Field(default=None, description="Commit hash of the squashed non-impl commit")
+    impl_priority: tuple[str, ...] = Field(default=(), description="Impl branches in priority order, highest first")
+    impl_commit_hashes: dict[str, str] = Field(
+        default_factory=dict, description="Mapping of impl branch name to its commit hash on the integrated branch"
+    )
+    failed: tuple[str, ...] = Field(default=(), description="Branch names that could not be integrated")
+    branch_name: str | None = Field(default=None, description="Integrated branch name, if any merges succeeded")
+
+
+class TestMapReduceResult(FrozenModel):
+    """Result for one test in the map-reduce run."""
+
+    # Tell pytest not to collect this as a test class (its name starts with "Test").
+    __test__ = False
+
+    test_node_id: str = Field(description="The pytest node ID for the test")
+    agent_name: AgentName = Field(description="Name of the agent that ran this test")
+    changes: dict[ChangeKind, Change] = Field(
+        default_factory=dict, description="Changes the agent attempted, keyed by kind"
+    )
+    errored: bool = Field(default=False, description="Whether an error prevented the agent from working")
+    tests_passing_before: bool | None = Field(default=None, description="Were tests passing before changes?")
+    tests_passing_after: bool | None = Field(default=None, description="Are tests passing after changes?")
+    summary_markdown: str = Field(default="", description="Markdown summary from the agent")
+    branch_name: str | None = Field(
+        default=None,
+        description="Git branch name if code changes were pulled, or None",
+    )
+    test_runs: tuple[TestRunInfo, ...] = Field(default=(), description="Test runs performed by the agent, in order")
+
 
 _EXTRACTED_TEST_OUTPUT_DIR = "test_output"
 
@@ -75,6 +192,28 @@ _md = MarkdownIt()
 
 _NON_IMPL_CHANGE_KINDS = frozenset({ChangeKind.FIX_TEST, ChangeKind.IMPROVE_TEST, ChangeKind.FIX_TUTORIAL})
 
+_CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
+    ChangeStatus.SUCCEEDED: "&#10003;",
+    ChangeStatus.FAILED: "&#10007;",
+    ChangeStatus.BLOCKED: "&#9644;",
+}
+
+
+# The Jinja env autoescapes the .j2 template; sections that already contain
+# safe HTML (markdown-rendered cells, test ids with <wbr> hints) are passed
+# through with the |safe filter in the template.
+_jinja_env = Environment(
+    loader=PackageLoader("imbue.mngr_tmr", "report_assets"),
+    autoescape=select_autoescape(["html", "j2"]),
+    trim_blocks=False,
+    lstrip_blocks=False,
+)
+
+
+def _read_static(filename: str) -> str:
+    """Read a static (non-jinja) asset shipped under report_assets/."""
+    return (files("imbue.mngr_tmr.report_assets") / filename).read_text()
+
 
 def _parse_outcome_json(raw: str) -> TestResult:
     """Parse an outcome JSON string into a TestResult.
@@ -113,9 +252,7 @@ def _outcome_path_for_testing_agent(output_dir: Path, agent_name: AgentName) -> 
 
 
 def _outcome_path_for_integrator(output_dir: Path, agent_name: AgentName) -> Path:
-    # The integrator agent still uses rsync, which drops .test_output's contents
-    # directly under <agent_name>/ (no test_output/ subdir).
-    return output_dir / str(agent_name) / INTEGRATOR_OUTCOME_FILENAME
+    return output_dir / str(agent_name) / _EXTRACTED_TEST_OUTPUT_DIR / INTEGRATOR_OUTCOME_FILENAME
 
 
 def _load_testing_agent_outcome(agent_name: AgentName, output_dir: Path) -> TestResult | None:
@@ -166,7 +303,7 @@ def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestM
     """Build a renderable row from per-agent metadata + optional parsed outcome."""
     if meta.error_summary is not None:
         return TestMapReduceResult(
-            test_node_id=meta.test_node_id or str(meta.agent_name),
+            test_node_id=meta.task_id or str(meta.agent_name),
             agent_name=meta.agent_name,
             errored=True,
             summary_markdown=meta.error_summary,
@@ -174,13 +311,13 @@ def _row_from_metadata(meta: AgentMetadata, outcome: TestResult | None) -> TestM
         )
     if outcome is None:
         return TestMapReduceResult(
-            test_node_id=meta.test_node_id or str(meta.agent_name),
+            test_node_id=meta.task_id or str(meta.agent_name),
             agent_name=meta.agent_name,
             summary_markdown="Agent is still running...",
             branch_name=meta.branch_name,
         )
     return TestMapReduceResult(
-        test_node_id=meta.test_node_id or str(meta.agent_name),
+        test_node_id=meta.task_id or str(meta.agent_name),
         agent_name=meta.agent_name,
         changes=outcome.changes,
         errored=outcome.errored,
@@ -199,32 +336,11 @@ def _build_rows(agents: Sequence[AgentMetadata], output_dir: Path) -> list[TestM
     """
     rows: list[TestMapReduceResult] = []
     for meta in agents:
-        if meta.kind is not AgentKind.TESTING_AGENT:
+        if meta.kind is not AgentKind.MAPPER:
             continue
         outcome = _load_testing_agent_outcome(meta.agent_name, output_dir) if meta.error_summary is None else None
         rows.append(_row_from_metadata(meta, outcome))
     return rows
-
-
-def list_pullable_branches(agents: Iterable[AgentMetadata], output_dir: Path) -> list[str]:
-    """Return branch names for testing agents whose outcomes qualify for integration.
-
-    Reads the outcome JSON for each agent from disk (cached) and applies the
-    ``should_pull_changes`` predicate. Used by the integrator phase to decide
-    which agent branches to cherry-pick.
-    """
-    branches: list[str] = []
-    for meta in agents:
-        if meta.kind is not AgentKind.TESTING_AGENT:
-            continue
-        if meta.error_summary is not None or meta.branch_name is None:
-            continue
-        outcome = _load_testing_agent_outcome(meta.agent_name, output_dir)
-        if outcome is None:
-            continue
-        if _should_pull_outcome(outcome):
-            branches.append(meta.branch_name)
-    return branches
 
 
 def _report_section_of(result: TestMapReduceResult) -> ReportSection:
@@ -250,119 +366,22 @@ def _report_section_of(result: TestMapReduceResult) -> ReportSection:
     return ReportSection.BLOCKED
 
 
-def generate_html_report(
-    agents: Sequence[AgentMetadata],
-    output_dir: Path,
-    *,
-    integrator_metadata: AgentMetadata | None = None,
-    run_commands: list[tuple[str, str]] | None = None,
-) -> Path:
-    """Generate an HTML report summarizing the run.
-
-    Walks ``agents`` and reads each testing agent's outcome from
-    ``output_dir/<agent_name>/test_output/``; reads the integrator's
-    outcome (if any) from ``output_dir/<integrator_name>/``. Writes the
-    report to ``output_dir/index.html`` and returns that path.
-
-    Side-effect free except for writing the local file. Mirroring the
-    report to s3 is the caller's responsibility (see
-    ``report_upload.maybe_upload_report``); orchestration calls it from
-    ``_emit_report`` so each regeneration triggers an upload.
-    """
-    rows = _build_rows(agents, output_dir)
-    integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
-
-    counts: dict[ReportSection, int] = {}
-    for r in rows:
-        sec = _report_section_of(r)
-        counts[sec] = counts.get(sec, 0) + 1
-
-    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
-    for r in rows:
-        try:
-            runs = _find_test_artifact_runs(output_dir, r.agent_name, r.test_runs)
-        except OSError as exc:
-            if "Too many open files" in str(exc):
-                logger.warning("FD exhaustion while scanning artifacts for '{}': {}", r.agent_name, exc)
-            raise
-        if runs:
-            agent_artifact_runs[str(r.agent_name)] = runs
-
-    toc_html = _build_toc_sidebar(counts)
-    tables_html = _build_grouped_tables(rows, agent_artifact_runs, integrator, run_commands)
-    panels_html = _build_artifact_panels(agent_artifact_runs)
-
-    has_artifacts = bool(agent_artifact_runs)
-    asciinema_head = ""
-    if has_artifacts:
-        asciinema_head = (
-            f'  <link rel="stylesheet" type="text/css" href="{ASCIINEMA_PLAYER_CSS}">\n'
-            f'  <script src="{ASCIINEMA_PLAYER_JS}"></script>'
-        )
-
-    css = _html_report_css()
-    artifact_css = _artifact_panel_css() if has_artifacts else ""
-    artifact_js = _artifact_panel_js() if has_artifacts else ""
-    report_html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Test Map-Reduce Report</title>
-{asciinema_head}
-  <style>
-{css}
-{artifact_css}
-  </style>
-</head>
-<body>
-{toc_html}
-  <div class="main-content">
-    <h1>Test Map-Reduce Report</h1>
-    <p class="summary">{len(rows)} test(s)</p>
-{_build_run_commands_html(run_commands)}
-{tables_html}
-  </div>
-{panels_html}
-{artifact_js}
-</body>
-</html>
-"""
-    output_path = output_dir / "index.html"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(report_html)
-    logger.info("HTML report written to {}", output_path)
-    return output_path
+def _format_test_id(test_node_id: str) -> str:
+    """HTML-escape the node ID, then add a soft wrap hint after each ``::``."""
+    return html.escape(test_node_id).replace("::", "::<wbr>")
 
 
-def _build_run_commands_html(commands: list[tuple[str, str]] | None) -> str:
-    """Build an HTML block showing useful commands for the run."""
-    if not commands:
-        return ""
-    items = ""
-    for label, cmd in commands:
-        escaped_cmd = html.escape(cmd)
-        items += f'    <div class="run-cmd"><span class="run-cmd-label">{html.escape(label)}:</span> <code>{escaped_cmd}</code></div>\n'
-    return f'  <div class="run-commands">\n{items}  </div>\n'
+def _format_changes(changes: dict[ChangeKind, Change]) -> str:
+    """Format changes as concise kind + icon pairs."""
+    parts: list[str] = []
+    for kind, change in changes.items():
+        icon = _CHANGE_STATUS_ICONS.get(change.status, "?")
+        parts.append(f"{kind.value} {icon}")
+    return ", ".join(parts)
 
 
-def _build_toc_sidebar(counts: dict[ReportSection, int]) -> str:
-    """Build a sticky left sidebar with links to sections."""
-    if not counts:
-        return ""
-    links = ""
-    for sec in _SECTION_ORDER:
-        count = counts.get(sec, 0)
-        if count == 0:
-            continue
-        label = _SECTION_LABELS.get(sec, sec.value)
-        color = _SECTION_COLORS.get(sec, "rgb(158, 158, 158)")
-        anchor = f"sec-{sec.value}"
-        links += f'    <a href="#{anchor}" class="toc-link" style="color: {color};">{label} ({count})</a>\n'
-    return f'  <div class="toc-sidebar">\n{links}  </div>\n'
-
-
-def _merged_status(result: TestMapReduceResult, integrator: IntegratorResult | None) -> str:
-    """Return merged status: commit hash for impl, checkmark for squashed, X for failed."""
+def _merged_status_html(result: TestMapReduceResult, integrator: IntegratorResult | None) -> str:
+    """Return merged-status HTML: commit hash for impl, checkmark for squashed, X for failed."""
     if integrator is None or result.branch_name is None:
         return ""
     branch = result.branch_name
@@ -378,197 +397,9 @@ def _merged_status(result: TestMapReduceResult, integrator: IntegratorResult | N
     return ""
 
 
-def _build_grouped_tables(
-    results: list[TestMapReduceResult],
-    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] | None = None,
-    integrator: IntegratorResult | None = None,
-    run_commands: list[tuple[str, str]] | None = None,
-) -> str:
-    """Build HTML tables grouped by report section."""
-    agent_artifact_runs = agent_artifact_runs or {}
-    grouped: dict[ReportSection, list[TestMapReduceResult]] = {}
-    for r in results:
-        sec = _report_section_of(r)
-        grouped.setdefault(sec, []).append(r)
-
-    sections = ""
-    for sec in _SECTION_ORDER:
-        group = grouped.get(sec)
-        if not group:
-            continue
-        color = _SECTION_COLORS.get(sec, "rgb(158, 158, 158)")
-        label = _SECTION_LABELS.get(sec, sec.value)
-        anchor = f"sec-{sec.value}"
-
-        if sec == ReportSection.IMPL_FIXES and integrator is not None and integrator.impl_priority:
-            priority_order = {branch: i for i, branch in enumerate(integrator.impl_priority)}
-            group = sorted(
-                group,
-                key=lambda r: priority_order.get(r.branch_name or "", len(priority_order)),
-            )
-
-        is_running = sec == ReportSection.RUNNING
-        sections += f'    <h2 id="{anchor}" style="color: {color};">{label} ({len(group)})</h2>\n'
-
-        # Show resolution hint for the blocked section
-        if sec == ReportSection.BLOCKED:
-            reintegrate_cmd = ""
-            if run_commands:
-                for cmd_label, cmd_text in run_commands:
-                    if "reintegrate" in cmd_label.lower():
-                        reintegrate_cmd = html.escape(cmd_text)
-                        break
-            sections += (
-                '    <div class="blocked-hint">\n'
-                "      <p>To resolve issues with a blocked agent:</p>\n"
-                "      <ol>\n"
-                "        <li><code>mngr connect $agent_name</code></li>\n"
-                '        <li>When done, tell it to "regenerate the outcome file"</li>\n'
-            )
-            if reintegrate_cmd:
-                sections += f"        <li>Run: <code>{reintegrate_cmd}</code></li>\n"
-            sections += "      </ol>\n    </div>\n"
-
-        # Show squashed commit hash for the non-impl fixes section
-        if sec == ReportSection.NON_IMPL_FIXES and integrator is not None and integrator.squashed_commit_hash:
-            escaped_hash = html.escape(integrator.squashed_commit_hash[:10])
-            sections += f'    <p class="squashed-hash">Squashed commit: <code>{escaped_hash}</code></p>\n'
-        is_clean_pass = sec == ReportSection.CLEAN_PASS
-        sections += "    <table>\n      <thead>\n        <tr>"
-        if is_running:
-            sections += "<th>Test</th><th>Agent</th>"
-        elif is_clean_pass:
-            sections += "<th>Test</th><th>Agent</th><th>Branch</th>"
-            if agent_artifact_runs:
-                sections += "<th>Artifacts</th>"
-        else:
-            sections += "<th>Test</th><th>Changes</th><th>Agent</th><th>Branch</th><th>Merged?</th>"
-            if agent_artifact_runs:
-                sections += "<th>Artifacts</th>"
-        sections += "</tr>\n      </thead>\n      <tbody>\n"
-        if is_running:
-            col_count = 2
-        elif is_clean_pass:
-            col_count = 3 + (1 if agent_artifact_runs else 0)
-        else:
-            col_count = 5 + (1 if agent_artifact_runs else 0)
-        for r in group:
-            agent_name_str = str(r.agent_name)
-            test_id_html = _format_test_id(r.test_node_id)
-            if is_running:
-                sections += f"""        <tr>
-          <td>{test_id_html}</td>
-          <td><code>{html.escape(agent_name_str)}</code></td>
-        </tr>
-"""
-            elif is_clean_pass:
-                branch_cell = r.branch_name if r.branch_name else "-"
-                artifact_cell = ""
-                if agent_artifact_runs:
-                    if agent_name_str in agent_artifact_runs:
-                        escaped = html.escape(agent_name_str)
-                        artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
-                    else:
-                        artifact_cell = "<td>-</td>"
-                sections += f"""        <tr>
-          <td>{test_id_html}</td>
-          <td><code>{html.escape(agent_name_str)}</code></td>
-          <td><code>{html.escape(branch_cell)}</code></td>
-          {artifact_cell}
-        </tr>
-"""
-            else:
-                branch_cell = r.branch_name if r.branch_name else "-"
-                changes_cell = _format_changes(r.changes) if r.changes else "-"
-                merged_cell = _merged_status(r, integrator)
-                artifact_cell = ""
-                if agent_artifact_runs:
-                    if agent_name_str in agent_artifact_runs:
-                        escaped = html.escape(agent_name_str)
-                        artifact_cell = f'<td><button class="artifacts-btn" data-agent="{escaped}">View</button></td>'
-                    else:
-                        artifact_cell = "<td>-</td>"
-                sections += f"""        <tr>
-          <td>{test_id_html}</td>
-          <td>{changes_cell}</td>
-          <td><code>{html.escape(agent_name_str)}</code></td>
-          <td><code>{html.escape(branch_cell)}</code></td>
-          <td>{merged_cell}</td>
-          {artifact_cell}
-        </tr>
-"""
-            if r.summary_markdown and not is_running:
-                summary_html = _render_markdown(r.summary_markdown)
-                sections += f'        <tr class="summary-row"><td colspan="{col_count}" class="md summary-cell">{summary_html}</td></tr>\n'
-        sections += "      </tbody>\n    </table>\n"
-
-    return sections
-
-
-_CHANGE_STATUS_ICONS: dict[ChangeStatus, str] = {
-    ChangeStatus.SUCCEEDED: "&#10003;",
-    ChangeStatus.FAILED: "&#10007;",
-    ChangeStatus.BLOCKED: "&#9644;",
-}
-
-
-def _format_test_id(test_node_id: str) -> str:
-    """Format a test node ID with soft line breaks after :: separators."""
-    return html.escape(test_node_id).replace("::", "::<wbr>")
-
-
-def _format_changes(changes: dict[ChangeKind, Change]) -> str:
-    """Format changes as concise kind + icon pairs."""
-    parts = []
-    for kind, change in changes.items():
-        icon = _CHANGE_STATUS_ICONS.get(change.status, "?")
-        parts.append(f"{kind.value} {icon}")
-    return ", ".join(parts)
-
-
 def _render_markdown(text: str) -> str:
     """Render markdown text to HTML."""
     return _md.render(text)
-
-
-def _html_report_css() -> str:
-    """Return the CSS stylesheet for the HTML report.
-
-    Uses rgb() colors instead of hex to avoid ratchet false positives.
-    """
-    return (
-        "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 2rem; }\n"
-        "    h1 { color: rgb(51, 51, 51); }\n"
-        "    h2 { margin-top: 1.5rem; font-size: 1.1rem; }\n"
-        "    .summary { margin-bottom: 0.5rem; color: rgb(102, 102, 102); }\n"
-        "    .run-commands { background: rgb(245, 245, 245); border-radius: 6px; padding: 0.75rem 1rem;"
-        " margin-bottom: 1.5rem; font-size: 0.85rem; }\n"
-        "    .run-cmd { margin: 0.3rem 0; }\n"
-        "    .run-cmd-label { color: rgb(80, 80, 80); }\n"
-        "    .blocked-hint { background: rgb(255, 243, 224); border-left: 3px solid rgb(244, 67, 54);"
-        " padding: 0.5rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; border-radius: 0 4px 4px 0; }\n"
-        "    .blocked-hint p { margin: 0 0 0.3rem 0; font-weight: 600; }\n"
-        "    .blocked-hint ol { margin: 0; padding-left: 1.5rem; }\n"
-        "    .toc-sidebar { position: sticky; top: 2rem; width: 200px; float: left;"
-        " padding-right: 1rem; }\n"
-        "    .toc-link { display: block; font-weight: 600; font-size: 0.9rem;"
-        " text-decoration: none; margin-bottom: 0.5rem; }\n"
-        "    .toc-link:hover { text-decoration: underline; }\n"
-        "    .main-content { margin-left: 220px; }\n"
-        "    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }\n"
-        "    th, td { border: 1px solid rgb(221, 221, 221); padding: 8px 12px; text-align: left; }\n"
-        "    th { background: rgb(245, 245, 245); font-weight: 600; }\n"
-        "    tr:hover { background: rgb(250, 250, 250); }\n"
-        "    .summary-row td { border-top: none; }\n"
-        "    .summary-cell { padding-left: 2em; color: rgb(80, 80, 80); font-size: 0.9em; }\n"
-        "    td.md p { margin: 0.25em 0; }\n"
-        "    td.md p:first-child { margin-top: 0; }\n"
-        "    td.md p:last-child { margin-bottom: 0; }\n"
-        "    code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }\n"
-        "    .artifacts-btn { cursor: pointer; padding: 2px 8px; font-size: 0.85em;"
-        " border: 1px solid rgb(180, 180, 180); border-radius: 3px; background: rgb(250, 250, 250); }\n"
-        "    .artifacts-btn:hover { background: rgb(235, 235, 235); }"
-    )
 
 
 def _find_test_artifact_runs(
@@ -605,98 +436,164 @@ def _find_test_artifact_runs(
     return found
 
 
-def _build_artifact_panels(agent_artifact_runs: dict[str, list[tuple[str, str, Path]]]) -> str:
-    """Build the overlay and slide-in panel divs for each agent's artifacts.
+def _build_row_view(
+    row: TestMapReduceResult,
+    integrator: IntegratorResult | None,
+    has_artifacts_for_agent: bool,
+) -> dict[str, object]:
+    """Flatten a renderable row into the dict the jinja template consumes."""
+    return {
+        "test_id_html": _format_test_id(row.test_node_id),
+        "agent_name": str(row.agent_name),
+        "branch_name": row.branch_name,
+        "changes_html": _format_changes(row.changes) if row.changes else "-",
+        "merged_html": _merged_status_html(row, integrator),
+        "summary_html": _render_markdown(row.summary_markdown) if row.summary_markdown else "",
+        "has_artifacts": has_artifacts_for_agent,
+    }
 
-    When an agent has multiple runs, a tab bar is rendered at the top of the
-    panel. Each tab shows the run number; clicking a tab switches the content.
-    """
-    if not agent_artifact_runs:
-        return ""
-    panels = '  <div id="artifacts-overlay" class="artifacts-overlay"></div>\n'
+
+def _build_section_views(
+    rows: list[TestMapReduceResult],
+    integrator: IntegratorResult | None,
+    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]],
+    has_artifacts: bool,
+) -> list[dict[str, object]]:
+    """Group rows by section and prepare the section views the template consumes."""
+    grouped: dict[ReportSection, list[TestMapReduceResult]] = {}
+    for r in rows:
+        grouped.setdefault(_report_section_of(r), []).append(r)
+
+    sections: list[dict[str, object]] = []
+    for sec in _SECTION_ORDER:
+        group = grouped.get(sec)
+        if not group:
+            continue
+        if sec == ReportSection.IMPL_FIXES and integrator is not None and integrator.impl_priority:
+            priority_order = {branch: i for i, branch in enumerate(integrator.impl_priority)}
+            group = sorted(group, key=lambda r: priority_order.get(r.branch_name or "", len(priority_order)))
+        col_count_base = (
+            5
+            if sec not in (ReportSection.RUNNING, ReportSection.CLEAN_PASS)
+            else (2 if sec == ReportSection.RUNNING else 3)
+        )
+        col_count = col_count_base + (1 if has_artifacts and sec != ReportSection.RUNNING else 0)
+        section_rows = [_build_row_view(r, integrator, str(r.agent_name) in agent_artifact_runs) for r in group]
+        sections.append(
+            {
+                "kind": sec.value,
+                "label": _SECTION_LABELS[sec],
+                "color": _SECTION_COLORS[sec],
+                "anchor": f"sec-{sec.value}",
+                "rows": section_rows,
+                "count": len(section_rows),
+                "col_count": col_count,
+            }
+        )
+    return sections
+
+
+def _build_toc_links(sections: list[dict[str, object]]) -> list[dict[str, object]]:
+    """One sidebar entry per non-empty section."""
+    return [
+        {
+            "anchor": s["anchor"],
+            "color": s["color"],
+            "label": s["label"],
+            "count": s["count"],
+        }
+        for s in sections
+    ]
+
+
+def _build_artifact_panels(
+    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]],
+) -> list[dict[str, object]]:
+    """Build the panel views, one per agent that has artifact runs."""
+    panels: list[dict[str, object]] = []
     for agent_name, runs in agent_artifact_runs.items():
         escaped_name = html.escape(agent_name)
-        panels += (
-            f'  <div class="artifacts-panel" id="panel-{escaped_name}">\n'
-            f'    <button class="artifacts-close">&times;</button>\n'
-            f"    <h2>{escaped_name}</h2>\n"
-        )
-
-        if len(runs) > 1:
-            panels += '    <div class="run-tabs">\n'
-            for i, (_run_name, _desc, _test_dir) in enumerate(runs):
-                active = " active" if i == 0 else ""
-                panels += (
-                    f'      <button class="run-tab{active}" '
-                    f'data-agent="{escaped_name}" data-run="{i}">{i + 1}</button>\n'
-                )
-            panels += "    </div>\n"
-
+        run_views: list[dict[str, object]] = []
         for i, (_run_name, description, test_dir) in enumerate(runs):
             prefix = f"art-{escaped_name}-r{i}-"
-            content = render_test_detail(test_dir, detail_id_prefix=prefix)
-            display = "" if i == 0 else ' style="display:none"'
-            panels += f'    <div class="run-content" data-agent="{escaped_name}" data-run="{i}"{display}>\n'
-            if description:
-                panels += f"      <p><em>{_render_markdown(description)}</em></p>\n"
-            panels += f"      {content}\n"
-            panels += "    </div>\n"
-
-        panels += "  </div>\n"
+            run_views.append(
+                {
+                    "index": i,
+                    "description_html": _render_markdown(description) if description else "",
+                    "detail_html": render_test_detail(test_dir, detail_id_prefix=prefix),
+                }
+            )
+        panels.append(
+            {
+                "agent_name": agent_name,
+                "tab_count": len(runs),
+                "runs": run_views,
+            }
+        )
     return panels
 
 
-def _artifact_panel_css() -> str:
-    """Return CSS for the artifact slide-in panels."""
-    return (
-        f"    {DETAIL_CSS}"
-        "    .artifacts-overlay { display: none; position: fixed; inset: 0;"
-        " background: rgba(0,0,0,0.3); z-index: 999; }\n"
-        "    .artifacts-panel { display: none; position: fixed; top: 0; right: 0; bottom: 0;"
-        " width: 80%; max-width: 1200px; background: rgb(250,250,250); z-index: 1000;"
-        " overflow-y: auto; padding: 2rem; box-shadow: -4px 0 20px rgba(0,0,0,0.15); }\n"
-        "    .artifacts-panel.open, .artifacts-overlay.open { display: block; }\n"
-        "    .artifacts-close { position: sticky; top: 0; float: right; font-size: 1.5rem;"
-        " cursor: pointer; background: none; border: none; padding: 0.5rem; z-index: 1001; }\n"
-        "    .run-tabs { display: flex; gap: 4px; margin-bottom: 1rem; }\n"
-        "    .run-tab { cursor: pointer; padding: 4px 12px; border: 1px solid rgb(200,200,200);"
-        " border-radius: 4px; background: rgb(245,245,245); font-size: 0.85rem; }\n"
-        "    .run-tab.active { background: rgb(33,150,243); color: white; border-color: rgb(33,150,243); }\n"
+def generate_html_report(
+    agents: Sequence[AgentMetadata],
+    output_dir: Path,
+    *,
+    integrator_metadata: AgentMetadata | None = None,
+    run_commands: list[tuple[str, str]] | None = None,
+) -> Path:
+    """Generate an HTML report summarizing the run.
+
+    Walks ``agents`` and reads each testing agent's outcome from
+    ``output_dir/<agent_name>/test_output/``; reads the integrator's
+    outcome (if any) from ``output_dir/<integrator_name>/``. Writes the
+    report to ``output_dir/index.html`` and returns that path.
+
+    Side-effect free except for writing the local file. Mirroring the
+    report to s3 is the recipe's responsibility (see ``recipe.render_report``).
+    """
+    rows = _build_rows(agents, output_dir)
+    integrator = _load_integrator_outcome(integrator_metadata, output_dir) if integrator_metadata is not None else None
+
+    agent_artifact_runs: dict[str, list[tuple[str, str, Path]]] = {}
+    for r in rows:
+        try:
+            runs = _find_test_artifact_runs(output_dir, r.agent_name, r.test_runs)
+        except OSError as exc:
+            if "Too many open files" in str(exc):
+                logger.warning("FD exhaustion while scanning artifacts for '{}': {}", r.agent_name, exc)
+            raise
+        if runs:
+            agent_artifact_runs[str(r.agent_name)] = runs
+
+    has_artifacts = bool(agent_artifact_runs)
+    sections = _build_section_views(rows, integrator, agent_artifact_runs, has_artifacts)
+    toc_links = _build_toc_links(sections)
+    artifact_panels = _build_artifact_panels(agent_artifact_runs)
+
+    reintegrate_cmd = ""
+    if run_commands:
+        for cmd_label, cmd_text in run_commands:
+            if "reintegrate" in cmd_label.lower():
+                reintegrate_cmd = html.escape(cmd_text)
+                break
+
+    template = _jinja_env.get_template("report.html.j2")
+    report_html = template.render(
+        rows=rows,
+        sections=sections,
+        toc_links=toc_links,
+        has_artifacts=has_artifacts,
+        artifact_panels=artifact_panels,
+        integrator=integrator,
+        run_commands=run_commands or [],
+        reintegrate_cmd=reintegrate_cmd,
+        asciinema_css_url=ASCIINEMA_PLAYER_CSS,
+        asciinema_js_url=ASCIINEMA_PLAYER_JS,
+        css=_read_static("report.css"),
+        detail_css=DETAIL_CSS,
+        js=_read_static("artifacts.js"),
     )
-
-
-def _artifact_panel_js() -> str:
-    """Return JS for opening/closing artifact panels."""
-    return """<script>
-(function() {
-  var overlay = document.getElementById('artifacts-overlay');
-  function closePanel() {
-    document.querySelectorAll('.artifacts-panel.open').forEach(function(p) { p.classList.remove('open'); });
-    if (overlay) overlay.classList.remove('open');
-  }
-  document.querySelectorAll('.artifacts-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      closePanel();
-      var agent = btn.getAttribute('data-agent');
-      var panel = document.getElementById('panel-' + agent);
-      if (panel) panel.classList.add('open');
-      if (overlay) overlay.classList.add('open');
-    });
-  });
-  if (overlay) overlay.addEventListener('click', closePanel);
-  document.querySelectorAll('.artifacts-close').forEach(function(btn) {
-    btn.addEventListener('click', closePanel);
-  });
-  document.querySelectorAll('.run-tab').forEach(function(tab) {
-    tab.addEventListener('click', function() {
-      var agent = tab.getAttribute('data-agent');
-      var run = tab.getAttribute('data-run');
-      tab.closest('.run-tabs').querySelectorAll('.run-tab').forEach(function(t) { t.classList.remove('active'); });
-      tab.classList.add('active');
-      tab.closest('.artifacts-panel').querySelectorAll('.run-content').forEach(function(c) {
-        c.style.display = (c.getAttribute('data-run') === run) ? '' : 'none';
-      });
-    });
-  });
-})();
-</script>"""
+    output_path = output_dir / "index.html"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(report_html)
+    logger.info("HTML report written to {}", output_path)
+    return output_path

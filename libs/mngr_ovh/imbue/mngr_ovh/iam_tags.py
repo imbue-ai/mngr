@@ -50,6 +50,23 @@ def vps_urn_for(service_name: str, *, region_code: str = "us") -> str:
     return f"urn:v1:{region_code}:resource:vps:{service_name}"
 
 
+def iam_region_code_for_endpoint(endpoint: str) -> str:
+    """Map a python-ovh endpoint id (``ovh-us``) to the URN's region segment (``us``).
+
+    Recognises the ``ovh-*`` family (which is what mngr's OVH backend
+    supports). Raises ``MngrError`` for unrecognised endpoints rather
+    than silently defaulting; a wrong URN region segment makes IAM v2
+    tag operations target a non-existent resource, which would surface
+    as a confusing 404 deep inside the recycle path.
+    """
+    if endpoint.startswith("ovh-"):
+        return endpoint.removeprefix("ovh-")
+    raise MngrError(
+        f"Cannot derive IAM URN region from OVH endpoint {endpoint!r}; "
+        "expected an ``ovh-*`` endpoint id (e.g. 'ovh-us', 'ovh-eu', 'ovh-ca')."
+    )
+
+
 def attach_tag(
     client: OvhVpsClient,
     urn: str,

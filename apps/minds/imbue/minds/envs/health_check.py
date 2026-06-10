@@ -73,14 +73,23 @@ class _DefinitiveHealthCheckFailure(Exception):
 def _is_transient_status(*, status_code: int, body_is_empty: bool, elapsed_seconds: float) -> bool:
     """Return True iff this HTTP response is transient -> keep polling.
 
-    Cold-boot tolerance: any 5xx within the first 10 seconds is treated
-    as transient. After that window, only 5xx-with-empty-body counts as
-    transient (502/503/504 with a body usually means the app is up but
-    broken, not booting).
+    Cold-boot tolerance: any 4xx or 5xx within the first 10 seconds is
+    treated as transient. The 4xx arm exists because Modal can serve a
+    stale container from the prior version during the swap window when
+    ``min_containers=0`` (dev tier default) -- the new URL is reachable
+    but routes to the old code, which returns 404 from FastAPI for
+    routes that didn't exist there yet (e.g. a newly-added
+    ``/health/liveness``). Without the cold-boot tolerance, the very
+    first deploy that adds a new healthcheck path would fail every
+    time. After the window, 4xx means the app is up but the route is
+    really missing -- treated as definitive. 5xx after the window is
+    only treated as transient when the body is empty (502/503/504 from
+    Modal's edge usually means the app is still booting; 5xx with a
+    body usually means the app is up but broken).
     """
     if status_code in (502, 503, 504) and body_is_empty:
         return True
-    if 500 <= status_code < 600 and elapsed_seconds < _DEFAULT_COLD_BOOT_SECONDS:
+    if 400 <= status_code < 600 and elapsed_seconds < _DEFAULT_COLD_BOOT_SECONDS:
         return True
     return False
 
@@ -120,9 +129,6 @@ def check_once(
         if expected_substring is None or expected_substring in body:
             return (True, None)
         return (False, f"HTTP 200 but expected substring {expected_substring!r} not in body: {body[:200]!r}")
-
-    if 400 <= status < 500:
-        return (False, f"HTTP {status}: {body[:200]!r}")
 
     if _is_transient_status(status_code=status, body_is_empty=body_is_empty, elapsed_seconds=elapsed_seconds):
         logger.debug(

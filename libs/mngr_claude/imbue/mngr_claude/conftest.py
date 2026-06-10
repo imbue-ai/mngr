@@ -1,6 +1,5 @@
 """Shared test fixtures for the mngr_claude plugin."""
 
-import textwrap
 from pathlib import Path
 from typing import Generator
 
@@ -10,32 +9,14 @@ import pytest
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.utils.testing import make_mngr_ctx
 
-
-@pytest.fixture
-def enabled_plugins() -> frozenset[str]:
-    """Enable BASIC-tier plugins plus all claude-package entry points.
-
-    The mngr_claude package provides claude (BASIC) plus code_guardian,
-    fixme_fairy, and headless_claude (EXTRA). Tests in this package need
-    all of them loaded.
-    """
-    return get_independent_entry_point_names() | {"code_guardian", "fixme_fairy", "headless_claude"}
-
-
-@pytest.fixture()
-def stub_mngr_log_sh() -> str:
-    """A no-op mngr_log.sh stub for testing shell scripts that source it."""
-    return textwrap.dedent("""\
-        #!/bin/bash
-        mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
-        log_info() { :; }
-        log_debug() { :; }
-        log_warn() { :; }
-        log_error() { :; }
-    """)
+# NB: mngr_claude inherits its test fixtures via register_plugin_test_fixtures
+# (see the project-level conftest.py), whose plugin-facing plugin_manager loads
+# every mngr entry point. There is deliberately no enabled_plugins override
+# here: unlike mngr-core's blocking plugin_manager, the plugin-facing one does
+# not consult enabled_plugins, so the claude / code_guardian / fixme_fairy /
+# headless_claude hooks are already all loaded.
 
 
 @pytest.fixture

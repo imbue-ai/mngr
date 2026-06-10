@@ -12,7 +12,7 @@ mngr kanpan [OPTIONS]
 TUI board showing agents grouped by lifecycle state with PR status.
 
 Launches a terminal UI that displays all mngr agents organized by their
-lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE).
+lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, UNKNOWN).
 
 Each agent shows its name, current state, and associated GitHub PR information
 including PR number, state (open/closed/merged), and CI check status.
@@ -63,7 +63,7 @@ mngr kanpan [OPTIONS]
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also

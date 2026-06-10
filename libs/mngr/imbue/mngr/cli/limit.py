@@ -21,8 +21,8 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -41,7 +41,6 @@ from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import Permission
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 
 
@@ -58,9 +57,6 @@ class LimitCliOptions(CommonCliOptions):
     activity_sources: str | None
     add_activity_source: tuple[str, ...]
     remove_activity_source: tuple[str, ...]
-    # Permissions
-    grant: tuple[str, ...]
-    revoke: tuple[str, ...]
     # SSH Keys (not yet implemented)
     refresh_ssh_keys: bool
     add_ssh_key: tuple[str, ...]
@@ -91,7 +87,7 @@ def _output_result(
     result_data = {"changes": changes, "count": len(changes)}
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("limit_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -143,21 +139,6 @@ def _build_updated_activity_config(
     )
 
 
-@pure
-def _build_updated_permissions(
-    current: Sequence[Permission],
-    grant: tuple[str, ...],
-    revoke: tuple[str, ...],
-) -> list[Permission]:
-    """Build an updated permissions list by applying grants and revokes."""
-    result = set(current)
-    for perm_str in grant:
-        result.add(Permission(perm_str))
-    for perm_str in revoke:
-        result.discard(Permission(perm_str))
-    return sorted(result)
-
-
 def _has_host_level_settings(opts: LimitCliOptions) -> bool:
     """Return True if any host-level settings are being changed."""
     return (
@@ -171,7 +152,7 @@ def _has_host_level_settings(opts: LimitCliOptions) -> bool:
 
 def _has_agent_level_settings(opts: LimitCliOptions) -> bool:
     """Return True if any agent-level settings are being changed."""
-    return opts.start_on_boot is not None or len(opts.grant) > 0 or len(opts.revoke) > 0
+    return opts.start_on_boot is not None
 
 
 def _has_any_setting(opts: LimitCliOptions) -> bool:
@@ -287,17 +268,6 @@ def _resolve_host_addresses(
     multiple=True,
     help="Remove an activity source from idle detection (repeatable)",
 )
-@optgroup.group("Permissions")
-@optgroup.option(
-    "--grant",
-    multiple=True,
-    help="Grant a permission to the agent (repeatable)",
-)
-@optgroup.option(
-    "--revoke",
-    multiple=True,
-    help="Revoke a permission from the agent (repeatable)",
-)
 @optgroup.group("SSH Keys")
 @optgroup.option(
     "--refresh-ssh-keys",
@@ -336,7 +306,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     if not _has_any_setting(opts):
         raise click.UsageError(
             "Must specify at least one setting to change (e.g., --idle-timeout, --idle-mode, "
-            "--activity-sources, --start-on-boot, --grant, --revoke)"
+            "--activity-sources, --start-on-boot)"
         )
 
     # Validate --activity-sources is not combined with --add/--remove-activity-source
@@ -362,7 +332,7 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     # If only --host is specified (no agents), agent-level settings are not allowed
     if has_hosts and not has_agents and _has_agent_level_settings(opts):
         raise click.UsageError(
-            "Agent-level settings (--start-on-boot, --grant, --revoke) require agent targeting. "
+            "Agent-level settings (--start-on-boot) require agent targeting. "
             "Use --agent or positional args with --host to target agents on specific hosts."
         )
 
@@ -408,7 +378,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
     changes = []
     agents_by_host = group_agents_by_host(target_agents)
     updated_host_ids: set[str] = set()
-    has_permission_changes = bool(opts.grant or opts.revoke)
 
     for host_key, agent_list in agents_by_host.items():
         host_id_str, _ = host_key.split(":", 1)
@@ -445,9 +414,6 @@ def limit(ctx: click.Context, **kwargs: Any) -> None:
                 raise HostOfflineError(f"Host '{host_id_str}' is offline. Cannot configure agents on offline hosts.")
             case _ as unreachable:
                 assert_never(unreachable)
-
-    if has_permission_changes:
-        _output("Restart required for permission changes to take effect.", output_opts)
 
     _output_result(changes, output_opts)
 
@@ -509,26 +475,6 @@ def _apply_agent_changes(
                     }
                 )
 
-            if opts.grant or opts.revoke:
-                current_permissions = agent.get_permissions()
-                new_permissions = _build_updated_permissions(
-                    current=current_permissions,
-                    grant=opts.grant,
-                    revoke=opts.revoke,
-                )
-                agent.set_permissions(new_permissions)
-                _output(
-                    f"Updated permissions for agent {agent_match.agent_name}",
-                    output_opts,
-                )
-                changes.append(
-                    {
-                        "type": "agent_permissions",
-                        "agent_id": str(agent_match.agent_id),
-                        "agent_name": str(agent_match.agent_name),
-                        "permissions": [str(p) for p in new_permissions],
-                    }
-                )
             break
     else:
         raise AgentNotFoundOnHostError(agent_match.agent_id, agent_match.host_id)
@@ -538,26 +484,21 @@ def _apply_agent_changes(
 CommandHelpMetadata(
     key="limit",
     one_line_description="Configure limits for agents and hosts [experimental]",
-    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--grant <PERM>] [--revoke <PERM>]",
+    synopsis="mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]",
     arguments_description="- `AGENTS`: Agent name(s) or ID(s) to configure (can also be specified via `--agent`)",
-    description="""Agents effectively have permissions that are equivalent to the *union* of all
-permissions on the same host. Changing permissions for agents requires them
-to be restarted.
-
-Changes to some limits for hosts (e.g. CPU, RAM, disk space, network) are
+    description="""Changes to some limits for hosts (e.g. CPU, RAM, disk space, network) are
 handled by the provider.
 
 When targeting agents, host-level settings (idle-timeout, idle-mode,
 activity-sources) are applied to each agent's underlying host.
 
-Agent-level settings (start-on-boot, grant, revoke) require agent targeting
+Agent-level settings (start-on-boot) require agent targeting
 and cannot be used with --host alone.
 
 Use '-' in place of agent names to read them from stdin, one per line.""",
     aliases=("lim",),
     examples=(
         ("Set idle timeout for an agent's host", "mngr limit my-agent --idle-timeout 5m"),
-        ("Grant permissions to an agent", "mngr limit my-agent --grant network --grant internet"),
         ("Disable idle detection for all agents", "mngr list --ids | mngr limit - --idle-mode disabled"),
         ("Update host idle settings directly", "mngr limit --host my-host --idle-timeout 1h"),
     ),

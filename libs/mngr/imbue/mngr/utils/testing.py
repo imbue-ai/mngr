@@ -40,7 +40,9 @@ from imbue.mngr.cli.create import create as create_command
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import ConfigStructureError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import build_tmux_capture_pane_command
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -174,6 +176,50 @@ def generate_test_environment_name() -> str:
     now = datetime.now(timezone.utc)
     timestamp = now.strftime("%Y-%m-%d-%H-%M-%S")
     return f"{TEST_ENV_PREFIX}{timestamp}"
+
+
+SHARED_MODAL_ENV_NAME_VAR: Final[str] = "MNGR_TEST_SHARED_MODAL_ENV_NAME"
+
+# Matches a full shared Modal env name and splits it into:
+#   group 1: the bare timestamp portion (no trailing dash), matching the shape
+#            ``generate_test_environment_name()`` returns. Callers join with a
+#            dash to build ``MngrConfig.prefix`` or any other prefix-shape value.
+#   group 2: the non-empty suffix (feeds ``ModalProviderConfig.user_id``).
+# Unlike ``TEST_ENV_PATTERN`` (which only anchors the timestamp), this pattern
+# enforces a literal dash separator and a non-empty suffix that the docstring of
+# ``read_shared_modal_env_name`` promises, so malformed values raise loudly
+# instead of producing a half-formed split.
+_SHARED_MODAL_ENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(mngr_test-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})-(.+)$"
+)
+
+
+def read_shared_modal_env_name() -> tuple[str, str] | None:
+    """Parse ``MNGR_TEST_SHARED_MODAL_ENV_NAME`` into ``(timestamp_name, user_id_suffix)``.
+
+    When the env var is unset or empty, returns ``None`` -- callers fall back
+    to per-test environment creation. Otherwise splits the shared env name on
+    the dash between the timestamp and the suffix, returning the bare timestamp
+    portion (same shape as ``generate_test_environment_name()``) and the
+    suffix. Callers join with ``-`` to reproduce the full shared env name.
+
+    Raises ``ConfigStructureError`` when the env var is set but the value does
+    not match the ``mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>`` pattern (the
+    dash separator and a non-empty suffix are both required) -- the justfile
+    generates conforming names, so a mismatch is a bug we want to surface
+    rather than silently fall back to per-test envs or produce a half-formed
+    split.
+    """
+    raw = os.environ.get(SHARED_MODAL_ENV_NAME_VAR, "")
+    if not raw:
+        return None
+    match = _SHARED_MODAL_ENV_NAME_PATTERN.match(raw)
+    if match is None:
+        raise ConfigStructureError(
+            f"{SHARED_MODAL_ENV_NAME_VAR}={raw!r} does not match the required "
+            "'mngr_test-YYYY-MM-DD-HH-MM-SS-<suffix>' pattern."
+        )
+    return match.group(1), match.group(2)
 
 
 def isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,9 +361,12 @@ def assert_home_is_temp_directory() -> None:
     """
     actual_home = Path.home()
     actual_home_str = str(actual_home)
-    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS
+    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS.
+    # /private/tmp is also valid: when TMPDIR points into /tmp (e.g. a /tmp/<runner> sandbox),
+    # macOS realpath-resolves the /tmp -> /private/tmp symlink, so tmp_path lands under /private/tmp.
     if not (
         actual_home_str.startswith("/tmp")
+        or actual_home_str.startswith("/private/tmp")
         or actual_home_str.startswith("/var/folders")
         or actual_home_str.startswith("/private/var")
     ):
@@ -585,8 +634,9 @@ def cleanup_tmux_session(session_name: str) -> None:
     a hung ``tmux`` step can't block the rest of the cleanup.
     """
     # Collect all pane PIDs and their descendants before killing the session.
-    # Guard with has-session first: list-panes -s does not support the = prefix for
-    # exact matching, so it would prefix-match a different session if this one is gone.
+    # Guard with has-session first: list-panes -s does not honor the = exact-match
+    # prefix (cmd-find.c quirk), so without the guard a bare-name list-panes -s
+    # would silently misroute when this session is gone.
     has_result = _run_with_timeout("tmux", "has-session", "-t", f"={session_name}")
     all_pids: list[str] = []
     if has_result.returncode == 0:
@@ -622,8 +672,15 @@ def cleanup_tmux_session(session_name: str) -> None:
         except (ProcessLookupError, ValueError):
             pass
 
-    # Kill any orphaned activity monitors for this session (started with nohup, detached)
-    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t {session_name}")
+    # Kill any orphaned activity monitors for this session (started with nohup, detached).
+    # The monitor runs `tmux list-panes -t =<session>:0 ...` (see
+    # _build_start_agent_shell_command, which routes the target through
+    # TmuxWindowTarget). Anchoring the pkill substring on the full `=<session>:0`
+    # form both keeps the match working (the bare `<session>` form is no longer
+    # in the command line) and avoids prefix-collision: a sibling session would
+    # appear as `=<session>-sibling:0`, which contains `<session>` but not
+    # `<session>:0`, so its monitor will not be killed by accident.
+    _run_with_timeout("pkill", "-9", "-f", f"list-panes -t ={session_name}:0")
 
 
 @contextmanager
@@ -652,15 +709,19 @@ def mngr_agent_cleanup(
         run_mngr_subprocess(*args, env=env)
 
 
-def capture_tmux_pane_contents(session_name: str) -> str:
-    """Capture the contents of a tmux session's pane via local subprocess.
+def capture_tmux_pane_contents(target: TmuxWindowTarget) -> str:
+    """Capture the contents of a tmux pane via local subprocess.
 
     This is the local-only variant for test code that doesn't have a host object.
     For the host-based version (works over SSH), use
     imbue.mngr.hosts.tmux.capture_tmux_pane_content.
+
+    The :class:`TmuxWindowTarget` argument mirrors the host-version signature so
+    callers that already hold a structured target can pass it through without
+    deconstructing.
     """
     result = subprocess.run(
-        shlex.split(build_tmux_capture_pane_command(session_name)),
+        shlex.split(build_tmux_capture_pane_command(target)),
         capture_output=True,
         text=True,
     )
@@ -822,6 +883,7 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    plugin: dict | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
@@ -853,6 +915,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
+        plugin=plugin or {},
         host=host_details,
     )
 
@@ -1490,7 +1553,6 @@ def make_test_discovered_agent() -> DiscoveredAgent:
             "work_dir": "/tmp/test",
             "start_on_boot": False,
             "labels": {},
-            "permissions": [],
         },
     )
 

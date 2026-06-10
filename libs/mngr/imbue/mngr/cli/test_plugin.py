@@ -235,6 +235,7 @@ def test_plugin_enable_registered_plugin_does_not_warn(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_git_repo_cwd: Path,
+    mngr_test_root_name: str,
 ) -> None:
     """Test that enabling a registered plugin does not produce an unregistered warning.
 
@@ -242,6 +243,12 @@ def test_plugin_enable_registered_plugin_does_not_warn(
     so that 'mngr plugin enable <name>' works without warnings. This test
     verifies the names used in the docs examples resolve correctly.
     """
+    # `plugin enable` writes the project settings.toml and later iterations reload
+    # it, so opt that config into the pytest run up front (is_allowed_in_pytest
+    # defaults to False); plugin enable preserves it when it appends the plugin.
+    config_dir = temp_git_repo_cwd / f".{mngr_test_root_name}"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
     # These are the built-in plugin names that are registered by the test fixture
     # (local, ssh from load_local_backend_only; claude, codex from load_agents_from_plugins)

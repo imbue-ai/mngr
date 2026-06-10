@@ -19,7 +19,7 @@ def all_agent_type_plugins() -> frozenset[str]:
         in (
             "claude",
             "opencode",
-            "gemini",
+            "antigravity",
             "pi_coding",
             "llm",
             "code_guardian",

@@ -6,13 +6,7 @@
 
 modal_workspace = "minds-production"
 vault_path_prefix = "secrets/minds/production"
-cloudflare_domain = "CHANGE_ME.example.com"
-
-# OAuth client IDs are not secrets; the client_secret stays in Vault under
-# the `supertokens` entry. The IDs are surfaced here so the deploy step
-# can validate the supertokens Vault entry matches the expected client.
-oauth_google_client_id = ""
-oauth_github_client_id = ""
+cloudflare_domain = "imbueminds.com"
 
 # Every service named here must exist as `.minds/template/<service>.sh`
 # (the schema) AND have a corresponding Vault entry at
@@ -25,9 +19,13 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "paid-accounts",
     "pool-ssh",
     "supertokens",
+    # OVH AK/AS/CK -- the connector's release route + cleanup cron make signed
+    # OVH calls at runtime to strip per-lease tags and cancel released VPSes.
+    # The rsc app references `ovh-<tier>-<deploy_id>` via Secret.from_name, so
+    # this must be pushed or `modal deploy rsc-<tier>` fails.
+    "ovh",
 ]
 
 # Tier-shape flags consumed by `minds env deploy` / `destroy`. Production
@@ -46,3 +44,8 @@ tracks_generation = true
 [min_containers]
 connector = 1
 litellm_proxy = 1
+
+# Default paid-access entries seeded (seed-if-absent) into paid_domains after
+# migrations, so the imbue team can exercise paid features on production.
+[paid]
+domains = ["imbue.com"]

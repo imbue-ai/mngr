@@ -1,31 +1,38 @@
-"""Tests for VPS Docker host store data types."""
+"""Tests for VPS Docker host store data types and volume-backed I/O."""
 
 import json
+import shlex
+import subprocess
+from collections.abc import Callable
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
-from typing import Any
+from pathlib import Path
 from typing import cast
 
 import pytest
+from pydantic import ConfigDict
+from pydantic import Field
+from pyinfra.api import Host as PyinfraHost
 
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import PyinfraConnector
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsDockerHostStore
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
-from imbue.mngr_vps_docker.host_store import _FILE_SEP
+from imbue.mngr_vps_docker.host_store import open_host_store
+from imbue.mngr_vps_docker.host_store import resolve_volume_device
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
-
-class _StubOuterHost:
-    """Minimal stub satisfying OuterHostInterface for parse-method tests.
-
-    Records the last command but never connects -- used only for the
-    pure-Python parse helpers on VpsDockerHostStore.
-    """
-
-    def execute_idempotent_command(self, command: str, **_kwargs: Any) -> Any:
-        raise NotImplementedError("StubOuterHost: execute should not be reached in parse tests")
+_AGENT_ID_1 = AgentId.generate()
+_AGENT_ID_2 = AgentId.generate()
+_AGENT_ID_3 = AgentId.generate()
 
 
 def _make_certified_data(host_id: str = "test-host-123", host_name: str = "test-host") -> CertifiedHostData:
@@ -41,6 +48,12 @@ def _make_certified_data(host_id: str = "test-host-123", host_name: str = "test-
         created_at=now,
         updated_at=now,
     )
+
+
+# =============================================================================
+# Schema tests: VpsHostConfig and VpsDockerHostRecord are unchanged by the
+# unified-volume refactor; these tests guard the pydantic shapes.
+# =============================================================================
 
 
 def test_vps_host_config_creation() -> None:
@@ -114,7 +127,6 @@ def test_vps_docker_host_record_serialization_roundtrip() -> None:
         container_id="deadbeef1234",
     )
 
-    # Serialize and deserialize
     json_str = original.model_dump_json()
     restored = VpsDockerHostRecord.model_validate_json(json_str)
 
@@ -135,88 +147,387 @@ def test_vps_docker_host_record_model_copy() -> None:
     updated = record.model_copy(update={"certified_host_data": new_data})
     assert updated.certified_host_data.host_name == "updated-host"
     assert updated.vps_ip == "10.0.0.1"
-    # Original unchanged
+    # Original unchanged.
     assert record.certified_host_data.host_name == "test-host"
 
 
-# -- Batched read tests --
+# =============================================================================
+# VpsDockerHostStore tests against a tmp-dir-backed fake outer.
+#
+# The fake stands in for the VPS's outer host: file I/O goes to a real local
+# tmp_path (so write_text_file/read_text_file exercise real bytes), and
+# execute_idempotent_command shells out locally for the few shell primitives
+# the store actually uses (mkdir, rm, ls, docker volume inspect).
+#
+# docker volume inspect is special-cased to return the registered
+# ``device_by_volume`` path so ``resolve_volume_device`` resolves to the fake
+# bind-source path without needing a real docker daemon.
+# =============================================================================
 
 
-def _make_store() -> VpsDockerHostStore:
-    """Create a VpsDockerHostStore with a stub outer for testing parse methods."""
-    return VpsDockerHostStore(
-        outer=cast(OuterHostInterface, _StubOuterHost()),
-        state_container_name="test-state",
+class _LocalFakeOuter(OuterHostInterface):
+    """An OuterHostInterface stand-in backed by a local tmp directory.
+
+    Only the methods VpsDockerHostStore calls are implemented in any
+    meaningful way. ``device_by_volume`` lets the fake answer
+    ``docker volume inspect --format '{{.Options.device}}'`` queries
+    deterministically. The remaining ``@abstractmethod`` methods on
+    OuterHostInterface raise so the fake fails loudly if a test exercises an
+    unsupported path.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    device_by_volume: dict[str, Path] = Field(default_factory=dict)
+    recorded_commands: list[str] = Field(default_factory=list)
+
+    @property
+    def is_local(self) -> bool:
+        return True
+
+    def get_name(self) -> str:
+        return "local-fake-outer"
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded_commands.append(command)
+
+        # Intercept docker volume inspect so we don't need a real daemon.
+        if command.startswith("docker volume inspect "):
+            tokens = shlex.split(command)
+            volume_name = tokens[3]
+            device = self.device_by_volume.get(volume_name)
+            if device is None:
+                return CommandResult(
+                    stdout="",
+                    stderr=f"Error: No such volume: {volume_name}",
+                    success=False,
+                )
+            return CommandResult(stdout=f"{device}\n", stderr="", success=True)
+
+        # Shell out for the remaining primitives (mkdir / rm / ls / test).
+        completed = subprocess.run(
+            ["sh", "-c", command],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        return CommandResult(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            success=completed.returncode == 0,
+        )
+
+    def execute_stateful_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        raise NotImplementedError("_LocalFakeOuter.execute_stateful_command not used by VpsDockerHostStore")
+
+    def execute_streaming_command(
+        self,
+        command: str,
+        on_line: Callable[[str], None],
+        *,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        raise NotImplementedError("_LocalFakeOuter.execute_streaming_command not used by VpsDockerHostStore")
+
+    def read_file(self, path: Path) -> bytes:
+        return path.read_bytes()
+
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        return path.read_text(encoding=encoding)
+
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding=encoding)
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        if not path.exists():
+            return None
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+    def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
+        return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        raise NotImplementedError("_LocalFakeOuter.list_directory not used by VpsDockerHostStore")
+
+    # path_exists is inherited from OuterHostInterface, which already routes to
+    # Path.exists() when is_local is True.
+
+
+def _make_local_connector() -> PyinfraConnector:
+    """Construct a no-op PyinfraConnector so OuterHostInterface's frozen field validates."""
+    return PyinfraConnector(cast(PyinfraHost, object()))
+
+
+def _outer_with_device(device: Path, volume_name: str = "mngr-host-vol-test") -> _LocalFakeOuter:
+    return _LocalFakeOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={volume_name: device},
     )
 
 
-def test_split_batched_output_empty() -> None:
-    store = _make_store()
-    assert store._split_batched_output("") == []
-
-
-def test_split_batched_output_single_file() -> None:
-    store = _make_store()
-    content = json.dumps({"host_id": "host-abc"})
-    output = f"{_FILE_SEP}/mngr-state/host_state/host-abc.json\n{content}"
-    result = store._split_batched_output(output)
-    assert len(result) == 1
-    assert result[0][0] == "/mngr-state/host_state/host-abc.json"
-    assert json.loads(result[0][1])["host_id"] == "host-abc"
-
-
-def test_split_batched_output_multiple_files() -> None:
-    store = _make_store()
-    content1 = json.dumps({"host_id": "host-1"})
-    content2 = json.dumps({"host_id": "host-2"})
-    output = (
-        f"{_FILE_SEP}/mngr-state/host_state/host-1.json\n{content1}\n"
-        f"{_FILE_SEP}/mngr-state/host_state/host-2.json\n{content2}"
+def _make_store(mountpoint: Path) -> VpsDockerHostStore:
+    outer = _LocalFakeOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={"unused": mountpoint},
     )
-    result = store._split_batched_output(output)
-    assert len(result) == 2
+    return VpsDockerHostStore(outer=outer, mountpoint=mountpoint)
 
 
-def test_parse_batched_json_files() -> None:
-    store = _make_store()
-    data1 = {"id": "agent-1", "name": "a1"}
-    data2 = {"id": "agent-2", "name": "a2"}
-    output = (
-        f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-1.json\n{json.dumps(data1)}\n"
-        f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-2.json\n{json.dumps(data2)}"
+def test_resolve_volume_device_returns_inspected_device_path(tmp_path: Path) -> None:
+    outer = _outer_with_device(tmp_path / "subvol", volume_name="mngr-host-vol-aaaa")
+    result = resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
+    assert result == tmp_path / "subvol"
+
+
+def test_resolve_volume_device_raises_when_volume_missing(tmp_path: Path) -> None:
+    outer = _outer_with_device(tmp_path / "subvol", volume_name="mngr-host-vol-aaaa")
+    with pytest.raises(MngrError, match="docker-volume-inspect"):
+        resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-does-not-exist")
+
+
+def test_resolve_volume_device_raises_when_options_device_empty() -> None:
+    """A volume created without bind options (no ``Options.device``) must fail loudly."""
+
+    class _EmptyDeviceOuter(_LocalFakeOuter):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            self.recorded_commands.append(command)
+            if command.startswith("docker volume inspect "):
+                # Docker's text/template prints "<no value>" for a missing
+                # nested field; an empty options map prints as an empty string.
+                return CommandResult(stdout="\n", stderr="", success=True)
+            return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+    outer = _EmptyDeviceOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={},
     )
-    result = store._parse_batched_json_files(output)
-    assert len(result) == 2
-    assert result[0]["id"] == "agent-1"
-    assert result[1]["id"] == "agent-2"
+    with pytest.raises(MngrError, match="empty Options.device"):
+        resolve_volume_device(cast(OuterHostInterface, outer), "mngr-host-vol-no-bind-opts")
 
 
-def test_parse_batched_json_files_raises_on_invalid() -> None:
-    """A corrupt file in batched output raises so the corruption is visible rather than silently dropped."""
-    store = _make_store()
-    output = (
-        f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-1.json\n{{invalid json\n"
-        f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-2.json\n{json.dumps({'id': 'agent-2'})}"
+def test_open_host_store_binds_to_inspected_device_path(tmp_path: Path) -> None:
+    # open_host_store only consults the stubbed `docker volume inspect`; no
+    # real directory is required for resolving the bind-source path.
+    device_path = tmp_path / "subvol"
+    outer = _outer_with_device(device_path, volume_name="mngr-host-vol-aaaa")
+    store = open_host_store(cast(OuterHostInterface, outer), "mngr-host-vol-aaaa")
+    assert store.mountpoint == device_path
+
+
+def test_write_then_read_host_record_roundtrips(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    record = VpsDockerHostRecord(
+        certified_host_data=_make_certified_data(host_id="host-abc", host_name="alpha"),
+        vps_ip="10.0.0.1",
     )
-    with pytest.raises(json.JSONDecodeError):
-        store._parse_batched_json_files(output)
+
+    store.write_host_record(record)
+
+    # On disk the record lives at the volume root.
+    on_disk = (tmp_path / "host_state.json").read_text()
+    assert json.loads(on_disk)["certified_host_data"]["host_id"] == "host-abc"
+
+    # Reading the record back from a fresh store reflects what's on disk.
+    fresh_store = _make_store(tmp_path)
+    loaded = fresh_store.read_host_record()
+    assert loaded is not None
+    assert loaded.certified_host_data.host_name == "alpha"
+    assert loaded.vps_ip == "10.0.0.1"
 
 
-def test_parse_batched_host_records() -> None:
-    store = _make_store()
-    host_id_str = "host-00112233445566778899aabbccddeeff"
-    certified_data = _make_certified_data(host_id=host_id_str, host_name="my-host")
-    record = VpsDockerHostRecord(certified_host_data=certified_data, vps_ip="10.0.0.1")
-    output = f"{_FILE_SEP}/mngr-state/host_state/{host_id_str}.json\n{record.model_dump_json()}"
-    result = store._parse_batched_host_records(output)
-    assert len(result) == 1
-    assert result[0].certified_host_data.host_id == host_id_str
+def test_read_host_record_returns_none_when_missing(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    assert store.read_host_record() is None
 
 
-def test_parse_batched_host_records_ignores_subdirectory_files() -> None:
-    """Host records are top-level .json files, not files in subdirectories."""
-    store = _make_store()
-    agent_data = json.dumps({"id": "agent-1", "name": "a1"})
-    output = f"{_FILE_SEP}/mngr-state/host_state/host-x/agent-1.json\n{agent_data}"
-    result = store._parse_batched_host_records(output)
-    assert len(result) == 0
+def test_read_host_record_returns_none_on_corrupt_json(tmp_path: Path) -> None:
+    (tmp_path / "host_state.json").write_text("{not valid json")
+    store = _make_store(tmp_path)
+    assert store.read_host_record() is None
+
+
+def test_read_host_record_propagates_mngr_error(tmp_path: Path) -> None:
+    """Transient SSH-class read failures must NOT be swallowed.
+
+    If read_text_file raises MngrError, callers like ``_read_records_from_vps``
+    rely on the exception bubbling out so they can warn and fall back to
+    cached records. Silently returning None would make the host disappear
+    from the listing on any flaky-network blip.
+    """
+
+    class _FailingReadOuter(_LocalFakeOuter):
+        def path_exists(self, path: Path) -> bool:
+            return True
+
+        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+            raise MngrError("simulated transient SSH failure")
+
+    outer = _FailingReadOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    with pytest.raises(MngrError, match="simulated transient SSH failure"):
+        store.read_host_record()
+
+
+def test_delete_host_record_removes_state_and_agents(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    record = VpsDockerHostRecord(certified_host_data=_make_certified_data())
+    store.write_host_record(record)
+    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})
+    store.persist_agent_data({"id": str(_AGENT_ID_2), "name": "second"})
+
+    store.delete_host_record()
+
+    assert not (tmp_path / "host_state.json").exists()
+    assert not (tmp_path / "agents").exists()
+    # Subsequent read sees no record.
+    assert store.read_host_record() is None
+
+
+def test_delete_host_record_is_idempotent_when_nothing_exists(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    # No prior write; deletion should still succeed.
+    store.delete_host_record()
+
+
+def test_persist_then_list_agent_data_roundtrips(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})
+    store.persist_agent_data({"id": str(_AGENT_ID_2), "name": "second"})
+
+    listed = store.list_persisted_agent_data()
+    listed_by_id = {entry["id"]: entry["name"] for entry in listed}
+    assert listed_by_id == {str(_AGENT_ID_1): "first", str(_AGENT_ID_2): "second"}
+
+
+def test_persist_agent_data_without_id_is_a_noop(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.persist_agent_data({"name": "no-id-here"})
+    # Nothing was written.
+    assert store.list_persisted_agent_data() == []
+
+
+def test_list_persisted_agent_data_returns_empty_when_dir_missing(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    assert store.list_persisted_agent_data() == []
+
+
+def test_list_persisted_agent_data_skips_corrupt_entries(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "valid"})
+
+    # Inject a corrupt sibling file (filename need not be a valid AgentId).
+    corrupt = tmp_path / "agents" / "agent-bad.json"
+    corrupt.write_text("{not valid json")
+
+    listed = store.list_persisted_agent_data()
+    assert len(listed) == 1
+    assert listed[0]["id"] == str(_AGENT_ID_1)
+
+
+def test_remove_persisted_agent_data_deletes_only_target(tmp_path: Path) -> None:
+    keep_id = _AGENT_ID_1
+    drop_id = _AGENT_ID_2
+    store = _make_store(tmp_path)
+    store.persist_agent_data({"id": str(keep_id), "name": "keep"})
+    store.persist_agent_data({"id": str(drop_id), "name": "drop"})
+
+    store.remove_persisted_agent_data(drop_id)
+
+    remaining_ids = {entry["id"] for entry in store.list_persisted_agent_data()}
+    assert remaining_ids == {str(keep_id)}
+    assert not (tmp_path / "agents" / f"{drop_id}.json").exists()
+
+
+def test_remove_persisted_agent_data_is_idempotent(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    # No prior persist; removal must not raise.
+    store.remove_persisted_agent_data(_AGENT_ID_3)
+
+
+def test_list_persisted_agent_data_raises_on_shell_failure(tmp_path: Path) -> None:
+    """A non-zero exit from the batched agent read must raise instead of returning []."""
+
+    class _FailingShellOuter(_LocalFakeOuter):
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+        ) -> CommandResult:
+            # Let path_exists / docker volume inspect work normally; fail
+            # only the batched agent-list shell loop.
+            if "for f in" in command:
+                return CommandResult(stdout="", stderr="permission denied", success=False)
+            return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+    (tmp_path / "agents").mkdir()
+    outer = _FailingShellOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    with pytest.raises(MngrError, match="list-agent-records"):
+        store.list_persisted_agent_data()
+
+
+def test_list_persisted_agent_data_uses_one_round_trip(tmp_path: Path) -> None:
+    """All agent files must come back in a single execute_idempotent_command call."""
+    outer = _LocalFakeOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={"unused": tmp_path},
+    )
+    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
+    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})
+    store.persist_agent_data({"id": str(_AGENT_ID_2), "name": "second"})
+
+    pre_call_count = len(outer.recorded_commands)
+    listed = store.list_persisted_agent_data()
+    post_call_count = len(outer.recorded_commands)
+
+    assert {entry["id"] for entry in listed} == {str(_AGENT_ID_1), str(_AGENT_ID_2)}
+    # One batched shell call regardless of agent count -- *not* one per agent.
+    assert post_call_count - pre_call_count == 1

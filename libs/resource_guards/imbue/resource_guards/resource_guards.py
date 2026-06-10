@@ -26,6 +26,7 @@ Usage:
 
 import dataclasses
 import importlib.metadata
+import inspect
 import os
 import shutil
 import stat
@@ -33,10 +34,15 @@ import tempfile
 from collections.abc import Callable
 from collections.abc import Generator
 from collections.abc import Iterable
+from contextlib import contextmanager
 from enum import StrEnum
 from enum import auto
+from functools import wraps
 from pathlib import Path
 from typing import Any
+from typing import Protocol
+from typing import TypeVar
+from typing import assert_never
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -48,8 +54,16 @@ import pytest
 RESOURCE_GUARDS_ENTRY_POINT_GROUP = "resource_guards"
 
 
-class ResourceGuardViolation(Exception):
-    """Raised when a test invokes an SDK resource without the required mark."""
+class ResourceGuardError(Exception):
+    """Base for everything the resource guard system raises."""
+
+
+class ResourceGuardViolation(ResourceGuardError):
+    """A test or fixture violated the resource guard invariants at runtime."""
+
+
+class ResourceGuardMisconfiguration(ResourceGuardError):
+    """@fixture_uses_resources was used incorrectly (empty/stacked/overridden)."""
 
 
 @dataclasses.dataclass
@@ -58,6 +72,7 @@ class _PerTestGuardState:
 
     tracking_dir: str
     marks: set[str]
+    covered_resources: set[str]
     env_patcher: patch.dict  # ty: ignore[invalid-type-form]
 
 
@@ -359,10 +374,6 @@ def register_sdk_guard(
 class MethodKind(StrEnum):
     """How to wrap a guarded method."""
 
-    @staticmethod
-    def _generate_next_value_(name: str, start: int, count: int, last_values: list[str]) -> str:
-        return name.upper()
-
     SYNC = auto()
     ASYNC = auto()
     ASYNC_GEN = auto()
@@ -504,8 +515,12 @@ def stop_resource_guards() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
-    """Build the env var dict for a single test's resource guards."""
+def _build_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
+    """Build the guard env var dict for a per-test or per-fixture scope.
+
+    ``marks`` is the set of resources the scope is authorized to use --
+    pytest marks for tests, @fixture_uses_resources declarations for fixtures.
+    """
     env: dict[str, str] = {
         "_PYTEST_GUARD_PHASE": "call",
         "_PYTEST_GUARD_TRACKING_DIR": tracking_dir,
@@ -513,6 +528,271 @@ def _build_per_test_guard_env(marks: set[str], tracking_dir: str) -> dict[str, s
     for resource in _guarded_resources:
         env[f"_PYTEST_GUARD_{resource.upper()}"] = "allow" if resource in marks else "block"
     return env
+
+
+class _GuardViolationKind(StrEnum):
+    """What kind of resource guard invariant was violated."""
+
+    BLOCKED = auto()
+    NEVER_INVOKED = auto()
+
+
+@dataclasses.dataclass(frozen=True)
+class _GuardViolation:
+    """A detected resource guard violation against a tracking_dir."""
+
+    resource: str
+    kind: _GuardViolationKind
+
+
+def _detect_guard_violations(
+    marks: set[str],
+    tracking_dir: str,
+    *,
+    check_never_invoked: bool,
+) -> _GuardViolation | None:
+    """Detect blocked-invocation and superfluous-mark violations.
+
+    Shared by the per-test and per-fixture guard checks. Returns the first
+    violation found, or None if the scope is clean. ``check_never_invoked``
+    should be False when the scope already failed for an unrelated reason --
+    a missing tracking file there is most likely a downstream consequence,
+    not the root cause.
+    """
+    for resource in _guarded_resources:
+        if (Path(tracking_dir) / f"blocked_{resource}").exists():
+            return _GuardViolation(resource=resource, kind=_GuardViolationKind.BLOCKED)
+
+    if not check_never_invoked:
+        return None
+
+    for resource in _guarded_resources:
+        if resource in marks and not (Path(tracking_dir) / resource).exists():
+            return _GuardViolation(resource=resource, kind=_GuardViolationKind.NEVER_INVOKED)
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Fixture-level resource guard scope (opt-in)
+# ---------------------------------------------------------------------------
+#
+# @fixture_uses_resources declares which resources a fixture itself uses.
+# Such fixtures run setup/teardown under their own guard scope rather than
+# attributing resource calls to whichever test triggered the setup -- which
+# matters for module/session-scoped fixtures shared across tests. Untagged
+# fixtures keep today's per-test attribution behavior.
+
+
+_fixture_resource_marks: dict[Callable[..., Any], set[str]] = {}
+
+
+class _NamedCallable(Protocol):
+    """A callable that also carries a ``__name__`` (i.e. a function), which is
+    all that ``fixture_uses_resources`` decorates."""
+
+    __name__: str
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+F = TypeVar("F", bound=_NamedCallable)
+
+
+def fixture_uses_resources(*resources: str) -> Callable[[F], F]:
+    """Declare which guarded resources a pytest fixture uses.
+
+    Apply BELOW @pytest.fixture so the underlying function is registered
+    before pytest captures it as a FixtureDef. Pass every resource the
+    fixture invokes in a single call::
+
+        @pytest.fixture(scope="module")
+        @fixture_uses_resources("modal", "docker")
+        def deployed_function() -> Generator[...]:
+            ...
+
+    During the fixture's setup and teardown, the resource guard treats the
+    fixture as an independently-marked scope: resource calls inside the
+    fixture are authorized against the fixture's declared resources rather
+    than whichever test happens to trigger setup. Consuming tests must
+    still carry @pytest.mark.<resource> for each declared resource (the
+    static check in _collect_fixture_covered_resources enforces this).
+
+    Raises ResourceGuardMisconfiguration if applied more than once to the
+    same function -- stacking the decorator is not supported; combine all
+    resources into the single call instead.
+    """
+
+    def decorator(func: F) -> F:
+        if func in _fixture_resource_marks:
+            raise ResourceGuardMisconfiguration(
+                f"@fixture_uses_resources applied more than once to '{func.__name__}'. "
+                f"Stacking the decorator is not supported -- combine all resources into "
+                f"a single call, e.g. @fixture_uses_resources('a', 'b')."
+            )
+        _fixture_resource_marks[func] = set(resources)
+        return func
+
+    return decorator
+
+
+def _collect_fixture_covered_resources(item: pytest.Item) -> set[str]:
+    """Resources declared via @fixture_uses_resources by any fixture in item's closure.
+
+    A test's @pytest.mark.<resource> is considered satisfied by transitive use
+    if a fixture in the test's closure declared that resource via
+    @fixture_uses_resources -- the fixture's setup is independently verified
+    to actually invoke the resource, so the mark on the consuming test is
+    meaningful even when the test body never calls the resource directly.
+
+    Lazy fixtures retrieved via request.getfixturevalue() are not part of
+    the static closure and therefore do not contribute to coverage here.
+
+    Raises ResourceGuardMisconfiguration if a fixture name in the closure
+    has multiple FixtureDefs (an override) where any def is tagged.
+    Override semantics for @fixture_uses_resources are not supported.
+    """
+    fixture_info = item._fixtureinfo  # ty: ignore[unresolved-attribute]
+    covered: set[str] = set()
+    for name, fixturedefs in fixture_info.name2fixturedefs.items():
+        tagged_decls: list[set[str]] = []
+        for fixturedef in fixturedefs:
+            declared = _fixture_resource_marks.get(fixturedef.func)
+            if declared:
+                tagged_decls.append(declared)
+        if not tagged_decls:
+            continue
+        if len(fixturedefs) > 1:
+            raise ResourceGuardMisconfiguration(
+                f"RESOURCE GUARD: Fixture '{name}' has multiple definitions in the test's closure "
+                f"(an override), and at least one is decorated with @fixture_uses_resources. "
+                f"Override semantics for tagged fixtures are not supported -- remove the override "
+                f"or remove the decorator from all defs."
+            )
+        for declared in tagged_decls:
+            covered |= declared
+    return covered
+
+
+def _make_guarded_fixture_wrapper(
+    original_func: Callable[..., Any],
+    fixture_env: dict[str, str],
+) -> Callable[..., Any]:
+    """Wrap a fixture function so its setup and teardown run under fixture_env.
+
+    Between the fixture's setup yield and teardown, env vars are restored so
+    consuming tests see their own per-test env -- the fixture's env only
+    applies inside the fixture function itself.
+
+    Generator fixtures: setup runs up to the yield with fixture_env active,
+    then env is restored. When pytest re-enters the generator for teardown,
+    fixture_env is reapplied for the post-yield body.
+
+    Non-generator fixtures: fixture_env is active for the whole call.
+    """
+    if inspect.isgeneratorfunction(original_func):
+
+        @wraps(original_func)
+        def wrapped(*args: Any, **kwargs: Any) -> Generator[Any, None, None]:
+            gen = original_func(*args, **kwargs)
+            with patch.dict(os.environ, fixture_env):
+                value = next(gen)
+            yield value
+            # Drain the generator's post-yield (teardown). Pytest fixtures yield
+            # exactly once, so next(..., None) is enough -- it absorbs the
+            # StopIteration that signals teardown completed normally and lets
+            # any teardown-raised exception propagate.
+            with patch.dict(os.environ, fixture_env):
+                next(gen, None)
+
+        return wrapped
+
+    @wraps(original_func)
+    def wrapped_plain(*args: Any, **kwargs: Any) -> Any:
+        with patch.dict(os.environ, fixture_env):
+            return original_func(*args, **kwargs)
+
+    return wrapped_plain
+
+
+def _raise_fixture_blocked(
+    fixture_id: str,
+    resource: str,
+    setup_exception: BaseException | None,
+) -> None:
+    """Raise the BLOCKED-violation error for a fixture invoking an undeclared resource."""
+    raise ResourceGuardViolation(
+        f"RESOURCE GUARD: Fixture '{fixture_id}' invoked '{resource}' but did not declare it via "
+        f"@fixture_uses_resources({resource!r}). Add the declaration or remove the {resource} usage."
+    ) from setup_exception
+
+
+def _check_fixture_blocked_after_setup(
+    fixture_id: str,
+    resources: set[str],
+    tracking_dir: str,
+    setup_exception: BaseException | None = None,
+) -> None:
+    """Raise immediately if the fixture's setup invoked an undeclared resource.
+
+    Runs in the fixture-setup hookwrapper's finally clause so a broken
+    setup fails fast -- pytest aborts before the fixture's teardown
+    runs and before any consuming tests execute. Chains the original
+    setup exception via ``from`` so the underlying failure is preserved
+    in the traceback.
+
+    Only checks BLOCKED; NEVER_INVOKED (and any teardown-phase BLOCKED)
+    is deferred to _check_fixture_at_scope_end, which runs as a fixture
+    finalizer after the wrapper's post-yield body has executed.
+    """
+    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=False)
+    if violation is None:
+        return
+    # check_never_invoked=False guarantees only BLOCKED is returned.
+    assert violation.kind == _GuardViolationKind.BLOCKED
+    _raise_fixture_blocked(fixture_id, violation.resource, setup_exception)
+
+
+def _check_fixture_at_scope_end(
+    fixture_id: str,
+    resources: set[str],
+    tracking_dir: str,
+    setup_failed: bool,
+) -> None:
+    """Validate fixture-scope guard invariants after the wrapper's teardown completes.
+
+    Registered as a fixture finalizer before pytest's teardown
+    finalizer, so it runs LAST in LIFO order (after teardown writes
+    its tracking files). Catches:
+    - BLOCKED invocations during teardown (the setup-time check
+      already handled setup-phase BLOCKED via
+      _check_fixture_blocked_after_setup; this re-runs the detector
+      to catch new tracking files written during teardown).
+    - NEVER_INVOKED for any declared resource that was never used
+      in setup or teardown.
+
+    Skips both checks when setup_failed -- a never-invoked violation
+    there may just be a downstream effect of the underlying failure,
+    and a teardown-phase BLOCKED cannot occur because pytest does not
+    run teardown when setup failed.
+    """
+    if setup_failed:
+        return
+    violation = _detect_guard_violations(resources, tracking_dir, check_never_invoked=True)
+    if violation is None:
+        return
+
+    match violation.kind:
+        case _GuardViolationKind.BLOCKED:
+            _raise_fixture_blocked(fixture_id, violation.resource, None)
+        case _GuardViolationKind.NEVER_INVOKED:
+            raise ResourceGuardViolation(
+                f"RESOURCE GUARD: Fixture '{fixture_id}' declared @fixture_uses_resources({violation.resource!r}) "
+                f"but did not invoke {violation.resource} during setup or teardown. Remove the declaration "
+                f"or ensure the fixture exercises {violation.resource}."
+            )
+        case _:  # pragma: no cover
+            assert_never(violation.kind)
 
 
 class _ResourceGuardPlugin:
@@ -537,8 +817,95 @@ class _ResourceGuardPlugin:
     def pytest_runtest_makereport(
         item: pytest.Item,
         call: pytest.CallInfo,
-    ) -> Generator[None, None, None]:
+    ) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
         yield from _pytest_runtest_makereport(item, call)
+
+    @staticmethod
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_fixture_setup(
+        fixturedef: Any,
+        request: pytest.FixtureRequest,
+    ) -> Generator[None, pluggy.Result[object], None]:
+        yield from _pytest_fixture_setup(fixturedef, request)
+
+
+@contextmanager
+def _swapped_fixturedef_func(fixturedef: Any, new_func: Callable[..., Any]) -> Generator[None, None, None]:
+    """Temporarily replace fixturedef.func, restoring the original on exit."""
+    original = fixturedef.func
+    fixturedef.func = new_func
+    try:
+        yield
+    finally:
+        fixturedef.func = original
+
+
+@pytest.hookimpl(hookwrapper=True)
+def _pytest_fixture_setup(
+    fixturedef: Any,
+    request: pytest.FixtureRequest,
+) -> Generator[None, pluggy.Result[object], None]:
+    """Apply a fixture-scope guard around fixtures that opted in.
+
+    Only fires for fixtures decorated with @fixture_uses_resources. Other
+    fixtures yield-through with no behavior change, so this is fully
+    backward-compatible with existing fixtures.
+    """
+    resources = _fixture_resource_marks.get(fixturedef.func)
+    if not resources:
+        yield
+        return
+
+    resources_set = set(resources)
+    # Use pytest's session-scoped tmp_path_factory so the tracking dir lives
+    # under pytest's own /tmp/pytest-of-<user>/pytest-N/ tree. Pytest rotates
+    # those between sessions, so we don't need our own finalizer.
+    tmp_path_factory = request.getfixturevalue("tmp_path_factory")
+    tracking_dir = str(tmp_path_factory.mktemp("guard_fixture", numbered=True))
+    fixture_env = _build_guard_env(resources_set, tracking_dir)
+    fixture_id = fixturedef.argname
+
+    # Register the deferred at-scope-end check BEFORE pytest's setup
+    # registers its teardown finalizer. Finalizers run in LIFO order, so
+    # this one runs LAST -- after the wrapper's post-yield (teardown)
+    # phase has executed and written any teardown-phase tracking files.
+    # The closure reads `setup_failed` from the enclosing scope at
+    # finalizer-call time, so it sees the value assigned below.
+    setup_failed = False
+
+    def _at_scope_end() -> None:
+        _check_fixture_at_scope_end(fixture_id, resources_set, tracking_dir, setup_failed)
+
+    request.addfinalizer(_at_scope_end)
+
+    setup_exception: BaseException | None = None
+    with _swapped_fixturedef_func(fixturedef, _make_guarded_fixture_wrapper(fixturedef.func, fixture_env)):
+        try:
+            outcome = yield
+            if outcome.excinfo is not None:
+                setup_failed = True
+                # outcome.excinfo is a (type, value, traceback) triple from pluggy.
+                # Capturing the exception instance lets us chain it onto any
+                # ResourceGuardViolation we raise below, so the underlying setup
+                # failure isn't silently dropped from the traceback.
+                setup_exception = outcome.excinfo[1]
+        finally:
+            # Fast-fail BLOCKED check: if setup invoked an undeclared
+            # resource, raise now so pytest aborts consuming tests with
+            # a clear error. NEVER_INVOKED and any teardown-phase
+            # BLOCKED are handled by _at_scope_end.
+            #
+            # If our BLOCKED check raises, flip setup_failed so the
+            # deferred _at_scope_end skips its checks -- otherwise the
+            # same blocked tracking file would surface twice (once
+            # here, once via the deferred re-detection).
+            try:
+                _check_fixture_blocked_after_setup(
+                    fixture_id, resources_set, tracking_dir, setup_exception=setup_exception
+                )
+            except ResourceGuardViolation:
+                setup_failed = True
+                raise
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -561,16 +928,43 @@ def _pytest_runtest_setup(item: pytest.Item) -> Generator[None, None, None]:
 
     marks = {m.name for m in item.iter_markers()}
     tracking_dir = tempfile.mkdtemp(prefix="pytest_guard_track_")
-    env_patcher = patch.dict(os.environ, _build_per_test_guard_env(marks, tracking_dir))
+    env_patcher = patch.dict(os.environ, _build_guard_env(marks, tracking_dir))
     env_patcher.start()
 
-    item._guard_state = _PerTestGuardState(  # ty: ignore[unresolved-attribute]
+    # Assign _guard_state before any code that can raise: teardown and
+    # makereport both unconditionally read item._guard_state, and raising
+    # before assignment would mask the underlying error with a cascading
+    # AttributeError. covered_resources starts as an empty placeholder and
+    # is filled in below; if _collect_fixture_covered_resources raises, the
+    # test enters the "setup failed" path and _check_guard_violations (the
+    # only consumer of covered_resources, runs on call-phase makereport
+    # only) never executes on it -- so the placeholder is never actually
+    # consulted on the failure path.
+    state = _PerTestGuardState(
         tracking_dir=tracking_dir,
         marks=marks,
+        covered_resources=set(),
         env_patcher=env_patcher,
     )
+    item._guard_state = state  # ty: ignore[unresolved-attribute]
+
+    # Defer any ResourceGuardMisconfiguration from closure inspection until
+    # *after* the inner pytest_runtest_setup chain has run. Raising before
+    # yield would short-circuit other plugins' setup (e.g. caplog), which
+    # then crash in their teardown phase and bury the original error. By
+    # holding the exception until after yield, the inner setup completes
+    # normally, all plugins get a chance to install their state, and the
+    # error still surfaces as a setup-phase error.
+    try:
+        state.covered_resources = _collect_fixture_covered_resources(item)
+        closure_error: ResourceGuardMisconfiguration | None = None
+    except ResourceGuardMisconfiguration as exc:
+        closure_error = exc
 
     yield
+
+    if closure_error is not None:
+        raise closure_error
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -585,50 +979,70 @@ def _pytest_runtest_teardown(item: pytest.Item) -> Generator[None, None, None]:
 def _check_guard_violations(state: _PerTestGuardState, report: pytest.TestReport) -> None:
     """Check resource guard invariants after the call phase and mutate the report if violated.
 
-    Two checks:
+    Three checks:
     1. Blocked invocations: a test without @pytest.mark.<resource> invoked
        the resource anyway. Checked regardless of pass/fail so the guard
        violation is visible even when the test fails for a downstream reason.
     2. Superfluous marks: a test has @pytest.mark.<resource> but the resource
-       was never invoked. Only checked on passing tests.
+       was never invoked. Only checked on passing tests. Marks whose resource
+       is already covered by a @fixture_uses_resources fixture in the test's
+       closure are excluded, so the mark is accepted either when the test
+       body invokes the resource OR when a tagged fixture transitively does.
+    3. Undeclared fixture coverage: the test consumes a fixture decorated with
+       @fixture_uses_resources(<resource>) but is missing the corresponding
+       @pytest.mark.<resource>. Static analysis of the fixture closure, so
+       reported regardless of runtime outcome -- the mark is required so that
+       `pytest -m <resource>` selects every test that transitively needs it.
     """
-    tracking_dir = state.tracking_dir
-    marks = state.marks
-
-    for resource in _guarded_resources:
-        blocked_file = Path(tracking_dir) / f"blocked_{resource}"
-        if blocked_file.exists():
-            msg = (
-                f"RESOURCE GUARD: Test invoked '{resource}' without @pytest.mark.{resource}.\n"
-                f"Add @pytest.mark.{resource} to the test, or remove the {resource} usage."
-            )
-            if report.passed:
-                report.outcome = "failed"
-                report.longrepr = msg
-            else:
-                report.longrepr = f"{report.longrepr}\n\n{msg}"
-            return
-
-    if not report.passed:
-        return
-
-    for resource in _guarded_resources:
-        if resource in marks:
-            tracking_file = Path(tracking_dir) / resource
-            if not tracking_file.exists():
+    enforce_marks = state.marks - state.covered_resources
+    violation = _detect_guard_violations(enforce_marks, state.tracking_dir, check_never_invoked=report.passed)
+    if violation is not None:
+        match violation.kind:
+            case _GuardViolationKind.BLOCKED:
+                msg = (
+                    f"RESOURCE GUARD: Test invoked '{violation.resource}' without @pytest.mark.{violation.resource}.\n"
+                    f"Add @pytest.mark.{violation.resource} to the test, or remove the {violation.resource} usage."
+                )
+                if report.passed:
+                    report.outcome = "failed"
+                    report.longrepr = msg
+                else:
+                    report.longrepr = f"{report.longrepr}\n\n{msg}"
+            case _GuardViolationKind.NEVER_INVOKED:
                 report.outcome = "failed"
                 report.longrepr = (
-                    f"Test marked with @pytest.mark.{resource} but never invoked {resource}.\n"
-                    f"Remove the mark or ensure the test exercises {resource}."
+                    f"Test marked with @pytest.mark.{violation.resource} but never invoked {violation.resource}.\n"
+                    f"Remove the mark or ensure the test exercises {violation.resource}."
                 )
-                return
+            case _:  # pragma: no cover
+                assert_never(violation.kind)
+
+    undeclared = sorted(state.covered_resources - state.marks)
+    if undeclared:
+        # Report every missing mark in one message so the user can fix them all
+        # at once instead of rediscovering them one by one across reruns. This
+        # check is independent of the runtime BLOCKED/NEVER_INVOKED checks
+        # above (it's a static property of the fixture closure), so it always
+        # runs and appends to whatever longrepr those checks may have set.
+        lines = [
+            f"RESOURCE GUARD: Test consumes a fixture decorated with @fixture_uses_resources({resource!r}) "
+            f"but is missing @pytest.mark.{resource}. Add the mark so that `pytest -m {resource}` selects "
+            f"this test alongside other {resource}-using tests."
+            for resource in undeclared
+        ]
+        msg = "\n".join(lines)
+        if report.outcome == "passed":
+            report.outcome = "failed"
+            report.longrepr = msg
+        else:
+            report.longrepr = f"{report.longrepr}\n\n{msg}"
 
 
 @pytest.hookimpl(hookwrapper=True)
 def _pytest_runtest_makereport(
     item: pytest.Item,
     call: pytest.CallInfo,
-) -> Generator[None, None, None]:
+) -> Generator[None, pluggy.Result[pytest.TestReport], None]:
     """Enforce resource guard invariants after each test phase."""
     outcome = yield
     report = outcome.get_result()

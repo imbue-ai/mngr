@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -6,7 +6,19 @@ const paths = require('./paths');
 const { runEnvSetup } = require('./env-setup');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 
-todesktop.init();
+// Only init the auto-updater in packaged builds: in dev, electron.autoUpdater
+// is undefined on macOS, so todesktop's constructor throws.
+if (app.isPackaged) {
+  // Default is "never", which stages a downloaded update without ever
+  // prompting the user to install it.
+  todesktop.init({
+    updateReadyAction: {
+      showInstallAndRestartPrompt: 'always',
+    },
+  });
+} else {
+  console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
 
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
 // and production installs are fully isolated (cookies, sessions, caches, etc.).
@@ -14,9 +26,39 @@ app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 const TITLEBAR_HEIGHT = 38;
+// Gap on the left, right, and bottom of the contentView. Matches
+// browser mode's iframe layout (``left-[4px]`` with ``width:
+// calc(100% - 8px)`` in Chrome.jinja) so Electron and browser modes
+// render the same shape. The top of the contentView is flush with the
+// titlebar's bottom edge; the rounded top corners are revealed by the
+// chromeView painting accent in the cutouts.
+const CONTENT_INSET = 4;
+// Corner radius applied to the contentView. Native ``setBorderRadius``
+// rounds all four corners with the same radius; the cutouts at every
+// corner reveal the chromeView underneath (which paints the accent
+// color everywhere it isn't covered by the contentView), so the visible
+// frame around the contentView is uniformly accent-colored regardless
+// of OS or workspace content background.
+//
+// For the inner content corners to look concentric with the OS's outer
+// window rounding (where one exists), the inner radius should be
+// ``outer_radius - inset``. Calibrated by eye against macOS Tahoe's
+// outer rounding (the Liquid Glass redesign bumped this up significantly
+// from Big Sur-era ~11px) -- 12px with our 4px inset reads as a parallel
+// offset of the window's outer curve. Windows/Linux frameless windows
+// are square (no OS rounding to match) so 12px is a free design choice
+// there -- if we ever wire DWM ``DWMWCP_ROUND`` on Win11 the outer would
+// be ~8px and a smaller inner would be more concentric.
+const CONTENT_CORNER_RADIUS = 12;
 const SIDEBAR_WIDTH = 260;
-const REQUESTS_PANEL_WIDTH = 320;
 const CONTENT_PARTITION = 'persist:workspace-content';
+
+// Coalesce rapid SSE-triggered list refreshes when the inbox modal is open. A
+// burst of requests events (count 1 -> 2 -> 3 within a few ms) would otherwise
+// re-post the chrome-event multiple times in flight; the inbox shell would
+// queue several /inbox/list fetches and waste backend HTTP load by
+// (open windows) x (events).
+const INBOX_LIST_REFRESH_DEBOUNCE_MS = 50;
 
 // -- Per-window bundle registry --
 const bundles = new Set();
@@ -24,7 +66,15 @@ const mruWindows = []; // most recently focused first
 let appMenuInstalled = false;
 
 let backendBaseUrl = null;
+let mngrForwardBaseUrl = null;
 let workspaceList = []; // [{id, name, account}]
+// Persistent set of agent ids we have ever seen in the chrome SSE's
+// ``destroying_agent_ids`` payload. Used to decide whether a workspace
+// disappearing from the workspaces list is an actual user-initiated destroy
+// (navigate the window to landing) or a transient discovery loss (leave the
+// window alone -- the recovery flow kicks in via the system_interface_status
+// event). Never cleared once added; a destroyed workspace's id is dead forever.
+const everSeenDestroying = new Set();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -35,10 +85,18 @@ let hasCompletedInitialStart = false;
 const latestChromeState = {
   workspaces: null, // most recent workspaces payload
   authStatus: null, // most recent auth_status payload
-  requestCount: 0,  // most recent request_count value
+  requestCount: 0,  // most recent pending-request count
+  requestIds: [],   // most recent ordered list of pending request ids
 };
 
 const chromeSseAbortRef = { current: null };
+// Holds the in-flight connection's ``finish`` resolver so a forced reconnect
+// (e.g. after the auth cookie is synced) can resolve the awaited promise
+// directly. Electron's ``ClientRequest`` does not reliably emit a terminal
+// event on ``abort()``, and its ``'close'`` event fires eagerly on a healthy
+// streaming response (causing a reconnect storm), so neither can be relied on
+// to drive reconnection.
+const chromeSseFinishRef = { current: null };
 let chromeSseReconnectTick = 0; // bumped to interrupt the current wait
 
 function getSessionStatePath() {
@@ -64,18 +122,79 @@ function parseWorkspaceId(url) {
   }
 }
 
+// Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
+// minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
+// associate``, ``/sharing/<id>/<service>``, ...). Used ONLY to decide
+// which workspace's accent should tint the titlebar; deliberately not
+// fed into ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace``
+// because those drive workspace uniqueness, and we want the user to be
+// able to open ``/workspace/X/settings`` in one window while another
+// window holds the actual workspace X.
+function parseAccentSourceAgentId(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
+    if (hostMatch) return hostMatch[1];
+    const pathMatch = parsed.pathname.match(
+      /^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i,
+    );
+    return pathMatch ? pathMatch[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
 }
 
+// Classify a URL as "external" -- i.e. something that should open in the
+// user's default browser rather than inside the app. All in-app navigation
+// (the minds backend, the mngr_forward plugin, and every
+// `agent-<id>.localhost` workspace subdomain) lives on localhost, so anything
+// off-localhost over http(s), plus mail/tel links, is treated as external.
+// Non-web schemes (file:, about:, blob:, data:, devtools:, etc.) are internal
+// app machinery and must never be handed to shell.openExternal.
+function isExternalUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Malformed but still clearly an http(s) link -- e.g. an agent emitted
+    // "https://example.com (note)" and the space/parens got encoded into the
+    // host, which makes `new URL` throw. Treat it as external so it routes to
+    // the browser (which shows a normal error page) instead of falling through
+    // to 'allow' and spawning a chrome-less Electron popup that hangs on
+    // ERR_NAME_NOT_RESOLVED. mailto:/tel: aren't handled here: a malformed one
+    // can't be opened meaningfully, so we let it stay internal (a no-op).
+    return /^https?:\/\//i.test(url);
+  }
+  if (parsed.protocol === 'mailto:' || parsed.protocol === 'tel:') return true;
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return false;
+  // URL.hostname wraps IPv6 literals in brackets, so the loopback parses as
+  // `[::1]`, not `::1`.
+  if (host === '127.0.0.1' || host === '[::1]') return false;
+  return true;
+}
+
 // Build the auth-bridge URL that, when loaded, installs a session cookie on
 // the agent's subdomain and redirects into the workspace's dockview UI.
 // Returns null if the backend hasn't come up yet.
 function workspaceUrlForAgent(agentId) {
-  if (!agentId || !backendBaseUrl) return null;
-  return `${backendBaseUrl}/goto/${encodeURIComponent(agentId)}/`;
+  // `/goto/` lives on the mngr_forward plugin (which owns subdomain
+  // forwarding), not the minds backend. Use mngrForwardBaseUrl when it has
+  // been received; fall back to backendBaseUrl during the startup window
+  // before the mngr_forward_started event arrives (rare -- the user can't
+  // open a workspace in that window).
+  if (!agentId) return null;
+  const origin = mngrForwardBaseUrl || backendBaseUrl;
+  if (!origin) return null;
+  return `${origin}/goto/${encodeURIComponent(agentId)}/`;
 }
 
 function findBundleForWorkspace(agentId) {
@@ -91,7 +210,7 @@ function getBundleFromEvent(event) {
   const senderId = event.sender.id;
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
-    const views = [b.chromeView, b.contentView, b.sidebarView, b.requestsPanelView];
+    const views = [b.chromeView, b.contentView, b.sidebarView, b.modalView];
     for (const v of views) {
       if (!v) continue;
       if (v.webContents.isDestroyed()) continue;
@@ -161,15 +280,29 @@ function updateBundleBounds(bundle) {
   }
 
   if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
-    bundle.chromeView.setBounds({ x: 0, y: 0, width, height: TITLEBAR_HEIGHT });
+    // The chromeView covers the entire window. Its body background is
+    // ``var(--titlebar-bg)``, so wherever the contentView doesn't paint
+    // (the ``CONTENT_INSET``-wide frame around three sides and the
+    // rounded-corner cutouts at all four corners of the contentView),
+    // the chromeView fills in with the current workspace's accent
+    // color. This mirrors browser mode where the iframe sits inside a
+    // matching body inset that paints the same accent color.
+    bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-    const rightOffset = bundle.requestsPanelVisible ? REQUESTS_PANEL_WIDTH : 0;
+    // Inset the contentView by ``CONTENT_INSET`` on left, right, and
+    // bottom (top is flush with the titlebar's bottom edge). That gap
+    // plus ``setBorderRadius(CONTENT_CORNER_RADIUS)`` (applied in
+    // ``createBundleWebContentsViews``) together create the "tucks
+    // under a rounded inset frame" look without needing per-corner
+    // control: all four corners of the contentView are visibly rounded
+    // and the cutouts reveal accent color (the chromeView below),
+    // independent of whatever background the workspace content paints.
     bundle.contentView.setBounds({
-      x: 0,
+      x: CONTENT_INSET,
       y: TITLEBAR_HEIGHT,
-      width: width - rightOffset,
-      height: height - TITLEBAR_HEIGHT,
+      width: width - CONTENT_INSET * 2,
+      height: height - TITLEBAR_HEIGHT - CONTENT_INSET,
     });
   }
   if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
@@ -180,12 +313,20 @@ function updateBundleBounds(bundle) {
       height: height - TITLEBAR_HEIGHT,
     });
   }
-  if (bundle.requestsPanelView && !bundle.requestsPanelView.webContents.isDestroyed()) {
-    bundle.requestsPanelView.setBounds({
-      x: width - REQUESTS_PANEL_WIDTH,
-      y: TITLEBAR_HEIGHT,
-      width: REQUESTS_PANEL_WIDTH,
-      height: height - TITLEBAR_HEIGHT,
+  // The modal overlays the entire window (including the title bar) so
+  // the inbox drawer reads as a top-level panel rather than something
+  // nested under the chrome. On macOS the OS-level traffic-light
+  // buttons stay visible (they're floating overlays the system draws);
+  // the in-content window controls used on Windows/Linux are hidden
+  // while the modal is open and reappear on close. The view is
+  // transparent, so the dialog's own dim backdrop shows the workspace
+  // behind it.
+  if (bundle.modalView && !bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.setBounds({
+      x: 0,
+      y: 0,
+      width,
+      height,
     });
   }
 }
@@ -221,13 +362,46 @@ function createBundleWebContentsViews(win) {
   });
   const contentView = new WebContentsView({
     webPreferences: {
+      preload: path.join(__dirname, 'content-relay-preload.js'),
       partition: CONTENT_PARTITION,
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+  // Round all four corners of the contentView so it floats inside a
+  // rounded inset frame painted by the full-window chromeView underneath.
+  // See ``updateBundleBounds`` for how the chromeView covers the entire
+  // window and the contentView is inset on three sides. Note from
+  // Electron docs: ``setBorderRadius`` rounds the RENDERED region, but
+  // the view's bounds rect still captures clicks -- so a click in a
+  // corner cutout hits this contentView, which is fine (the cutouts are
+  // at the corners of the workspace content, not over chrome affordances).
+  contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+  // Pin the contentView's between-load background to white so navigation
+  // between workspace pages never reveals the chromeView's accent color
+  // through the gap. (When the previous page tears down, Electron paints
+  // the view's background color for a frame or two before the next page's
+  // first paint lands; the default background is transparent, which would
+  // briefly show the accent through.)
+  contentView.setBackgroundColor('#ffffff');
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
+
+  // Auto-open DevTools for dev-time inspection on both the chrome
+  // (titlebar) view and the workspace content view.
+  if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+    chromeView.webContents.once('did-finish-load', () => {
+      if (!chromeView.webContents.isDestroyed()) {
+        chromeView.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
+    contentView.webContents.once('did-finish-load', () => {
+      if (!contentView.webContents.isDestroyed()) {
+        contentView.webContents.openDevTools({ mode: 'detach' });
+      }
+    });
+  }
+
   return { chromeView, contentView };
 }
 
@@ -257,11 +431,11 @@ function wireBundleWindowEvents(bundle) {
     // set and we must not overwrite it with a progressively shrinking snapshot
     // as the teardown closes each window.
     if (!isShuttingDown) saveSessionState();
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
+    if (bundle.inboxListReloadTimer) {
+      clearTimeout(bundle.inboxListReloadTimer);
+      bundle.inboxListReloadTimer = null;
     }
-    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.requestsPanelView];
+    const views = [bundle.chromeView, bundle.contentView, bundle.sidebarView, bundle.modalView];
     for (const view of views) {
       if (!view) continue;
       if (view.webContents.isDestroyed()) continue;
@@ -284,15 +458,16 @@ function wireBundleShowLogic(bundle) {
   // Show the window once chrome has painted (avoids flashing a bare BaseWindow
   // for the half-second before the WebContentsView renders). Fall back to a
   // longer timer in case the chrome load never completes.
-  chromeView.webContents.once('did-finish-load', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  win.once('ready-to-show', () => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  });
-  setTimeout(() => {
-    if (!win.isDestroyed() && !win.isVisible()) win.show();
-  }, 3000);
+  // showInactiveOnFirstShow lets callers (e.g. the startup multi-window restore
+  // loop) surface the window without stealing focus from another bundle.
+  const surface = () => {
+    if (win.isDestroyed() || win.isVisible()) return;
+    if (bundle.showInactiveOnFirstShow) win.showInactive();
+    else win.show();
+  };
+  chromeView.webContents.once('did-finish-load', surface);
+  win.once('ready-to-show', surface);
+  setTimeout(surface, 3000);
 }
 
 function createBundle() {
@@ -305,14 +480,25 @@ function createBundle() {
     contentView,
     sidebarView: null,
     sidebarVisible: false,
-    requestsPanelView: null,
-    requestsPanelVisible: false,
-    requestsPanelReloadTimer: null,
+    modalView: null,
+    modalVisible: false,
+    modalUrl: null,
+    inboxListReloadTimer: null,
     currentContentUrl: null,
     currentWorkspaceId: null,
+    // ``lastWorkspaceAgentId`` is the agent id whose accent should color
+    // THIS window's titlebar even after the user navigates away from the
+    // workspace (e.g. to Home). Distinct from ``currentWorkspaceId``
+    // because that clears on every navigate-to-non-workspace; this only
+    // changes when the user opens a *different* workspace in this window,
+    // or when the workspace is deleted / the user signs out. Persisted in
+    // each window-state.json entry so windows restore with their own
+    // accent rather than a single global one stepping on every window.
+    lastWorkspaceAgentId: null,
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
+    showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
   };
@@ -326,7 +512,8 @@ function createBundle() {
   // title bar otherwise has no way to learn its own window's title.
   chromeView.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
-    primeViewWithCachedChromeState(chromeView.webContents);
+    sendCurrentWorkspaceToBundleViews(bundle);
+    primeViewWithCachedChromeState(bundle, chromeView.webContents);
   });
 
   wireContentViewEvents(bundle, contentView);
@@ -355,7 +542,17 @@ function wireContentViewEvents(bundle, contentView) {
     const newAgentId = parseWorkspaceId(url);
     if (bundle.currentWorkspaceId !== newAgentId) {
       bundle.currentWorkspaceId = newAgentId;
-      sendCurrentWorkspaceToBundleSidebar(bundle);
+      sendCurrentWorkspaceToBundleViews(bundle);
+    }
+    // Tint the titlebar with the workspace's accent on any
+    // workspace-scoped URL, not just the workspace itself: navigating
+    // to ``/workspace/<id>/settings`` or ``/sharing/<id>/<svc>`` is
+    // conceptually still "I'm working on workspace <id>", so the bar
+    // should adopt that accent. Distinct from the narrower
+    // ``parseWorkspaceId`` above which drives workspace uniqueness.
+    const accentAgentId = parseAccentSourceAgentId(url);
+    if (accentAgentId) {
+      updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
     }
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
@@ -433,13 +630,79 @@ function registerShortcutsFor(bundle, wc) {
   });
 }
 
-// -- Sidebar / requests panel helpers (per-bundle) --
+// Route external links to the user's default browser instead of navigating
+// the in-app view (which would clobber the workspace UI) or spawning a bare
+// chrome-less Electron window. Covers both `target="_blank"` / `window.open`
+// (via setWindowOpenHandler) and ordinary link clicks / JS navigations (via
+// will-frame-navigate, which -- unlike will-navigate -- also fires for clicks
+// inside the iframes that the workspace UI embeds agent content in). In-app
+// (localhost) navigation is left untouched so workspace, home, and
+// request-page links keep working. The `setImmediate` defer around
+// openExternal follows Electron's security guide.
+function applyExternalLinkHandling(wc) {
+  // Defer per Electron's security guide. shell.openExternal returns a Promise
+  // that rejects when the OS has no handler for the scheme -- realistic for
+  // mailto:/tel: on machines with no mail client or dialer configured. We must
+  // catch (an unhandled rejection terminates the main process under the bundled
+  // Node runtime), but rather than silently no-op we log and surface the failure
+  // to the user so the click is recoverable instead of vanishing.
+  const openInBrowser = (url) => {
+    setImmediate(() => {
+      shell.openExternal(url).catch((err) => {
+        console.warn('[external-link] failed to open', url, err);
+        notifyOpenFailed(url);
+      });
+    });
+  };
+  wc.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) {
+      openInBrowser(url);
+      return { action: 'deny' };
+    }
+    // Internal popups keep Electron's default behavior (unchanged from before
+    // this handler existed).
+    return { action: 'allow' };
+  });
+  // Use will-frame-navigate (not will-navigate) so external link clicks inside
+  // embedded iframes are caught too. It is a superset of will-navigate -- it
+  // fires for the main frame as well -- so listening to both would double-fire
+  // and open two browser tabs for a top-level external navigation.
+  wc.on('will-frame-navigate', (details) => {
+    if (!isExternalUrl(details.url)) return;
+    details.preventDefault();
+    openInBrowser(details.url);
+  });
+}
 
-// Sidebar and requests-panel views are created lazily the first time the
-// user toggles them on, then reused for all subsequent toggles via
-// setVisible(true/false). Destroying and recreating a WebContentsView on
-// every click means spawning a fresh render process + preload + loadURL
-// round-trip; on rapid clicks these queue up and take seconds to drain.
+// Surface a failed shell.openExternal to the user instead of letting the click
+// vanish. For mailto:/tel: the useful payload is the bare address (to paste into
+// webmail or a dialer), not the scheme-prefixed URL, so copy that.
+function notifyOpenFailed(url) {
+  let scheme = '';
+  try {
+    scheme = new URL(url).protocol.replace(':', '');
+  } catch {
+    // Unparseable url -- fall through with an empty scheme and copy it verbatim.
+  }
+  const isAddressScheme = scheme === 'mailto' || scheme === 'tel';
+  const payload = isAddressScheme ? url.slice(url.indexOf(':') + 1) : url;
+  clipboard.writeText(payload);
+  const what = scheme === 'mailto' ? 'email address'
+    : scheme === 'tel' ? 'phone number'
+    : 'link';
+  new Notification({
+    title: "Couldn't open link",
+    body: `No app is set up to handle this ${what}. It has been copied to your clipboard.`,
+  }).show();
+}
+
+// -- Sidebar helpers (per-bundle) --
+
+// The sidebar view is created lazily the first time the user toggles it
+// on, then reused for all subsequent toggles via setVisible(true/false).
+// Destroying and recreating a WebContentsView on every click means
+// spawning a fresh render process + preload + loadURL round-trip; on
+// rapid clicks these queue up and take seconds to drain.
 
 function openSidebar(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
@@ -455,8 +718,8 @@ function openSidebar(bundle) {
     bundle.window.contentView.addChildView(sidebarView);
     registerShortcutsFor(bundle, sidebarView.webContents);
     sidebarView.webContents.on('did-finish-load', () => {
-      sendCurrentWorkspaceToBundleSidebar(bundle);
-      primeViewWithCachedChromeState(sidebarView.webContents);
+      sendCurrentWorkspaceToBundleViews(bundle);
+      primeViewWithCachedChromeState(bundle, sidebarView.webContents);
     });
     if (backendBaseUrl) {
       sidebarView.webContents.loadURL(backendBaseUrl + '/_chrome/sidebar');
@@ -484,80 +747,168 @@ function toggleSidebar(bundle) {
   else openSidebar(bundle);
 }
 
-function openRequestsPanel(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView) {
-    const panel = new WebContentsView({
+// -- Modal overlay (per-bundle) --
+//
+// The modal is a full-content-area overlay that hosts the inbox modal and
+// any one-off dialog pages. It does not replace the user's workspace in
+// the content view -- the workspace stays visible behind the dialog's dim
+// backdrop. Created lazily and reused via setVisible(true/false). It uses
+// the default session (so it carries the auth cookie, like the chrome
+// view) plus the preload bridge, so the page inside can call
+// `window.minds.closeModal()`.
+
+function openModal(bundle, url) {
+  if (!bundle || bundle.window.isDestroyed() || !url) return;
+  if (!bundle.modalView) {
+    const modal = new WebContentsView({
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
         contextIsolation: true,
         nodeIntegration: false,
       },
     });
-    bundle.requestsPanelView = panel;
-    bundle.window.contentView.addChildView(panel);
-    registerShortcutsFor(bundle, panel.webContents);
-    if (backendBaseUrl) {
-      panel.webContents.loadURL(backendBaseUrl + '/_chrome/requests-panel');
+    // Transparent background so the dialog's own dim backdrop reveals the
+    // workspace underneath instead of an opaque rectangle.
+    modal.setBackgroundColor('#00000000');
+    bundle.modalView = modal;
+    bundle.window.contentView.addChildView(modal);
+    registerShortcutsFor(bundle, modal.webContents);
+    // Escape closes the modal even if the page's own key handling fails.
+    modal.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        event.preventDefault();
+        closeModal(bundle);
+      }
+    });
+    // Auto-open DevTools for dev-time inspection. Matches the
+    // contentView behavior in createBundleWebContentsViews; gated on
+    // the same env var so a single switch covers both surfaces.
+    if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
+      modal.webContents.once('did-finish-load', () => {
+        if (!modal.webContents.isDestroyed()) {
+          modal.webContents.openDevTools({ mode: 'detach' });
+        }
+      });
     }
   } else {
-    bundle.window.contentView.removeChildView(bundle.requestsPanelView);
-    bundle.window.contentView.addChildView(bundle.requestsPanelView);
-    bundle.requestsPanelView.setVisible(true);
-    // The panel's HTML is rendered server-side and doesn't subscribe to SSE,
-    // so its cards go stale while hidden. Refresh on show, and cancel any
-    // debounced SSE-driven reload that was pending so we don't double-load.
-    if (bundle.requestsPanelReloadTimer) {
-      clearTimeout(bundle.requestsPanelReloadTimer);
-      bundle.requestsPanelReloadTimer = null;
-    }
-    if (!bundle.requestsPanelView.webContents.isDestroyed()) {
-      bundle.requestsPanelView.webContents.reload();
-    }
+    // Re-add to the parent to raise to the top of z-order, then make visible.
+    bundle.window.contentView.removeChildView(bundle.modalView);
+    bundle.window.contentView.addChildView(bundle.modalView);
+    bundle.modalView.setVisible(true);
   }
-  bundle.requestsPanelVisible = true;
+  bundle.modalVisible = true;
+  bundle.modalUrl = url;
+  // Notify the chrome view that the modal is open so it can drop the
+  // ``-webkit-app-region: drag`` on #minds-titlebar. macOS unions drag
+  // regions across all visible views in a window, so the chrome
+  // titlebar's drag rule otherwise wins over the modal's no-drag in
+  // the y=0..TITLEBAR strip and intercepts clicks (e.g. the inbox X).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: true });
+    } catch { /* noop */ }
+  }
+  if (!bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.webContents.loadURL(url);
+  }
   updateBundleBounds(bundle);
 }
 
-function closeRequestsPanel(bundle) {
+function closeModal(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  bundle.requestsPanelView.setVisible(false);
-  bundle.requestsPanelVisible = false;
-  updateBundleBounds(bundle);
-}
-
-// Coalesce rapid SSE-triggered reloads. A burst of request_count events
-// (e.g. count 1 -> 2 -> 3 within a few ms) would otherwise restart the
-// panel load multiple times in flight, potentially preventing it from
-// ever settling on a rendered state, and multiplying backend HTTP load
-// by (open windows) x (events).
-const REQUESTS_PANEL_RELOAD_DEBOUNCE_MS = 50;
-function scheduleRequestsPanelReload(bundle) {
-  if (!bundle || bundle.window.isDestroyed()) return;
-  if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-  if (bundle.requestsPanelReloadTimer) {
-    clearTimeout(bundle.requestsPanelReloadTimer);
+  if (!bundle.modalView || !bundle.modalVisible) return;
+  bundle.modalView.setVisible(false);
+  bundle.modalVisible = false;
+  bundle.modalUrl = null;
+  // Restore the chrome titlebar's drag region.
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    try {
+      bundle.chromeView.webContents.send('modal-state-changed', { open: false });
+    } catch { /* noop */ }
   }
-  bundle.requestsPanelReloadTimer = setTimeout(() => {
-    bundle.requestsPanelReloadTimer = null;
-    if (bundle.window.isDestroyed()) return;
-    if (!bundle.requestsPanelView || !bundle.requestsPanelVisible) return;
-    if (bundle.requestsPanelView.webContents.isDestroyed()) return;
-    bundle.requestsPanelView.webContents.reload();
-  }, REQUESTS_PANEL_RELOAD_DEBOUNCE_MS);
+  // Drop the page so its websockets/timers stop and a stale dialog isn't
+  // briefly visible the next time the modal opens.
+  if (!bundle.modalView.webContents.isDestroyed()) {
+    bundle.modalView.webContents.loadURL('about:blank').catch(() => {});
+  }
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+    bundle.inboxListReloadTimer = null;
+  }
 }
 
-function toggleRequestsPanel(bundle) {
+function inboxUrlFor(query) {
+  if (!backendBaseUrl) return null;
+  return backendBaseUrl + '/inbox' + (query || '');
+}
+
+function isInboxModalOpen(bundle) {
+  if (!bundle || !bundle.modalVisible) return false;
+  if (!bundle.modalUrl) return false;
+  // Compare path only -- the query (?selected=) may differ between auto-open
+  // and selection-driven loads.
+  try {
+    const u = new URL(bundle.modalUrl);
+    return u.pathname === '/inbox';
+  } catch {
+    return false;
+  }
+}
+
+function openInbox(bundle, query) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  if (bundle.requestsPanelVisible) closeRequestsPanel(bundle);
-  else openRequestsPanel(bundle);
+  const url = inboxUrlFor(query || '');
+  if (!url) return;
+  openModal(bundle, url);
 }
 
-function sendCurrentWorkspaceToBundleSidebar(bundle) {
-  if (!bundle || !bundle.sidebarView) return;
-  if (bundle.sidebarView.webContents.isDestroyed()) return;
-  bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+function toggleInbox(bundle) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (isInboxModalOpen(bundle)) closeModal(bundle);
+  else openInbox(bundle, '');
+}
+
+// Coalesce rapid SSE-triggered chrome-event posts so the inbox shell
+// doesn't queue several /inbox/list fetches when a burst of requests
+// events arrives in quick succession.
+function scheduleInboxListRefresh(bundle, evt) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  if (!isInboxModalOpen(bundle)) return;
+  if (bundle.inboxListReloadTimer) {
+    clearTimeout(bundle.inboxListReloadTimer);
+  }
+  bundle.inboxListReloadTimer = setTimeout(() => {
+    bundle.inboxListReloadTimer = null;
+    if (!bundle || bundle.window.isDestroyed()) return;
+    if (!bundle.modalView || !bundle.modalVisible) return;
+    if (bundle.modalView.webContents.isDestroyed()) return;
+    try {
+      bundle.modalView.webContents.send('chrome-event', evt);
+    } catch { /* noop */ }
+  }, INBOX_LIST_REFRESH_DEBOUNCE_MS);
+}
+
+function sendCurrentWorkspaceToBundleViews(bundle) {
+  if (!bundle) return;
+  // Both the titlebar (chrome view) and the sidebar key UI off the current
+  // workspace -- the titlebar uses it to drive the per-agent accent color
+  // and the auto-redirect to the recovery page (which only fires when a
+  // system_interface_status event matches the currently-displayed agent).
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  if (bundle.sidebarView && !bundle.sidebarView.webContents.isDestroyed()) {
+    bundle.sidebarView.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
+  }
+  // Persist this window's "last opened workspace" so a subsequent
+  // navigation to Home (or any non-workspace URL) keeps the bar tinted in
+  // this workspace's color, and so cold-start restores the same color
+  // before the first ``current-workspace-changed`` event lands. Each
+  // window remembers independently -- opening a workspace in window B
+  // does not repaint window A.
+  if (bundle.currentWorkspaceId) {
+    updateBundleLastWorkspaceAgentId(bundle, bundle.currentWorkspaceId);
+  }
 }
 
 // -- Window opening / focusing --
@@ -577,7 +928,15 @@ function loadUrlIntoBundleContentView(bundle, url) {
     bundle.currentContentUrl = url;
     bundle.preErrorUrl = url;
     updateOsTitle(bundle);
-    sendCurrentWorkspaceToBundleSidebar(bundle);
+    sendCurrentWorkspaceToBundleViews(bundle);
+  }
+  // Pre-stamp the accent source the same way, but on the wider
+  // ``parseAccentSourceAgentId`` set -- workspace-scoped settings /
+  // sharing routes paint the bar before their first did-navigate lands
+  // (so the user doesn't see a black flash before the accent applies).
+  const accentAgentId = parseAccentSourceAgentId(url);
+  if (accentAgentId) {
+    updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
   }
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
@@ -594,8 +953,9 @@ function openOrFocusWorkspace(agentId, url) {
   return openNewWindow(absolute);
 }
 
-function openNewWindow(url) {
+function openNewWindow(url, { showInactive = false } = {}) {
   const bundle = createBundle();
+  if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
   updateBundleBounds(bundle);
   if (bundle.chromeView && backendBaseUrl) {
@@ -624,7 +984,7 @@ function showErrorInAllWindows(message, details) {
     bundle.isErrorState = true;
 
     if (bundle.sidebarView) closeSidebar(bundle);
-    if (bundle.requestsPanelView) closeRequestsPanel(bundle);
+    if (bundle.modalView) closeModal(bundle);
 
     if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
       bundle.window.contentView.removeChildView(bundle.contentView);
@@ -655,11 +1015,18 @@ function prepareAllWindowsForRetry() {
     if (!bundle.contentView) {
       const contentView = new WebContentsView({
         webPreferences: {
+          preload: path.join(__dirname, 'content-relay-preload.js'),
           partition: CONTENT_PARTITION,
           contextIsolation: true,
           nodeIntegration: false,
         },
       });
+      // Match the rounding + background applied in
+      // createBundleWebContentsViews so the post-retry contentView keeps
+      // the same tucked-under appearance and doesn't flash the accent
+      // through during in-workspace navigation.
+      contentView.setBorderRadius(CONTENT_CORNER_RADIUS);
+      contentView.setBackgroundColor('#ffffff');
       bundle.contentView = contentView;
       bundle.window.contentView.addChildView(contentView);
       registerShortcutsFor(bundle, contentView.webContents);
@@ -703,17 +1070,39 @@ function readLastLogLines(lineCount) {
 }
 
 // -- Session state --
+//
+// On-disk shape is ``{ windows: [{ url, x, y, width, height, displayId,
+// lastWorkspaceAgentId }, ...] }`` in ``window-state.json``. The
+// pre-titlebar-accent version of the file was a bare array of window
+// entries (no ``lastWorkspaceAgentId`` field); ``loadSessionState``
+// accepts either shape so existing installs migrate transparently on
+// first read. ``lastWorkspaceAgentId`` is per-window: the agent id whose
+// accent colors that window's titlebar across navigation to Home. Each
+// window remembers its own, so opening workspace B in window 2 does not
+// repaint window 1's titlebar. Cleared on workspace deletion (for
+// matching windows) or account sign-out (all windows).
 
 function loadSessionState() {
   try {
     const p = getSessionStatePath();
-    if (!fs.existsSync(p)) return [];
+    if (!fs.existsSync(p)) return { windows: [] };
     const raw = fs.readFileSync(p, 'utf-8');
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string');
+    // Legacy shape: a bare array of window entries (pre-titlebar-accent).
+    if (Array.isArray(parsed)) {
+      return {
+        windows: parsed.filter((e) => typeof e === 'object' && typeof e.url === 'string'),
+      };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const windows = Array.isArray(parsed.windows)
+        ? parsed.windows.filter((e) => typeof e === 'object' && typeof e.url === 'string')
+        : [];
+      return { windows };
+    }
+    return { windows: [] };
   } catch {
-    return [];
+    return { windows: [] };
   }
 }
 
@@ -730,28 +1119,52 @@ function toRelativeBackendUrl(url) {
 
 function saveSessionState() {
   try {
-    const state = [];
-    for (const b of bundles) {
+    const windows = [];
+    // Iterate in MRU order so entry 0 is the most-recently-focused window.
+    // The startup path applies entry 0's bounds to the loading window before
+    // the loading screen renders, so MRU ordering means the loading window
+    // appears at the user's last-active window's position.
+    for (const b of mruWindows) {
       if (b.window.isDestroyed()) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
       const relative = toRelativeBackendUrl(url);
       if (!relative) continue;
       const bounds = b.window.getBounds();
       const display = screen.getDisplayMatching(bounds);
-      state.push({
+      windows.push({
         url: relative,
         x: bounds.x,
         y: bounds.y,
         width: bounds.width,
         height: bounds.height,
         displayId: display ? display.id : null,
+        lastWorkspaceAgentId: b.lastWorkspaceAgentId || null,
       });
     }
     const p = getSessionStatePath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify(state, null, 2));
+    fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
+  }
+}
+
+// Update a single bundle's ``lastWorkspaceAgentId`` and notify only that
+// bundle's chrome view. Persists to disk via ``saveSessionState`` (skipped
+// during teardown so a late SSE-driven call doesn't overwrite the legitimate
+// pre-teardown snapshot with a partial windows array). No-op when the value
+// isn't actually changing so a stream of duplicate ``current-workspace-changed``
+// transitions (Electron emits one per content navigation) doesn't thrash the
+// file or the IPC. Pass ``null`` to clear (workspace deleted, user signed
+// out, no active workspace).
+function updateBundleLastWorkspaceAgentId(bundle, agentId) {
+  if (!bundle || bundle.window.isDestroyed()) return;
+  const normalized = typeof agentId === 'string' && agentId ? agentId : null;
+  if (normalized === bundle.lastWorkspaceAgentId) return;
+  bundle.lastWorkspaceAgentId = normalized;
+  if (!isShuttingDown) saveSessionState();
+  if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+    bundle.chromeView.webContents.send('last-workspace-agent-id-changed', normalized);
   }
 }
 
@@ -803,9 +1216,9 @@ function restoreWindowBounds(bundle, entry) {
 // Every chromeView and sidebarView used to open its own EventSource to
 // /_chrome/events. Chromium caps same-host HTTP/1.1 connections at 6, so
 // with a couple of workspace windows + sidebars, ALL subsequent requests
-// (/_chrome/sidebar, /_chrome/requests-panel, home navigation) queue
-// behind SSE streams -- you'd see load-finish latencies creep from 50ms
-// to 8+ seconds. Running one SSE connection in the main process and
+// (/_chrome/sidebar, /inbox/list, home navigation) queue behind SSE
+// streams -- you'd see load-finish latencies creep from 50ms to 8+
+// seconds. Running one SSE connection in the main process and
 // broadcasting events via IPC avoids the exhaustion entirely.
 
 function handleChromeSSEEvent(evt) {
@@ -818,58 +1231,115 @@ function handleChromeSSEEvent(evt) {
       account: w.account ? String(w.account) : '',
     }));
     const newIds = new Set(workspaceList.map((w) => w.id));
+    // Anything currently in destroying state stays in the ever-seen set so
+    // we can recognize it as a real destroy once it later disappears from
+    // the workspaces list.
+    if (Array.isArray(evt.destroying_agent_ids)) {
+      for (const aid of evt.destroying_agent_ids) {
+        everSeenDestroying.add(String(aid));
+      }
+    }
 
-    // Handle windows for destroyed workspaces: close them if other
-    // windows exist, otherwise navigate to home so the user isn't left
-    // with nothing.
+    // Handle windows whose workspace disappeared. We ONLY navigate the user
+    // away when we have positive evidence the workspace was destroyed (the
+    // id was in destroying state at some prior tick). Otherwise (a transient
+    // discovery hiccup) we leave the content view alone -- the recovery flow
+    // handles the unresponsive workspace via the system_interface_status SSE
+    // event, no nav required.
     for (const oldId of oldIds) {
-      if (!newIds.has(oldId)) {
-        const affected = [];
-        for (const b of bundles) {
-          if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-            affected.push(b);
-          }
+      if (newIds.has(oldId)) continue;
+      if (!everSeenDestroying.has(oldId)) continue;
+      const affected = [];
+      for (const b of bundles) {
+        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
+          affected.push(b);
         }
-        const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-        for (const b of affected) {
-          if (liveBundleCount - affected.length >= 1) {
-            b.window.close();
-          } else {
-            b.currentWorkspaceId = null;
-            if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-              b.contentView.webContents.loadURL(backendBaseUrl + '/');
-            }
-            updateOsTitle(b);
+      }
+      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+      for (const b of affected) {
+        if (liveBundleCount - affected.length >= 1) {
+          b.window.close();
+        } else {
+          b.currentWorkspaceId = null;
+          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+            b.contentView.webContents.loadURL(backendBaseUrl + '/');
           }
+          updateOsTitle(b);
+          // Notify the chrome renderer that this window is no longer
+          // showing a workspace. The did-navigate handler that fires
+          // after the loadURL above would NOT send this IPC: its
+          // diff-guard (`bundle.currentWorkspaceId !== newAgentId`)
+          // sees null !== null and skips. Without this explicit
+          // notification the renderer's `currentTitleAgentId` would
+          // stay as the deleted workspace's id, which then blocks the
+          // `last-workspace-agent-id-changed: null` broadcast below
+          // from clearing the titlebar accent (the chrome.js handler
+          // gates on `currentTitleAgentId` being falsy).
+          sendCurrentWorkspaceToBundleViews(b);
+        }
+      }
+      // Clear the stored accent in any window whose remembered "last
+      // opened" was the destroyed workspace, so the next render of those
+      // titlebars falls back to the dark default chrome rather than
+      // pointing at a workspace that no longer exists.
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        if (b.lastWorkspaceAgentId === oldId) {
+          updateBundleLastWorkspaceAgentId(b, null);
         }
       }
     }
 
     updateAllOsTitles();
+  } else if (evt.type === 'auth_required') {
+    // Clear every window's stored accent on the authenticated ->
+    // unauthenticated boundary (account sign-out or session expiration).
+    // Without this each window's bar would stay tinted with its
+    // last-opened workspace's color on the sign-in page. The SSE endpoint
+    // emits ``auth_required`` and closes whenever the request is
+    // unauthenticated, so a mid-session sign-out manifests here as:
+    // stream that was delivering ``workspaces`` -> stream closes ->
+    // reconnect after 1.5s -> ``auth_required`` payload.
+    // ``latestChromeState.workspaces`` is only ever set from the
+    // ``workspaces`` branch above, so its non-null state is a stable
+    // "we have been authenticated this session" flag -- gating on it
+    // leaves freshly-hydrated ``bundle.lastWorkspaceAgentId`` values
+    // alone during the cold-start unauthenticated path.
+    if (latestChromeState.workspaces !== null) {
+      for (const b of bundles) {
+        if (b.window.isDestroyed()) continue;
+        updateBundleLastWorkspaceAgentId(b, null);
+      }
+    }
   } else if (evt.type === 'auth_status') {
     latestChromeState.authStatus = evt;
-  } else if (evt.type === 'request_count') {
-    const prevCount = latestChromeState.requestCount;
+  } else if (evt.type === 'requests') {
+    const prevIds = latestChromeState.requestIds || [];
+    const newIds = Array.isArray(evt.request_ids) ? evt.request_ids.map(String) : [];
     const newCount = evt.count || 0;
-    // Backend defaults the setting to true, but treat a missing field the
-    // same way so older backends do not regress to no-auto-open.
+    // Backend defaults auto_open to true; treat a missing field the same way.
     const autoOpen = evt.auto_open !== false;
+    // Diff the pending *set* (ordered ids), not the count, so a swap at
+    // constant size still refreshes the inbox list. Auto-open keys off a
+    // genuinely new id appearing (not a count increase, which is blind to
+    // replacements), so approving/denying never reopens an inbox the user
+    // closed.
+    const prevSet = new Set(prevIds);
+    const hasNewRequest = newIds.some((id) => !prevSet.has(id));
+    const idsChanged = newIds.length !== prevIds.length || hasNewRequest;
+    latestChromeState.requestIds = newIds;
     latestChromeState.requestCount = newCount;
-    // Auto-open only when the count actually went UP. Going down (e.g.
-    // user just approved/denied) should never reopen a panel the user
-    // closed, and equal counts mean nothing inbox-relevant changed.
-    const shouldAutoOpen = autoOpen && newCount > prevCount;
-    // Requests panel HTML is static at load time. Refresh visible panels
-    // so their cards reflect the new pending list, OR open hidden ones
-    // when shouldAutoOpen is set. ``openRequestsPanel`` reloads the panel
-    // itself for the visible-bundle case, so we never need to schedule a
-    // reload on top of an open call. Debounced per-bundle so a burst of
-    // count changes coalesces into one reload per panel.
-    for (const b of bundles) {
-      if (shouldAutoOpen && !b.requestsPanelVisible) {
-        openRequestsPanel(b);
-      } else {
-        scheduleRequestsPanelReload(b);
+    const shouldAutoOpen = autoOpen && hasNewRequest;
+    // When the inbox modal is already open in a bundle, forward the
+    // chrome-event to its shell JS (debounced) so the master list
+    // re-fetches its fragment; otherwise, on a genuinely new id, open it.
+    if (idsChanged || shouldAutoOpen) {
+      for (const b of bundles) {
+        if (shouldAutoOpen && !isInboxModalOpen(b)) {
+          openInbox(b, '');
+        } else if (isInboxModalOpen(b)) {
+          scheduleInboxListRefresh(b, evt);
+        }
       }
     }
   }
@@ -889,7 +1359,7 @@ function broadcastChromeEvent(evt) {
   }
 }
 
-function primeViewWithCachedChromeState(wc) {
+function primeViewWithCachedChromeState(bundle, wc) {
   if (!wc || wc.isDestroyed()) return;
   if (latestChromeState.workspaces !== null) {
     wc.send('chrome-event', { type: 'workspaces', workspaces: latestChromeState.workspaces });
@@ -897,7 +1367,21 @@ function primeViewWithCachedChromeState(wc) {
   if (latestChromeState.authStatus) {
     wc.send('chrome-event', latestChromeState.authStatus);
   }
-  wc.send('chrome-event', { type: 'request_count', count: latestChromeState.requestCount });
+  wc.send('chrome-event', {
+    type: 'requests',
+    count: latestChromeState.requestCount,
+    request_ids: latestChromeState.requestIds,
+  });
+  // Re-send modal state to the chrome titlebar in case the modal opened
+  // before chrome.js registered its onModalStateChanged listener (e.g. the
+  // requests panel auto-opens at startup faster than chrome.js loads).
+  // Electron IPC drops events with no listener, so without this replay the
+  // initial open is missed and the titlebar drag region wins over the
+  // modal's no-drag in the y=0..TITLEBAR strip. The sidebar view doesn't
+  // listen for this event so we scope the send to the chrome view.
+  if (bundle && bundle.chromeView && wc === bundle.chromeView.webContents) {
+    wc.send('modal-state-changed', { open: !!bundle.modalVisible });
+  }
 }
 
 function kickChromeSSEReconnect() {
@@ -906,6 +1390,11 @@ function kickChromeSSEReconnect() {
   if (req) {
     try { req.abort(); } catch { /* noop */ }
   }
+  // ``req.abort()`` does not reliably emit a terminal event on Electron's
+  // ClientRequest, so resolve the in-flight connection promise directly to
+  // guarantee the loop reconnects rather than wedging on an unresolved await.
+  const finish = chromeSseFinishRef.current;
+  if (finish) finish();
 }
 
 async function runChromeSSELoop() {
@@ -922,6 +1411,7 @@ async function runChromeSSELoop() {
         if (finished) return;
         finished = true;
         chromeSseAbortRef.current = null;
+        chromeSseFinishRef.current = null;
         resolve();
       };
       let req;
@@ -936,12 +1426,13 @@ async function runChromeSSELoop() {
         return;
       }
       chromeSseAbortRef.current = req;
+      chromeSseFinishRef.current = finish;
       req.setHeader('Accept', 'text/event-stream');
       req.on('response', (response) => {
         if (response.statusCode !== 200) {
           response.on('data', () => {});
-          response.on('end', finish);
-          response.on('error', finish);
+          response.on('end', () => finish());
+          response.on('error', () => finish());
           return;
         }
         let buffer = '';
@@ -959,15 +1450,78 @@ async function runChromeSSELoop() {
             } catch { /* ignore bad frames */ }
           }
         });
-        response.on('end', finish);
-        response.on('error', finish);
+        response.on('end', () => finish());
+        response.on('error', () => finish());
+        response.on('aborted', () => finish());
       });
-      req.on('error', finish);
+      req.on('error', () => finish());
       req.end();
     });
     // Brief backoff before reconnecting.
     await sleepInterruptible(1500);
   }
+}
+
+// POST a restart endpoint (``restart-system-interface`` or ``restart-host``)
+// and resolve once the server has acknowledged the 202 dispatch (or the
+// request errors / times out). The endpoints return 202 immediately and
+// drive recovery asynchronously; the 202 also means the health tracker is
+// already RESTARTING, so callers navigate to the recovery page afterward,
+// which shows restart progress and returns to the workspace once healthy.
+//
+// Always resolves (never rejects) so callers can chain navigation
+// regardless of network outcome.
+const RESTART_REQUEST_TIMEOUT_MS = 10000;
+function postRestart(agentId, endpointPath) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/${endpointPath}`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[restart] failed to construct restart request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      console.warn(`[restart] restart API timed out for ${agentId} after ${RESTART_REQUEST_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch (_) { /* ignore */ }
+      settle();
+    }, RESTART_REQUEST_TIMEOUT_MS);
+    req.on('response', (response) => {
+      response.on('data', () => {});
+      response.on('end', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      response.on('error', () => {
+        clearTimeout(timer);
+        settle();
+      });
+      if (response.statusCode >= 400) {
+        console.warn(`[restart] restart API returned ${response.statusCode} for ${agentId}`);
+      }
+    });
+    req.on('error', (err) => {
+      console.warn(`[restart] restart API request failed for ${agentId}:`, err);
+      clearTimeout(timer);
+      settle();
+    });
+    req.end();
+  });
 }
 
 function sleepInterruptible(ms) {
@@ -1135,13 +1689,70 @@ async function syncContentCookiesToDefaultSession() {
 }
 
 async function onReady() {
+  // Send external links to the user's default browser for every WebContents
+  // the app ever creates (all four bundle views plus any popup windows),
+  // rather than wiring each view individually. Registered before the first
+  // bundle is created so it covers the initial chrome/content views too.
+  app.on('web-contents-created', (_event, contents) => {
+    applyExternalLinkHandling(contents);
+  });
   installApplicationMenu();
   installDockMenu();
   setupContentPartitionCookieSync();
   await syncContentCookiesToDefaultSession();
 
   initialBundle = createBundle();
+  // Apply saved bounds before the loading screen renders so the window doesn't
+  // jump from default-centered to its restored position once content loads.
+  // ``loadSessionState`` returns ``{ windows: [...] }`` (see comment above
+  // the function) -- entry 0 is the MRU window, which is the bundle the
+  // loading screen will surface as.
+  const initialSavedState = loadSessionState();
+  if (initialSavedState.windows.length > 0) {
+    restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
+  }
   await runStartupSequence(initialBundle);
+}
+
+// User-initiated update check from the app menu's Check for Updates item.
+// autoUpdater.checkForUpdates() resolves to { updateInfo }: present when a
+// newer version exists (then downloaded in the background), absent when current.
+async function triggerUpdateCheck() {
+  const autoUpdater = todesktop.autoUpdater;
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    dialog.showMessageBox({
+      type: 'info',
+      message: 'Update check unavailable.',
+      detail: app.isPackaged
+        ? 'The auto-updater is disabled until this build is released to the latest channel.'
+        : 'Updates are only available in installed builds.',
+    });
+    return;
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const updateInfo = result && result.updateInfo;
+    if (updateInfo) {
+      const v = updateInfo.version || updateInfo.releaseName;
+      dialog.showMessageBox({
+        type: 'info',
+        message: v ? `Update ${v} found.` : 'Update found.',
+        detail: 'Downloading in the background. You will be prompted to restart when it is ready.',
+      });
+    } else {
+      dialog.showMessageBox({
+        type: 'info',
+        message: "You're up to date.",
+        detail: 'No newer version is available.',
+      });
+    }
+  } catch (err) {
+    dialog.showMessageBox({
+      type: 'error',
+      message: 'Update check failed.',
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
 }
 
 function installApplicationMenu() {
@@ -1159,6 +1770,8 @@ function installApplicationMenu() {
       label: app.name || 'Minds',
       submenu: [
         { role: 'about' },
+        { type: 'separator' },
+        { label: 'Check for Updates...', click: triggerUpdateCheck },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -1189,6 +1802,57 @@ function installApplicationMenu() {
       ],
     },
     { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Toggle Developer Tools',
+          // role: 'toggleDevTools' targets a BrowserWindow; we use BaseWindow,
+          // so toggle the focused bundle's content view explicitly.
+          accelerator: 'Alt+Cmd+I',
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            const cv = bundle.contentView;
+            if (cv && !cv.webContents.isDestroyed()) {
+              cv.webContents.toggleDevTools();
+            }
+          },
+        },
+        {
+          label: 'Toggle Outer Developer Tools',
+          // Opens DevTools (in detached windows so the small surfaces
+          // aren't constrained to an embedded panel) for all of the
+          // bundle's WebContentsViews -- the chrome view (titlebar +
+          // sidebar shell), the workspace content view, and the modal
+          // view if it exists. Equivalent to setting
+          // MINDS_OPEN_DEVTOOLS=1 at startup but on-demand. No
+          // accelerator -- it's a dev-time affordance.
+          //
+          // ``toggleDevTools()`` ignores its options argument, so to
+          // get the detached window we explicitly open / close.
+          click: () => {
+            const bundle = getMostRecentWindow();
+            if (!bundle || bundle.window.isDestroyed()) return;
+            for (const view of [bundle.chromeView, bundle.contentView, bundle.modalView]) {
+              if (!view) continue;
+              if (view.webContents.isDestroyed()) continue;
+              if (view.webContents.isDevToolsOpened()) {
+                view.webContents.closeDevTools();
+              } else {
+                view.webContents.openDevTools({ mode: 'detach' });
+              }
+            }
+          },
+        },
+        { type: 'separator' },
+        { role: 'resetZoom' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -1218,6 +1882,7 @@ async function runStartupSequence(bundle) {
       }
     });
   } catch (err) {
+    console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
       'Setup failed -- you may not be connected to the internet',
       err.message,
@@ -1326,8 +1991,21 @@ async function startBackendWithRetry() {
         ? new Set(workspaceList.map((w) => w.id))
         : null;
       const restorable = authenticated
-        ? filterRestorableUrls(savedState, knownAgentIdsSet)
+        ? filterRestorableUrls(savedState.windows, knownAgentIdsSet)
         : [];
+      // Drop any stored per-window ``lastWorkspaceAgentId`` whose workspace
+      // no longer exists -- otherwise the restored titlebar would paint
+      // with the color of a workspace the user already destroyed.
+      if (knownAgentIdsSet) {
+        for (const entry of restorable) {
+          if (
+            typeof entry.lastWorkspaceAgentId === 'string' &&
+            !knownAgentIdsSet.has(entry.lastWorkspaceAgentId)
+          ) {
+            entry.lastWorkspaceAgentId = null;
+          }
+        }
+      }
 
       initialBundle.isLoadingState = false;
       updateBundleBounds(initialBundle);
@@ -1353,13 +2031,47 @@ async function startBackendWithRetry() {
           initialBundle.contentView.webContents.loadURL(backendBaseUrl + '/');
         }
       } else {
-        // Restore saved windows with their positions and sizes
+        // Restore saved windows with their positions, sizes, and -- so
+        // each window's titlebar repaints in its own accent on launch --
+        // their ``lastWorkspaceAgentId`` from the persisted entry. The
+        // explicit ``updateBundleLastWorkspaceAgentId`` call (rather than
+        // a direct assignment to ``bundle.lastWorkspaceAgentId``) sends
+        // the matching IPC to the chrome view so the accent is applied
+        // before any ``current-workspace-changed`` event arrives.
         const [first, ...rest] = restorable;
         restoreWindowBounds(initialBundle, first);
+        if (first.lastWorkspaceAgentId) {
+          updateBundleLastWorkspaceAgentId(initialBundle, first.lastWorkspaceAgentId);
+        }
         loadUrlIntoBundleContentView(initialBundle, toAbsoluteUrl(first.url));
+        // Open the lesser-MRU windows without stealing focus, so the
+        // MRU-zero window (already focused as initialBundle) stays focused
+        // after restore completes.
+        const restoredBundles = [];
         for (const entry of rest) {
-          const bundle = openNewWindow(toAbsoluteUrl(entry.url));
+          const bundle = openNewWindow(toAbsoluteUrl(entry.url), { showInactive: true });
           restoreWindowBounds(bundle, entry);
+          if (entry.lastWorkspaceAgentId) {
+            updateBundleLastWorkspaceAgentId(bundle, entry.lastWorkspaceAgentId);
+          }
+          restoredBundles.push(bundle);
+        }
+        // createBundle unshifts each new bundle to the front of mruWindows,
+        // which reverses the saved order. Re-write the MRU list so
+        // initialBundle stays MRU-zero and the restored windows follow in
+        // their saved (i.e. previously most-recent-first) order, so the next
+        // saveSessionState preserves recency across restarts.
+        mruWindows.length = 0;
+        mruWindows.push(initialBundle, ...restoredBundles);
+        // showInactive() blocks keyboard focus but not z-order: on macOS the
+        // restored windows still surface in front of initialBundle. Re-raise
+        // initialBundle as each restored window appears so it stays on top.
+        const raiseInitial = () => {
+          if (initialBundle && !initialBundle.window.isDestroyed()) initialBundle.window.focus();
+        };
+        for (const bundle of restoredBundles) {
+          if (bundle.window.isVisible()) raiseInitial();
+          else bundle.window.once('show', raiseInitial);
         }
       }
     } else {
@@ -1429,6 +2141,9 @@ async function handleMngrForwardStarted(event) {
     return;
   }
   const url = `http://localhost:${port}`;
+  // Cache the plugin origin so workspaceUrlForAgent() can build /goto/ URLs
+  // against the correct port (the plugin, not minds).
+  mngrForwardBaseUrl = url;
   const baseSpec = {
     url,
     name: 'mngr_forward_session',
@@ -1518,13 +2233,8 @@ ipcMain.on('toggle-sidebar', (event) => {
   toggleSidebar(getBundleFromEvent(event));
 });
 
-ipcMain.on('toggle-requests-panel', (event) => {
-  toggleRequestsPanel(getBundleFromEvent(event));
-});
-
-ipcMain.on('open-requests-panel', (event) => {
-  const bundle = getBundleFromEvent(event);
-  openRequestsPanel(bundle);
+ipcMain.on('toggle-inbox', (event) => {
+  toggleInbox(getBundleFromEvent(event));
 });
 
 ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
@@ -1536,43 +2246,123 @@ ipcMain.on('open-workspace-in-new-window', (event, agentId) => {
   if (bundle) closeSidebar(bundle);
 });
 
-ipcMain.on('navigate-to-request', (event, agentId, eventId) => {
+ipcMain.on('navigate-to-request', (event, _agentId, eventId) => {
   if (!eventId) return;
-  const url = toAbsoluteUrl('/requests/' + eventId);
+  // Open the inbox modal pre-selected on the target request. Keeps the user's
+  // workspace exactly as they left it -- closing the inbox returns them to
+  // their work with no context lost, and no window switching.
   const sender = getBundleFromEvent(event);
-  // Route to the workspace's window when one is open so the request page
-  // lives alongside the workspace it's about, rather than wherever the user
-  // happened to click the request card from.
-  if (agentId) {
-    const existing = findBundleForWorkspace(agentId);
-    if (existing) {
-      focusBundle(existing);
-      if (existing.contentView && !existing.contentView.webContents.isDestroyed()) {
-        existing.contentView.webContents.loadURL(url);
-      }
-      return;
-    }
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(eventId));
+});
+
+// Open the inbox modal pre-selected on a request on behalf of the (otherwise
+// unprivileged) workspace content view. Only content-relay-preload.js can
+// emit this channel -- the page itself never sees ipcRenderer -- and it does
+// so only for an allowlisted `minds:open-request-modal` postMessage. We
+// re-validate the id here (never trust the renderer) before building the
+// `/inbox?selected=<id>` URL.
+ipcMain.on('open-request-modal', (event, requestId) => {
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(requestId)) return;
+  const sender = getBundleFromEvent(event);
+  if (sender) openInbox(sender, '?selected=' + encodeURIComponent(requestId));
+});
+
+ipcMain.on('close-modal', (event) => {
+  closeModal(getBundleFromEvent(event));
+});
+
+// Native file/directory picker for the file-sharing permission dialog.
+// The inbox modal calls this (via the preload bridge) so the user can
+// pick the path to share. ``options.mode`` is 'file' or 'directory':
+// the dialog exposes separate "Choose file" / "Choose folder" buttons
+// rather than a single combined picker because a dialog can't be both a
+// file and a directory selector on Linux/Windows (Electron would fall
+// back to a directory selector, so picking a file there returns its
+// parent directory). Returns the chosen absolute path, or null when the
+// user cancelled.
+ipcMain.handle('show-file-picker', async (event, options) => {
+  const bundle = getBundleFromEvent(event);
+  const opts = options || {};
+  const property = opts.mode === 'directory' ? 'openDirectory' : 'openFile';
+  const dialogOptions = { properties: [property] };
+  if (typeof opts.defaultPath === 'string' && opts.defaultPath.length > 0) {
+    dialogOptions.defaultPath = opts.defaultPath;
   }
-  // Fallback: no window for this workspace -- open the request in the sender.
-  if (sender && sender.contentView && !sender.contentView.webContents.isDestroyed()) {
-    sender.contentView.webContents.loadURL(url);
+  // Anchor the dialog to the requesting window when we can resolve it so
+  // it behaves as a sheet/modal; fall back to an unparented dialog
+  // otherwise.
+  const result = bundle && bundle.window && !bundle.window.isDestroyed()
+    ? await dialog.showOpenDialog(bundle.window, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+  if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+    return null;
   }
+  return result.filePaths[0];
 });
 
 ipcMain.on('show-workspace-context-menu', (event, agentId, x, y) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || !agentId) return;
-  // Don't offer "Open in new window" if the sender's window is already on this workspace
-  if (bundle.currentWorkspaceId === agentId) return;
-  const menu = Menu.buildFromTemplate([
-    {
+  const isCurrent = bundle.currentWorkspaceId === agentId;
+  const workspaceUrl = workspaceUrlForAgent(agentId);
+  const template = [];
+  // Don't offer "Open in new window" if the sender's window is already on this workspace.
+  if (!isCurrent) {
+    template.push({
       label: 'Open in new window',
       click: () => {
-        openOrFocusWorkspace(agentId, workspaceUrlForAgent(agentId));
+        openOrFocusWorkspace(agentId, workspaceUrl);
         closeSidebar(bundle);
       },
+    });
+    template.push({ type: 'separator' });
+  }
+  const goToRecoveryView = () => {
+    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
+      // The restart POST has already moved the health tracker to RESTARTING,
+      // so the recovery page renders its "Restarting…" progress state and
+      // auto-refreshes itself until the workspace is healthy again, then
+      // navigates back to ``workspaceUrl``. Reloading the workspace URL directly would
+      // instead race the restart: the container is still up at dispatch
+      // time, so the reload would just show the pre-restart workspace.
+      bundle.contentView.webContents.loadURL(
+        toAbsoluteUrl(
+          '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(workspaceUrl || ''),
+        ),
+      );
+    }
+  };
+  template.push({
+    label: 'Restart system interface',
+    click: async () => {
+      // Close the sidebar first so the user gets immediate visual feedback
+      // while the restart dispatch is acknowledged.
+      closeSidebar(bundle);
+      await postRestart(agentId, 'restart-system-interface');
+      goToRecoveryView();
     },
-  ]);
+  });
+  template.push({
+    label: 'Restart workspace…',
+    click: async () => {
+      // A host restart interrupts every agent in the workspace, so confirm
+      // before dispatching it.
+      const { response } = await dialog.showMessageBox(bundle.window, {
+        type: 'warning',
+        buttons: ['Cancel', 'Restart workspace'],
+        defaultId: 0,
+        cancelId: 0,
+        message: 'Restart this workspace?',
+        detail: 'This restarts the whole workspace. In-progress work in all agents will be interrupted.',
+      });
+      if (response !== 1) return;
+      closeSidebar(bundle);
+      await postRestart(agentId, 'restart-host');
+      goToRecoveryView();
+    },
+  });
+  const menu = Menu.buildFromTemplate(template);
   // sidebar coords are relative to the sidebar view, which sits at (0, TITLEBAR_HEIGHT)
   const px = Math.round(x || 0);
   const py = Math.round((y || 0) + TITLEBAR_HEIGHT);
@@ -1629,6 +2419,18 @@ ipcMain.on('window-maximize', (event) => {
 ipcMain.on('window-close', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.close();
+});
+
+// Renderer (chrome.js) asks for the persisted last-opened workspace agent id
+// on DOMContentLoaded so the titlebar accent can paint before any
+// ``current-workspace-changed`` event arrives. Per-window: scoped to the
+// caller's bundle, so each window's chrome page sees its own value rather
+// than a single shared one. Writes are driven exclusively from main
+// (``sendCurrentWorkspaceToBundleViews`` + SSE-driven cleanup); there is
+// no renderer-side setter.
+ipcMain.handle('get-last-workspace-agent-id', (event) => {
+  const bundle = getBundleFromEvent(event);
+  return bundle ? bundle.lastWorkspaceAgentId : null;
 });
 
 // -- App lifecycle --

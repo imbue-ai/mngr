@@ -185,7 +185,7 @@ def run_background(
     shutdown_event: MutableEvent | None = None,
     shutdown_timeout_sec: float = 30.0,
     env: Mapping[str, str] | None = None,
-    process_class: type[ProcessClassType] = RunningProcess,  # type: ignore[assignment]
+    process_class: type[ProcessClassType] = RunningProcess,  # ty: ignore[invalid-parameter-default]
     process_class_kwargs: Mapping[str, object] | None = None,
 ) -> ProcessClassType:
     """

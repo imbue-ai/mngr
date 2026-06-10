@@ -1,8 +1,8 @@
-"""Acceptance tests for push/pull sync workflows with real local agents.
+"""Acceptance tests for rsync/git push/git pull workflows with real local agents.
 
-These tests exercise the full push/pull/pair CLI commands against real local
-agents created by mngr. They verify end-to-end behavior including agent
-creation, file sync, git sync, and uncommitted changes handling.
+These tests exercise ``mngr rsync``, ``mngr git push``, and ``mngr git pull``
+against real local agents created by mngr. They verify end-to-end behavior
+including agent creation, file sync, git sync, and uncommitted changes handling.
 
 To run these tests locally:
 
@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import mngr_agent_cleanup
@@ -31,11 +30,7 @@ from imbue.mngr.utils.testing import setup_claude_trust_config_for_subprocess
 
 @pytest.fixture
 def sync_test_env(tmp_path: Path) -> dict[str, str]:
-    """Create a git repo and subprocess env for sync acceptance tests.
-
-    Returns env dict with Claude trust configured for the test repo.
-    The test repo path is available as tmp_path / "repo".
-    """
+    """Create a git repo and subprocess env for sync acceptance tests."""
     repo = tmp_path / "repo"
     init_git_repo(repo)
     return setup_claude_trust_config_for_subprocess(
@@ -60,10 +55,7 @@ def created_agent(
     repo_path: Path,
     agent_name: str,
 ) -> Generator[str, None, None]:
-    """Create a local long-running command agent from the test repo and yield its name.
-
-    Destroys the agent after the test completes.
-    """
+    """Create a local long-running command agent and yield its name."""
     with mngr_agent_cleanup(agent_name, env=sync_test_env, disable_plugins=["modal"]):
         result = run_mngr_subprocess(
             "create",
@@ -95,18 +87,16 @@ def _get_agent_work_dir(repo_path: Path, agent_name: str) -> Path:
         text=True,
         check=True,
     )
-    # Parse porcelain output to find the worktree for this agent
     for block in result.stdout.strip().split("\n\n"):
         lines = block.strip().split("\n")
-        worktree_path = lines[0].replace("worktree ", "")
-        for line in lines[1:]:
-            if line.startswith("branch ") and agent_name in line:
-                return Path(worktree_path)
-    raise MngrError(f"Could not find worktree for agent {agent_name}")
+        worktree_line = next((line for line in lines if line.startswith("worktree ")), None)
+        if worktree_line and agent_name in worktree_line:
+            return Path(worktree_line.removeprefix("worktree "))
+    raise AssertionError(f"Could not find worktree for agent {agent_name}")
 
 
 # =============================================================================
-# Test: Push files (--sync-mode=files)
+# mngr rsync (push direction: local -> agent)
 # =============================================================================
 
 
@@ -114,27 +104,26 @@ def _get_agent_work_dir(repo_path: Path, agent_name: str) -> Path:
 @pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_push_files_transfers_files_to_agent(
+def test_rsync_transfers_files_to_agent(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
 ) -> None:
-    """Test that push --sync-mode=files copies files from local to agent."""
-    # Add a new file to the local repo
     (repo_path / "pushed_file.txt").write_text("pushed content")
     run_git_command(repo_path, "add", "pushed_file.txt")
     run_git_command(repo_path, "commit", "-m", "Add pushed file")
 
+    # Trailing slash on the source: copy contents of repo into agent's workdir
+    # (rather than copying repo itself as a child).
     result = run_mngr_subprocess(
-        "push",
+        "rsync",
         "--disable-plugin",
         "modal",
+        f"{repo_path}/",
         created_agent,
-        str(repo_path),
-        "--sync-mode=files",
         env=sync_test_env,
     )
-    assert result.returncode == 0, f"Push failed: {result.stderr}"
+    assert result.returncode == 0, f"Rsync failed: {result.stderr}"
 
     agent_dir = _get_agent_work_dir(repo_path, created_agent)
     assert (agent_dir / "pushed_file.txt").exists()
@@ -145,23 +134,22 @@ def test_push_files_transfers_files_to_agent(
 @pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_push_files_dry_run_does_not_transfer(
+def test_rsync_dry_run_does_not_transfer(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
 ) -> None:
-    """Test that push --dry-run previews without transferring."""
     (repo_path / "dry_run_file.txt").write_text("should not appear")
     run_git_command(repo_path, "add", "dry_run_file.txt")
     run_git_command(repo_path, "commit", "-m", "Add dry run file")
 
     result = run_mngr_subprocess(
-        "push",
+        "rsync",
         "--disable-plugin",
         "modal",
-        created_agent,
         str(repo_path),
-        "--sync-mode=files",
+        created_agent,
+        "--",
         "--dry-run",
         env=sync_test_env,
     )
@@ -172,32 +160,30 @@ def test_push_files_dry_run_does_not_transfer(
 
 
 # =============================================================================
-# Test: Push git (--sync-mode=git)
+# mngr git push
 # =============================================================================
 
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_push_git_transfers_commits_to_agent(
+def test_git_push_transfers_commits_to_agent(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
 ) -> None:
-    """Test that push --sync-mode=git pushes commits to the agent worktree."""
     (repo_path / "git_pushed.txt").write_text("git pushed content")
     run_git_command(repo_path, "add", "git_pushed.txt")
     run_git_command(repo_path, "commit", "-m", "Add git pushed file")
 
     result = run_mngr_subprocess(
+        "git",
         "push",
         "--disable-plugin",
         "modal",
         created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--uncommitted-changes=clobber",
         env=sync_test_env,
+        cwd=repo_path,
     )
     assert result.returncode == 0, f"Git push failed: {result.stderr}"
 
@@ -205,7 +191,6 @@ def test_push_git_transfers_commits_to_agent(
     assert (agent_dir / "git_pushed.txt").exists()
     assert (agent_dir / "git_pushed.txt").read_text() == "git pushed content"
 
-    # Verify the commit history matches
     local_log = subprocess.run(
         ["git", "log", "--oneline"],
         cwd=str(repo_path),
@@ -224,160 +209,41 @@ def test_push_git_transfers_commits_to_agent(
 @pytest.mark.acceptance
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_push_git_uncommitted_changes_fail_mode_rejects(
+def test_git_push_force_overwrites_diverged_remote(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
 ) -> None:
-    """Test that push --uncommitted-changes=fail errors when agent has dirty files."""
+    """``mngr git push -- --force`` passes through and overwrites a diverged agent branch."""
     agent_dir = _get_agent_work_dir(repo_path, created_agent)
 
-    # Dirty the agent worktree
-    (agent_dir / "dirty.txt").write_text("uncommitted")
+    (agent_dir / "agent_change.txt").write_text("agent work")
+    run_git_command(agent_dir, "add", "agent_change.txt")
+    run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
-    # Make a commit to push
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
+    (repo_path / "local_change.txt").write_text("local work")
+    run_git_command(repo_path, "add", "local_change.txt")
+    run_git_command(repo_path, "commit", "-m", "Local commit")
 
     result = run_mngr_subprocess(
+        "git",
         "push",
         "--disable-plugin",
         "modal",
         created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--uncommitted-changes=fail",
+        "--",
+        "--force",
         env=sync_test_env,
+        cwd=repo_path,
     )
-    assert result.returncode != 0
-    assert "Uncommitted changes" in result.stderr
+    assert result.returncode == 0, f"Push --force failed: {result.stderr}"
 
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_push_git_uncommitted_changes_stash_mode_preserves_changes(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    """Test that push --uncommitted-changes=stash stashes agent changes."""
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-
-    # Dirty the agent worktree
-    (agent_dir / "stashed.txt").write_text("will be stashed")
-
-    # Make a commit to push
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
-
-    result = run_mngr_subprocess(
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--uncommitted-changes=stash",
-        env=sync_test_env,
-    )
-    assert result.returncode == 0, f"Push failed: {result.stderr}"
-
-    # The pushed file should be there
-    assert (agent_dir / "new.txt").exists()
-
-    # The dirty file should be stashed, not in the working tree
-    assert not (agent_dir / "stashed.txt").exists()
-
-    # Verify stash exists
-    stash_result = subprocess.run(
-        ["git", "stash", "list"],
-        cwd=str(agent_dir),
-        capture_output=True,
-        text=True,
-    )
-    assert "mngr-sync-stash" in stash_result.stdout
-
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_push_git_uncommitted_changes_clobber_mode_discards_changes(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    """Test that push --uncommitted-changes=clobber discards agent changes."""
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-
-    # Dirty the agent worktree
-    (agent_dir / "clobbered.txt").write_text("will be discarded")
-
-    # Make a commit to push
-    (repo_path / "new.txt").write_text("new")
-    run_git_command(repo_path, "add", "new.txt")
-    run_git_command(repo_path, "commit", "-m", "New file")
-
-    result = run_mngr_subprocess(
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--uncommitted-changes=clobber",
-        env=sync_test_env,
-    )
-    assert result.returncode == 0, f"Push failed: {result.stderr}"
-
-    assert (agent_dir / "new.txt").exists()
-    assert not (agent_dir / "clobbered.txt").exists()
-
-
-@pytest.mark.acceptance
-@pytest.mark.tmux
-@pytest.mark.timeout(120)
-def test_push_git_mirror_mode_overwrites_all_refs(
-    sync_test_env: dict[str, str],
-    repo_path: Path,
-    created_agent: str,
-) -> None:
-    """Test that push --mirror overwrites all refs in the target."""
-    # Create a branch on the source
-    run_git_command(repo_path, "checkout", "-b", "feature-branch")
-    (repo_path / "feature.txt").write_text("feature")
-    run_git_command(repo_path, "add", "feature.txt")
-    run_git_command(repo_path, "commit", "-m", "Feature commit")
-    run_git_command(repo_path, "checkout", "main")
-
-    result = run_mngr_subprocess(
-        "push",
-        "--disable-plugin",
-        "modal",
-        created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--mirror",
-        "--uncommitted-changes=clobber",
-        env=sync_test_env,
-    )
-    assert result.returncode == 0, f"Mirror push failed: {result.stderr}"
-
-    # The feature branch should exist on the agent
-    agent_dir = _get_agent_work_dir(repo_path, created_agent)
-    branch_result = subprocess.run(
-        ["git", "branch", "-a"],
-        cwd=str(agent_dir),
-        capture_output=True,
-        text=True,
-    )
-    assert "feature-branch" in branch_result.stdout
+    assert (agent_dir / "local_change.txt").exists()
+    assert not (agent_dir / "agent_change.txt").exists()
 
 
 # =============================================================================
-# Test: Pull files (--sync-mode=files)
+# mngr rsync (pull direction: agent -> local)
 # =============================================================================
 
 
@@ -385,69 +251,64 @@ def test_push_git_mirror_mode_overwrites_all_refs(
 @pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_pull_files_transfers_files_from_agent(
+def test_rsync_transfers_files_from_agent(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
     tmp_path: Path,
 ) -> None:
-    """Test that pull --sync-mode=files copies files from agent to local."""
     agent_dir = _get_agent_work_dir(repo_path, created_agent)
 
-    # Add a file on the agent side
     (agent_dir / "agent_file.txt").write_text("from agent")
 
-    # Pull into a fresh directory
     pull_dest = tmp_path / "pulled"
     pull_dest.mkdir()
     init_git_repo(pull_dest)
 
     result = run_mngr_subprocess(
-        "pull",
+        "rsync",
         "--disable-plugin",
         "modal",
         created_agent,
         str(pull_dest),
-        "--sync-mode=files",
         env=sync_test_env,
     )
-    assert result.returncode == 0, f"Pull failed: {result.stderr}"
+    assert result.returncode == 0, f"Rsync failed: {result.stderr}"
     assert (pull_dest / "agent_file.txt").exists()
     assert (pull_dest / "agent_file.txt").read_text() == "from agent"
 
 
 # =============================================================================
-# Test: Pull git (--sync-mode=git)
+# mngr git pull
 # =============================================================================
 
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_pull_git_merges_agent_commits(
+def test_git_pull_merges_agent_commits(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
-    tmp_path: Path,
 ) -> None:
-    """Test that pull --sync-mode=git merges commits from agent to local."""
     agent_dir = _get_agent_work_dir(repo_path, created_agent)
 
-    # Make a commit on the agent side
     (agent_dir / "agent_change.txt").write_text("agent work")
     run_git_command(agent_dir, "add", "agent_change.txt")
     run_git_command(agent_dir, "commit", "-m", "Agent commit")
 
-    # Pull into the original repo
+    # No refspec: ``git pull <url>`` fetches the agent's HEAD branch
+    # (``mngr/<agent>``) and merges into the local current branch (main).
     result = run_mngr_subprocess(
+        "git",
         "pull",
         "--disable-plugin",
         "modal",
         created_agent,
-        str(repo_path),
-        "--sync-mode=git",
-        "--uncommitted-changes=clobber",
+        "--",
+        "--no-edit",
         env=sync_test_env,
+        cwd=repo_path,
     )
     assert result.returncode == 0, f"Git pull failed: {result.stderr}"
 
@@ -456,7 +317,7 @@ def test_pull_git_merges_agent_commits(
 
 
 # =============================================================================
-# Test: Round-trip (push then pull)
+# Round trip: rsync push then pull
 # =============================================================================
 
 
@@ -464,41 +325,36 @@ def test_pull_git_merges_agent_commits(
 @pytest.mark.rsync
 @pytest.mark.tmux
 @pytest.mark.timeout(120)
-def test_push_then_pull_round_trips_files(
+def test_rsync_round_trips_files(
     sync_test_env: dict[str, str],
     repo_path: Path,
     created_agent: str,
     tmp_path: Path,
 ) -> None:
-    """Test that pushing files to an agent and pulling them back produces the same content."""
-    # Create content and push
     (repo_path / "round_trip.txt").write_text("round trip content")
     run_git_command(repo_path, "add", "round_trip.txt")
     run_git_command(repo_path, "commit", "-m", "Round trip file")
 
     push_result = run_mngr_subprocess(
-        "push",
+        "rsync",
         "--disable-plugin",
         "modal",
+        f"{repo_path}/",
         created_agent,
-        str(repo_path),
-        "--sync-mode=files",
         env=sync_test_env,
     )
     assert push_result.returncode == 0
 
-    # Pull into a fresh directory
     pull_dest = tmp_path / "pulled"
     pull_dest.mkdir()
     init_git_repo(pull_dest)
 
     pull_result = run_mngr_subprocess(
-        "pull",
+        "rsync",
         "--disable-plugin",
         "modal",
         created_agent,
         str(pull_dest),
-        "--sync-mode=files",
         env=sync_test_env,
     )
     assert pull_result.returncode == 0

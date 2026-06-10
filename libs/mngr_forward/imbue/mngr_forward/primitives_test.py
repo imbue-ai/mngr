@@ -59,4 +59,4 @@ def test_reverse_tunnel_spec_allows_zero_remote() -> None:
 
 def test_reverse_tunnel_spec_rejects_zero_local() -> None:
     with pytest.raises(ValueError):
-        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # type: ignore[arg-type]
+        ReverseTunnelSpec(remote_port=NonNegativeInt(8420), local_port=0)  # ty: ignore[invalid-argument-type]

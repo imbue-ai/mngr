@@ -16,8 +16,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -42,6 +42,7 @@ class MessageCliOptions(CommonCliOptions):
 
     agents: tuple[str, ...]
     agent_list: tuple[AgentAddress, ...]
+    all_agents: bool
     message_content: str | None
     message_file: str | None
     provider: tuple[str, ...]
@@ -58,6 +59,14 @@ class MessageCliOptions(CommonCliOptions):
     type=AGENT_ADDRESS,
     multiple=True,
     help="Agent address (NAME[@HOST[.PROVIDER]]) to send message to (can be specified multiple times)",
+)
+@optgroup.option(
+    "-a",
+    "--all",
+    "--all-agents",
+    "all_agents",
+    is_flag=True,
+    help="Send the message to all agents",
 )
 @optgroup.option(
     "--start/--no-start",
@@ -117,10 +126,16 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         opts.agent_list
     )
 
-    # Validate input: must have agents specified
-    if not agent_addresses:
+    # --all is mutually exclusive with naming specific agents.
+    if opts.all_agents and agent_addresses:
+        raise UserInputError("Cannot specify both agent names and --all")
+
+    # Validate input: must have agents specified (unless --all targets everyone).
+    if not agent_addresses and not opts.all_agents:
         if not stdin_consumed:
-            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+            raise UserInputError(
+                "Must specify at least one agent (use '-' to read from stdin or --all for every agent)"
+            )
         return
 
     # Read message from file if --message-file is provided
@@ -158,7 +173,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
             message_content=message_content,
             include_filters=tuple(include_filters),
             exclude_filters=(),
-            all_agents=False,
+            all_agents=opts.all_agents,
             error_behavior=error_behavior,
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
@@ -175,7 +190,7 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         message_content=message_content,
         include_filters=tuple(include_filters),
         exclude_filters=(),
-        all_agents=False,
+        all_agents=opts.all_agents,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
         provider_names=opts.provider,
@@ -283,14 +298,14 @@ def _emit_json_output(result: MessageResult) -> None:
         "total_sent": len(result.successful_agents),
         "total_failed": len(result.failed_agents),
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 # Register help metadata for git-style help formatting
 CommandHelpMetadata(
     key="message",
     one_line_description="Send a message to one or more agents",
-    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]",
+    synopsis="mngr [message|msg] [AGENTS...|-] [--agent <AGENT>] [-a] [-m <MESSAGE>] [--message-file <FILE>] [--[no-]start] [--on-error <MODE>]",
     description="""Agent IDs can be specified as positional arguments for convenience. The
 message is sent to the agent's stdin.
 
@@ -302,7 +317,8 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
-        ("Send to all agents", "mngr list --ids | mngr message - --message 'Hello everyone'"),
+        ("Send to every agent", 'mngr message --all --message "Hello everyone"'),
+        ("Send to all agents via stdin", "mngr list --ids | mngr message - --message 'Hello everyone'"),
         ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),

@@ -13,12 +13,16 @@ from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.host_store import HostRecord
 from imbue.mngr.providers.docker.instance import CONTAINER_SSH_PORT
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import LABEL_HOST_ID
@@ -29,6 +33,7 @@ from imbue.mngr.providers.docker.instance import _get_docker_context_host
 from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.instance import parse_container_labels
+from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.docker.testing import make_offline_docker_provider
@@ -290,6 +295,140 @@ def test_build_docker_run_command_entrypoint_at_end(temp_mngr_ctx: MngrContext) 
     assert cmd[image_idx + 1] == "-c"
 
 
+def _make_docker_provider_with_runtime(mngr_ctx: MngrContext, docker_runtime: str | None) -> DockerProviderInstance:
+    config = DockerProviderConfig(isolate_host_volumes=False, docker_runtime=docker_runtime)
+    return DockerProviderInstance(
+        name=ProviderInstanceName("test-docker"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        config=config,
+    )
+
+
+def test_build_docker_run_command_includes_runtime_when_configured(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    cmd = provider._build_docker_run_command(
+        image="debian:bookworm-slim",
+        container_name="test",
+        labels={},
+        start_args=(),
+    )
+    runtime_idx = cmd.index("--runtime")
+    assert cmd[runtime_idx + 1] == "runsc"
+
+
+def test_build_docker_run_command_omits_runtime_by_default(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime=None)
+    cmd = provider._build_docker_run_command(
+        image="debian:bookworm-slim",
+        container_name="test",
+        labels={},
+        start_args=(),
+    )
+    assert "--runtime" not in cmd
+
+
+def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx: MngrContext) -> None:
+    """`volume_mount_args` tokens are inserted verbatim into the docker run command."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    cmd = provider._build_docker_run_command(
+        image="my-image",
+        container_name="test",
+        labels={},
+        start_args=(),
+        volume_mount_args=["--mount", "type=volume,source=foo,target=/bar,volume-subpath=baz"],
+    )
+    mount_idx = cmd.index("--mount")
+    assert cmd[mount_idx + 1] == "type=volume,source=foo,target=/bar,volume-subpath=baz"
+
+
+# =========================================================================
+# Volume Mount Argument Building
+# =========================================================================
+
+
+def test_build_volume_mount_args_legacy_shared_mode(temp_mngr_ctx: MngrContext) -> None:
+    """Legacy mode emits `-v <vol>:/mngr-state:rw` regardless of host id."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    args = provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False)
+    assert args[0] == "-v"
+    assert args[1].endswith(":/mngr-state:rw")
+
+
+def test_build_volume_mount_args_isolated_mode(temp_mngr_ctx: MngrContext) -> None:
+    """Isolated mode emits `--mount type=volume,...,volume-subpath=volumes/vol-<hex>`."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    host_id = HostId(HOST_ID_A)
+    args = provider._build_volume_mount_args(host_id, is_isolated=True)
+    assert args[0] == "--mount"
+    spec = args[1]
+    assert spec.startswith("type=volume,")
+    assert f"target={provider.host_dir}" in spec
+    expected_volume_id = provider._volume_id_for_host(host_id)
+    assert f"volume-subpath=volumes/{expected_volume_id}" in spec
+    # The state volume name appears as the source.
+    assert f"source={provider._state_volume_name}" in spec
+
+
+def test_build_volume_mount_args_disabled_returns_empty(temp_mngr_ctx: MngrContext) -> None:
+    """When is_host_volume_created is False, no mount args are emitted in either mode."""
+    config = DockerProviderConfig(is_host_volume_created=False, isolate_host_volumes=False)
+    provider = DockerProviderInstance(
+        name=ProviderInstanceName("test-no-vol"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=temp_mngr_ctx,
+        config=config,
+    )
+    assert provider._build_volume_mount_args(HostId(HOST_ID_A), is_isolated=False) == []
+
+
+def test_host_volume_symlink_target_is_none_when_isolated(temp_mngr_ctx: MngrContext) -> None:
+    """Isolated mode has no symlink (host_dir IS the mount)."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    assert provider._get_host_volume_symlink_target(HostId(HOST_ID_A), is_isolated=True) is None
+
+
+def test_host_volume_symlink_target_points_into_state_mount_when_shared(temp_mngr_ctx: MngrContext) -> None:
+    """Shared mode emits the per-host path under /mngr-state for the install-script to symlink to."""
+    provider = make_docker_provider(temp_mngr_ctx)
+    target = provider._get_host_volume_symlink_target(HostId(HOST_ID_A), is_isolated=False)
+    assert target is not None
+    assert target.startswith("/mngr-state/volumes/vol-")
+
+
+# =========================================================================
+# Engine Version Preflight
+# =========================================================================
+
+
+@pytest.mark.parametrize("version", ["25.0.0", "25.0.3", "25.1.0", "26.0.0", "100.0.0"])
+def test_engine_version_supports_volume_subpath_accepts_25_or_newer(version: str) -> None:
+    verify_engine_version_supports_volume_subpath(version)
+
+
+@pytest.mark.parametrize("version", ["24.0.7", "24.0.0", "23.0.5", "20.10.21", "1.0.0"])
+def test_engine_version_supports_volume_subpath_rejects_older(version: str) -> None:
+    with pytest.raises(MngrError, match="requires Docker Engine 25.0\\+"):
+        verify_engine_version_supports_volume_subpath(version)
+
+
+@pytest.mark.parametrize("version", ["not-a-version", "abc.def", ""])
+def test_engine_version_supports_volume_subpath_rejects_unparseable(version: str) -> None:
+    with pytest.raises(MngrError):
+        verify_engine_version_supports_volume_subpath(version)
+
+
+@pytest.mark.parametrize("version", ["25.0.0-rc.1", "25.0-rc.1", "25.0-beta.2"])
+def test_engine_version_supports_volume_subpath_accepts_prerelease_suffix(version: str) -> None:
+    """Pre-release suffixes on either the minor or patch component are tolerated.
+
+    `25.0.0-rc.1` matches the realistic Docker pre-release format; the
+    other entries cover the parser's robustness to suffixes appearing on
+    the minor segment.
+    """
+    verify_engine_version_supports_volume_subpath(version)
+
+
 # =========================================================================
 # Tag Methods (no Docker required)
 # =========================================================================
@@ -369,6 +508,79 @@ def test_delete_volume_removes_directory(
 
     provider.delete_volume(vol_id)
     assert not vol_dir.exists()
+
+
+def test_offline_host_from_record_is_readable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An offline host built from a host record reads files from its volume.
+
+    The destroy / GC paths obtain a stopped host via ``get_host`` (and thus
+    ``_create_host_from_host_record``), not ``to_offline_host``; both must yield
+    a ``HostFileReadInterface`` so ``on_before_host_destroy`` can still preserve
+    session files from the volume. This guards that the readability wrapping
+    lives at the shared construction site, not only on ``to_offline_host``.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, HostFileReadInterface)
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    agent_dir = tmp_path / "volumes" / str(vol_id) / "agents" / "agent-x"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "f.txt").write_text("hi")
+
+    assert host.read_text_file(host.host_dir / "agents" / "agent-x" / "f.txt") == "hi"
+    assert host.path_exists(host.host_dir / "agents" / "agent-x")
+    assert not host.path_exists(host.host_dir / "agents" / "missing")
+
+
+@pytest.mark.allow_warnings(match=r"File mode is not settable when writing to an offline host's volume")
+def test_offline_host_from_record_is_writable(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """An offline host built from a host record writes files to its volume.
+
+    Backs `mngr file put` against a stopped host: writing through the host's
+    HostFileWriteInterface lands the bytes on the persisted volume (with --mode
+    ignored), and the write is read back through the same host.
+    """
+    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
+    record = HostRecord(
+        certified_host_data=CertifiedHostData(
+            host_id=HOST_ID_A,
+            host_name="h",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+    )
+
+    host = provider._create_host_from_host_record(record)
+    assert isinstance(host, OfflineHostWithVolume)
+    assert isinstance(host, HostFileWriteInterface)
+
+    target = host.host_dir / "agents" / "agent-x" / "staged.txt"
+    host.write_file(target, b"hello")
+
+    vol_id = DockerProviderInstance._volume_id_for_host(HostId(HOST_ID_A))
+    on_disk = tmp_path / "volumes" / str(vol_id) / "agents" / "agent-x" / "staged.txt"
+    assert on_disk.read_bytes() == b"hello"
+    assert host.read_file(target) == b"hello"
+
+    # mode is not settable on a volume write -- it is ignored, not an error.
+    host.write_file(target, b"world", mode="0644")
+    assert host.read_file(target) == b"world"
 
 
 def test_volume_id_for_host_is_deterministic() -> None:
@@ -476,7 +688,7 @@ def test_build_image_translates_process_timeout_to_docker_build_timeout_error(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """A timed-out `docker build` surfaces as a clear DockerBuildTimeoutError."""
-    config = DockerProviderConfig(build_timeout_seconds=42)
+    config = DockerProviderConfig(build_timeout_seconds=42, isolate_host_volumes=False)
     provider = _BuildTimingOutDockerProvider(
         name=ProviderInstanceName("test-docker-timeout"),
         host_dir=Path("/mngr"),

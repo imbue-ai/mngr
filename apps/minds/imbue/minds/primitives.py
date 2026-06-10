@@ -35,7 +35,7 @@ class OutputFormat(UpperCaseStrEnum):
 class LaunchMode(UpperCaseStrEnum):
     """How a workspace agent should be launched."""
 
-    LOCAL = auto()
+    DOCKER = auto()
     CLOUD = auto()
     LIMA = auto()
     IMBUE_CLOUD = auto()
@@ -63,6 +63,68 @@ class AIProvider(UpperCaseStrEnum):
     SUBSCRIPTION = auto()
 
 
+class BackupProvider(UpperCaseStrEnum):
+    """How the workspace agent's restic backups are configured.
+
+    Decoupled from both the compute and AI providers so any combination is
+    valid. Backup setup runs asynchronously after the host is created; the
+    same code path can be re-applied to an existing host later.
+
+    - ``IMBUE_CLOUD`` -- create a per-workspace R2 bucket (named after the
+      host id) + a scoped key against the selected account, then inject a
+      ``runtime/secrets/restic.env`` pointing restic at that bucket.
+      Requires a selected account.
+    - ``API_KEY`` -- inject a user-supplied ``KEY=VALUE`` block verbatim
+      into ``restic.env``; the user owns ``RESTIC_REPOSITORY`` and any
+      backend credentials.
+    - ``CONFIGURE_LATER`` -- inject nothing now. Backups stay dormant until
+      the same provisioning path is invoked against the host later.
+    """
+
+    IMBUE_CLOUD = auto()
+    API_KEY = auto()
+    CONFIGURE_LATER = auto()
+
+
+class UserDataPreference(UpperCaseStrEnum):
+    """How much the workspace agent may learn about the user during onboarding.
+
+    Captured by the first onboarding question shown while a workspace is
+    being created. For now the only behavior gated on this is a minimal
+    local scan of the user's machine (see
+    ``imbue.minds.desktop_client.onboarding``); we will extend what each
+    level does in the future.
+
+    - ``CONVENIENCE`` -- import as much local context as possible.
+    - ``PRIVACY`` -- gather minimal data, kept on the user's machine.
+    - ``CONTROL`` -- gather nothing (the onboarding scan is skipped).
+    """
+
+    CONVENIENCE = auto()
+    PRIVACY = auto()
+    CONTROL = auto()
+
+
+class BackupEncryptionMethod(UpperCaseStrEnum):
+    """Which master/recovery key the workspace's restic repo is initialized with.
+
+    Only meaningful when a real backup provider (``IMBUE_CLOUD`` or
+    ``API_KEY``) is selected. Either way the workspace gets its own random
+    repository password; this only governs the key minds uses to ``restic
+    init`` the repo (a user-controlled recovery key), which never enters the
+    workspace.
+
+    - ``MASTER_PASSWORD`` -- init the repo with a user passphrase, established
+      once and stored in a per-user file shared across all of the user's
+      workspaces.
+    - ``NO_PASSWORD`` -- init the repo with an empty password (restic
+      ``--insecure-no-password``); no recovery passphrase to remember.
+    """
+
+    MASTER_PASSWORD = auto()
+    NO_PASSWORD = auto()
+
+
 class OneTimeCode(NonEmptyStr):
     """A single-use authentication code for workspace access."""
 
@@ -71,17 +133,6 @@ class OneTimeCode(NonEmptyStr):
 
 class CookieSigningKey(SecretStr):
     """Secret key used for signing authentication cookies."""
-
-    ...
-
-
-class MindsApiToken(SecretStr):
-    """Bearer token authenticating non-browser callers of the minds desktop-client API.
-
-    Persisted under the auth data directory and shared with the latchkey
-    gateway via ``latchkey auth set minds`` so agents can spawn peer
-    minds without ever seeing the token themselves.
-    """
 
     ...
 
@@ -106,11 +157,5 @@ class GitBranch(NonEmptyStr):
 
 class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
-
-    ...
-
-
-class ApiKeyHash(NonEmptyStr):
-    """SHA-256 hex digest of an agent's API key."""
 
     ...

@@ -6,14 +6,10 @@
 **Synopsis:**
 
 ```text
-mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--grant <PERM>] [--revoke <PERM>]
+mngr [limit|lim] [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--idle-timeout <DURATION>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot]
 ```
 
 Configure limits for agents and hosts [experimental].
-
-Agents effectively have permissions that are equivalent to the *union* of all
-permissions on the same host. Changing permissions for agents requires them
-to be restarted.
 
 Changes to some limits for hosts (e.g. CPU, RAM, disk space, network) are
 handled by the provider.
@@ -21,7 +17,7 @@ handled by the provider.
 When targeting agents, host-level settings (idle-timeout, idle-mode,
 activity-sources) are applied to each agent's underlying host.
 
-Agent-level settings (start-on-boot, grant, revoke) require agent targeting
+Agent-level settings (start-on-boot) require agent targeting
 and cannot be used with --host alone.
 
 Use '-' in place of agent names to read them from stdin, one per line.
@@ -57,13 +53,6 @@ mngr limit [OPTIONS] [AGENTS]...
 | `--add-activity-source` | choice (`create` &#x7C; `boot` &#x7C; `start` &#x7C; `ssh` &#x7C; `process` &#x7C; `agent` &#x7C; `user`) | Add an activity source for idle detection (repeatable) | None |
 | `--remove-activity-source` | choice (`create` &#x7C; `boot` &#x7C; `start` &#x7C; `ssh` &#x7C; `process` &#x7C; `agent` &#x7C; `user`) | Remove an activity source from idle detection (repeatable) | None |
 
-## Permissions
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--grant` | text | Grant a permission to the agent (repeatable) | None |
-| `--revoke` | text | Revoke a permission from the agent (repeatable) | None |
-
 ## SSH Keys
 
 | Name | Type | Description | Default |
@@ -85,7 +74,7 @@ mngr limit [OPTIONS] [AGENTS]...
 | `--safe` | boolean | Always query all providers during discovery (disable event-stream optimization). Use this when interfacing with mngr from multiple machines. | `False` |
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
-| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths) [repeatable] | None |
+| `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## See Also
@@ -101,12 +90,6 @@ mngr limit [OPTIONS] [AGENTS]...
 
 ```bash
 $ mngr limit my-agent --idle-timeout 5m
-```
-
-**Grant permissions to an agent**
-
-```bash
-$ mngr limit my-agent --grant network --grant internet
 ```
 
 **Disable idle detection for all agents**

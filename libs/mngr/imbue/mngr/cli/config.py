@@ -2,8 +2,8 @@ import json
 import os
 import subprocess
 import tomllib
+import typing
 from collections.abc import MutableMapping
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import assert_never
@@ -12,21 +12,29 @@ from typing import cast
 import click
 import tomlkit
 from loguru import logger
+from pydantic import BaseModel
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import ConfigScope
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver import is_extend_key
+from imbue.mngr.config.key_resolver import parse_scalar_value
+from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.pre_readers import get_local_config_path
+from imbue.mngr.config.pre_readers import get_project_config_path
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.errors import ConfigKeyNotFoundError
@@ -40,14 +48,6 @@ from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
 
 
-class ConfigScope(UpperCaseStrEnum):
-    """Scope for configuration file operations."""
-
-    USER = auto()
-    PROJECT = auto()
-    LOCAL = auto()
-
-
 class ConfigCliOptions(CommonCliOptions):
     """Options passed from the CLI to the config command.
 
@@ -57,10 +57,21 @@ class ConfigCliOptions(CommonCliOptions):
     For that information, see the click.option() and click.argument() decorators on the config() function itself.
     """
 
-    scope: str | None
+    # ``scope`` is optional because ``mngr config list --schema`` doesn't accept a
+    # --scope flag (so click never populates ``ctx.params['scope']`` for it);
+    # other subcommands either default it (config_set) or leave it as None.
+    scope: str | None = None
     # Arguments used by subcommands (get, set, unset)
     key: str | None = None
     value: str | None = None
+    # ``mngr config list --all`` opts into the full-schema listing.
+    all: bool = False
+    # ``mngr config list --schema`` switches the output to the type-annotated
+    # schema view (every settable key with its declared type and description).
+    # Bound through the click option's ``"schema_view"`` ctx-params key because
+    # the bare name ``schema`` collides with pydantic's deprecated ``.schema``
+    # alias on ``BaseModel``.
+    schema_view: bool = False
 
 
 def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: ConcurrencyGroup) -> Path:
@@ -71,15 +82,15 @@ def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: C
                 raise ConfigNotFoundError("profile_dir is required for USER scope")
             return get_user_config_path(profile_dir)
         case ConfigScope.PROJECT:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for project config")
-            return project_dir / "settings.toml"
+            return get_project_config_path(project_dir)
         case ConfigScope.LOCAL:
-            project_dir = resolve_project_config_dir(None, root_name, cg)
+            project_dir = resolve_project_config_dir(root_name, cg)
             if project_dir is None:
                 raise ConfigNotFoundError("No git repository found for local config")
-            return project_dir / "settings.local.toml"
+            return get_local_config_path(project_dir)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -128,20 +139,6 @@ def _unset_nested_value(doc: tomlkit.TOMLDocument, key_path: str) -> bool:
     return False
 
 
-def _parse_value(value_str: str) -> Any:
-    """Parse a string value into the appropriate type.
-
-    Attempts to parse as JSON first (for booleans, numbers, arrays, objects),
-    then falls back to treating it as a string.
-    """
-    # Try parsing as JSON for proper type handling
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        # Not valid JSON, treat as string
-        return value_str
-
-
 def _format_value_for_display(value: Any) -> str:
     """Format a value for human-readable display."""
     if isinstance(value, bool):
@@ -187,6 +184,21 @@ def config(ctx: click.Context, **kwargs: Any) -> None:
     type=click.Choice(["user", "project", "local"], case_sensitive=False),
     help="Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml)",
 )
+@click.option(
+    "--all",
+    "all",
+    is_flag=True,
+    default=False,
+    help="Include all settable fields (with their current effective values), not just keys explicitly set in config.",
+)
+@click.option(
+    "--schema",
+    "schema_view",
+    is_flag=True,
+    default=False,
+    help="Render each settable key with its declared type and description (the schema view). "
+    "Useful for discovering what is settable via MNGR__* env vars, --setting, or mngr config set.",
+)
 @add_common_options
 @click.pass_context
 def config_list(ctx: click.Context, **kwargs: Any) -> None:
@@ -198,7 +210,23 @@ def config_list(ctx: click.Context, **kwargs: Any) -> None:
 
 
 def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
-    """Implementation of config list command."""
+    """Implementation of config list command.
+
+    Default: merged config restricted to keys that appear in at least one of
+    the user / project / local TOML scopes. Keys defaulted by ``MngrConfig``
+    (or set via ``MNGR__*`` env vars / ``--setting`` for this invocation only)
+    are omitted, matching the user expectation that ``list`` reflects what's
+    persisted in config files.
+
+    ``--all`` switches to the full ``model_dump`` view so users can discover
+    every settable key with its current effective value.
+
+    ``--schema`` walks ``MngrConfig.model_fields`` recursively (through any
+    enabled plugin sub-configs) and emits each settable key path alongside
+    its declared type and description. Composes naturally with ``--scope``-
+    less invocations; ``--scope`` is rejected because schema is independent
+    of which TOML file the keys came from.
+    """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="config",
@@ -208,6 +236,13 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
 
+    if opts.schema_view:
+        if opts.scope:
+            raise click.UsageError("--schema and --scope cannot be combined; the schema is global.")
+        rows = _collect_schema_rows(MngrConfig, mngr_ctx.config)
+        _emit_schema_rows(rows, output_opts)
+        return
+
     if opts.scope:
         # List config from specific scope
         scope = ConfigScope(opts.scope.upper())
@@ -215,9 +250,99 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        # List merged config (show what's currently in effect)
-        config_data = mngr_ctx.config.model_dump(mode="json")
+        # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime
+        # on DockerProviderConfig); without it model_dump serializes providers by
+        # the declared base type and silently drops subclass-only keys.
+        full_view = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
+        if opts.all:
+            config_data = full_view
+        else:
+            explicit_keys = _collect_explicit_toml_keys(
+                root_name,
+                mngr_ctx.profile_dir,
+                mngr_ctx.concurrency_group,
+            )
+            config_data = _filter_to_explicit_keys(full_view, explicit_keys)
         _emit_config_list(config_data, output_opts, None, None)
+
+
+def _collect_explicit_toml_keys(
+    root_name: str,
+    profile_dir: Path,
+    cg: ConcurrencyGroup,
+) -> set[tuple[str, ...]]:
+    """Return the set of flattened key paths set in any user/project/local TOML scope.
+
+    Used by ``mngr config list`` (without ``--all``) to filter the merged
+    config view to keys the user has actually written to a config file.
+    Missing scope files (no path resolvable, file absent) contribute no
+    keys; a malformed TOML file surfaces as a ``tomllib.TOMLDecodeError``
+    from ``_load_config_file``, matching how the rest of ``mngr config``
+    handles parse failures.
+    """
+    explicit: set[tuple[str, ...]] = set()
+    for scope in (ConfigScope.USER, ConfigScope.PROJECT, ConfigScope.LOCAL):
+        try:
+            config_path = get_config_path(scope, root_name, profile_dir, cg)
+        except ConfigNotFoundError:
+            # E.g. local scope outside a git repo; nothing to contribute.
+            continue
+        raw = _load_config_file(config_path)
+        _collect_key_paths(raw, prefix=(), out=explicit)
+    return explicit
+
+
+def _collect_key_paths(
+    data: dict[str, Any],
+    prefix: tuple[str, ...],
+    out: set[tuple[str, ...]],
+) -> None:
+    """Walk ``data`` and add a tuple key-path for every leaf key into ``out``.
+
+    A leaf is any value that is not a dict (so nested tables recurse). The
+    operator suffix ``__extend`` is leaf-only by spec, so the strip only
+    applies to leaf keys; intermediate keys are recorded verbatim so a
+    malformed config with ``foo__extend`` on a sub-table doesn't get silently
+    collapsed under a ``foo`` prefix.
+    """
+    for key, value in data.items():
+        if isinstance(value, dict):
+            _collect_key_paths(value, prefix + (key,), out)
+            continue
+        bare = key[: -len(EXTEND_SUFFIX)] if isinstance(key, str) and key.endswith(EXTEND_SUFFIX) else key
+        out.add(prefix + (bare,))
+
+
+def _filter_to_explicit_keys(
+    config_data: dict[str, Any],
+    explicit_keys: set[tuple[str, ...]],
+) -> dict[str, Any]:
+    """Project ``config_data`` down to only the keys present in ``explicit_keys``.
+
+    Intermediate container dicts are retained when at least one descendant
+    key is explicit; empty branches are dropped.
+    """
+    return _filter_branch(config_data, prefix=(), explicit_keys=explicit_keys)
+
+
+def _filter_branch(
+    data: dict[str, Any],
+    prefix: tuple[str, ...],
+    explicit_keys: set[tuple[str, ...]],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in data.items():
+        path = prefix + (key,)
+        if isinstance(value, dict):
+            filtered = _filter_branch(value, path, explicit_keys)
+            if filtered:
+                result[key] = filtered
+        elif path in explicit_keys:
+            result[key] = value
+        else:
+            # Leaf value at a path the user never wrote to a TOML file; drop it.
+            continue
+    return result
 
 
 def _emit_config_list(
@@ -239,14 +364,14 @@ def _emit_config_list(
                 output["scope"] = scope.value.lower()
             if config_path is not None:
                 output["path"] = str(config_path)
-            emit_final_json(output)
+            write_json_line(output)
         case OutputFormat.JSONL:
             output_jsonl: dict[str, object] = {"event": "config_list", "config": config_data}
             if scope is not None:
                 output_jsonl["scope"] = scope.value.lower()
             if config_path is not None:
                 output_jsonl["path"] = str(config_path)
-            emit_final_json(output_jsonl)
+            write_json_line(output_jsonl)
         case OutputFormat.HUMAN:
             if scope is not None and config_path is not None:
                 write_human_line("Config from {} ({}):", scope.value.lower(), config_path)
@@ -281,7 +406,16 @@ def config_get(ctx: click.Context, key: str, **kwargs: Any) -> None:
 
 
 def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
-    """Implementation of config get command."""
+    """Implementation of config get command.
+
+    Scope mode reads the TOML file literally, so a ``key__extend`` entry is
+    rendered with an ellipsis sentinel in human format and as the literal
+    TOML key in JSON/JSONL — making it visually obvious that the value is
+    an extend operation, not a full assignment.
+
+    Merged mode returns the resolved value (extends are applied before the
+    merge completes); the ellipsis sentinel never appears there.
+    """
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="config",
@@ -295,10 +429,28 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         scope = ConfigScope(opts.scope.upper())
         config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
         config_data = _load_config_file(config_path)
-    else:
-        # Get from merged config
-        config_data = mngr_ctx.config.model_dump(mode="json")
+        try:
+            value = _get_nested_value(config_data, key)
+            _emit_config_value(key, value, output_opts)
+            return
+        except KeyError:
+            pass
+        # Bare key not found; try the ``key__extend`` form for scope-file reads.
+        extend_key = f"{key}{EXTEND_SUFFIX}"
+        try:
+            extend_value = _get_nested_value(config_data, extend_key)
+        except KeyError:
+            _emit_key_not_found(key, output_opts)
+            ctx.exit(1)
+            return
+        _emit_config_extend_value(key, extend_key, extend_value, output_opts)
+        return
 
+    # Merged mode: extends are already applied; bare key lookup is sufficient.
+    # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime on
+    # DockerProviderConfig); without it model_dump serializes providers by the
+    # declared base type and silently drops subclass-only keys.
+    config_data = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
     try:
         value = _get_nested_value(config_data, key)
         _emit_config_value(key, value, output_opts)
@@ -311,11 +463,42 @@ def _emit_config_value(key: str, value: Any, output_opts: OutputOptions) -> None
     """Emit a config value in the appropriate format."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"key": key, "value": value})
+            write_json_line({"key": key, "value": value})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_value", "key": key, "value": value})
+            write_json_line({"event": "config_value", "key": key, "value": value})
         case OutputFormat.HUMAN:
             write_human_line("{}", _format_value_for_display(value))
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _format_extend_sentinel(value: Any) -> str:
+    """Render an extend value with a ``...`` sentinel indicating "extends base".
+
+    Lists become ``[..., item1, item2]`` and dicts become ``{..., k1: v1}``.
+    Other shapes fall back to the bare display form (the resolver would have
+    rejected them, but be defensive).
+    """
+    if isinstance(value, list):
+        rendered_items = ", ".join(json.dumps(item) for item in value)
+        return f"[..., {rendered_items}]" if rendered_items else "[...]"
+    if isinstance(value, dict):
+        rendered_items = ", ".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in value.items())
+        return f"{{..., {rendered_items}}}" if rendered_items else "{...}"
+    return _format_value_for_display(value)
+
+
+def _emit_config_extend_value(key: str, extend_key: str, value: Any, output_opts: OutputOptions) -> None:
+    """Emit a scope-file extend-key value. Human prints the ellipsis sentinel;
+    JSON/JSONL emit the literal TOML key so downstream tooling can round-trip.
+    """
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line({"key": extend_key, "value": value})
+        case OutputFormat.JSONL:
+            write_json_line({"event": "config_value", "key": extend_key, "value": value})
+        case OutputFormat.HUMAN:
+            write_human_line("{}", _format_extend_sentinel(value))
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -324,9 +507,9 @@ def _emit_key_not_found(key: str, output_opts: OutputOptions) -> None:
     """Emit a key not found error in the appropriate format."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"error": f"Key not found: {key}", "key": key})
+            write_json_line({"error": f"Key not found: {key}", "key": key})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "error", "message": f"Key not found: {key}", "key": key})
+            write_json_line({"event": "error", "message": f"Key not found: {key}", "key": key})
         case OutputFormat.HUMAN:
             logger.error("Key not found: {}", key)
         case _ as unreachable:
@@ -357,7 +540,19 @@ def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
 
 
 def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
-    """Implementation of config set command."""
+    """Implementation of ``mngr config set``.
+
+    The same path also handles ``mngr config set foo__extend value`` — when
+    the final segment of the key ends in ``__extend``, the write is routed
+    through the same code as ``mngr config extend foo value``, so the two
+    spellings are interchangeable.
+    """
+    if is_extend_key(key.split(".")[-1]):
+        # ``... .field__extend`` is the same operation as ``mngr config extend``.
+        bare = key[: -len(EXTEND_SUFFIX)]
+        _config_extend_impl(ctx, bare, value, **kwargs)
+        return
+
     mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="config",
@@ -372,19 +567,123 @@ def _config_set_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) ->
     doc = load_config_file_tomlkit(config_path)
 
     # Parse and set the value
-    parsed_value = _parse_value(value)
+    parsed_value = parse_scalar_value(value)
     set_nested_value(doc, key, parsed_value)
 
-    # Validate the resulting config before saving
-    parse_config(
-        dict(doc.unwrap()),
-        disabled_plugins=mngr_ctx.config.disabled_plugins,
-    )
+    # Validate the resulting config (resolving any ``__extend`` keys already in
+    # the file against the merged context) before saving.
+    _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
 
     # Save the config
     save_config_file(config_path, doc)
 
     _emit_config_set_result(key, parsed_value, scope, config_path, output_opts)
+
+
+def _validate_doc_after_set(doc: Any, base_config: MngrConfig, *, disabled_plugins: frozenset[str]) -> None:
+    """Validate a tomlkit document after a ``set`` / ``extend`` mutation.
+
+    Resolves any ``__extend`` keys present in the file against ``base_config``
+    so the parser sees only plain assignments, then runs ``parse_config`` in
+    strict mode to catch unknown keys / wrong types before the file is saved.
+    """
+    raw = dict(doc.unwrap())
+    resolved = resolve_extends(base_config, raw)
+    parse_config(resolved, disabled_plugins=disabled_plugins)
+
+
+def _config_extend_impl(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
+    """Implementation of ``mngr config extend``.
+
+    Writes a ``key__extend`` entry into the TOML file. The value must be a
+    JSON list / dict / scalar matching the target field's aggregate type;
+    a scalar target raises ``ConfigParseError``.
+    """
+    mngr_ctx, output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="config",
+        command_class=ConfigCliOptions,
+    )
+
+    root_name = os.environ.get("MNGR_ROOT_NAME", "mngr")
+    scope = ConfigScope((opts.scope or "project").upper())
+    config_path = get_config_path(scope, root_name, mngr_ctx.profile_dir, mngr_ctx.concurrency_group)
+
+    doc = load_config_file_tomlkit(config_path)
+    parsed_value = parse_scalar_value(value)
+    extend_key = f"{key}{EXTEND_SUFFIX}"
+    set_nested_value(doc, extend_key, parsed_value)
+
+    # Validate by resolving the new extend against the current merged config.
+    _validate_doc_after_set(doc, mngr_ctx.config, disabled_plugins=mngr_ctx.config.disabled_plugins)
+
+    save_config_file(config_path, doc)
+    _emit_config_extend_result(key, extend_key, parsed_value, scope, config_path, output_opts)
+
+
+@config.command(name="extend")
+@click.argument("key")
+@click.argument("value")
+@click.option(
+    "--scope",
+    type=click.Choice(["user", "project", "local"], case_sensitive=False),
+    default="project",
+    show_default=True,
+    help="Config scope: user (~/.mngr/profiles/<profile_id>/), project (.mngr/), or local (.mngr/settings.local.toml)",
+)
+@add_common_options
+@click.pass_context
+def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
+    """Write a ``key__extend`` entry that appends to / merges with the base."""
+    try:
+        _config_extend_impl(ctx, key, value, **kwargs)
+    except ConfigParseError as e:
+        logger.error("Invalid configuration: {}", e)
+        ctx.exit(1)
+    except AbortError as e:
+        logger.error("Aborted: {}", e.message)
+        ctx.exit(1)
+
+
+def _emit_config_extend_result(
+    key: str,
+    extend_key: str,
+    value: Any,
+    scope: ConfigScope,
+    config_path: Path,
+    output_opts: OutputOptions,
+) -> None:
+    """Emit the result of a ``mngr config extend`` operation."""
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line(
+                {
+                    "key": extend_key,
+                    "value": value,
+                    "scope": scope.value.lower(),
+                    "path": str(config_path),
+                }
+            )
+        case OutputFormat.JSONL:
+            write_json_line(
+                {
+                    "event": "config_extend",
+                    "key": extend_key,
+                    "value": value,
+                    "scope": scope.value.lower(),
+                    "path": str(config_path),
+                }
+            )
+        case OutputFormat.HUMAN:
+            write_human_line(
+                "Extended {} with {} in {} ({})",
+                key,
+                _format_value_for_display(value),
+                scope.value.lower(),
+                config_path,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _emit_config_set_result(
@@ -397,7 +696,7 @@ def _emit_config_set_result(
     """Emit the result of a config set operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "key": key,
                     "value": value,
@@ -406,7 +705,7 @@ def _emit_config_set_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_set",
                     "key": key,
@@ -480,7 +779,7 @@ def _emit_config_unset_result(
     """Emit the result of a config unset operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "key": key,
                     "scope": scope.value.lower(),
@@ -488,7 +787,7 @@ def _emit_config_unset_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_unset",
                     "key": key,
@@ -561,14 +860,14 @@ def _config_edit_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "scope": scope.value.lower(),
                     "path": str(config_path),
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_edited",
                     "scope": scope.value.lower(),
@@ -596,7 +895,6 @@ def _get_config_template() -> str:
 # [agent_types.my_claude]
 # parent_type = "claude"
 # cli_args = "--env CLAUDE_MODEL=opus"
-# permissions = ["github", "npm"]
 
 # Provider instances
 # [providers.my-docker]
@@ -612,6 +910,97 @@ def _get_config_template() -> str:
 # console_level = "INFO"
 # file_level = "DEBUG"
 """
+
+
+def _collect_schema_rows(model_class: type[BaseModel], current: Any) -> list[dict[str, Any]]:
+    """Flatten ``model_class``'s schema into ``[{key, type, value, description}, ...]``.
+
+    Recurses into nested ``BaseModel`` fields. Stops at the dict level for
+    open-ended ``dict[str, Any]`` fields (e.g. ``commands.<cmd>.defaults``);
+    the inner key shape is user-extensible and not part of the schema.
+    """
+    rows: list[dict[str, Any]] = []
+    _walk_schema(model_class, current, prefix=(), rows=rows)
+    return rows
+
+
+def _walk_schema(
+    model_class: type[BaseModel],
+    current: Any,
+    prefix: tuple[str, ...],
+    rows: list[dict[str, Any]],
+) -> None:
+    # Project the current model to a plain dict once so we can look up dynamic
+    # field names via dict-key access (rather than ``getattr``).
+    current_as_dict: dict[str, Any] | None
+    if isinstance(current, BaseModel):
+        current_as_dict = current.model_dump(mode="json")
+    elif isinstance(current, dict):
+        current_as_dict = current
+    else:
+        current_as_dict = None
+    for field_name, field_info in model_class.model_fields.items():
+        path = ".".join(prefix + (field_name,))
+        annotation = field_info.annotation
+        description = field_info.description or ""
+        value = None if current_as_dict is None else current_as_dict.get(field_name)
+        # Recurse into nested pydantic models so plugin-defined sub-configs
+        # appear too. Container dicts (agent_types, providers, etc.) and
+        # leaf dicts both stop at this level — their value shape is not part
+        # of the schema enumeration.
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            _walk_schema(annotation, value, prefix=prefix + (field_name,), rows=rows)
+            continue
+        rows.append(
+            {
+                "key": path,
+                "type": _render_annotation(annotation),
+                "value": value,
+                "description": description,
+            }
+        )
+
+
+def _render_annotation(annotation: Any) -> str:
+    """Best-effort string for an annotation.
+
+    Parameterised generics like ``list[str]`` carry a useful type parameter
+    that ``__name__`` discards (it would return just ``"list"``), so for any
+    annotation that has generic args or origin we use ``repr`` -- which
+    renders as ``list[str]``, ``dict[str, Path]``, ``str | None``, etc.
+    Plain classes (``str``, ``Path``, ``int``) still use ``__name__`` for the
+    short, familiar form.
+    """
+    if annotation is None:
+        return "None"
+    if typing.get_args(annotation) or typing.get_origin(annotation) is not None:
+        return repr(annotation)
+    name = getattr(annotation, "__name__", None)
+    if name:
+        return name
+    return repr(annotation)
+
+
+def _emit_schema_rows(rows: list[dict[str, Any]], output_opts: OutputOptions) -> None:
+    """Emit schema rows in the appropriate format."""
+    if output_opts.format_template is not None:
+        emit_format_template_lines(output_opts.format_template, rows)
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line({"schema": rows})
+        case OutputFormat.JSONL:
+            write_json_line({"event": "config_list_schema", "schema": rows})
+        case OutputFormat.HUMAN:
+            for row in rows:
+                write_human_line(
+                    "  {} : {} = {}",
+                    row["key"],
+                    row["type"],
+                    _format_value_for_display(row["value"]),
+                )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @config.command(name="path")
@@ -649,9 +1038,9 @@ def _config_path_impl(ctx: click.Context, **kwargs: Any) -> None:
         except ConfigNotFoundError as e:
             match output_opts.output_format:
                 case OutputFormat.JSON:
-                    emit_final_json({"error": str(e), "scope": scope.value.lower()})
+                    write_json_line({"error": str(e), "scope": scope.value.lower()})
                 case OutputFormat.JSONL:
-                    emit_final_json({"event": "error", "message": str(e), "scope": scope.value.lower()})
+                    write_json_line({"event": "error", "message": str(e), "scope": scope.value.lower()})
                 case OutputFormat.HUMAN:
                     logger.error("{}", e)
                 case _ as unreachable:
@@ -686,7 +1075,7 @@ def _emit_single_path(scope: ConfigScope, config_path: Path, output_opts: Output
     """Emit a single config path."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "scope": scope.value.lower(),
                     "path": str(config_path),
@@ -694,7 +1083,7 @@ def _emit_single_path(scope: ConfigScope, config_path: Path, output_opts: Output
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_path",
                     "scope": scope.value.lower(),
@@ -712,9 +1101,9 @@ def _emit_all_paths(paths: list[dict[str, Any]], output_opts: OutputOptions) -> 
     """Emit all config paths."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"paths": paths})
+            write_json_line({"paths": paths})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_paths", "paths": paths})
+            write_json_line({"event": "config_paths", "paths": paths})
         case OutputFormat.HUMAN:
             for path_info in paths:
                 scope = path_info["scope"]
@@ -763,12 +1152,21 @@ CommandHelpMetadata(
     one_line_description="List all configuration values",
     synopsis="mngr config list [OPTIONS]",
     description="""Shows all configuration settings from the specified scope, or from the
-merged configuration if no scope is specified.
+merged configuration if no scope is specified. By default only keys that
+appear in a user/project/local TOML file are listed; use ``--all`` to include
+every settable field with its current effective value.
+
+Pass ``--schema`` to render each settable key with its declared type and
+description (useful for discovering what is settable via ``MNGR__*`` env vars,
+``--setting``, or ``mngr config set``). ``--schema`` cannot be combined with
+``--scope``.
 
 Supports custom format templates via --format. Available fields:
-key, value.""",
+key, value (and additionally type, description when ``--schema`` is set).""",
     examples=(
         ("List merged configuration", "mngr config list"),
+        ("List every settable field with its current value", "mngr config list --all"),
+        ("Print the full schema with types", "mngr config list --schema"),
         ("List user-scope configuration", "mngr config list --scope user"),
         ("Output as JSON", "mngr config list --format json"),
         ("Custom format template", "mngr config list --format '{key}={value}'"),
@@ -821,6 +1219,32 @@ Use 'true'/'false' for booleans, numbers for integers/floats.""",
     ),
 ).register()
 add_pager_help_option(config_set)
+
+CommandHelpMetadata(
+    key="config.extend",
+    one_line_description="Extend a list/dict/set configuration value",
+    synopsis="mngr config extend KEY VALUE [OPTIONS]",
+    description="""Writes a ``KEY__extend`` entry into the TOML file. When the
+config is loaded, the extend operation is applied on top of whatever the lower
+precedence layers provided: lists/tuples are concatenated, dicts shallow-merge
+keys, and sets are unioned. The target field must be an aggregate; a scalar
+target raises an error.
+
+For consistency, ``mngr config set KEY__extend VALUE`` is also accepted and
+routes through this same code path.""",
+    examples=(
+        (
+            "Append a CLI arg to a custom agent type",
+            'mngr config extend agent_types.my_claude.cli_args \'["--model", "opus"]\'',
+        ),
+        ("Add an entry to work_dir_extra_paths", 'mngr config extend work_dir_extra_paths \'{".venv": "SHARE"}\''),
+    ),
+    see_also=(
+        ("config set", "Assign a configuration value (replaces, not appends)"),
+        ("config get", "Get a configuration value"),
+    ),
+).register()
+add_pager_help_option(config_extend)
 
 CommandHelpMetadata(
     key="config.unset",

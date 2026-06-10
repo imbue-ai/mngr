@@ -21,7 +21,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.primitives import Permission
 
 
 class _SubclassAgentConfig(AgentTypeConfig):
@@ -54,41 +53,28 @@ def test_apply_custom_overrides_applies_command_override() -> None:
 
 
 def test_apply_custom_overrides_applies_cli_args_override() -> None:
-    """Custom config with cli_args should merge with parent's cli_args."""
+    """Custom config with cli_args assigns over the parent's cli_args (no concat)."""
     parent = AgentTypeConfig(cli_args=("--base",))
     custom = AgentTypeConfig(cli_args=("--extra",))
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
     assert result is not parent
-    assert result.cli_args == ("--base", "--extra")
-
-
-def test_apply_custom_overrides_applies_permissions_override() -> None:
-    """Custom config with permissions should override the parent's permissions."""
-    parent = AgentTypeConfig()
-    custom = AgentTypeConfig(permissions=[Permission("network")])
-
-    result = _apply_custom_overrides_to_parent_config(parent, custom)
-
-    assert result is not parent
-    assert result.permissions == [Permission("network")]
+    assert result.cli_args == ("--extra",)
 
 
 def test_apply_custom_overrides_applies_all_overrides_at_once() -> None:
-    """All fields overridden at once should produce a merged config."""
+    """All fields are assigned from the custom config; no concat across parent inheritance."""
     parent = AgentTypeConfig(cli_args=("--parent-arg",))
     custom = AgentTypeConfig(
         command=CommandString("my-cmd"),
         cli_args=("--custom-arg",),
-        permissions=[Permission("disk")],
     )
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
     assert result.command == CommandString("my-cmd")
-    assert result.cli_args == ("--parent-arg", "--custom-arg")
-    assert result.permissions == [Permission("disk")]
+    assert result.cli_args == ("--custom-arg",)
 
 
 def test_apply_custom_overrides_applies_subclass_fields() -> None:
@@ -124,8 +110,8 @@ def test_apply_custom_overrides_preserves_unset_subclass_fields() -> None:
     assert result.extra_str == "original"
 
 
-def test_apply_custom_overrides_concatenates_provisioning_fields() -> None:
-    """Provisioning tuple fields should be concatenated onto parent, not replaced."""
+def test_apply_custom_overrides_replaces_provisioning_fields() -> None:
+    """Provisioning tuple fields are assigned from custom, not concatenated."""
     parent = AgentTypeConfig(
         extra_provision_command=("echo parent",),
         env=("PARENT=1",),
@@ -137,8 +123,8 @@ def test_apply_custom_overrides_concatenates_provisioning_fields() -> None:
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
-    assert result.extra_provision_command == ("echo parent", "echo child")
-    assert result.env == ("PARENT=1", "CHILD=2")
+    assert result.extra_provision_command == ("echo child",)
+    assert result.env == ("CHILD=2",)
 
 
 def test_apply_custom_overrides_preserves_parent_provisioning_when_unset() -> None:

@@ -6,7 +6,7 @@ on:
       test_paths:
         description: "Test paths (space-separated, passed as positional args before --)"
         required: true
-        default: "libs/mngr/imbue/mngr/e2e/test_basic.py"
+        default: "libs/mngr/imbue/mngr/e2e/"
       pytest_args:
         description: "Pytest args after `--` (must be valid bash; quote values containing spaces, e.g. `-m \"foo and bar\"`)"
         required: true
@@ -21,6 +21,42 @@ on:
         default: ""
       run_name:
         description: "Override the auto-generated run name (default: a UTC YYYYMMDDHHMMSS timestamp). The reintegrate workflow uses this name to rediscover this run's agents."
+        required: false
+        default: ""
+  # Invoked by the TMR (scheduled) workflow on its daily cron. The shared
+  # inputs below mirror the workflow_dispatch inputs; the two extra inputs
+  # (is_scheduled, supersedes_pr) are scheduled-run plumbing and are not
+  # surfaced in the manual-dispatch UI.
+  workflow_call:
+    inputs:
+      test_paths:
+        type: string
+        required: false
+        default: "libs/mngr/imbue/mngr/e2e/"
+      pytest_args:
+        type: string
+        required: false
+        default: "-m release"
+      mngr_user_id:
+        type: string
+        required: false
+        default: ""
+      additional_authorized_hosts:
+        type: string
+        required: false
+        default: ""
+      run_name:
+        type: string
+        required: false
+        default: ""
+      is_scheduled:
+        description: "Set by the scheduled wrapper workflow. When true, the auto-opened PR is labeled `tmr-periodic` so the next scheduled run's gate can find it."
+        type: boolean
+        required: false
+        default: false
+      supersedes_pr:
+        description: "Set by the scheduled wrapper workflow when this run was triggered after auto-closing a stale prior periodic PR. The newly-opened PR's number is posted as a follow-up comment on this PR."
+        type: string
         required: false
         default: ""
 
@@ -91,7 +127,6 @@ jobs:
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
             --agent-type yolo \
             --provider modal \
-            --use-snapshot \
             --env "MODAL_TOKEN_ID=${MODAL_TOKEN_ID}" \
             --env "MODAL_TOKEN_SECRET=${MODAL_TOKEN_SECRET}" \
             --env "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
@@ -102,10 +137,14 @@ jobs:
             ${{ inputs.test_paths }} \
             -- ${{ inputs.pytest_args }} \
             | tee tmr-report/events.jsonl
+          # Don't rely on pipefail to propagate mngr's exit code through tee:
+          # in this step's GHA shell, the pipeline's non-zero left-side status
+          # has been observed to read as success. Re-assert it explicitly.
+          exit "${PIPESTATUS[0]}"
 
       - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tmr-report
           path: tmr-report/
@@ -113,6 +152,9 @@ jobs:
 
       - name: Push integrator branch and open PR
         if: success()
+        env:
+          IS_SCHEDULED: ${{ inputs.is_scheduled }}
+          SUPERSEDES_PR: ${{ inputs.supersedes_pr }}
         run: |
           set -euo pipefail
           branch=$(jq -r 'select(.event == "integrator_branch") | .branch_name' < tmr-report/events.jsonl | tail -n 1)
@@ -129,11 +171,27 @@ jobs:
           else
             report_line="HTML report: attached as the \`tmr-report\` artifact on the workflow run; download and open \`index.html\`. (AWS credentials missing, so no s3 mirror was published.)"
           fi
-          gh pr create \
+          # Scheduled runs label the auto-opened PR so the next day's gate
+          # can find it, and assign it to the periodic-run owners. Manual
+          # runs leave it unlabeled and unassigned.
+          scheduled_args=()
+          if [ "$IS_SCHEDULED" = "true" ]; then
+            scheduled_args+=(--label tmr-periodic)
+            scheduled_args+=(--assignee qi-imbue --assignee joshalbrecht)
+          fi
+          new_pr_url=$(gh pr create \
             --base "${{ github.ref_name }}" \
             --head "$branch" \
             --title "TMR: $branch" \
             --body "Automated PR from TMR workflow run [#${{ github.run_id }}]($run_url).
 
           $report_line" \
-            --draft
+            --draft \
+            "${scheduled_args[@]}")
+          echo "Opened $new_pr_url"
+          # If this scheduled run superseded a stale prior periodic PR
+          # (closed up front by the gate), leave a breadcrumb on it pointing
+          # at the replacement.
+          if [ -n "$SUPERSEDES_PR" ]; then
+            gh pr comment "$SUPERSEDES_PR" --body "Superseded by $new_pr_url from a fresh scheduled TMR run."
+          fi

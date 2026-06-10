@@ -8,11 +8,14 @@ from unittest.mock import patch
 
 import ovh
 import pytest
+from ovh.exceptions import APIError
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_ovh.client import OvhVpsClient
+from imbue.mngr_ovh.ordering import OvhOrderDeliveryTimeoutError
 from imbue.mngr_ovh.ordering import order_and_wait_for_vps
 from imbue.mngr_ovh.ordering import rebuild_vps_with_public_key
+from imbue.mngr_ovh.ordering import try_poll_order_for_delivered_vps
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
@@ -177,6 +180,45 @@ def _fake_order_router(
         raise AssertionError(f"unexpected fake OVH call: {method} {path}")
 
     return fake
+
+
+def test_order_never_configures_a_backup_option() -> None:
+    """Regression: the order/cart flow must never enable an OVH backup option.
+
+    OVH automated backups freeze the guest filesystem and cause serious
+    runtime problems, so we disable them at provision time by purging qemu.
+    This test locks in the other half of that guarantee: we must not
+    *order* backups in the first place. It records every
+    ``/order/cart/.../configuration`` call and asserts the configured
+    labels are exactly datacenter / OS / RTM (with RTM set to ``no``) and
+    that none is a backup option.
+    """
+    configured_labels_and_values: list[tuple[str, str]] = []
+    happy_path = _fake_order_router(resource_populated_after_n_polls=0)
+
+    def recording_fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "POST" and path.endswith("/configuration") and isinstance(body, dict):
+            configured_labels_and_values.append((body["label"], body["value"]))
+        return happy_path(method, path, body, need_auth)
+
+    client = _client(recording_fake)
+    with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
+        order_and_wait_for_vps(
+            client,
+            plan_code="vps-2025-model1",
+            datacenter="US-EAST-VA",
+            image_name="Debian 12 - Docker",
+            pricing_mode="default",
+            duration="P1M",
+            deliver_timeout_seconds=10.0,
+        )
+
+    configured_labels = {label for label, _value in configured_labels_and_values}
+    assert configured_labels == {"vps_datacenter", "vps_os", "vps_install_rtm"}
+    assert not any("backup" in label.lower() for label, _value in configured_labels_and_values)
+    # RTM (real-time monitoring) defaults off; assert it explicitly so a
+    # future default flip is caught alongside the backup guarantee.
+    assert ("vps_install_rtm", "no") in configured_labels_and_values
 
 
 def test_order_and_wait_for_vps_success_polled_path() -> None:
@@ -345,7 +387,7 @@ def test_order_raises_when_delivery_times_out() -> None:
 
     client = _client(fake)
     with patch("imbue.mngr_ovh.ordering._OVH_DELIVERY_POLL_INTERVAL_SECONDS", 0.0):
-        with pytest.raises(VpsProvisioningError, match="did not produce a VPS serviceName"):
+        with pytest.raises(OvhOrderDeliveryTimeoutError) as exc_info:
             order_and_wait_for_vps(
                 client,
                 plan_code="vps-2025-model1",
@@ -355,7 +397,66 @@ def test_order_raises_when_delivery_times_out() -> None:
                 duration="P1M",
                 deliver_timeout_seconds=0.05,
             )
+    # The exception subclasses VpsProvisioningError so existing handlers still catch it,
+    # AND carries order_id so the cleanup path can attempt post-hoc adoption.
+    assert isinstance(exc_info.value, VpsProvisioningError)
+    assert exc_info.value.order_id == 4242
+    assert "did not produce a VPS serviceName" in str(exc_info.value)
     assert operation_fetches["n"] >= 1
+
+
+def test_try_poll_returns_none_when_order_not_delivered_yet() -> None:
+    """One-shot poll returns None when no operation has a populated resource.name yet."""
+
+    def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and path == "/me/order/9999/details":
+            return [555]
+        if method == "GET" and path == "/me/order/9999/details/555/extension":
+            return {
+                "order": {
+                    "plan": {
+                        "code": "vps-2025-model1",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                },
+            }
+        if method == "GET" and path == "/me/order/9999/details/555/operations":
+            return [777]
+        if method == "GET" and path == "/me/order/9999/details/555/operations/777":
+            return {"id": 777, "status": "doing", "resource": {}}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    client = _client(fake)
+    result = try_poll_order_for_delivered_vps(client, order_id=9999, plan_code="vps-2025-model1")
+    assert result is None
+
+
+def test_try_poll_returns_service_name_when_order_has_delivered() -> None:
+    """One-shot poll returns the assigned serviceName as soon as the operation publishes it."""
+
+    def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and path == "/me/order/8888/details":
+            return [444]
+        if method == "GET" and path == "/me/order/8888/details/444/extension":
+            return {
+                "order": {
+                    "plan": {
+                        "code": "vps-2025-model1",
+                        "duration": "P1M",
+                        "product": {"name": "virtualPrivateServer"},
+                    },
+                },
+            }
+        if method == "GET" and path == "/me/order/8888/details/444/operations":
+            return [666]
+        if method == "GET" and path == "/me/order/8888/details/444/operations/666":
+            return {"id": 666, "status": "done", "resource": {"name": "vps-late42.vps.ovh.us"}}
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+    client = _client(fake)
+    result = try_poll_order_for_delivered_vps(client, order_id=8888, plan_code="vps-2025-model1")
+    assert result == "vps-late42.vps.ovh.us"
 
 
 def test_order_raises_when_checkout_returns_no_order_id() -> None:
@@ -668,3 +769,60 @@ def test_rebuild_waits_when_tasks_still_active() -> None:
         task_timeout_seconds=10.0,
     )
     assert rebuild_was_called == [True]
+
+
+def test_rebuild_retries_when_ovh_rejects_with_running_tasks_despite_empty_drain() -> None:
+    """OVH's task listing is eventually consistent, so the drain can report no
+    active tasks while ``/rebuild`` is still rejected with "...running tasks on
+    the VPS". The rebuild must re-drain and retry that POST until OVH accepts
+    it instead of failing the whole bake (the 3A fresh-order failure).
+    """
+    rebuild_attempts: list[int] = []
+
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        # Drain always reports empty -- the listing lags reality.
+        if method == "GET" and "/tasks?state=" in path:
+            return []
+        if method == "POST" and path.endswith("/rebuild"):
+            rebuild_attempts.append(1)
+            # OVH rejects while a task is in flight; accept on the third try.
+            if len(rebuild_attempts) < 3:
+                raise APIError("Action not available while there are running tasks on the VPS")
+            return {"id": 321, "state": "todo"}
+        if method == "GET" and "/tasks/321" in path:
+            return {"id": 321, "state": "done", "type": "reinstallVm"}
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    client = _client(fake_call)
+    rebuild_vps_with_public_key(
+        client,
+        service_name="vps-x.vps.ovh.us",
+        image_id="uuid-img",
+        public_ssh_key="ssh-ed25519 AAAA test",
+        task_timeout_seconds=10.0,
+    )
+    assert len(rebuild_attempts) == 3
+
+
+def test_rebuild_does_not_retry_non_running_task_api_errors() -> None:
+    """A rebuild rejection unrelated to in-flight tasks surfaces immediately, not retried."""
+    rebuild_attempts: list[int] = []
+
+    def fake_call(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+        if method == "GET" and "/tasks?state=" in path:
+            return []
+        if method == "POST" and path.endswith("/rebuild"):
+            rebuild_attempts.append(1)
+            raise APIError("Bad Request: imageId not found")
+        raise AssertionError(f"Unexpected call: {method} {path}")
+
+    client = _client(fake_call)
+    with pytest.raises(VpsApiError):
+        rebuild_vps_with_public_key(
+            client,
+            service_name="vps-x.vps.ovh.us",
+            image_id="uuid-img",
+            public_ssh_key="ssh-ed25519 AAAA test",
+            task_timeout_seconds=10.0,
+        )
+    assert len(rebuild_attempts) == 1
