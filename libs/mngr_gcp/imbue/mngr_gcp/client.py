@@ -200,6 +200,17 @@ class GcpVpsClient(VpsClientInterface):
     # Firewall management (idempotent, tag-targeted, network-scoped)
     # =========================================================================
 
+    def _firewall_exists(self) -> bool:
+        """Return True iff the configured firewall rule exists (read-only lookup)."""
+        try:
+            with self._translate_gcp_errors():
+                self._firewalls().get(project=self.project_id, firewall=self.firewall_name)
+        except VpsApiError as e:
+            if e.status_code == 404:
+                return False
+            raise
+        return True
+
     def ensure_firewall(self) -> str:
         """Ensure the SSH firewall rule exists, creating it if absent. Returns the target tag.
 
@@ -212,6 +223,11 @@ class GcpVpsClient(VpsClientInterface):
         wide-open rule, raise so the caller makes an explicit decision. A
         pre-existing rule is reused as-is (ingress is not re-patched); delete it
         manually to change the allowed CIDRs.
+
+        This is the privileged write path, used by ``mngr gcp prepare`` (one-time
+        admin setup). The hot path in ``create_instance`` uses
+        ``resolve_firewall`` instead, which is lookup-only and needs only
+        instance-create permissions (no ``compute.firewalls.create``).
         """
         if not self.allowed_ssh_cidrs:
             raise MngrError(
@@ -219,13 +235,8 @@ class GcpVpsClient(VpsClientInterface):
                 "Set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) for your "
                 "own IP), or pre-create the firewall rule targeting the configured firewall_target_tag."
             )
-        try:
-            with self._translate_gcp_errors():
-                self._firewalls().get(project=self.project_id, firewall=self.firewall_name)
+        if self._firewall_exists():
             return self.firewall_target_tag
-        except VpsApiError as e:
-            if e.status_code != 404:
-                raise
 
         firewall = compute_v1.Firewall(
             name=self.firewall_name,
@@ -253,6 +264,26 @@ class GcpVpsClient(VpsClientInterface):
         )
         return self.firewall_target_tag
 
+    def resolve_firewall(self) -> str:
+        """Look up the firewall rule without creating or modifying it. Returns the target tag.
+
+        Mirrors ``ensure_firewall`` but with no write API calls -- the hot
+        ``create_instance`` path needs only instance-create permissions. When
+        the rule is missing, raises a ``MngrError`` pointing at
+        ``mngr gcp prepare`` so a user with restricted IAM gets a clear next
+        step rather than an opaque permission denial when the instance later
+        proves unreachable.
+        """
+        if self._firewall_exists():
+            return self.firewall_target_tag
+        raise MngrError(
+            f"GCP firewall rule {self.firewall_name!r} does not exist in project {self.project_id!r}. "
+            f"Run `uv run mngr gcp prepare --project {self.project_id}` once to create it "
+            "(needs compute.firewalls.create), then retry the create with your usual "
+            "instance-create-only credentials. The rule targets the configured firewall_target_tag "
+            f"({self.firewall_target_tag!r}); every instance is tagged with it."
+        )
+
     # =========================================================================
     # Instance Operations
     # =========================================================================
@@ -278,7 +309,9 @@ class GcpVpsClient(VpsClientInterface):
                 f"got region={region!r} (for GCP, --gcp-zone is the placement knob). Instantiate a zone-specific client.",
             )
 
-        self.ensure_firewall()
+        # Read-only firewall resolve on the hot path (no compute.firewalls.create
+        # needed); the privileged create lives in `mngr gcp prepare`.
+        self.resolve_firewall()
 
         instance_name = _make_instance_name(label, tags)
         ssh_metadata_value = "\n".join(

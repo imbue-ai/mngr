@@ -11,7 +11,9 @@ from typing import Any
 from typing import Final
 
 import google.auth
+from google.api_core import exceptions as google_api_exceptions
 from google.auth import exceptions as google_auth_exceptions
+from google.cloud import compute_v1
 from pydantic import Field
 
 from imbue.mngr_gcp.client import GcpVpsClient
@@ -79,6 +81,92 @@ def get_default_project() -> str | None:
     except google_auth_exceptions.GoogleAuthError:
         return None
     return project
+
+
+class FakeOperation:
+    """Stand-in for a google-cloud-compute ExtendedOperation; ``result()`` no-ops or re-raises."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    def result(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
+class FakeInstancesClient:
+    """Fake InstancesClient: records insert/delete/get/list requests, returns canned responses."""
+
+    def __init__(self) -> None:
+        self.inserted: list[compute_v1.Instance] = []
+        self.deleted: list[str] = []
+        self.get_result: compute_v1.Instance | None = None
+        self.get_error: Exception | None = None
+        self.list_result: list[compute_v1.Instance] = []
+        self.last_list_filter: str | None = None
+        self.insert_error: Exception | None = None
+        self.delete_error: Exception | None = None
+        self.list_error: Exception | None = None
+
+    def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> FakeOperation:
+        self.inserted.append(instance_resource)
+        return FakeOperation(error=self.insert_error)
+
+    def delete(self, *, project: str, zone: str, instance: str) -> FakeOperation:
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(instance)
+        return FakeOperation()
+
+    def get(self, *, project: str, zone: str, instance: str) -> compute_v1.Instance:
+        if self.get_error is not None:
+            raise self.get_error
+        assert self.get_result is not None, "get_result not set"
+        return self.get_result
+
+    def list(self, *, project: str, zone: str, filter: str | None = None) -> list[compute_v1.Instance]:
+        if self.list_error is not None:
+            raise self.list_error
+        self.last_list_filter = filter
+        return self.list_result
+
+
+class FakeFirewallsClient:
+    """Fake FirewallsClient: ``get`` raises NotFound unless a rule is preset; records inserts."""
+
+    def __init__(self) -> None:
+        self.existing: compute_v1.Firewall | None = None
+        self.inserted: list[compute_v1.Firewall] = []
+        self.insert_error: Exception | None = None
+
+    def get(self, *, project: str, firewall: str) -> compute_v1.Firewall:
+        if self.existing is None:
+            raise google_api_exceptions.NotFound("firewall not found")
+        return self.existing
+
+    def insert(self, *, project: str, firewall_resource: compute_v1.Firewall) -> FakeOperation:
+        self.inserted.append(firewall_resource)
+        return FakeOperation(error=self.insert_error)
+
+
+class FakeSnapshotsClient:
+    """Fake SnapshotsClient: records snapshot insert/delete/list, returns canned responses."""
+
+    def __init__(self) -> None:
+        self.inserted: list[compute_v1.Snapshot] = []
+        self.deleted: list[str] = []
+        self.list_result: list[compute_v1.Snapshot] = []
+
+    def insert(self, *, project: str, snapshot_resource: compute_v1.Snapshot) -> FakeOperation:
+        self.inserted.append(snapshot_resource)
+        return FakeOperation()
+
+    def delete(self, *, project: str, snapshot: str) -> FakeOperation:
+        self.deleted.append(snapshot)
+        return FakeOperation()
+
+    def list(self, *, project: str) -> list[compute_v1.Snapshot]:
+        return self.list_result
 
 
 class _StubbedGcpVpsClient(GcpVpsClient):

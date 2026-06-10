@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
+import click
 from google.auth import exceptions as google_auth_exceptions
 from pydantic import ConfigDict
 from pydantic import Field
@@ -16,6 +17,7 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp import hookimpl
+from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -204,3 +206,9 @@ class GcpProviderBackend(ProviderBackendInterface):
 def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
     """Register the GCP provider backend."""
     return (GcpProviderBackend, GcpProviderConfig)
+
+
+@hookimpl
+def register_cli_commands() -> Sequence[click.Command]:
+    """Register the ``mngr gcp ...`` operator command group."""
+    return [gcp_cli_group]

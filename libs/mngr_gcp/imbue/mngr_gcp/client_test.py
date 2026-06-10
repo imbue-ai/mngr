@@ -18,6 +18,9 @@ from google.cloud import compute_v1
 from imbue.mngr.errors import MngrError
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import to_gce_label_value
+from imbue.mngr_gcp.testing import FakeFirewallsClient
+from imbue.mngr_gcp.testing import FakeInstancesClient
+from imbue.mngr_gcp.testing import FakeSnapshotsClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -26,90 +29,11 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
-class FakeOperation:
-    """Stand-in for an ExtendedOperation; ``result()`` no-ops or re-raises."""
-
-    def __init__(self, error: Exception | None = None) -> None:
-        self.error = error
-
-    def result(self) -> None:
-        if self.error is not None:
-            raise self.error
-
-
-class FakeInstancesClient:
-    """Records insert/delete/get/list requests and returns canned responses."""
-
-    def __init__(self) -> None:
-        self.inserted: list[compute_v1.Instance] = []
-        self.deleted: list[str] = []
-        self.get_result: compute_v1.Instance | None = None
-        self.get_error: Exception | None = None
-        self.list_result: list[compute_v1.Instance] = []
-        self.last_list_filter: str | None = None
-        self.insert_error: Exception | None = None
-        self.delete_error: Exception | None = None
-        self.list_error: Exception | None = None
-
-    def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> FakeOperation:
-        self.inserted.append(instance_resource)
-        return FakeOperation(error=self.insert_error)
-
-    def delete(self, *, project: str, zone: str, instance: str) -> FakeOperation:
-        if self.delete_error is not None:
-            raise self.delete_error
-        self.deleted.append(instance)
-        return FakeOperation()
-
-    def get(self, *, project: str, zone: str, instance: str) -> compute_v1.Instance:
-        if self.get_error is not None:
-            raise self.get_error
-        assert self.get_result is not None, "get_result not set"
-        return self.get_result
-
-    def list(self, *, project: str, zone: str, filter: str | None = None) -> list[compute_v1.Instance]:
-        if self.list_error is not None:
-            raise self.list_error
-        self.last_list_filter = filter
-        return self.list_result
-
-
-class FakeFirewallsClient:
-    """Records firewall get/insert; ``get`` raises NotFound unless a rule is preset."""
-
-    def __init__(self) -> None:
-        self.existing: compute_v1.Firewall | None = None
-        self.inserted: list[compute_v1.Firewall] = []
-        self.insert_error: Exception | None = None
-
-    def get(self, *, project: str, firewall: str) -> compute_v1.Firewall:
-        if self.existing is None:
-            raise google_api_exceptions.NotFound("firewall not found")
-        return self.existing
-
-    def insert(self, *, project: str, firewall_resource: compute_v1.Firewall) -> FakeOperation:
-        self.inserted.append(firewall_resource)
-        return FakeOperation(error=self.insert_error)
-
-
-class FakeSnapshotsClient:
-    """Records snapshot insert/delete/list and returns canned responses."""
-
-    def __init__(self) -> None:
-        self.inserted: list[compute_v1.Snapshot] = []
-        self.deleted: list[str] = []
-        self.list_result: list[compute_v1.Snapshot] = []
-
-    def insert(self, *, project: str, snapshot_resource: compute_v1.Snapshot) -> FakeOperation:
-        self.inserted.append(snapshot_resource)
-        return FakeOperation()
-
-    def delete(self, *, project: str, snapshot: str) -> FakeOperation:
-        self.deleted.append(snapshot)
-        return FakeOperation()
-
-    def list(self, *, project: str) -> list[compute_v1.Snapshot]:
-        return self.list_result
+def _present_firewalls() -> FakeFirewallsClient:
+    """A FakeFirewallsClient whose rule already exists (the prepared state)."""
+    firewalls = FakeFirewallsClient()
+    firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
+    return firewalls
 
 
 def _make_client(
@@ -120,6 +44,8 @@ def _make_client(
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_minutes: int | None = None,
 ) -> GcpVpsClient:
+    # Default to a prepared (existing) firewall so create-path tests don't each
+    # have to wire one up; firewall-specific tests pass their own.
     return _StubbedGcpVpsClient(
         credentials=AnonymousCredentials(),
         project_id="test-project",
@@ -129,7 +55,7 @@ def _make_client(
         allowed_ssh_cidrs=allowed_ssh_cidrs,
         auto_shutdown_minutes=auto_shutdown_minutes,
         stubbed_instances_client=instances or FakeInstancesClient(),
-        stubbed_firewalls_client=firewalls or FakeFirewallsClient(),
+        stubbed_firewalls_client=firewalls if firewalls is not None else _present_firewalls(),
         stubbed_snapshots_client=snapshots or FakeSnapshotsClient(),
     )
 
@@ -196,9 +122,10 @@ def test_create_instance_builds_expected_resource() -> None:
     assert built.network_interfaces[0].access_configs[0].type_ == "ONE_TO_ONE_NAT"
 
 
-def test_create_instance_ensures_firewall_first() -> None:
-    firewalls = FakeFirewallsClient()
-    client = _make_client(firewalls=firewalls)
+def test_create_instance_resolves_firewall_without_creating() -> None:
+    firewalls = _present_firewalls()
+    instances = FakeInstancesClient()
+    client = _make_client(instances, firewalls=firewalls)
     client.upload_ssh_key("key-1", "ssh-ed25519 AAAA test")
     client.create_instance(
         label="mngr-host",
@@ -208,9 +135,25 @@ def test_create_instance_ensures_firewall_first() -> None:
         ssh_key_ids=["key-1"],
         tags={"mngr-host-id": "host-00000000000000000000000000000000"},
     )
-    # Firewall did not exist -> it was created before the instance insert.
-    assert len(firewalls.inserted) == 1
-    assert firewalls.inserted[0].name == "mngr-gcp-ssh"
+    # Hot path only resolves (read-only) -- it must NOT create the firewall.
+    assert firewalls.inserted == []
+    assert len(instances.inserted) == 1
+
+
+def test_create_instance_raises_when_firewall_missing() -> None:
+    # Firewall absent -> the read-only resolve raises a prepare hint before any
+    # instance is created.
+    client = _make_client(firewalls=FakeFirewallsClient())
+    client.upload_ssh_key("key-1", "ssh-ed25519 AAAA test")
+    with pytest.raises(MngrError, match="mngr gcp prepare"):
+        client.create_instance(
+            label="mngr-host",
+            region="us-west1-a",
+            plan="e2-small",
+            user_data="x",
+            ssh_key_ids=["key-1"],
+            tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        )
 
 
 def test_create_instance_sets_auto_delete_scheduling() -> None:
@@ -299,6 +242,18 @@ def test_ensure_firewall_tolerates_create_race() -> None:
     client = _make_client(firewalls=firewalls)
     # A concurrent create wins the race -> treated as success, not an error.
     assert client.ensure_firewall() == "mngr-ssh"
+
+
+def test_resolve_firewall_returns_tag_when_present() -> None:
+    client = _make_client(firewalls=_present_firewalls())
+    assert client.resolve_firewall() == "mngr-ssh"
+
+
+def test_resolve_firewall_raises_prepare_hint_when_missing() -> None:
+    # Read-only resolve never creates; a missing rule points the user at prepare.
+    client = _make_client(firewalls=FakeFirewallsClient())
+    with pytest.raises(MngrError, match="mngr gcp prepare"):
+        client.resolve_firewall()
 
 
 # =============================================================================
