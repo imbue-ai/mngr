@@ -97,22 +97,10 @@
     handleRowClick(e.target);
   });
 
-  // Flip the hover affordance on the open-in-new button for non-current
-  // rows. The current row already shows the icons (set in renderWorkspaces),
-  // so no hover toggle is needed for it.
-  document.addEventListener('mouseover', function (e) {
-    var row = e.target.closest('.sidebar-item');
-    if (!row || row.classList.contains('is-current')) return;
-    var btn = row.querySelector('.sidebar-row-icon[data-open-new]');
-    if (btn) { btn.classList.remove('hidden'); btn.classList.add('inline-flex'); }
-  });
-  document.addEventListener('mouseout', function (e) {
-    var row = e.target.closest('.sidebar-item');
-    if (!row || row.classList.contains('is-current')) return;
-    if (e.relatedTarget && row.contains(e.relatedTarget)) return;
-    var btn = row.querySelector('.sidebar-row-icon[data-open-new]');
-    if (btn) { btn.classList.add('hidden'); btn.classList.remove('inline-flex'); }
-  });
+  // Reveal a non-current row's action icons (open-in-new + settings gear)
+  // on hover; the current row shows them at all times. Shared handler so
+  // both menus behave identically.
+  window.mindsSidebarRow.wireHoverReveal();
 
   document.addEventListener('contextmenu', function (e) {
     var row = e.target.closest('.sidebar-item');

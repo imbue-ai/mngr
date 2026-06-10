@@ -6,9 +6,10 @@ overlay above the workspace content. Each row's accent is shown by the dot
 alone -- the old left-edge vertical accent stripe (carried over from the
 docked sidebar) is removed as redundant.
 
-The current workspace row now carries an "Open in new window" button and
-a per-workspace settings gear; non-current rows reveal the open-in-new
-button on hover. Two new rows at the bottom of the menu: "New workspace"
+Every workspace row reveals its per-workspace settings gear on hover (and
+in Electron, an "Open in new window" button alongside it); the current
+workspace's row shows those icons at all times. Two new rows at the bottom
+of the menu: "New workspace"
 (navigates to /create) and "Manage account(s)" / "Log in" (replaces the
 account button that used to sit in the titlebar). The titlebar no longer
 shows the account button.

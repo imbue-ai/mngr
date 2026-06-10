@@ -14,6 +14,7 @@
 // Usage:
 //   var row = window.mindsSidebarRow.buildRow(workspace,
 //               { isCurrent: bool, withOpenNew: bool });
+//   window.mindsSidebarRow.wireHoverReveal();  // once per page
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildOpenNewBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
@@ -87,21 +88,18 @@
       row.appendChild(staleDot);
     }
 
-    // Open-in-new icon (Electron only). Always in the DOM but hidden until
-    // hover for non-current rows; shown immediately on the current row
-    // alongside the settings gear (Figma "selected row" treatment). The
-    // hover toggle is the caller's delegated mouseover/mouseout handler.
-    if (withOpenNew) {
-      var openBtn = buildOpenNewBtn(workspace.id);
-      if (isCurrent) openBtn.classList.add('inline-flex');
-      else openBtn.classList.add('hidden');
-      row.appendChild(openBtn);
+    // Row action icons. Both are hidden by default and revealed on row
+    // hover (by the delegated wireHoverReveal handler below); the current
+    // row shows them immediately (Figma "selected row" treatment). The
+    // settings gear is on every row in both modes; the open-in-new button
+    // is Electron-only (withOpenNew) since the browser has no multi-window.
+    function addActionIcon(btn) {
+      if (isCurrent) btn.classList.add('inline-flex');
+      else btn.classList.add('hidden');
+      row.appendChild(btn);
     }
-
-    // Per-workspace settings gear: only the current row carries it.
-    if (isCurrent) {
-      row.appendChild(buildSettingsBtn(workspace.id));
-    }
+    if (withOpenNew) addActionIcon(buildOpenNewBtn(workspace.id));
+    addActionIcon(buildSettingsBtn(workspace.id));
 
     // Accent: prefer the server-attached value; otherwise resolve it
     // asynchronously via the shared workspace_accent helper (if loaded).
@@ -118,10 +116,45 @@
     return row;
   }
 
+  // Reveal the action icons (open-in-new + settings gear) when a
+  // non-current row is hovered, and re-hide them on leave. Delegated on
+  // ``document`` so it covers rows added later. The current row keeps its
+  // icons shown at all times, so it's skipped. Both menus (sidebar.js and
+  // chrome.js) call this once; keeping it here means the row's hover
+  // behavior lives with the row's markup.
+  function setRowIconsHidden(row, hidden) {
+    var icons = row.querySelectorAll('.sidebar-row-icon');
+    for (var i = 0; i < icons.length; i += 1) {
+      if (hidden) {
+        icons[i].classList.add('hidden');
+        icons[i].classList.remove('inline-flex');
+      } else {
+        icons[i].classList.remove('hidden');
+        icons[i].classList.add('inline-flex');
+      }
+    }
+  }
+
+  function wireHoverReveal() {
+    document.addEventListener('mouseover', function (e) {
+      var row = e.target.closest('.sidebar-item');
+      if (!row || row.classList.contains('is-current')) return;
+      setRowIconsHidden(row, false);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var row = e.target.closest('.sidebar-item');
+      if (!row || row.classList.contains('is-current')) return;
+      // Ignore moves between children of the same row.
+      if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+      setRowIconsHidden(row, true);
+    });
+  }
+
   window.mindsSidebarRow = {
     buildIconButton: buildIconButton,
     buildOpenNewBtn: buildOpenNewBtn,
     buildSettingsBtn: buildSettingsBtn,
     buildRow: buildRow,
+    wireHoverReveal: wireHoverReveal,
   };
 })();
