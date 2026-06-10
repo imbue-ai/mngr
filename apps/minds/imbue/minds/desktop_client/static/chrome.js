@@ -83,6 +83,15 @@
   // tick has arrived yet) leave the accent unset on this call and get
   // painted by ``renderWorkspaces`` on the next tick.
   var accentByAgentId = {};
+  // Tracks the agentId whose accent the chrome *wants* painted, regardless
+  // of whether the SSE cache has caught up yet. Bootstrap and the
+  // ``onLastWorkspaceAgentIdChanged`` path both set this even when the SSE
+  // workspaces payload hasn't arrived yet (cold start, freshly-created
+  // workspace); the next ``workspaces`` tick replays the paint with the
+  // now-populated cache. Independent of ``currentTitleAgentId`` so the
+  // accent-only call paths (bootstrap / last-workspace IPC) can update
+  // the titlebar without claiming to represent the displayed workspace.
+  var lastRequestedAccentAgentId = null;
   function rememberWorkspaceAccents(workspaces) {
     if (!workspaces) return;
     workspaces.forEach(function (w) {
@@ -95,6 +104,7 @@
   }
 
   function applyTitleAccent(agentId) {
+    lastRequestedAccentAgentId = agentId || null;
     if (!agentId) {
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
@@ -105,8 +115,8 @@
     if (!cached || !cached.accent) {
       // No SSE entry for this agent yet (cold start, workspace just
       // created, etc.). Leave the bar at whatever it was; the next
-      // ``workspaces`` tick will populate the cache and a follow-up
-      // call paints it.
+      // ``workspaces`` tick will replay this call via
+      // ``lastRequestedAccentAgentId`` and paint it.
       return;
     }
     document.documentElement.style.setProperty('--workspace-accent', cached.accent);
@@ -397,10 +407,18 @@
       if (data.type === 'workspaces') {
         rememberWorkspaceAccents(data.workspaces);
         renderWorkspaces(data.workspaces);
-        // If the titlebar already has an active agentId but the cache
-        // was empty until this tick (cold start), re-apply now so the
-        // bar paints without waiting for another navigation event.
-        if (currentTitleAgentId) applyTitleAccent(currentTitleAgentId);
+        // Replay the most recent ``applyTitleAccent`` call now that the
+        // cache has fresh data. Catches two cases:
+        //   1. Cold start: bootstrap set ``lastRequestedAccentAgentId``
+        //      before any SSE tick; this tick fills the cache and paints.
+        //   2. Settings-page color save: the settings POST updated the
+        //      resolver snapshot which triggered this tick; the cached
+        //      hex is now the newly-picked one, so the chrome repaints.
+        // Independent of ``currentTitleAgentId`` because the settings
+        // page (and ``lastWorkspace``-driven Home views) don't update
+        // it -- the persisted last-opened workspace is what drives the
+        // accent.
+        if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
       }
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);
