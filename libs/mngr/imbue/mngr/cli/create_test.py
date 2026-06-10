@@ -512,6 +512,73 @@ def test_try_reuse_existing_agent_found_and_started(
         local_host.stop_agents([agent.id])
 
 
+@pytest.mark.tmux
+def test_try_reuse_existing_agent_scopes_to_address_host_name_among_many(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_work_dir: Path,
+) -> None:
+    """When several same-named agents are discoverable, the address's host name
+    narrows the candidate set to exactly the agent on that host and reuses it.
+
+    This is the positive counterpart to the new-host regression guard: a
+    re-create targeting an *existing* host must reuse exactly the agent on the
+    named host rather than raising the disambiguation error. A second same-named
+    agent on a different host is registered so the test fails if host-name
+    scoping does not actually narrow the candidates.
+    """
+    local_host = cast(OnlineHostInterface, local_provider.get_host(HostName(LOCAL_HOST_NAME)))
+
+    agent_options = CreateAgentOptions(
+        agent_type=AgentTypeName("generic"),
+        name=AgentName("system-services"),
+        command=CommandString("sleep 47291"),
+    )
+    agent = local_host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=agent_options,
+    )
+
+    real_host_ref = DiscoveredHost(
+        provider_name=ProviderInstanceName("local"),
+        host_id=local_host.id,
+        host_name=local_host.get_name(),
+    )
+    real_agent_ref = DiscoveredAgent(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=local_host.id,
+        provider_name=ProviderInstanceName("local"),
+    )
+    # A same-named agent on a *different* host, which host-name scoping must exclude.
+    other_host_ref = _make_discovered_host(
+        provider="local", host_id=TEST_HOST_ID_2, host_name="other-workspace"
+    )
+    other_agent_ref = _make_discovered_agent(
+        agent_id=TEST_AGENT_ID_2, agent_name="system-services", host_id=TEST_HOST_ID_2, provider="local"
+    )
+
+    try:
+        result = _try_reuse_existing_agent(
+            agent_name=agent.name,
+            provider_name=None,
+            target_host_ref=None,
+            host_name=local_host.get_name(),
+            mngr_ctx=temp_mngr_ctx,
+            agent_and_host_loader=lambda: {
+                real_host_ref: [real_agent_ref],
+                other_host_ref: [other_agent_ref],
+            },
+        )
+
+        assert result is not None
+        found_agent, found_host = result
+        assert found_agent.id == agent.id
+        assert found_host.id == local_host.id
+    finally:
+        local_host.stop_agents([agent.id])
+
+
 def test_try_reuse_existing_agent_not_found_on_host(
     local_provider: LocalProviderInstance,
     temp_mngr_ctx: MngrContext,
