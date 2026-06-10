@@ -700,9 +700,25 @@ function notifyOpenFailed(url) {
 // Escape handling + ``modal-state-changed`` titlebar-drag suppression as
 // the inbox. There is no separate sidebar WebContentsView.
 
-function sidebarUrlFor() {
+function sidebarUrlFor(anchor) {
   if (!backendBaseUrl) return null;
-  return backendBaseUrl + '/_chrome/sidebar';
+  const base = backendBaseUrl + '/_chrome/sidebar';
+  // ``anchor`` is { trigger: {x, y, width, height}, offset: {x, y} } -- the
+  // trigger button's viewport-relative rect plus a caller-chosen offset.
+  // The chrome view (where the trigger lives) and the modal view share
+  // window coordinate space, so the rect translates directly into the
+  // sidebar page's coordinate system; Sidebar.jinja anchors the menu
+  // at trigger.bottom-left + offset via server-rendered inline style.
+  // When no anchor is provided, the server falls back to defaults.
+  if (!anchor || !anchor.trigger || !anchor.offset) return base;
+  const params = new URLSearchParams();
+  params.set('trigger_x', Math.round(anchor.trigger.x).toString());
+  params.set('trigger_y', Math.round(anchor.trigger.y).toString());
+  params.set('trigger_w', Math.round(anchor.trigger.width).toString());
+  params.set('trigger_h', Math.round(anchor.trigger.height).toString());
+  params.set('offset_x', Math.round(anchor.offset.x).toString());
+  params.set('offset_y', Math.round(anchor.offset.y).toString());
+  return base + '?' + params.toString();
 }
 
 function isSidebarModalOpen(bundle) {
@@ -714,17 +730,17 @@ function isSidebarModalOpen(bundle) {
   }
 }
 
-function openSidebar(bundle) {
+function openSidebar(bundle, anchor) {
   if (!bundle || bundle.window.isDestroyed()) return;
-  const url = sidebarUrlFor();
+  const url = sidebarUrlFor(anchor);
   if (!url) return;
   openModal(bundle, url);
 }
 
-function toggleSidebar(bundle) {
+function toggleSidebar(bundle, anchor) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (isSidebarModalOpen(bundle)) closeModal(bundle);
-  else openSidebar(bundle);
+  else openSidebar(bundle, anchor);
 }
 
 // -- Modal overlay (per-bundle) --
@@ -2223,8 +2239,8 @@ ipcMain.on('content-go-forward', (event) => {
   }
 });
 
-ipcMain.on('toggle-sidebar', (event) => {
-  toggleSidebar(getBundleFromEvent(event));
+ipcMain.on('toggle-sidebar', (event, anchor) => {
+  toggleSidebar(getBundleFromEvent(event), anchor);
 });
 
 ipcMain.on('toggle-inbox', (event) => {

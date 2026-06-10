@@ -1,22 +1,31 @@
-{#def mngr_forward_origin, is_mac=False #}
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=0, offset_y=8 #}
 {#
   Standalone sidebar page loaded into the shared modal WebContentsView
   when the user opens the sidebar. The modal view covers the full window
   content area, the body is the transparent backdrop, and the floating
-  dark teal panel is pinned to the top-left. Clicks on the backdrop
-  (anywhere outside the panel) dismiss the modal via /_static/sidebar.js;
-  the Escape key is handled by main.js's modal before-input-event
-  listener (see openModal in electron/main.js), so this page does not
-  install its own Escape handler. The panel's height comes from its own
-  flex content -- no JS measurement or Electron-side bounds math is needed.
+  dark teal panel is pinned at a position derived from the caller's
+  trigger geometry. Clicks on the backdrop (anywhere outside the panel)
+  dismiss the modal via /_static/sidebar.js; the Escape key is handled
+  by main.js's modal before-input-event listener (see openModal in
+  electron/main.js), so this page does not install its own Escape
+  handler. The panel's height comes from its own flex content -- no JS
+  measurement or Electron-side bounds math is needed.
 
-  ``is_mac`` shifts the menu's left position so the menu's icon column
-  sits directly below the titlebar's sidebar-toggle icon: the titlebar
-  uses ``pl-[72px]`` on macOS (for traffic-light clearance) and ``px-1``
-  (4px) elsewhere, so we mirror those values here. The panel itself uses
-  ``py-1.5`` (vertical-only padding) so each row's ``px-2`` (8px)
-  internal padding lines up exactly with the trigger button's icon offset
-  inside its own ``w-8`` shell.
+  Position model: the trigger (chrome page's #sidebar-toggle button)
+  passes its viewport-relative rect (trigger_x, trigger_y, trigger_w,
+  trigger_h) plus a caller-chosen offset (offset_x, offset_y). The menu
+  anchors its top-left at the trigger's bottom-left + offset:
+    left = trigger_x + offset_x
+    top  = trigger_y + trigger_h + offset_y
+  Because the chrome view and the modal view share the same window
+  coordinate space, the trigger's rect translates directly. The panel
+  uses ``py-1.5`` (vertical-only padding) so each row's ``px-2`` (8px)
+  internal padding lines up exactly with the trigger button's icon
+  offset inside its ``w-8`` shell -- icon columns line up.
+
+  Defaults (no query params): anchor just below a 38px-tall element at
+  the top-left of the window, with an 8px gap. That's the right shape
+  for the titlebar's first button without any caller customization.
 
   mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
   can build the cross-origin /goto/<agent>/ URL the plugin serves.
@@ -27,16 +36,16 @@
 <script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/sidebar.js" defer></script>
 {% endset %}
+{% set _menu_left = trigger_x + offset_x %}
+{% set _menu_top = trigger_y + trigger_h + offset_y %}
 <Base title="Projects"
       body_class="font-sans antialiased bg-transparent"
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="sidebar-backdrop" class="fixed inset-0">
-    {# top-[46px] = 38px titlebar + 8px inset. Left position matches the
-       titlebar's sidebar-toggle button so the menu's icon column lines up
-       directly below the trigger icon. #}
     <div id="sidebar-menu"
-         class="absolute top-[46px] {% if is_mac %}left-[72px]{% else %}left-1{% endif %} w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+         style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
+         class="absolute w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
       <div id="sidebar-workspaces" class="flex flex-col gap-px"></div>
       <SidebarBottom />
     </div>

@@ -1090,7 +1090,15 @@ def render_chrome_page(
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "", is_mac: bool = False) -> str:
+def render_sidebar_page(
+    mngr_forward_origin: str = "",
+    trigger_x: int = 0,
+    trigger_y: int = 0,
+    trigger_w: int = 0,
+    trigger_h: int = 38,
+    offset_x: int = 0,
+    offset_y: int = 8,
+) -> str:
     """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
@@ -1099,15 +1107,24 @@ def render_sidebar_page(mngr_forward_origin: str = "", is_mac: bool = False) -> 
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
 
-    ``is_mac`` shifts the menu's left position to match the titlebar's
-    sidebar-toggle button: traffic-light-shifted (72px) on macOS, flush with
-    the small ``px-1`` titlebar padding (4px) elsewhere. This puts the menu's
-    icon column directly below the trigger icon.
+    Position is driven entirely by the caller. The chrome view (which owns the
+    trigger button) passes the button's viewport-relative rect (``trigger_x``,
+    ``trigger_y``, ``trigger_w``, ``trigger_h``) plus a caller-chosen offset
+    (``offset_x``, ``offset_y``). The menu's top-left lands at the trigger's
+    bottom-left + offset. The chrome view and the modal view share window
+    coordinate space, so the rect translates directly. Defaults (no query
+    params) anchor just below a 38px-tall element at the top-left of the
+    window with an 8px gap -- right for the titlebar's first button.
     """
     return CATALOG.render(
         "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
-        is_mac=is_mac,
+        trigger_x=trigger_x,
+        trigger_y=trigger_y,
+        trigger_w=trigger_w,
+        trigger_h=trigger_h,
+        offset_x=offset_x,
+        offset_y=offset_y,
     )
 
 

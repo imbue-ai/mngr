@@ -22,8 +22,16 @@ loaded into the same modalView that hosts /inbox, so dismissal,
 titlebar-drag suppression, transparent background, and Escape handling
 all come from the existing modal infrastructure.
 
-The menu's left position now tracks the titlebar's sidebar-toggle button:
-shifted by 72px on macOS (to clear the traffic lights) and flush with the
-titlebar's small 4px padding elsewhere. The panel drops its horizontal
-padding so the icon column inside the menu lines up directly below the
-trigger icon in the titlebar.
+The menu's position is now driven entirely by the call site, not by an
+inferred ``is_mac`` flag. The chrome page reads the trigger button's
+``getBoundingClientRect`` and passes the rect + a caller-chosen offset
+through; the menu anchors at ``trigger.bottom-left + offset`` regardless
+of where the trigger lives. In Electron that goes over IPC into
+``/_chrome/sidebar``'s query string (``trigger_x`` / ``trigger_y`` /
+``trigger_w`` / ``trigger_h`` / ``offset_x`` / ``offset_y``); in browser
+mode chrome.js sets the inline panel's ``style.left`` / ``style.top``
+directly. The panel uses ``py-1.5`` (vertical padding only) so the
+row's ``px-2`` lines up exactly with the trigger button's icon offset
+inside its ``w-8`` shell -- icon columns line up automatically. Moving
+or restyling the trigger button in the future requires no template
+changes.

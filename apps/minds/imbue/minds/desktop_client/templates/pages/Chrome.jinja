@@ -68,20 +68,19 @@
 
   {# Browser-mode floating sidebar: full-screen transparent backdrop
      (#sidebar-backdrop) with a floating dark teal menu (#sidebar-menu)
-     pinned to the top-left under the titlebar. Clicks on the backdrop and
-     Escape close the menu (handled by chrome.js). In Electron this whole
-     block is hidden via JS; the sidebar page (Sidebar.jinja) is loaded
-     into the shared modal WebContentsView and uses the same
-     #sidebar-backdrop / #sidebar-menu shape with the /_static/sidebar.js
-     renderer. #}
+     positioned at toggle time by chrome.js using the sidebar-toggle
+     button's getBoundingClientRect + a caller-chosen offset. Clicks on
+     the backdrop and Escape close the menu (handled by chrome.js). In
+     Electron this whole block is hidden via JS; the sidebar page
+     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
+     uses the same #sidebar-backdrop / #sidebar-menu shape with the
+     /_static/sidebar.js renderer. Both modes share the position model:
+     menu.top-left = trigger.bottom-left + offset, with py-1.5 (vertical
+     padding only) so each row's px-2 (8px) lines up exactly with the
+     trigger button's icon offset inside its w-8 shell. #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
-    {# Left position matches the titlebar's sidebar-toggle button (pl-[72px]
-       on macOS for traffic-light clearance; px-1 = 4px elsewhere) so the
-       menu's icon column lines up directly below the trigger icon. The
-       panel uses py-1.5 only -- each row's px-2 (8px) matches the trigger
-       button's icon offset inside its w-8 shell. #}
     <div id="sidebar-menu"
-         class="absolute {% if is_mac %}left-[72px]{% else %}left-1{% endif %} top-[46px] w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+         class="absolute w-[244px] flex flex-col gap-px py-1.5 rounded-[10px] border border-white/10 bg-[#0b292b] shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
       <div id="sidebar-workspaces" class="flex flex-col gap-px"></div>
       <SidebarBottom />
     </div>

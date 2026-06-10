@@ -363,17 +363,35 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     assert 'id="sidebar-account-label"' in html
 
 
-def test_render_sidebar_page_left_position_tracks_is_mac() -> None:
-    """The floating menu's left position matches the titlebar's
-    sidebar-toggle button: ``left-[72px]`` on macOS (to clear the traffic
-    lights) and ``left-1`` (4px) elsewhere. This pins the menu's icon
-    column directly under the titlebar trigger icon, which is the whole
-    point of plumbing ``is_mac`` through to ``render_sidebar_page``."""
-    html_mac = render_sidebar_page(is_mac=True)
-    html_non_mac = render_sidebar_page(is_mac=False)
-    assert "left-[72px]" in html_mac
-    assert "left-[72px]" not in html_non_mac
-    assert "left-1" in html_non_mac
+def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
+    """The floating menu's left/top come from the caller's trigger rect
+    + offset (caller passes the trigger button's viewport-relative rect
+    and a chosen offset; the menu anchors at trigger.bottom-left + offset).
+    The chrome view and the modal view share window coordinate space, so
+    the rect translates directly. This replaces an earlier ``is_mac``
+    branch -- the position is now driven by call-site geometry rather
+    than baked into a server template.
+
+    Trigger rect (72, 0, 32, 28) is roughly the macOS sidebar-toggle
+    button (traffic-light-shifted titlebar with a w-8 h-7 button). With
+    offset (0, 8) the menu anchors at left=72+0=72, top=0+28+8=36."""
+    html = render_sidebar_page(
+        trigger_x=72,
+        trigger_y=0,
+        trigger_w=32,
+        trigger_h=28,
+        offset_x=0,
+        offset_y=8,
+    )
+    assert "left:72px" in html
+    assert "top:36px" in html
+
+    # Defaults (no caller args) anchor below a 38px-tall element at the
+    # top-left with an 8px gap -- right shape for "open the sidebar from
+    # the first titlebar button" without any caller customization.
+    html_default = render_sidebar_page()
+    assert "left:0px" in html_default
+    assert "top:46px" in html_default
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:

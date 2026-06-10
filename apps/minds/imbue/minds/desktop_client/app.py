@@ -1805,10 +1805,33 @@ def _handle_chrome_page(
 
 
 def _handle_chrome_sidebar(request: Request) -> Response:
-    """Serve the standalone sidebar page loaded into the shared modal WebContentsView."""
+    """Serve the standalone sidebar page loaded into the shared modal WebContentsView.
+
+    Position params (``trigger_x`` / ``trigger_y`` / ``trigger_w`` / ``trigger_h``
+    / ``offset_x`` / ``offset_y``) come from the caller (chrome.js packs the
+    sidebar-toggle button's getBoundingClientRect + a caller-chosen offset into
+    the URL). Missing or unparseable params fall back to render_sidebar_page's
+    defaults (anchor just below a 38px-tall element at the top-left of the
+    window, +8px gap).
+    """
+
+    def _int_query(name: str, default: int) -> int:
+        raw = request.query_params.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+
     html = render_sidebar_page(
         mngr_forward_origin=_get_mngr_forward_origin(request),
-        is_mac=_get_is_mac(request),
+        trigger_x=_int_query("trigger_x", 0),
+        trigger_y=_int_query("trigger_y", 0),
+        trigger_w=_int_query("trigger_w", 0),
+        trigger_h=_int_query("trigger_h", 38),
+        offset_x=_int_query("offset_x", 0),
+        offset_y=_int_query("offset_y", 8),
     )
     return HTMLResponse(content=html)
 

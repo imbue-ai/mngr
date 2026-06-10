@@ -35,8 +35,13 @@ contextBridge.exposeInMainWorld('minds', {
     ipcRenderer.on('modal-state-changed', (_event, data) => callback(data));
   },
 
-  // Sidebar
-  toggleSidebar: () => ipcRenderer.send('toggle-sidebar'),
+  // Sidebar. The optional ``anchor`` arg is
+  //   { trigger: {x, y, width, height}, offset: {x, y} }
+  // (all numbers; viewport-relative). Main packs it into the sidebar's URL
+  // so Sidebar.jinja can position the menu via server-rendered inline
+  // style. If omitted, the server falls back to sensible defaults
+  // (anchor just below a 38px-tall element at the top-left, +8px gap).
+  toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
   // Inbox modal (formerly the right-side requests panel)
   toggleInbox: () => ipcRenderer.send('toggle-inbox'),

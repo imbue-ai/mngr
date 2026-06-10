@@ -33,15 +33,44 @@
 
   // -- Sidebar toggle -------------------------------------------------------
   //
-  // Browser mode: toggles the floating backdrop's `hidden` class. The
-  // backdrop covers the full viewport with the panel pinned at top-left;
-  // clicks outside the panel (and the Esc key) close the menu. Electron
-  // mode: defers to the main process, which loads /_chrome/sidebar into
-  // the shared modal WebContentsView. ``sidebarOpen`` is intentionally
-  // browser-mode-only -- in Electron the main process owns visibility
-  // (see toggleSidebar / openModal / closeModal in electron/main.js).
+  // The menu's position is derived from the trigger button's
+  // getBoundingClientRect + a caller-chosen offset (anchor model:
+  // menu.top-left = trigger.bottom-left + offset). This keeps the menu
+  // visually attached to whatever opens it -- if the button moves (mac
+  // traffic-light spacing, a future layout change, a different control
+  // entirely), the menu follows for free without baking the trigger
+  // location into a server-side template branch.
+  //
+  // Browser mode: this script positions the inline #sidebar-menu via
+  // style.left/style.top at toggle time, then toggles the backdrop's
+  // hidden class. Electron mode: the rect + offset are sent over IPC;
+  // main.js encodes them into /_chrome/sidebar's query string, the
+  // server passes them to Sidebar.jinja, and the menu is positioned by
+  // server-rendered inline style. Both modes share the same anchor math.
+  //
+  // ``sidebarOpen`` is intentionally browser-mode-only -- in Electron
+  // the main process owns visibility (see toggleSidebar / openModal /
+  // closeModal in electron/main.js).
+  var SIDEBAR_OFFSET_X = 0;
+  var SIDEBAR_OFFSET_Y = 8;
   var sidebarOpen = false;
+  function computeSidebarAnchor() {
+    var btn = document.getElementById('sidebar-toggle');
+    if (!btn) return null;
+    var rect = btn.getBoundingClientRect();
+    return {
+      trigger: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+      offset: { x: SIDEBAR_OFFSET_X, y: SIDEBAR_OFFSET_Y },
+    };
+  }
+  function positionInlineSidebarPanel(anchor) {
+    var menu = document.getElementById('sidebar-menu');
+    if (!menu || !anchor) return;
+    menu.style.left = Math.round(anchor.trigger.x + anchor.offset.x) + 'px';
+    menu.style.top = Math.round(anchor.trigger.y + anchor.trigger.height + anchor.offset.y) + 'px';
+  }
   function showSidebarPanel() {
+    positionInlineSidebarPanel(computeSidebarAnchor());
     document.getElementById('sidebar-backdrop').classList.remove('hidden');
   }
   function hideSidebarPanel() {
@@ -49,7 +78,7 @@
   }
   function toggleSidebar() {
     if (isElectron) {
-      window.minds.toggleSidebar();
+      window.minds.toggleSidebar(computeSidebarAnchor());
     } else {
       sidebarOpen = !sidebarOpen;
       if (sidebarOpen) showSidebarPanel();
