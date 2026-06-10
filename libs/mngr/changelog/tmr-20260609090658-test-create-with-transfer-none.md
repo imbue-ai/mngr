@@ -1,1 +1,0 @@
-Fixed the e2e test fixture in `conftest.py` that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate produced invalid TOML, causing every e2e tutorial test (including `test_create_with_transfer_none`) to fail config parsing with "Cannot overwrite a value".
