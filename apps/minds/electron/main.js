@@ -1681,9 +1681,10 @@ async function syncContentCookiesToDefaultSession() {
 
 async function onReady() {
   // Send external links to the user's default browser for every WebContents
-  // the app ever creates (all four bundle views plus any popup windows),
-  // rather than wiring each view individually. Registered before the first
-  // bundle is created so it covers the initial chrome/content views too.
+  // the app ever creates (all three bundle views -- chrome, content, modal --
+  // plus any popup windows), rather than wiring each view individually.
+  // Registered before the first bundle is created so it covers the initial
+  // chrome/content views too.
   app.on('web-contents-created', (_event, contents) => {
     applyExternalLinkHandling(contents);
   });
