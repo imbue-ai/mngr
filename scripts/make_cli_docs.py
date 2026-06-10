@@ -64,6 +64,7 @@ SECONDARY_COMMANDS = {
     "file",
     "forward",
     "gc",
+    "gcp",
     "help",
     "imbue_cloud",
     "kanpan",

@@ -224,6 +224,20 @@ Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: gcp
+  GCE-specific args (consumed by provider, not passed to docker):
+    --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal
+                             the provider's configured zone; default: us-west1-a)
+    --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
+    --git-depth=N            Shallow-clone build context to depth N before upload
+
+  The GCE VM image is taken from the provider config (default_source_image);
+  per-host image overrides are not supported via build args.
+
+  All other build args are passed to 'docker build' on the GCE instance.
+  Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: imbue_cloud
   Build args constrain which pool host the connector leases for this `mngr create`. Recognized keys (see LeaseAttributes): repo_url, repo_branch_or_tag, cpus, memory_gb, gpu_count. Unknown keys are rejected. Example: `mngr create my-agent@my-host.imbue_cloud_alice --new-host -b cpus=4 -b repo_branch_or_tag=v1.2.3`.
   Start args are not used by the imbue_cloud provider.
