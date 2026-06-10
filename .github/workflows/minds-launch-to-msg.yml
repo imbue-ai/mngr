@@ -566,26 +566,41 @@ jobs:
             if [ -z "$CID" ]; then
               echo "(no docker container -- pilot in-VM provisioning path)"
               echo
-              echo "=== tmux list-sessions inside VM ==="
-              "$LIMA" shell "$VM" -- tmux list-sessions 2>&1 | head -20
+              echo "=== tmux sessions inside VM (root socket) ==="
+              "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-sessions 2>&1 | head -10
               echo
-              for win in $("$LIMA" shell "$VM" -- tmux list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+              for win in $("$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
                 echo "--- tmux capture-pane minds-system-services:$win ---"
-                "$LIMA" shell "$VM" -- tmux capture-pane -t "minds-system-services:$win" -p -S -200 2>&1 | tail -30
+                "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default capture-pane -t "minds-system-services:$win" -p -S -300 2>&1 | tail -40
                 echo
               done
+              echo "=== TEST: directly invoke installed CLIs as root (replicates SIGILL trigger) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                echo "--- which mngr / system-interface ---"
+                which mngr system-interface 2>&1
+                echo "--- mngr --version (catches SIGILL on mngr CLI startup) ---"
+                mngr --version 2>&1 || echo "rc=$?"
+                echo "--- system-interface --help (catches SIGILL on system_interface startup) ---"
+                system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- /mngr/code/.venv/bin/system-interface --help (sync-installed copy) ---"
+                /mnt/lima-mngr-*/code/.venv/bin/system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- python -c import paramiko (in mngr tool venv) ---"
+                MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+                if [ -n "$MNGR_PY" ]; then
+                  echo "mngr python: $MNGR_PY"
+                  "$MNGR_PY" -c "import paramiko; print(\"paramiko OK\")" 2>&1 || echo "rc=$?"
+                fi
+              ' 2>&1 | tail -25
+              echo
               echo "=== curl system_interface (port 1234) from VM ==="
               "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:1234/health 2>&1 | head -5
-              "$LIMA" shell "$VM" -- curl -s -m 3 http://localhost:1234/ 2>&1 | head -20
               echo
-              echo "=== curl web server (port 8080) from VM ==="
-              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8080/ 2>&1 | head -5
+              echo "=== ps aux in VM ==="
+              "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
               echo
-              echo "=== ps aux in VM (svc processes) ==="
-              "$LIMA" shell "$VM" -- ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|sshd|tmux" | head -40
-              echo
-              echo "=== services.toml in VM ==="
-              "$LIMA" shell "$VM" -- cat /mngr/code/services.toml 2>&1 | head -40
+              echo "=== bootstrap.log (if present) ==="
+              "$LIMA" shell "$VM" -- sudo find /var/log /tmp /mngr -name 'bootstrap*' -type f 2>/dev/null | head -5
+              "$LIMA" shell "$VM" -- sudo bash -c 'tail -40 /var/log/bootstrap*.log /tmp/bootstrap*.log /mngr/bootstrap*.log 2>/dev/null' | head -50
               echo
               echo "=== mngr forward host-side reach via SSH (port 8421) ==="
               curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8421/ 2>&1
