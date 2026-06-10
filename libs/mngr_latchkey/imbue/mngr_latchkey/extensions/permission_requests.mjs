@@ -85,7 +85,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -310,15 +310,58 @@ function ensureNoExtraneousFields(parent, allowed, parsed) {
 }
 
 /**
+ * The on-disk roots the Minds WebDAV server mounts: the current user's
+ * home directory and the system temp directory. Computed from Node's
+ * ``homedir()`` / ``tmpdir()`` which -- on the desktop host, where the
+ * gateway and the Minds WebDAV server run as the same user in the same
+ * environment -- match the ``Path.home()`` / ``tempfile.gettempdir()``
+ * roots that ``webdav.py`` actually serves.
+ *
+ * Trailing slashes are stripped so the prefix test in
+ * ``isPathWithinFileSharingRoot`` is uniform. A falsy root (which
+ * ``homedir()`` / ``tmpdir()`` should never return on a real host) is
+ * dropped rather than collapsed to ``/`` (which would match every
+ * path).
+ */
+function fileSharingMountRoots() {
+  const roots = [];
+  for (const root of [homedir(), tmpdir()]) {
+    if (typeof root !== 'string' || root.length === 0) {
+      continue;
+    }
+    const trimmed = root.replace(/\/+$/, '');
+    roots.push(trimmed.length > 0 ? trimmed : '/');
+  }
+  return roots;
+}
+
+/**
+ * Whether ``filePath`` is at or beneath ``root``. The comparison is
+ * case-insensitive to mirror WsgiDAV's share-prefix matching (it
+ * lowercases both the share keys and the request path), and purely
+ * lexical -- we do not resolve symlinks or require the path to exist,
+ * matching how the WebDAV server mounts by string prefix.
+ */
+function isPathWithinFileSharingRoot(filePath, root) {
+  const lowerPath = filePath.toLowerCase();
+  const lowerRoot = root.toLowerCase();
+  return lowerPath === lowerRoot || lowerPath.startsWith(`${lowerRoot}/`);
+}
+
+/**
  * Validate an absolute filesystem path for the ``file-sharing`` payload.
  *
- * The path must start with ``/`` and must not contain any ``..``
- * segments (under either POSIX or Windows separators). We deliberately
- * do not resolve symlinks or check that the file exists here; that is
- * a job for the Minds API endpoint that ends up serving the file when
- * the request is approved. The goal is just to reject obvious traversal
- * patterns up front so a request like ``/etc/passwd/../shadow`` is
- * refused at creation time.
+ * The path must start with ``/``, must not contain any ``..`` segments
+ * (under either POSIX or Windows separators), and must lie within one
+ * of the WebDAV mount roots (the user's home directory or the system
+ * temp directory). We deliberately do not resolve symlinks or check
+ * that the file exists here; that is a job for the Minds API endpoint
+ * that ends up serving the file when the request is approved. The goals
+ * are to reject obvious traversal patterns (e.g. ``/etc/passwd/../shadow``)
+ * and to reject paths the WebDAV server could never serve (anything
+ * outside the two mounts), so the agent gets a clear error at request
+ * time -- or at approve time, when this also guards a user-edited path
+ * override -- rather than an approve-then-404 dead end.
  */
 function validateAbsoluteFileSharingPath(rawPath) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
@@ -347,6 +390,14 @@ function validateAbsoluteFileSharingPath(rawPath) {
   const normalized = posix.normalize(rawPath);
   if (!normalized.startsWith('/') || normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new InvalidRequestBodyError(`payload.'path' normalizes to a traversed path: ${rawPath} -> ${normalized}.`);
+  }
+  // Reject anything the Minds WebDAV server could never serve: it mounts
+  // only the home and temp roots, so a grant elsewhere is inert (404).
+  const roots = fileSharingMountRoots();
+  if (!roots.some((root) => isPathWithinFileSharingRoot(normalized, root))) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' must be within a shared root (${roots.join(', ')}); got ${rawPath}.`,
+    );
   }
 }
 
@@ -1194,7 +1245,77 @@ function mergeSchemas(existingSchemas, effectSchemas) {
   return base;
 }
 
-function handleApproveRequest(response, rawRequestId) {
+/**
+ * Parse the optional JSON body of a ``POST /permission-requests/approve/<id>``
+ * call. The desktop client sends a body only when the user edited the
+ * shared path in the approval dialog before approving; the body then
+ * carries a single ``path`` field with the (possibly new) absolute
+ * filesystem path the grant should target. An empty body (the common
+ * case -- the user approved the request as-is) yields ``null``.
+ *
+ * The override path is validated here with the same traversal-rejection
+ * rules that guard request *creation* (``validateAbsoluteFileSharingPath``),
+ * so a user-edited path is held to exactly the same security bar as an
+ * agent-supplied one. Any field other than ``path`` is rejected so the
+ * server stays the single source of truth on identity, target, and
+ * access mode.
+ */
+async function parseApproveOverrideBody(request) {
+  const raw = await readRequestBody(request);
+  if (raw.trim().length === 0) {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidRequestBodyError(`approve body is not valid JSON: ${message}`);
+  }
+  // A literal JSON ``null`` body means "no override", same as an empty
+  // body -- some HTTP clients serialize an absent payload that way.
+  if (parsed === null) {
+    return null;
+  }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new InvalidRequestBodyError('approve body must be a JSON object.');
+  }
+  ensureNoExtraneousFields('approve body ', ['path'], parsed);
+  if (parsed.path === undefined) {
+    return null;
+  }
+  validateAbsoluteFileSharingPath(parsed.path);
+  return { path: parsed.path };
+}
+
+/**
+ * Resolve the effect that approving ``requestRecord`` should splice in.
+ *
+ * With no override this is just the precomputed ``requestRecord.effect``.
+ * When the user edited the shared path in the dialog (``override`` is
+ * non-null), the effect is recomputed for the new path so the grant
+ * targets exactly what the user chose -- but only for ``file-sharing``
+ * requests, which are the only kind whose effect is path-derived. A
+ * path override on any other request type is a programming error in the
+ * caller and is rejected.
+ */
+function resolveEffectForApproval(requestRecord, override) {
+  if (override === null) {
+    return requestRecord.effect;
+  }
+  if (requestRecord.request_type !== REQUEST_TYPE_FILE_SHARING) {
+    throw new InvalidRequestBodyError(
+      `a 'path' override is only valid for '${REQUEST_TYPE_FILE_SHARING}' requests; `
+      + `request ${requestRecord.request_id} is '${requestRecord.request_type}'.`,
+    );
+  }
+  // The access mode is fixed at request-creation time and is not
+  // user-editable: the user may narrow/redirect *where* the grant
+  // applies, but not escalate read-only to read-write.
+  return computeFileSharingEffect(override.path, requestRecord.payload.access);
+}
+
+function handleApproveRequest(response, rawRequestId, override = null) {
   const requestId = validateRequestId(rawRequestId);
   const filePath = requestFilePath(requestId);
   const requestRecord = readRequestFile(filePath);
@@ -1202,7 +1323,7 @@ function handleApproveRequest(response, rawRequestId) {
     throw new RequestNotFoundError(requestId);
   }
   const target = requestRecord.target;
-  const effect = requestRecord.effect;
+  const effect = resolveEffectForApproval(requestRecord, override);
   const permissionsFile = readPermissionsFileOrEmpty(target);
 
   const updatedRules = effect.rules ? mergeRules(permissionsFile.rules, effect.rules) : permissionsFile.rules;
@@ -1253,7 +1374,8 @@ export default async function permissionRequestsExtension(request, response, con
       return true;
     }
     if (route.kind === 'approve' && method === 'POST') {
-      handleApproveRequest(response, route.requestIdFromPath);
+      const override = await parseApproveOverrideBody(request);
+      handleApproveRequest(response, route.requestIdFromPath, override);
       return true;
     }
     if (route.kind === 'item' && method === 'DELETE') {

@@ -20,6 +20,7 @@ import pytest
 import tomlkit
 from loguru import logger
 
+from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
@@ -134,6 +135,25 @@ class E2eSession(Session):
         # code uses), so we never target a different session by prefix.
         session_target = f"={session_name}"
 
+        env = dict(self._env)
+        # The fixture sets a global ``connect_command`` (the no-op asciinema
+        # recorder) under ``[commands.connect]`` so that the plain pipe-based
+        # ``run`` can exercise ``mngr conn`` without a real tmux attach. That
+        # override would also intercept the standalone connect here, leaving no
+        # client to poll for. Setting MNGR_CONNECT_COMMAND_ACTIVE makes
+        # ``resolve_connect_command`` fall back to the builtin attach (the same
+        # mechanism a connect_command uses when it re-invokes mngr), so this
+        # helper exercises the real ``tmux attach`` it is designed to detach.
+        env[CONNECT_COMMAND_ACTIVE_ENV_VAR] = "1"
+        # mngr refuses to attach when it detects it is already inside a tmux
+        # session (the nested-tmux guard). When the test runner itself runs under
+        # tmux, ``$TMUX``/``$TMUX_PANE`` leak in and trip that guard, so the
+        # builtin attach errors out and no client ever appears. Drop them so the
+        # connect attaches to the fixture's isolated tmux server (selected via
+        # ``TMUX_TMPDIR``); the teardown clears ``$TMUX`` for the same reason.
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+
         master_fd, slave_fd = pty.openpty()
         proc = subprocess.Popen(
             command,
@@ -141,7 +161,7 @@ class E2eSession(Session):
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
-            env=self._env,
+            env=env,
             cwd=str(self._cwd),
             start_new_session=True,
         )
@@ -681,21 +701,26 @@ def e2e(
         'connect_command = "mngr-e2e-connect"\n'
     )
 
-    # ``mngr config set`` defaults to the project scope, which writes/loads
-    # ``settings.toml`` (a different file from ``settings.local.toml`` above).
-    # Seed it with the pytest opt-in so that any test mutating project config --
-    # and any later command that loads the merged config -- passes the
-    # enforce_pytest_config_opt_in guard. ``config set`` loads this file via
-    # tomlkit and re-saves it, preserving the opt-in key alongside new values.
-    project_settings_path = project_config_dir / "settings.toml"
-    project_settings_path.write_text("is_allowed_in_pytest = true\n")
+    # NOTE: the project-scope ``settings.toml`` is deliberately NOT seeded here.
+    # ``mngr config edit``/``config set`` tutorial tests assert on the genuine
+    # first-use behavior, where the project config file does not yet exist (e.g.
+    # ``config edit`` creates it from a template, and ``config set`` writes a
+    # fresh file). Those tests therefore read the project file back with ``cat``
+    # rather than a follow-up ``mngr`` command, since a freshly-created project
+    # file does not carry the ``is_allowed_in_pytest`` opt-in. The opt-in for
+    # commands that load merged config comes from the profile ``settings.toml``
+    # and the project ``settings.local.toml`` seeded above.
 
-    # Ensure .claude/settings.local.json is gitignored. Remote providers
-    # (Modal, Docker) need to write Claude hooks to this file, and the
-    # gitignore check fails if it would appear as an unstaged change.
+    # Ensure .claude/settings.local.json and the per-test project config dir
+    # are gitignored. Remote providers (Modal, Docker) need to write Claude
+    # hooks to .claude/settings.local.json. The project config dir holds the
+    # settings.toml / settings.local.toml that the e2e fixture seeds and that
+    # tests further mutate via `mngr config set`. Without these entries, every
+    # `mngr create` invocation against this repo would have to pass
+    # --no-ensure-clean to satisfy the working-tree-clean check.
     gitignore_path = temp_git_repo / ".gitignore"
     if not gitignore_path.exists():
-        gitignore_path.write_text(".claude/settings.local.json\n")
+        gitignore_path.write_text(f".claude/settings.local.json\n/{project_config_dir.name}/\n")
         run_command("git add .gitignore && git commit -m 'Add .gitignore'", env=env, cwd=temp_git_repo, timeout=10.0)
 
     session = E2eSession.create(env=env, cwd=temp_git_repo, output_dir=test_output_dir)

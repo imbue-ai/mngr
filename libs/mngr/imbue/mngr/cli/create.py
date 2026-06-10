@@ -885,6 +885,7 @@ def _create_agent(
             agent_name=agent_opts.name,
             provider_name=address.provider_name,
             target_host_ref=target_host if isinstance(target_host, DiscoveredHost) else None,
+            host_name=address.host_name,
             mngr_ctx=mngr_ctx,
             agent_and_host_loader=setup.agent_and_host_loader,
         )
@@ -966,9 +967,13 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
+    # Pass is_for_host_creation=True (matching api_create's own resolution) so a
+    # backend with one-time per-user bootstrap (Modal's environment) does not
+    # raise ProviderEmptyError here on the very first create: this is the create
+    # path, and the environment is about to be bootstrapped, not listed.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
-        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx, is_for_host_creation=True)
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):
@@ -1198,6 +1203,7 @@ def _try_reuse_existing_agent(
     agent_name: AgentName,
     provider_name: ProviderInstanceName | None,
     target_host_ref: DiscoveredHost | None,
+    host_name: HostName | HostId | None,
     mngr_ctx: MngrContext,
     agent_and_host_loader: Callable[[], dict[DiscoveredHost, list[DiscoveredAgent]]],
 ) -> tuple[AgentInterface, OnlineHostInterface] | None:
@@ -1206,6 +1212,17 @@ def _try_reuse_existing_agent(
     Searches for an agent matching the name, scoped by provider and host if specified.
     If found, ensures the agent is started and returns it along with its host.
     If not found, returns None so the caller can proceed with creating a new agent.
+
+    ``host_name`` is the host designated by the create address (e.g. ``babatest``
+    in ``system-services@babatest.docker``). When the address names a host, reuse
+    is scoped to that host even if it does not exist yet -- a brand-new host has
+    nothing to reuse, so the lookup returns None and the caller creates a fresh
+    agent. This matters when the agent name is shared across many hosts (minds
+    names every workspace's primary agent the constant ``system-services`` and
+    relies on the host name for identity): without host scoping the lookup would
+    match every same-named agent on the provider and fail to disambiguate.
+    ``target_host_ref`` is the already-resolved host for an existing-host create;
+    it scopes by host id when present and co-occurs with ``host_name``.
     """
     agents_by_host = agent_and_host_loader()
 
@@ -1219,6 +1236,16 @@ def _try_reuse_existing_agent(
         # Skip hosts that don't match the target host filter (if specified)
         if target_host_ref is not None and host_ref.host_id != target_host_ref.host_id:
             continue
+
+        # Skip hosts that don't match the host named in the address (if specified).
+        # The address host may be a HostId (exact id) or a HostName (the host's name).
+        if host_name is not None:
+            if isinstance(host_name, HostId):
+                host_matches_address = host_ref.host_id == host_name
+            else:
+                host_matches_address = host_ref.host_name == host_name
+            if not host_matches_address:
+                continue
 
         for agent_ref in agent_refs:
             if agent_ref.agent_name == agent_name:
