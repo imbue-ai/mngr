@@ -1,0 +1,1 @@
+Refactored the `.claude/settings.local.json` gitignore preflight/provisioning check into a reusable `check_claude_path_gitignore_status` helper (with a `ClaudeGitignoreStatus` result) so other plugins can guard their own `.claude/` artifacts against dirtying a tracked worktree. No user-visible behavior change to the settings check itself.

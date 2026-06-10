@@ -62,12 +62,17 @@ class FakeHost(BaseFakeHost):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.executed_commands.append(command)
+        # shell=True so the plugin's shell-using commands (``mkdir -p``,
+        # ``test -L .claude && ...``) work. check=False and an honored ``cwd``
+        # mirror the real OnlineHostInterface: a non-zero exit is reported via
+        # ``success`` rather than raising, and commands run in the requested
+        # directory (the gitignore guard depends on both).
         completed = subprocess.run(
             command,
             shell=True,
-            check=True,
             capture_output=True,
             text=True,
+            cwd=cwd,
             timeout=timeout_seconds,
         )
         return CommandResult(

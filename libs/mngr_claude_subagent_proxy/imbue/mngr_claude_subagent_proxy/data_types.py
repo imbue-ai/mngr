@@ -20,7 +20,7 @@ class SubagentProxyMode(UpperCaseStrEnum):
     end-turn body.
 
     DENY: deny every Task call with a short permissionDecisionReason
-    that points Claude at the ``mngr-subagents`` skill. The skill
+    that points Claude at the ``mngr-proxy`` skill. The skill
     teaches an explicit two-command spawn-and-wait protocol Claude
     runs itself via the Bash tool (``mngr create`` then
     ``python -m imbue.mngr_claude_subagent_proxy.subagent_wait``) and
@@ -61,7 +61,7 @@ class SubagentProxyPluginConfig(PluginConfig):
         default=SubagentProxyMode.PROXY,
         description="Whether to proxy Task calls through a mngr subagent (PROXY) "
         "or deny them with a short skill-pointer reason that directs Claude at "
-        "the mngr-subagents skill (DENY).",
+        "the mngr-proxy skill (DENY).",
     )
 
     def merge_with(self, override: "PluginConfig") -> "SubagentProxyPluginConfig":
