@@ -56,30 +56,32 @@ def test_resolve_agent_type_returns_claude_for_registered_type() -> None:
     assert resolved.agent_config.command == CommandString("claude")
 
 
-def _resolve_custom_claude_type(**config_overrides: Any) -> ResolvedAgentType:
-    """Helper to resolve a custom type with parent_type=claude and given overrides."""
+def _resolve_custom_claude_type(
+    parent_config: ClaudeAgentConfig | None = None,
+    **config_overrides: Any,
+) -> ResolvedAgentType:
+    """Helper to resolve a custom type with parent_type=claude and given overrides.
+
+    If parent_config is provided, it is registered as the user config for the
+    parent "claude" type, so its non-default fields participate in the merge.
+    """
     custom_config = AgentTypeConfig(
         parent_type=AgentTypeName("claude"),
         **config_overrides,
     )
-    config = MngrConfig(
-        agent_types={AgentTypeName("my_claude"): custom_config},
-    )
+    agent_types: dict[AgentTypeName, AgentTypeConfig] = {AgentTypeName("my_claude"): custom_config}
+    if parent_config is not None:
+        agent_types[AgentTypeName("claude")] = parent_config
+    config = MngrConfig(agent_types=agent_types)
     return resolve_agent_type(AgentTypeName("my_claude"), config)
 
 
-def test_resolve_agent_type_with_custom_type_uses_parent_class() -> None:
-    """A custom type with parent_type should use the parent's agent class."""
+def test_resolve_agent_type_with_custom_type_uses_parent_class_and_merges_cli_args() -> None:
+    """A custom type with parent_type should use the parent's agent class and merge its cli_args."""
     resolved = _resolve_custom_claude_type(cli_args=("--model", "opus"))
 
     assert resolved.agent_class == ClaudeAgent
     assert isinstance(resolved.agent_config, ClaudeAgentConfig)
-
-
-def test_resolve_agent_type_with_custom_type_merges_cli_args() -> None:
-    """A custom type should merge its cli_args onto the parent config."""
-    resolved = _resolve_custom_claude_type(cli_args=("--model", "opus"))
-
     assert resolved.agent_config.cli_args == ("--model", "opus")
 
 
@@ -91,11 +93,18 @@ def test_resolve_agent_type_with_custom_type_overrides_command() -> None:
 
 
 def test_resolve_agent_type_with_custom_type_preserves_parent_specific_fields() -> None:
-    """Custom type config should retain parent-specific fields like sync_home_settings."""
-    resolved = _resolve_custom_claude_type(cli_args=("--model", "opus"))
+    """A non-default parent-specific field (sync_home_settings) should survive the merge.
+
+    sync_home_settings defaults to True, so the parent config explicitly sets it to
+    False; if the merge dropped the field it would re-default to True and this would fail.
+    """
+    resolved = _resolve_custom_claude_type(
+        parent_config=ClaudeAgentConfig(sync_home_settings=False),
+        cli_args=("--model", "opus"),
+    )
 
     assert isinstance(resolved.agent_config, ClaudeAgentConfig)
-    assert resolved.agent_config.sync_home_settings is True
+    assert resolved.agent_config.sync_home_settings is False
 
 
 def test_resolve_agent_type_with_override_for_registered_type() -> None:
