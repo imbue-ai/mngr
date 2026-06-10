@@ -2000,6 +2000,7 @@ dependencies = [
     { name = "click" },
     { name = "click-option-group" },
     { name = "imbue-mngr" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -2007,6 +2008,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.0" },
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "tenacity", specifier = ">=8.0" },
 ]
 
 [[package]]
