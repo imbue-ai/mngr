@@ -279,7 +279,7 @@ html {
   box-shadow:
     inset 0 0 0 2px rgba(0, 0, 0, 0.25),
     0 0 0 2px #fff,
-    0 0 0 3px rgba(37, 99, 235, 0.4); /* blue-500/40 */
+    0 0 0 4px #60a5fa; /* blue-400: a 2px ring, lighter than the blue-600 selected ring */
 }
 /*
  * When the active color is a custom hex (no palette swatch matches),
