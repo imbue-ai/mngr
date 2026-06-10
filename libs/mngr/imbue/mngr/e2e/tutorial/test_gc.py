@@ -51,12 +51,39 @@ def test_gc_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
+@pytest.mark.rsync
+@pytest.mark.timeout(240)
 def test_gc_dry_run(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
         # if you want to see what would be cleaned before actually running garbage collection
         mngr gc --dry-run
     """)
-    expect(e2e.run("mngr gc --dry-run", comment="dry-run before actually running gc")).to_succeed()
+    # Like the other gc tests in this file, `mngr gc --dry-run` only reaches a
+    # provider once that provider's environment exists: the Modal backend
+    # disables itself (raising ProviderEmptyError) until its per-user
+    # environment has been bootstrapped, so a dry run against a fresh
+    # environment never touches Modal at all. Create a Modal agent first so the
+    # environment is bootstrapped (via `modal environment create`, which also
+    # satisfies @pytest.mark.modal) and the dry run genuinely exercises the
+    # Modal provider's discovery path.
+    expect(
+        e2e.run(
+            "mngr create dry-run-task --provider modal --type command --no-connect --no-ensure-clean -- sleep 100732",
+            comment="create a Modal agent so gc has a real provider environment to inspect",
+            timeout=_REMOTE_TIMEOUT,
+        )
+    ).to_succeed()
+
+    result = e2e.run("mngr gc --dry-run", comment="dry-run before actually running gc")
+    expect(result).to_succeed()
+    # A dry run must announce itself as a dry run, not a real cleanup.
+    expect(result.stdout).to_contain("Garbage Collection (Dry Run)")
+
+    # The whole point of --dry-run is that it changes nothing: the active agent
+    # and its Modal host must still be present after the dry run.
+    list_after = e2e.run("mngr list", comment="verify the dry run destroyed nothing")
+    expect(list_after).to_succeed()
+    expect(list_after.stdout).to_contain("dry-run-task")
 
 
 @pytest.mark.release

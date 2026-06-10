@@ -1,0 +1,1 @@
+Fixed the e2e test fixture in `imbue/mngr/e2e/conftest.py` that wrote an invalid `settings.local.toml`: the `[commands.create]` table contained a duplicate `type = "claude"` key (introduced by a botched merge), which made every `mngr` invocation fail with "Cannot overwrite a value". This unblocks the e2e tutorial config tests (e.g. `test_config_path`).

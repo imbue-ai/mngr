@@ -1,0 +1,1 @@
+Fixed the e2e test fixture's generated `settings.local.toml`, which defined the `[commands.create]` `type` key twice. TOML forbids redefining a key in the same table, so every e2e tutorial test failed at startup with "Cannot overwrite a value" before any command ran. Removed the duplicate key.
