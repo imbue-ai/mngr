@@ -578,8 +578,32 @@ jobs:
             echo "=== tmux capture-pane svc-system_interface ==="
             "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
             echo
-            echo "=== tmux capture-pane svc-bootstrap ==="
-            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-bootstrap -p 2>&1 | tail -40
+            echo "=== tmux list-windows on minds-system-services ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services 2>&1 | head -40
+            echo
+            echo "=== tmux capture-pane on each service window ==="
+            for win in $("$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+              echo "--- $win ---"
+              "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t "minds-system-services:$win" -p 2>&1 | tail -25
+              echo
+            done
+            echo "=== services.toml ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" cat /mngr/code/services.toml 2>&1 | head -60
+            echo
+            echo "=== bootstrap log ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" find /var/log /tmp /mngr -name "bootstrap*" -type f 2>/dev/null | head -5
+            echo
+            echo "=== TEST: paramiko import inside agent container (replicate mngr_plugin_add SIGILL) ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+              if [ -n "$MNGR_PY" ]; then
+                echo "mngr python: $MNGR_PY"
+                "$MNGR_PY" -c "import paramiko; print(\"paramiko OK\")" 2>&1 || echo "rc=$?"
+                "$MNGR_PY" -c "import pyinfra; print(\"pyinfra OK\")" 2>&1 || echo "rc=$?"
+              else
+                echo "(mngr not installed in container)"
+              fi
+            ' 2>&1 | tail -10
             echo
             echo "=== /var/log/cloud-init-output.log tail (VM) ==="
             "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
