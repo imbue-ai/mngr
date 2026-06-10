@@ -12,15 +12,18 @@ and the grantable ``permissions`` (each with its own optional
 description). A single service may expose more than one scope (e.g.
 ``github`` -> ``github-rest-api``, ``github-git``).
 
-This module is the single chokepoint for that file and serves two layers:
+This module is the single chokepoint for that file. All access goes
+through :class:`ServicesCatalog`, which serves two layers:
 
 * The credential-sync path (``remote_gateway``) uses
-  :func:`services_for_permissions` / :func:`all_service_names` to map the
-  scopes a host has been granted back to the canonical service names
-  whose credentials should be shipped to that host.
-* The desktop permission dialog uses :class:`ServicesCatalog` /
-  :class:`ServicePermissionInfo` to render a granted scope with its
-  display name and the checkbox list of grantable permissions.
+  :meth:`ServicesCatalog.services_for_permissions` /
+  :meth:`ServicesCatalog.all_service_names` to map the scopes a host has
+  been granted back to the canonical service names whose credentials
+  should be shipped to that host.
+* The desktop permission dialog uses :meth:`ServicesCatalog.get` /
+  :meth:`ServicesCatalog.get_by_scope` / :meth:`ServicesCatalog.as_mapping`
+  (returning :class:`ServicePermissionInfo`) to render a granted scope
+  with its display name and the checkbox list of grantable permissions.
 
 The dialog used to fetch this from the running gateway's
 ``GET /permissions/available`` endpoint, but that endpoint was a pure
@@ -204,49 +207,19 @@ def _load_bundled_catalog() -> Mapping[str, tuple[ServicePermissionInfo, ...]]:
     return catalog
 
 
-@cache
-def all_service_names() -> frozenset[str]:
-    """Return every canonical service name present in the bundled catalog."""
-    return frozenset(_load_bundled_catalog().keys())
-
-
-@cache
-def _scope_to_service_index() -> Mapping[str, str]:
-    """Return the inverse ``scope schema name -> canonical service name`` index."""
-    return {info.scope: name for name, infos in _load_bundled_catalog().items() for info in infos}
-
-
-def services_for_permissions(config: LatchkeyPermissionsConfig) -> frozenset[str]:
-    """Resolve the canonical service names a permissions config grants access to.
-
-    Each rule in ``config.rules`` is a single-key ``{scope: [permission,
-    ...]}`` object; the key is a Detent scope schema name. This maps each
-    such scope back to its canonical service name via the bundled
-    catalog. Scopes that are not third-party services -- minds' own
-    internal scopes (``minds-api-proxy-unauthorized``, the gateway-self
-    schemas, ...) -- are simply absent from the catalog and dropped, so
-    they contribute no service. The Detent wildcard scope (``any``)
-    grants every service and therefore resolves to the full catalog.
-
-    Returns an empty set for a deny-all config (no rules), which is the
-    safe default: a host with no grants has no credentials shipped to it.
-    """
-    scope_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
-    if _WILDCARD_SCOPE in scope_keys:
-        return all_service_names()
-    index = _scope_to_service_index()
-    return frozenset(index[scope] for scope in scope_keys if scope in index)
-
-
 class ServicesCatalog(MutableModel):
-    """In-memory snapshot of the service catalog for permission-dialog rendering.
+    """In-memory snapshot of the service catalog, the single access point for the data.
+
+    Both consumers go through this class: the desktop permission dialog
+    (:meth:`get` / :meth:`get_by_scope` / :meth:`as_mapping`) and the
+    credential-sync path (:meth:`services_for_permissions` /
+    :meth:`all_service_names`).
 
     Production constructs ``ServicesCatalog()`` and the bundled
     ``services.json`` is read lazily on first access (and memoized across
     instances via the module-level cache). Tests pass an explicit
-    ``catalog_override`` -- typically built with
-    :func:`service_infos_from_catalog_payload` -- to avoid depending on
-    the shipped file.
+    ``catalog_override`` -- typically via :meth:`from_catalog_payload` --
+    to avoid depending on the shipped file.
 
     Unlike the previous gateway-backed implementation, there is no fetch
     that can fail at runtime: the catalog is local package data, so a
@@ -300,6 +273,34 @@ class ServicesCatalog(MutableModel):
         self._ensure_loaded()
         assert self._by_service_name is not None
         return self._by_service_name
+
+    def all_service_names(self) -> frozenset[str]:
+        """Return every canonical service name present in the catalog."""
+        self._ensure_loaded()
+        assert self._by_service_name is not None
+        return frozenset(self._by_service_name.keys())
+
+    def services_for_permissions(self, config: LatchkeyPermissionsConfig) -> frozenset[str]:
+        """Resolve the canonical service names a permissions config grants access to.
+
+        Each rule in ``config.rules`` is a single-key ``{scope: [permission,
+        ...]}`` object; the key is a Detent scope schema name. This maps each
+        such scope back to its canonical service name via the catalog. Scopes
+        that are not third-party services -- minds' own internal scopes
+        (``minds-api-proxy-unauthorized``, the gateway-self schemas, ...) --
+        are simply absent from the catalog and dropped, so they contribute no
+        service. The Detent wildcard scope (``any``) grants every service and
+        therefore resolves to the full catalog.
+
+        Returns an empty set for a deny-all config (no rules), which is the
+        safe default: a host with no grants has no credentials shipped to it.
+        """
+        self._ensure_loaded()
+        assert self._by_scope is not None
+        scope_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
+        if _WILDCARD_SCOPE in scope_keys:
+            return self.all_service_names()
+        return frozenset(self._by_scope[scope].name for scope in scope_keys if scope in self._by_scope)
 
     @classmethod
     def from_catalog_payload(cls, payload: Mapping[str, object]) -> "ServicesCatalog":

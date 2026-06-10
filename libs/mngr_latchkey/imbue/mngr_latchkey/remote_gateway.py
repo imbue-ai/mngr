@@ -24,7 +24,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
-from imbue.mngr_latchkey.services_catalog import services_for_permissions
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import load_permissions
@@ -222,7 +222,7 @@ def _services_allowed_for_host(latchkey_directory: Path, host_id: HostId) -> fro
         return frozenset()
     try:
         config = load_permissions(permissions_path)
-        return services_for_permissions(config)
+        return ServicesCatalog().services_for_permissions(config)
     except (LatchkeyStoreError, ServiceCatalogError) as e:
         raise RemoteGatewayError(f"Failed to resolve allowed services for host {host_id}: {e}") from e
 
@@ -285,8 +285,7 @@ def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: Host
     actually-stored services means a VPS compromise cannot leak
     credentials the agent was never permitted to use.
 
-    When nothing is left to ship (deny-all host, or every granted service
-    lacks stored credentials), the remote store is removed instead, since
+    When nothing is left to ship, the remote store is removed instead, since
     ``re-encrypt`` requires at least one service.
 
     Raises :class:`RemoteGatewayError` if resolving the services, the

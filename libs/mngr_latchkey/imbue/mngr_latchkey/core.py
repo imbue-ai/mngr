@@ -79,10 +79,9 @@ _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 # The auth-browser flow waits on a real human and is intentionally untimed.
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
 _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
-# Re-encrypting the credential store decrypts every entry and writes a
-# filtered copy; a few seconds covers even a large store, but we keep the
-# same generous ceiling the other introspection commands use.
-_REENCRYPT_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Empirically, reencryption takes around 0.1s.
+_REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
 # Node-runtime startup on cold filesystems.
