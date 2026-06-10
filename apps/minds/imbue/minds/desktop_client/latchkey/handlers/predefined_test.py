@@ -1,4 +1,5 @@
 import json
+import re
 import shlex
 from pathlib import Path
 
@@ -24,8 +25,10 @@ from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestStatus
 from imbue.minds.desktop_client.request_events import create_latchkey_predefined_permission_request_event
 from imbue.minds.desktop_client.request_events import load_response_events
+from imbue.minds.primitives import CreationId
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.agent_setup import ensure_minds_schema_in_existing_host_files
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -357,6 +360,51 @@ def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Pat
     assert result.set_credentials_example is None
     # auth browser must not have been invoked.
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
+
+
+def test_render_detail_fragment_with_unknown_credentials_does_not_promise_browser(tmp_path: Path) -> None:
+    # The dialog's progress notice must match what ``grant()`` will
+    # actually do: UNKNOWN credential status proceeds straight to the
+    # grant (no ``latchkey auth browser``), so the fragment must show
+    # the generic notice, not the sign-in one.
+    handler = _build_handler(
+        tmp_path,
+        credential_status="unknown",
+        auth_options_json=json.dumps(["set"]),
+    )
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    assert "Granting permission..." in body
+    assert "opening a browser window" not in body
+
+
+def test_render_detail_fragment_with_missing_credentials_promises_browser(tmp_path: Path) -> None:
+    # MISSING credentials with a browser auth option still run
+    # ``latchkey auth browser`` on Approve, so the notice must say so.
+    handler = _build_handler(tmp_path, credential_status="missing")
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id=str(AgentId()),
+        scope="slack-api",
+        rationale="need to read a channel",
+    )
+
+    body = handler.render_request_detail_fragment(
+        req_event=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        mngr_forward_origin="",
+    )
+
+    assert "opening a browser window" in body
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
@@ -860,3 +908,27 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     assert on_disk["schemas"] == baseline["schemas"]
     assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
     assert {"slack-api": ["slack-read-all"]} in on_disk["rules"]
+
+
+def test_minds_detent_patterns_match_real_creation_ids(tmp_path: Path) -> None:
+    """Lock the latchkey-side ``creation-<32 hex>`` patterns to CreationId's real format.
+
+    The ``minds-status`` / ``minds-logs`` detent schemas in
+    ``imbue.mngr_latchkey.agent_setup`` hard-code the creation-id shape
+    (the lib cannot import the app), so a change to
+    ``imbue.minds.primitives.CreationId`` would silently stop the
+    granted permissions from matching real status/logs requests. This
+    cross-boundary check fails instead.
+    """
+    plugin_data_dir = tmp_path / "mngr_latchkey"
+    host_dir = plugin_data_dir / "hosts" / "host-x"
+    host_dir.mkdir(parents=True)
+    (host_dir / "latchkey_permissions.json").write_text(json.dumps({"rules": [], "schemas": {}}))
+    assert ensure_minds_schema_in_existing_host_files(plugin_data_dir) == 1
+    schemas = json.loads((host_dir / "latchkey_permissions.json").read_text())["schemas"]
+
+    creation_id = CreationId()
+    status_pattern = schemas["minds-status"]["properties"]["path"]["pattern"]
+    logs_pattern = schemas["minds-logs"]["properties"]["path"]["pattern"]
+    assert re.search(status_pattern, f"/minds-api-proxy/api/create-agent/{creation_id}/status")
+    assert re.search(logs_pattern, f"/minds-api-proxy/api/create-agent/{creation_id}/logs")

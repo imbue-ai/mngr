@@ -186,7 +186,13 @@ _MANUAL_SERVICES: Final[Mapping[str, tuple[_ScopeCatalogEntry, ...]]] = {
                 "made through the latchkey gateway's minds-api-proxy extension."
             ),
             permissions=(
-                _CatalogPermission(name="minds-create", description="Spawn a new peer mind."),
+                _CatalogPermission(
+                    name="minds-create",
+                    description=(
+                        "Spawn a new peer mind from any git URL, including cloud launches "
+                        "that consume compute and AI credits on your account."
+                    ),
+                ),
                 _CatalogPermission(
                     name="minds-status", description="Check the creation status of a spawned peer mind."
                 ),

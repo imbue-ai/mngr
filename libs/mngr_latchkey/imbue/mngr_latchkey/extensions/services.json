@@ -1583,7 +1583,7 @@
       "permissions": [
         {
           "name": "minds-create",
-          "description": "Spawn a new peer mind."
+          "description": "Spawn a new peer mind from any git URL, including cloud launches that consume compute and AI credits on your account."
         },
         {
           "name": "minds-status",
