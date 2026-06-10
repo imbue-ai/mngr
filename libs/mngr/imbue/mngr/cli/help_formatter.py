@@ -147,7 +147,7 @@ def get_terminal_width() -> int:
     return terminal_size.columns
 
 
-def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None) -> str:
+def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None, indent: int = 0) -> str:
     """Render a markdown block for terminal display.
 
     When ``use_ansi`` is True, render via rich (tables, bold, code, links,
@@ -159,6 +159,10 @@ def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str
     anchor links are rewritten to absolute URLs resolved against it, so they are
     clickable terminal hyperlinks rather than dead relative targets. Plain
     (non-ANSI) output keeps the original relative links untouched.
+
+    When ``indent`` is greater than zero (and ``use_ansi`` is True), every
+    rendered line is left-padded by that many spaces, matching the man-page-style
+    indentation used for the prose sections of command help.
     """
     if not use_ansi:
         return markdown
@@ -166,7 +170,7 @@ def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str
     # it is only needed here, when rendering help for an interactive terminal.
     from imbue.mngr.cli.markdown_render import markdown_to_ansi
 
-    return markdown_to_ansi(markdown, width, link_base=link_base)
+    return markdown_to_ansi(markdown, width, link_base=link_base, indent=indent)
 
 
 @pure
@@ -311,7 +315,7 @@ def _write_git_style_help(
     # DESCRIPTION section
     output.write(f"{_format_section_title('Description')}\n")
     if use_ansi:
-        output.write(render_markdown(metadata.full_description.strip(), use_ansi=True, width=width))
+        output.write(render_markdown(metadata.full_description.strip(), use_ansi=True, width=width, indent=7))
         output.write("\n")
     else:
         for paragraph in metadata.full_description.strip().split("\n\n"):
@@ -327,7 +331,7 @@ def _write_git_style_help(
         for title, content in metadata.additional_sections:
             output.write(f"{_format_section_title(title)}\n")
             if use_ansi:
-                output.write(render_markdown(content.strip(), use_ansi=True, width=width))
+                output.write(render_markdown(content.strip(), use_ansi=True, width=width, indent=7))
                 output.write("\n")
             else:
                 for line in content.strip().split("\n"):
