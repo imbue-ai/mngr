@@ -1,10 +1,32 @@
 """Shared pytest fixtures for the mngr_antigravity package tests."""
 
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
+
+
+@pytest.fixture
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Mirrors mngr's own ``log_warnings`` fixture (in ``libs/mngr``'s conftest),
+    which is not on this package's fixture path. Tolerates handler removal during
+    the test (e.g. ``setup_logging()`` calls ``logger.remove()``), so teardown
+    never fails if the handler is already gone.
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 @pytest.fixture
