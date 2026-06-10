@@ -10,6 +10,11 @@ from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_claude.plugin import DialogDetectedError
 from imbue.mngr_claude.plugin_test import make_claude_agent
 
+# The fake tmux sessions these tests drive just need to stay alive long enough
+# for the assertions to run; the exact duration is irrelevant. A large value
+# keeps the session from exiting mid-test (the ``finally`` blocks kill it).
+_KEEP_ALIVE_SLEEP_SECONDS = 847601
+
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
@@ -22,7 +27,7 @@ def test_send_message_raises_dialog_detected_when_dialog_visible(
 
     try:
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Yes, I trust this folder\"; sleep 847601'",
+            f"tmux new-session -d -s '{session_name}' 'echo \"Yes, I trust this folder\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
             timeout_seconds=5.0,
         )
 
@@ -56,7 +61,7 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
 
     try:
         agent.host.execute_idempotent_command(
-            f"tmux new-session -d -s '{session_name}' 'echo \"Normal output here\"; sleep 847602'",
+            f"tmux new-session -d -s '{session_name}' 'echo \"Normal output here\"; sleep {_KEEP_ALIVE_SLEEP_SECONDS}'",
             timeout_seconds=5.0,
         )
 
@@ -66,9 +71,21 @@ def test_send_message_does_not_raise_dialog_detected_when_no_dialog(
             error_message="Content not visible in pane",
         )
 
-        # Should NOT raise DialogDetectedError. Will raise SendMessageError
-        # because there's no real Claude Code process to handle the input.
-        with pytest.raises(SendMessageError) as exc_info:
+        # The dialog preflight must clear (no dialog is present), after which
+        # send_message proceeds to the paste/submit phase. With no real Claude
+        # process, that phase deterministically times out -- either
+        # wait_for_paste_visible ("Timeout waiting for pasted content to
+        # appear") or the per-session submit hook in _send_enter_and_validate
+        # ("Timeout waiting for message submission signal"). Both raise the
+        # base SendMessageError with a "Timeout waiting for" reason, which a
+        # DialogDetectedError ("A dialog is blocking the agent's input ...")
+        # never contains. Matching that substring therefore proves the failure
+        # came from the downstream send path, not the dialog gate or some
+        # unrelated SendMessageError. We do NOT positively assert that "hello"
+        # reached the pane: the keep-alive session runs a bare `sleep` with no
+        # input handler, so whether the typed text echoes back is not reliable
+        # enough to assert on here.
+        with pytest.raises(SendMessageError, match="Timeout waiting for") as exc_info:
             agent.send_message("hello")
         assert not isinstance(exc_info.value, DialogDetectedError)
     finally:
