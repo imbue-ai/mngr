@@ -52,8 +52,8 @@ truth (see ``build_antigravity_statusline_settings``). It maintains an
 while the agent works and WAITING when idle (agy maintains no such marker on its
 own), records the root conversation for resume, and fires the tmux
 message-submission signal. agy's top-level ``agent_state`` already aggregates
-subagent activity (stays ``working`` while a subagent runs), so a single state
-check suffices -- replacing the old ``PreInvocation``/``Stop`` marker-hook pair.
+subagent activity (stays ``working`` while a subagent runs), so this single
+state check captures the whole-turn busy/idle invariant on its own.
 
 Hooks: a single ``PreInvocation`` handler captures every conversation id (incl.
 subagents', which ``statusLine`` does not surface) for transcript scoping (see
@@ -555,7 +555,20 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # -- so it wins. This is the one setting mngr does not let settings_overrides
         # override: RUNNING/WAITING detection and message-submission confirmation
         # both depend on statusline.sh running, so a user statusLine would break
-        # them (see build_antigravity_statusline_settings).
+        # them (see build_antigravity_statusline_settings). agy allows only one
+        # statusLine command, so we can't keep both; warn (rather than silently
+        # discard) if the user supplied one, in either the synced base settings or
+        # settings_overrides -- both are already merged into per_agent_settings here.
+        user_statusline = per_agent_settings.get("statusLine")
+        if user_statusline is not None:
+            logger.warning(
+                "Antigravity agent {} has a user-provided statusLine ({!r}) that mngr is overriding with "
+                "its lifecycle statusLine. agy allows only one statusLine command, and mngr's drives "
+                "RUNNING/WAITING detection and message-submission confirmation, so it must win. Remove the "
+                "statusLine from your settings/settings_overrides to silence this warning.",
+                self.name,
+                user_statusline,
+            )
         per_agent_settings.update(build_antigravity_statusline_settings())
         settings_path = get_antigravity_settings_path(agy_home)
         with log_span("Writing per-agent antigravity settings to {}", settings_path):

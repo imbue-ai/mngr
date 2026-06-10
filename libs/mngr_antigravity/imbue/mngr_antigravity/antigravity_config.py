@@ -357,8 +357,8 @@ def build_antigravity_hooks_config() -> dict[str, Any]:
     aggregates subagent activity (it stays ``working`` continuously while a
     subagent runs and returns to ``idle`` only when root + subagents are all
     done; verified live against agy 1.0.6/1.0.7), so a single ``agent_state``
-    check replaces the old ``PreInvocation``/``Stop`` marker-hook pair that
-    reconstructed the same invariant by hand.
+    check captures the whole-turn busy/idle invariant without per-conversation
+    bookkeeping.
 
     Auto-approval of tool permissions is NOT a hook either: agy's documented
     ``PreToolUse`` ``{"decision": "allow"}`` output does not actually gate the

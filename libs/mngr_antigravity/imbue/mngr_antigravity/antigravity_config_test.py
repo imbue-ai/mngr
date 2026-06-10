@@ -239,10 +239,10 @@ def test_hooks_config_emits_only_conversation_id_capture_preinvocation() -> None
     """The lone hook is a single PreInvocation handler running capture_conversation_id.sh.
 
     Lifecycle (RUNNING/WAITING) and message submission are driven by the
-    statusLine command, NOT hooks -- so the old PreInvocation marker handler and
-    the entire Stop block are gone. The capture hook remains because the
-    statusLine payload only ever reports the root conversation, so subagent ids
-    (needed for transcript scoping) are surfaced only here.
+    statusLine command, NOT hooks -- so the hooks config carries no marker
+    handler and no Stop block. The capture hook exists because the statusLine
+    payload only ever reports the root conversation, so subagent ids (needed for
+    transcript scoping) are surfaced only here.
     """
     config = build_antigravity_hooks_config()
 
@@ -259,7 +259,7 @@ def test_hooks_config_emits_only_conversation_id_capture_preinvocation() -> None
 
 
 def test_hooks_config_emits_no_stop_handler() -> None:
-    """No Stop handler: clearing the active marker is the statusLine's job now."""
+    """No Stop handler: clearing the active marker is the statusLine command's job."""
     config = build_antigravity_hooks_config()
     assert "Stop" not in config["mngr"]
 

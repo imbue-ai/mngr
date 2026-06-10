@@ -10,8 +10,8 @@
 # stays `working` continuously while a subagent runs and returns to `idle` only
 # once root + subagents are all done (75 consecutive `working` samples spanning
 # a ~29s subagent run, zero mid-turn `idle` blips). That makes a single
-# `agent_state` check a correct replacement for the old PreInvocation/Stop
-# marker-hook pair.
+# `agent_state` check a correct, self-contained signal for whole-turn busy/idle
+# state -- no per-conversation bookkeeping needed.
 #
 # On each invocation this script:
 #   1. Parses `agent_state` and `conversation_id` (POSIX grep/sed only -- no jq;
@@ -68,8 +68,8 @@ model=$(
 )
 
 # Record the root conversation whenever the payload carries one. agy always
-# reports the root id here (never a subagent's), so this is simpler and more
-# correct than the old "marker-absent = turn boundary" heuristic.
+# reports the root id here (never a subagent's), so recording it unconditionally
+# keeps `root_conversation` pointed at the true root for resume.
 if [ -n "$conv_id" ]; then
     printf '%s' "$conv_id" > "$root_file"
 fi

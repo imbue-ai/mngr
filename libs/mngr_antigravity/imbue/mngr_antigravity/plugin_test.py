@@ -981,9 +981,10 @@ def test_provision_hooks_json_emits_only_conversation_id_capture(
 ) -> None:
     """The lone hook is the PreInvocation conversation-id capture; no Stop block.
 
-    Lifecycle (RUNNING/WAITING) is driven by the statusLine command now, so the
-    old PreInvocation marker handler and the Stop block are gone. The capture
-    hook stays because the statusLine payload only reports the root conversation.
+    Lifecycle (RUNNING/WAITING) is driven by the statusLine command, so the
+    provisioned hooks config carries no marker handler and no Stop block. The
+    capture hook is present because the statusLine payload only reports the root
+    conversation.
     """
     agent = antigravity_agent_auto_dismiss
     _provision(agent)
@@ -1012,13 +1013,16 @@ def test_provision_settings_json_has_mngr_owned_statusline(
     }
 
 
-def test_provision_statusline_wins_over_settings_overrides(
-    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path
+def test_provision_statusline_wins_over_settings_overrides_and_warns(
+    local_provider: LocalProviderInstance, tmp_path: Path, isolated_home: Path, log_warnings: list[str]
 ) -> None:
-    """A user statusLine in settings_overrides must NOT win -- mngr's is applied last.
+    """A user statusLine in settings_overrides must NOT win -- mngr's is applied last,
+    and mngr warns that it is overriding the user's.
 
     Lifecycle correctness depends on statusline.sh running, so this is the one
-    setting mngr does not let settings_overrides override.
+    setting mngr does not let settings_overrides override. agy allows only one
+    statusLine command, so the user's is discarded; mngr warns rather than doing
+    so silently.
     """
     agent = _make_antigravity_agent(
         local_provider,
@@ -1031,6 +1035,17 @@ def test_provision_statusline_wins_over_settings_overrides(
     _provision(agent)
     settings = _read_per_agent_settings(agent)
     assert settings["statusLine"]["command"] == f'bash "$MNGR_AGENT_STATE_DIR/commands/{STATUSLINE_SCRIPT_NAME}"'
+    # The override is surfaced, not silently dropped: the warning names statusLine
+    # and quotes the discarded user command.
+    assert any("statusLine" in msg and "echo user-owned" in msg for msg in log_warnings)
+
+
+def test_provision_does_not_warn_when_no_user_statusline(
+    antigravity_agent_auto_dismiss: AntigravityAgent, isolated_home: Path, log_warnings: list[str]
+) -> None:
+    """With no user statusLine, mngr injects its own silently (no override warning)."""
+    _provision(antigravity_agent_auto_dismiss)
+    assert not any("statusLine" in msg for msg in log_warnings)
 
 
 def test_provision_installs_statusline_script(
