@@ -123,6 +123,7 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
+from imbue.minds.desktop_client.templates import pick_workspace_foreground
 from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
@@ -2095,10 +2096,19 @@ def _build_workspace_list(
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries a deterministic "accent" CSS color derived from the
-    agent id so the chrome and sidebar can render a per-workspace accent
-    without running a digest in JS. Entries whose provider's latest discovery
-    poll errored carry ``is_stale="true"`` so the UI can flag them as
+    Each entry carries an ``accent`` (CSS color) and ``accent_fg`` (RGB
+    triple for the contrasting titlebar foreground) for the chrome and
+    sidebar to render. ``accent`` is the workspace's stored ``color``
+    label if present (``#rrggbb`` from the user-picked palette or a
+    custom hex); otherwise it falls back to the legacy SHA-derived OKLCH
+    string for backward compatibility while the migration backfill is
+    rolling out. ``accent_fg`` is the WCAG-contrasting foreground for
+    the stored hex, or ``"0 0 0"`` for the legacy SHA-derived case
+    (those are all light L=0.85 backgrounds, so black foreground is
+    correct).
+
+    Entries whose provider's latest discovery poll errored carry
+    ``is_stale="true"`` so the UI can flag them as
     retained-but-unverified (they remain fully interactive).
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
@@ -2109,7 +2119,19 @@ def _build_workspace_list(
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
+        stored_color = backend_resolver.get_workspace_color(aid)
+        if stored_color is not None:
+            accent = stored_color
+            accent_fg = pick_workspace_foreground(stored_color)
+        else:
+            accent = workspace_accent(str(aid))
+            accent_fg = "0 0 0"
+        entry: dict[str, str] = {
+            "id": str(aid),
+            "name": ws_name,
+            "accent": accent,
+            "accent_fg": accent_fg,
+        }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
         # unverified rather than confirmed healthy.
@@ -2912,13 +2934,26 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
         accent_key = primary_agent_id_by_ws_name.get(ws_name, ws_name)
+        # Prefer the stored color on the primary agent, falling back to
+        # the SHA-derived accent during the migration rollout (matches
+        # the same precedence used in _build_workspace_list). The
+        # primary id is always a freshly-stringified AgentId from
+        # list_known_workspace_ids, so reparsing through AgentId is
+        # safe and never raises.
+        primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
+        stored_accent = (
+            backend_resolver.get_workspace_color(AgentId(primary_agent_id_str))
+            if primary_agent_id_str is not None
+            else None
+        )
+        accent = stored_accent if stored_accent is not None else workspace_accent(accent_key)
         cards.append(
             {
                 "id": str(req.event_id),
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "accent": workspace_accent(accent_key),
+                "accent": accent,
             }
         )
     return cards

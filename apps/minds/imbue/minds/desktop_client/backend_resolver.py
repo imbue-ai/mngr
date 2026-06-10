@@ -140,6 +140,18 @@ class BackendResolverInterface(MutableModel, ABC):
         """
         return None
 
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the workspace color hex for an agent, or None if unset.
+
+        Returns a normalized ``#rrggbb`` lowercase string, ``None`` if the
+        agent has no ``color`` label (callers treat None as "needs backfill"),
+        or the default color hex if the stored label is malformed.
+
+        Default implementation returns None. Subclasses with access to
+        agent labels should override this.
+        """
+        return None
+
     def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
         """Return the ``system-services`` agent id that shares the workspace agent's host.
 
@@ -475,6 +487,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # _lock by update_agents; read by get_system_services_agent_id as the
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
+    # Set of agent ids for which we've already logged a malformed-color-label
+    # warning, so the log line fires once per agent rather than on every SSE
+    # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
+    # mutating it.
+    _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
 
     def model_post_init(self, __context: object) -> None:
         """Load the persisted last-good agent topology from disk, if configured."""
@@ -692,6 +709,43 @@ class MngrCliBackendResolver(BackendResolverInterface):
             for agent in self._agents_result.discovered_agents:
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
+            return None
+
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the normalized ``#rrggbb`` color label for an agent.
+
+        Returns ``None`` when the agent has no ``color`` label (callers
+        treat that as "needs backfill"). Defensively parses the stored
+        value: if it is non-empty but not a recognized hex literal, logs
+        once at WARNING and returns the default workspace color so the
+        UI never crashes on a bad label. Mngr itself does not validate
+        label values, so a hand-edited or future-version label might
+        carry junk.
+        """
+        # Local imports to avoid a circular import with templates.py at
+        # module load (templates imports agent_creator, which transitively
+        # imports backend_resolver).
+        from imbue.minds.desktop_client.templates import DEFAULT_WORKSPACE_COLOR
+        from imbue.minds.desktop_client.templates import normalize_workspace_color
+
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    raw = agent.labels.get("color")
+                    if raw is None:
+                        return None
+                    normalized = normalize_workspace_color(raw)
+                    if normalized is None:
+                        if str(agent_id) not in self._logged_malformed_color_agents:
+                            logger.warning(
+                                "Ignoring malformed color label %r for agent %s; "
+                                "rendering as default. Repick in workspace settings to fix.",
+                                raw,
+                                agent_id,
+                            )
+                            self._logged_malformed_color_agents.add(str(agent_id))
+                        return DEFAULT_WORKSPACE_COLOR
+                    return normalized
             return None
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:

@@ -407,3 +407,61 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
     assert "is_stale" not in workspaces[0]
+
+
+# -- _build_workspace_list color + accent_fg emission --
+#
+# These assert the SSE workspaces payload carries the stored color and
+# the WCAG-derived foreground triple. Pre-migration workspaces (no
+# ``color`` label) still fall back to the SHA-derived OKLCH accent so
+# the rollout doesn't visually break existing workspaces.
+
+
+def _make_workspace_agent_with_color(color_hex: str) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=HostId("host-" + "0" * 31 + "2"),
+        agent_id=AgentId("agent-" + "0" * 31 + "2"),
+        agent_name=AgentName("ws-agent-color"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={
+            "labels": {"workspace": "colored-ws", "is_primary": "true", "color": color_hex},
+        },
+    )
+
+
+def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent_with_color("#0b292b")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert workspaces[0]["accent"] == "#0b292b"
+    # Confusion is dark -> white foreground.
+    assert workspaces[0]["accent_fg"] == "255 255 255"
+
+
+def test_build_workspace_list_emits_black_foreground_for_light_palette_entries() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent_with_color("#fcefd4")  # clarity
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == "#fcefd4"
+    assert workspaces[0]["accent_fg"] == "0 0 0"
+
+
+def test_build_workspace_list_falls_back_to_sha_accent_when_color_label_missing() -> None:
+    """Pre-migration workspaces stay on their hash-derived OKLCH accent
+    until the user picks a color (or the migration backfill writes
+    ``confusion``). Falling back keeps the rollout invisible to users
+    who haven't engaged with the picker."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    # SHA-derived accent uses the legacy oklch() form.
+    assert workspaces[0]["accent"].startswith("oklch(85% 0.08 ")
+    # Legacy SHA accents are all L=0.85 (light) so black foreground.
+    assert workspaces[0]["accent_fg"] == "0 0 0"
