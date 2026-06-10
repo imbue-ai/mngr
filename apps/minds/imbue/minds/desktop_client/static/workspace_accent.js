@@ -17,9 +17,11 @@
   // lockstep. The 11 named entries come from the Figma source
   // (Minds Early IA Explorations, node 356:4113); ``white`` is added
   // as the 12th so users have a neutral light option distinct from
-  // the warm-cream Figma entries.
+  // the warm-cream Figma entries. Order matters and mirrors
+  // WORKSPACE_PALETTE in templates_color (workspace_color.py): the 10
+  // chromatic colors first, then the two achromatic neutrals
+  // (indifference = black, white) grouped at the end.
   var WORKSPACE_PALETTE = {
-    indifference: '#000000',
     confusion: '#0b292b',
     courage: '#492222',
     envy: '#3c3d06',
@@ -30,6 +32,7 @@
     comfort: '#f5d6a0',
     inspiration: '#e9ecd9',
     clarity: '#fcefd4',
+    indifference: '#000000',
     white: '#ffffff',
   };
 

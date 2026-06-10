@@ -31,8 +31,13 @@ from imbue.imbue_common.pure import pure
 # swatches); they exist so the system can refer to the default by
 # name in code and so the same name list is auditable in both Python
 # and JS.
+#
+# Order matters: the picker renders swatches in this order and
+# ``pick_unused_create_color`` walks it to find the first free color.
+# The 10 chromatic entries come first so new workspaces get a real
+# color before falling back to the two achromatic neutrals
+# (``indifference`` = black, ``white``), which are grouped at the end.
 WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
-    "indifference": "#000000",
     "confusion": "#0b292b",
     "courage": "#492222",
     "envy": "#3c3d06",
@@ -43,6 +48,7 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "comfort": "#f5d6a0",
     "inspiration": "#e9ecd9",
     "clarity": "#fcefd4",
+    "indifference": "#000000",
     "white": "#ffffff",
 }
 

@@ -820,8 +820,10 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
 # the create-form picker and the settings picker render from the JS side
 # while the SSE workspace payload emits from the Python side.
 
+# Order is significant: the 10 chromatic colors come first, then the
+# two achromatic neutrals (indifference = black, white) grouped at the
+# end, so the picker + the create-form preselect prioritize real colors.
 _EXPECTED_PALETTE: Final[dict[str, str]] = {
-    "indifference": "#000000",
     "confusion": "#0b292b",
     "courage": "#492222",
     "envy": "#3c3d06",
@@ -832,6 +834,7 @@ _EXPECTED_PALETTE: Final[dict[str, str]] = {
     "comfort": "#f5d6a0",
     "inspiration": "#e9ecd9",
     "clarity": "#fcefd4",
+    "indifference": "#000000",
     "white": "#ffffff",
 }
 
@@ -839,9 +842,19 @@ _WORKSPACE_ACCENT_JS_PATH = Path(_templates_module.__file__).resolve().parent / 
 
 
 def test_workspace_palette_matches_expected_entries() -> None:
-    # Pinning the exact entries here so a stray edit to templates.py
+    # Pinning the exact entries here so a stray edit to workspace_color.py
     # (rename / typo / dropped entry) fails loudly.
     assert dict(WORKSPACE_PALETTE) == _EXPECTED_PALETTE
+
+
+def test_workspace_palette_groups_neutrals_last() -> None:
+    # Order is semantic: chromatic colors first, the two achromatic
+    # neutrals (black + white) last, so the picker + create-form
+    # preselect prioritize real colors.
+    names = list(WORKSPACE_PALETTE.keys())
+    assert names[-2:] == ["indifference", "white"]
+    # ``confusion`` (the default) leads the chromatic block.
+    assert names[0] == "confusion"
 
 
 def test_default_workspace_color_is_confusion() -> None:
@@ -956,26 +969,34 @@ def test_pick_unused_create_color_returns_confusion_when_all_used() -> None:
 
 def test_pick_unused_create_color_returns_first_unused_in_palette_order() -> None:
     # Confusion is used (e.g. one label-less workspace renders as confusion);
-    # the first unused palette entry in order is indifference (#000000).
-    assert pick_unused_create_color({_CONFUSION}) == _INDIFFERENCE
+    # the first unused palette entry in order is courage (confusion leads
+    # the chromatic block, so the next one is courage -- not a neutral).
+    assert pick_unused_create_color({_CONFUSION}) == WORKSPACE_PALETTE["courage"]
 
 
 def test_pick_unused_create_color_skips_to_next_unused() -> None:
-    # indifference + confusion taken -> next palette entry is courage.
-    assert pick_unused_create_color({_INDIFFERENCE, _CONFUSION}) == WORKSPACE_PALETTE["courage"]
+    # confusion + courage taken -> next chromatic palette entry is envy.
+    assert pick_unused_create_color({_CONFUSION, WORKSPACE_PALETTE["courage"]}) == WORKSPACE_PALETTE["envy"]
 
 
 def test_pick_unused_create_color_ignores_custom_colors() -> None:
     # A custom (non-palette) color in use doesn't block any palette pick;
     # with a custom color the set is non-empty so the first palette entry
-    # (indifference) is returned, not confusion.
-    assert pick_unused_create_color({"#123456"}) == _INDIFFERENCE
+    # (confusion, which now leads the palette) is returned.
+    assert pick_unused_create_color({"#123456"}) == _CONFUSION
+
+
+def test_pick_unused_create_color_picks_neutrals_only_after_colors() -> None:
+    # With every chromatic color used, the first unused entry is the
+    # first neutral (indifference = black), confirming neutrals sort last.
+    chromatic = [hex_value for name, hex_value in WORKSPACE_PALETTE.items() if name not in ("indifference", "white")]
+    assert pick_unused_create_color(set(chromatic)) == _INDIFFERENCE
 
 
 def test_pick_unused_create_color_is_case_insensitive() -> None:
     # Uppercased used colors still match palette entries.
     used = {_CONFUSION.upper()}
-    assert pick_unused_create_color(used) == _INDIFFERENCE
+    assert pick_unused_create_color(used) == WORKSPACE_PALETTE["courage"]
 
 
 def test_tokens_css_defines_titlebar_utility_classes() -> None:
