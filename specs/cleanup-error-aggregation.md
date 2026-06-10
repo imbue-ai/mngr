@@ -12,7 +12,7 @@ This spec defines a uniform model: cleanup **never silently ignores an error**. 
 
 **Audience:** developers implementing or reviewing the cleanup paths.
 
-**Related specs:** [detached-destroy-flow](detached-destroy-flow/spec.md), [docker-cleanup-state-and-images](docker-cleanup-state-and-images), [discovery-provider-error-resilience](discovery-provider-error-resilience.md).
+**Related specs:** [detached-destroy-flow](detached-destroy-flow/spec.md), [docker-cleanup-state-and-images](docker-cleanup-state-and-images/spec.md), [discovery-provider-error-resilience](discovery-provider-error-resilience.md).
 
 ## Goals
 
