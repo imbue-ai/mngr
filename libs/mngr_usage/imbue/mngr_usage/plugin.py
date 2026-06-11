@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from types import ModuleType
 
 import click
 from loguru import logger
@@ -29,6 +30,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr_usage import hookspecs as usage_hookspecs
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.preservation import preserve_agent_usage
@@ -50,6 +52,12 @@ register_plugin_config("usage", UsagePluginConfig)
 def register_cli_commands() -> Sequence[click.Command] | None:
     """Register the `mngr usage` command."""
     return [usage]
+
+
+@hookimpl
+def register_hookspecs() -> ModuleType:
+    """Contribute the ``aggregate_usage_source`` reader hookspec so usage plugins can ship readers."""
+    return usage_hookspecs
 
 
 def _is_preserve_on_destroy_enabled(mngr_ctx: MngrContext) -> bool:

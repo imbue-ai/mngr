@@ -49,6 +49,7 @@ from threading import Lock
 from typing import Any
 from typing import overload
 
+import pluggy
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -68,14 +69,17 @@ from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostProvenance
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import EVENTS_DIR_NAME
 from imbue.mngr_usage.data_types import EVENTS_JSONL_FILENAME
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import USAGE_DIR_NAME
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 from imbue.mngr_usage.preservation import discover_preserved_agents
+from imbue.mngr_usage.pricing import compute_cost
 
 # Discovery convention: each agent's state dir holds usage events at
 #   <agent_state_dir>/events/<source>/usage/events.jsonl
@@ -171,6 +175,41 @@ def _cost_from_event(event: dict[str, Any]) -> CostSnapshot | None:
         return CostSnapshot.model_validate(cost_payload)
     except ValidationError as e:
         logger.debug("Skipping cost block: {}", e)
+        return None
+
+
+def _tokens_from_event(event: dict[str, Any]) -> TokenSnapshot | None:
+    """Reshape an event's ``tokens`` payload into a TokenSnapshot, or None if absent.
+
+    Mirrors ``_cost_from_event``: a non-dict ``tokens`` is "no token data", and an
+    unexpected field raises under ``extra="forbid"`` and is dropped with a debug
+    log (surfacing writer/reader drift rather than masking it).
+    """
+    tokens_payload = event.get("tokens")
+    if not isinstance(tokens_payload, dict):
+        return None
+    try:
+        return TokenSnapshot.model_validate(tokens_payload)
+    except ValidationError as e:
+        logger.debug("Skipping tokens block: {}", e)
+        return None
+
+
+def _model_from_event(event: dict[str, Any]) -> str | None:
+    """Extract the canonical ``<provider>/<model>`` string from the event, or None."""
+    model = event.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def _cost_mode_hint_from_event(event: dict[str, Any]) -> CostMode | None:
+    """Extract a writer-declared ``cost_mode`` hint, or None if absent / unrecognized."""
+    hint = event.get("cost_mode")
+    if not isinstance(hint, str):
+        return None
+    try:
+        return CostMode(hint)
+    except ValueError:
+        logger.debug("Ignoring unrecognized cost_mode hint {!r}", hint)
         return None
 
 
@@ -470,25 +509,243 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
     )
 
 
-def _build_snapshot_for_source(
+def aggregate_process_cumulative(
     source_name: str,
     agents_events: dict[str, list[dict[str, Any]]],
     *,
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:
-    """Aggregate one source's parsed events (grouped by agent) into a UsageSnapshot.
+    """Aggregate a **process-cumulative** source (Claude) into a UsageSnapshot.
 
-    Per-agent walks (``_walk_agent_events``) do all the per-event filtering
-    (session_id required) and reduction (windows, session records). The
-    outer combine here just reduces per-agent results across agents:
-    freshest-wins for windows, max for timestamp, union for session records.
-    Sessions are then filtered to the recency window (``last_event_at >=
-    now - since_seconds``) and sorted newest-first.
+    For this strategy each agent's cost is one counter that spans multiple
+    ``session_id``s (a ``/clear`` rotates the session id without resetting cost),
+    so per-agent walks (``_walk_agent_events``) partition the stream into
+    processes via cost-drop detection and compute each session's contribution as
+    a delta from the prior session's reading within the process. The outer
+    combine here reduces per-agent results across agents: freshest-wins for
+    windows, max for timestamp, union for session records. Sessions are then
+    filtered to the recency window (``last_event_at >= now - since_seconds``) and
+    sorted newest-first.
+
+    This is the default strategy a writer plugin's reader hookimpl reuses when
+    its harness shares Claude's cumulative model, and the fallback the dispatcher
+    uses for an unclaimed source.
 
     Returns None when no event contributes anything renderable (no
     parseable timestamps, no windows, no cost-bearing sessions in the
     window).
+    """
+    return _combine_agent_walks(source_name, agents_events, _walk_agent_events, since_seconds=since_seconds, now=now)
+
+
+def _resolve_session_cost_and_provenance(
+    cost: CostSnapshot | None,
+    tokens: TokenSnapshot | None,
+    model: str | None,
+    *,
+    source_name: str,
+    session_id: str,
+) -> tuple[CostSnapshot, CostProvenance]:
+    """Pick a session's dollar figure: prefer a harness-reported cost, else estimate from tokens.
+
+    1. A reported ``total_cost_usd`` wins (provenance ``REPORTED``).
+    2. Else, with ``tokens`` + a priced ``model``, derive it (``ESTIMATED``).
+    3. Else leave the cost unpriced (all-None ``total_cost_usd``); ``ESTIMATED``
+       when tokens are present (we wanted to estimate but couldn't -- WARNING),
+       ``REPORTED`` when there's simply nothing to price.
+    """
+    if cost is not None and cost.total_cost_usd is not None:
+        return cost, CostProvenance.REPORTED
+    if tokens is not None and model is not None:
+        derived = compute_cost(model, tokens)
+        if derived is not None:
+            return CostSnapshot(total_cost_usd=derived), CostProvenance.ESTIMATED
+        logger.warning(
+            "Missing pricing for model {!r} (source {}, session {}); cost left unestimated",
+            model,
+            source_name,
+            session_id,
+        )
+        return CostSnapshot(), CostProvenance.ESTIMATED
+    if tokens is not None:
+        logger.warning(
+            "Session {} (source {}) reports tokens but no model; cannot estimate cost",
+            session_id,
+            source_name,
+        )
+        return CostSnapshot(), CostProvenance.ESTIMATED
+    return (cost if cost is not None else CostSnapshot()), CostProvenance.REPORTED
+
+
+class _SessionCumulativeAccumulator(MutableModel):
+    """Scratchpad for one session under session-cumulative aggregation.
+
+    Each ``session_id`` is its own counter, so the freshest event's cost/tokens
+    is the session's whole contribution -- no cross-session delta is taken.
+    """
+
+    session_id: str
+    freshest_cost: CostSnapshot | None
+    freshest_tokens: TokenSnapshot | None
+    model: str | None
+    cost_mode_hint: CostMode | None
+    has_rate_limits: bool
+    first_event_at: int
+    last_event_at: int
+
+
+def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+    """Walk one agent's events treating each ``session_id`` as its own cumulative counter.
+
+    Unlike ``_walk_agent_events`` (process-cumulative), there is no process
+    partitioning or cross-session delta: the freshest event per session carries
+    that session's whole cumulative reading. Tracks freshest windows and max
+    timestamp the same way, and resolves each session's dollar cost + provenance
+    (reported vs token-estimated) and mode (writer hint -> rate_limits -> API_KEY)
+    at the end.
+    """
+    timed: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        timestamp = _parse_iso_timestamp(event.get("timestamp"))
+        if timestamp is None:
+            continue
+        timed.append((timestamp, event))
+    timed.sort(key=lambda pair: pair[0])
+
+    max_timestamp = -1
+    freshest_windows_timestamp = -1
+    freshest_windows: dict[str, WindowSnapshot] = {}
+    accumulator_by_session: dict[str, _SessionCumulativeAccumulator] = {}
+    session_order: list[str] = []
+
+    for timestamp, event in timed:
+        session_id = _session_id_from_event(event)
+        if session_id is None:
+            logger.warning(
+                "Dropping event without session_id from source {} (event_id={})",
+                source_name,
+                event.get("event_id"),
+            )
+            continue
+
+        if timestamp > max_timestamp:
+            max_timestamp = timestamp
+        windows = _windows_from_event(event)
+        if windows and timestamp > freshest_windows_timestamp:
+            freshest_windows_timestamp = timestamp
+            freshest_windows = windows
+
+        cost = _cost_from_event(event)
+        tokens = _tokens_from_event(event)
+        model = _model_from_event(event)
+        hint = _cost_mode_hint_from_event(event)
+
+        accumulator = accumulator_by_session.get(session_id)
+        if accumulator is None:
+            accumulator_by_session[session_id] = _SessionCumulativeAccumulator(
+                session_id=session_id,
+                freshest_cost=cost,
+                freshest_tokens=tokens,
+                model=model,
+                cost_mode_hint=hint,
+                has_rate_limits=bool(windows),
+                first_event_at=timestamp,
+                last_event_at=timestamp,
+            )
+            session_order.append(session_id)
+            continue
+
+        # Refresh the freshest reading from at-or-after events; widen the bracket
+        # and accumulate the (sticky) rate-limits-seen flag from any event.
+        if timestamp >= accumulator.last_event_at:
+            if cost is not None:
+                accumulator.freshest_cost = cost
+            if tokens is not None:
+                accumulator.freshest_tokens = tokens
+            if model is not None:
+                accumulator.model = model
+            if hint is not None:
+                accumulator.cost_mode_hint = hint
+            accumulator.last_event_at = timestamp
+        if timestamp < accumulator.first_event_at:
+            accumulator.first_event_at = timestamp
+        if windows:
+            accumulator.has_rate_limits = True
+
+    records: list[SessionCostRecord] = []
+    for session_id in session_order:
+        accumulator = accumulator_by_session[session_id]
+        if accumulator.freshest_cost is None and accumulator.freshest_tokens is None:
+            # A windows-only session (no cost and no tokens) contributes no record;
+            # its windows + max timestamp were already folded in above.
+            continue
+        resolved_cost, provenance = _resolve_session_cost_and_provenance(
+            accumulator.freshest_cost,
+            accumulator.freshest_tokens,
+            accumulator.model,
+            source_name=source_name,
+            session_id=session_id,
+        )
+        mode = (
+            accumulator.cost_mode_hint
+            if accumulator.cost_mode_hint is not None
+            else (CostMode.SUBSCRIPTION if accumulator.has_rate_limits else CostMode.API_KEY)
+        )
+        records.append(
+            SessionCostRecord(
+                session_id=session_id,
+                cost=resolved_cost,
+                cost_mode=mode,
+                tokens=accumulator.freshest_tokens,
+                model=accumulator.model,
+                cost_provenance=provenance,
+                first_event_at=accumulator.first_event_at,
+                last_event_at=accumulator.last_event_at,
+            )
+        )
+
+    return _AgentWalkResult(
+        max_timestamp=max_timestamp,
+        freshest_windows_timestamp=freshest_windows_timestamp,
+        freshest_windows=freshest_windows,
+        session_records=tuple(records),
+    )
+
+
+def aggregate_session_cumulative(
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate a **session-cumulative** source (Codex, OpenCode, pi) into a UsageSnapshot.
+
+    Each ``session_id`` is its own counter, so the freshest reading per session
+    is its whole contribution -- no process partitioning, no cross-session delta.
+    Cost is preferred from the harness and otherwise estimated from tokens. Same
+    outer combine, recency filter, and window handling as the process-cumulative
+    strategy.
+    """
+    return _combine_agent_walks(
+        source_name, agents_events, _walk_agent_events_session_cumulative, since_seconds=since_seconds, now=now
+    )
+
+
+def _combine_agent_walks(
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    walk_agent_events: Callable[[list[dict[str, Any]], str], _AgentWalkResult],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Reduce per-agent walk results into one source snapshot (shared by both strategies).
+
+    Freshest-wins for windows, max for timestamp, union for session records;
+    sessions are then filtered to the recency window and sorted newest-first.
+    Returns None when nothing renderable was found.
     """
     cutoff = now - since_seconds
     freshest_windows_timestamp = -1
@@ -497,7 +754,7 @@ def _build_snapshot_for_source(
     all_sessions: list[SessionCostRecord] = []
 
     for _agent_id, events in agents_events.items():
-        agent_result = _walk_agent_events(events, source_name)
+        agent_result = walk_agent_events(events, source_name)
         if agent_result.max_timestamp > max_timestamp:
             max_timestamp = agent_result.max_timestamp
         if agent_result.freshest_windows_timestamp > freshest_windows_timestamp:
@@ -541,7 +798,7 @@ def aggregate_events_to_snapshots(
     """
     snapshots: list[UsageSnapshot] = []
     for source_name, agents_events in events_by_source.items():
-        snapshot = _build_snapshot_for_source(source_name, agents_events, since_seconds=since_seconds, now=now)
+        snapshot = aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)
         if snapshot is not None:
             snapshots.append(snapshot)
     return snapshots
@@ -794,6 +1051,46 @@ def _merge_preserved_events(
             events_by_source.setdefault(source_name, {}).setdefault(ref.agent_id, []).extend(events)
 
 
+def _dispatch_source_aggregation(
+    pm: pluggy.PluginManager,
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate one source via the reader hook, falling back to process-cumulative.
+
+    A usage plugin's ``aggregate_usage_source`` hookimpl claims its own source
+    (the hook is firstresult); a source no plugin claims aggregates with the
+    process-cumulative default. The hookspec itself is contributed by
+    ``mngr_usage``'s ``register_hookspecs`` (processed at plugin-load time in both
+    production and the test plugin-manager fixture), so it is always present.
+    """
+    snapshot = pm.hook.aggregate_usage_source(
+        source_name=source_name, agents_events=agents_events, since_seconds=since_seconds, now=now
+    )
+    if snapshot is not None:
+        return snapshot
+    return aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)
+
+
+def _aggregate_via_dispatch(
+    pm: pluggy.PluginManager,
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> list[UsageSnapshot]:
+    """Aggregate every source through the reader-hook dispatch (plugin reader or fallback)."""
+    snapshots: list[UsageSnapshot] = []
+    for source_name, agents_events in events_by_source.items():
+        snapshot = _dispatch_source_aggregation(pm, source_name, agents_events, since_seconds=since_seconds, now=now)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
+
+
 def gather_usage_snapshots(
     mngr_ctx: MngrContext,
     *,
@@ -842,7 +1139,7 @@ def gather_usage_snapshots(
             exclude_filters=exclude_filters,
             provider_names=provider_names,
         )
-    return aggregate_events_to_snapshots(collector.events_by_source, since_seconds=since_seconds, now=now)
+    return _aggregate_via_dispatch(mngr_ctx.pm, collector.events_by_source, since_seconds=since_seconds, now=now)
 
 
 # =============================================================================

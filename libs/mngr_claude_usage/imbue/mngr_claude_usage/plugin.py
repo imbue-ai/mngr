@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
@@ -43,6 +44,12 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude_usage import resources as _resources
+from imbue.mngr_usage.api import aggregate_process_cumulative
+from imbue.mngr_usage.data_types import UsageSnapshot
+
+# Source name the Claude writer emits under ($STATE_DIR/events/claude/usage/...);
+# the reader strips "/usage", so this hookimpl claims exactly "claude".
+_CLAUDE_USAGE_SOURCE_NAME = "claude"
 
 _USAGE_WRITER_SCRIPT = "claude_usage_writer.sh"
 _STATUSLINE_SHIM_SCRIPT = "claude_statusline.sh"
@@ -216,3 +223,22 @@ def on_before_provisioning(agent: AgentInterface, host: OnlineHostInterface, mng
         get_agent_state_dir_path(host.host_dir, agent.id),
         agent.work_dir,
     )
+
+
+@hookimpl
+def aggregate_usage_source(
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate the Claude usage source; decline every other source.
+
+    Claude Code reports cost cumulatively across a process's lifetime (a
+    ``/clear`` rotates ``session_id`` without resetting cost), so this is the
+    process-cumulative strategy. Returning None for non-Claude sources lets the
+    firstresult hook fall through to another plugin (or the dispatcher fallback).
+    """
+    if source_name != _CLAUDE_USAGE_SOURCE_NAME:
+        return None
+    return aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)

@@ -43,6 +43,23 @@ class CostMode(UpperCaseStrEnum):
     API_KEY = auto()
 
 
+class CostProvenance(UpperCaseStrEnum):
+    """How a session's ``total_cost_usd`` was obtained.
+
+    - ``REPORTED``: the harness supplied the dollar figure directly (Claude
+      Code's statusline, OpenCode's per-message cost, pi's client-side cost).
+    - ``ESTIMATED``: the reader derived it from token counts via the pricing
+      table (a token-only source like Codex, or a provider where the harness
+      reports no cost).
+
+    Orthogonal to [[cost-mode]] (who pays / whether it's billable). The reader
+    prefers a ``REPORTED`` figure and only falls back to ``ESTIMATED``.
+    """
+
+    REPORTED = auto()
+    ESTIMATED = auto()
+
+
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
@@ -220,6 +237,21 @@ class SessionCostRecord(FrozenModel):
         "rate_limits payload (Claude.ai Pro/Max subscription; cost is imputed), else ``API_KEY`` "
         "(direct ANTHROPIC_API_KEY; cost is real). Determines which aggregate this session feeds "
         "into on UsageSnapshot."
+    )
+    tokens: TokenSnapshot | None = Field(
+        default=None,
+        description="This session's own token contribution, when the source reports tokens; "
+        "None for cost-only sources (e.g. Claude).",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Canonical '<provider>/<model>' the tokens were billed against; drives "
+        "token->cost derivation. None when the source reports cost directly or omits the model.",
+    )
+    cost_provenance: CostProvenance = Field(
+        default=CostProvenance.REPORTED,
+        description="Whether ``cost`` was reported by the harness (default) or estimated by the "
+        "reader from ``tokens`` via the pricing table.",
     )
     first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
