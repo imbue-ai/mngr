@@ -156,12 +156,11 @@ def generate_completion_shim(shell: str) -> str:
 # function, and the segment-drilling form that preceded the shim on this branch.)
 #
 # DEPRECATED migration shim: mngr stopped generating these self-contained rc
-# functions in 2026-06 (replaced by the managed shim). This block + the
+# functions in June 2026 (replaced by the managed shim). This block + the
 # templates below + ``strip_legacy_completion_block`` + its call in
 # ``extras._install_completion`` exist only to migrate users off the old form.
 # Once everyone has had time to upgrade, delete all of it (a leftover old block
-# is harmless dead code in a user's rc). Safe to remove entirely after
-# 2026-09-10.
+# is harmless dead code in a user's rc). Safe to remove entirely after October 2026.
 _LEGACY_COMPLETION_FUNCTION_TEMPLATES: Final[tuple[str, ...]] = (
     # zsh, released (pre-segment-drilling)
     """_mngr_complete() {
