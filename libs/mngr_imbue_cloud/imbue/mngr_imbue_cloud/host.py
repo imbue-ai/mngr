@@ -46,6 +46,8 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr_imbue_cloud.errors import ClaudeConfigPatchError
+from imbue.mngr_imbue_cloud.errors import FixedAgentIdError
 
 
 def _parse_create_time(value: Any) -> datetime:
@@ -169,7 +171,7 @@ class ImbueCloudHost(Host):
         if self.pre_baked_agent_id is None:
             return super().create_agent_state(work_dir_path, options, created_branch_name)
         if options.agent_id is not None and options.agent_id != self.pre_baked_agent_id:
-            raise ValueError(
+            raise FixedAgentIdError(
                 f"imbue_cloud agent id is fixed by the lease ({self.pre_baked_agent_id}); "
                 f"caller requested {options.agent_id}. Drop --id to let the lease decide."
             )
@@ -278,7 +280,9 @@ class ImbueCloudHost(Host):
             patch_command = _build_patch_claude_config_command(anthropic_api_key, agent.id)
             result = self.execute_idempotent_command(patch_command)
             if not result.success:
-                raise RuntimeError(f"Failed to patch claude config on imbue_cloud host {self.id}: {result.stderr}")
+                raise ClaudeConfigPatchError(
+                    f"Failed to patch claude config on imbue_cloud host {self.id}: {result.stderr}"
+                )
 
 
 def _build_patch_claude_config_command(litellm_key: str, agent_id: AgentId) -> str:
