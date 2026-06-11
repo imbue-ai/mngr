@@ -8,6 +8,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
@@ -15,7 +16,7 @@ from imbue.mngr_pi_coding_usage.plugin import _USAGE_GATE_FILENAME
 from imbue.mngr_pi_coding_usage.plugin import on_after_provisioning
 
 
-def _gate_path(host_dir: Path, agent_id: object) -> Path:
+def _gate_path(host_dir: Path, agent_id: AgentId) -> Path:
     return get_agent_state_dir_path(host_dir, agent_id) / _USAGE_GATE_FILENAME
 
 
