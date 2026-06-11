@@ -7,8 +7,8 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 # -- Sync-path resolution (scope -> canonical service name) --------------------
 
 
-def test_all_service_names_includes_known_services() -> None:
-    names = ServicesCatalog().all_service_names()
+def test_catalog_includes_known_services() -> None:
+    names = frozenset(ServicesCatalog().as_mapping())
     # A few canonical services that ship in the bundled catalog.
     assert {"slack", "github", "discord"} <= names
 
@@ -36,7 +36,8 @@ def test_services_for_permissions_empty_for_deny_all() -> None:
 
 def test_services_for_permissions_wildcard_grants_every_service() -> None:
     config = LatchkeyPermissionsConfig(rules=({"any": ["any"]},))
-    assert ServicesCatalog().services_for_permissions(config) == ServicesCatalog().all_service_names()
+    catalog = ServicesCatalog()
+    assert catalog.services_for_permissions(config) == frozenset(catalog.as_mapping())
 
 
 # -- Dialog-facing catalog (ServicesCatalog / ServicePermissionInfo) ----------

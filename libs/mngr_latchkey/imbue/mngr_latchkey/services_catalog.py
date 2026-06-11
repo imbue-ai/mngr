@@ -16,10 +16,9 @@ This module is the single chokepoint for that file. All access goes
 through :class:`ServicesCatalog`, which serves two layers:
 
 * The credential-sync path (``remote_gateway``) uses
-  :meth:`ServicesCatalog.services_for_permissions` /
-  :meth:`ServicesCatalog.all_service_names` to map the scopes a host has
-  been granted back to the canonical service names whose credentials
-  should be shipped to that host.
+  :meth:`ServicesCatalog.services_for_permissions` to map the scopes a
+  host has been granted back to the canonical service names whose
+  credentials should be shipped to that host.
 * The desktop permission dialog uses :meth:`ServicesCatalog.get` /
   :meth:`ServicesCatalog.get_by_scope` / :meth:`ServicesCatalog.as_mapping`
   (returning :class:`ServicePermissionInfo`) to render a granted scope
@@ -212,8 +211,7 @@ class ServicesCatalog(MutableModel):
 
     Both consumers go through this class: the desktop permission dialog
     (:meth:`get` / :meth:`get_by_scope` / :meth:`as_mapping`) and the
-    credential-sync path (:meth:`services_for_permissions` /
-    :meth:`all_service_names`).
+    credential-sync path (:meth:`services_for_permissions`).
 
     Production constructs ``ServicesCatalog()`` and the bundled
     ``services.json`` is read lazily on first access (and memoized across
@@ -274,12 +272,6 @@ class ServicesCatalog(MutableModel):
         assert self._by_service_name is not None
         return self._by_service_name
 
-    def all_service_names(self) -> frozenset[str]:
-        """Return every canonical service name present in the catalog."""
-        self._ensure_loaded()
-        assert self._by_service_name is not None
-        return frozenset(self._by_service_name.keys())
-
     def services_for_permissions(self, config: LatchkeyPermissionsConfig) -> frozenset[str]:
         """Resolve the canonical service names a permissions config grants access to.
 
@@ -296,10 +288,12 @@ class ServicesCatalog(MutableModel):
         safe default: a host with no grants has no credentials shipped to it.
         """
         self._ensure_loaded()
+        assert self._by_service_name is not None
         assert self._by_scope is not None
         scope_keys = [next(iter(rule)) for rule in config.rules if len(rule) == 1]
         if _WILDCARD_SCOPE in scope_keys:
-            return self.all_service_names()
+            # The Detent wildcard grants every service.
+            return frozenset(self._by_service_name.keys())
         return frozenset(self._by_scope[scope].name for scope in scope_keys if scope in self._by_scope)
 
     @classmethod
