@@ -23,7 +23,7 @@ mngr azure prepare [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--subscription-id` | text | Azure subscription ID. Defaults to the provider config / AZURE_SUBSCRIPTION_ID env var. | None |
+| `--subscription-id` | text | Azure subscription ID. Defaults to the provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
 | `--region` | text | Azure region. Defaults to the provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to create / reuse. Defaults to 'mngr'. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Required (fail-closed): with none supplied, prepare refuses to create a wide-open NSG. | None |
@@ -41,6 +41,6 @@ mngr azure cleanup [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--subscription-id` | text | Azure subscription ID. Defaults to the provider config / AZURE_SUBSCRIPTION_ID env var. | None |
+| `--subscription-id` | text | Azure subscription ID. Defaults to the provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription. | None |
 | `--region` | text | Azure region. Defaults to the provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to delete. Defaults to 'mngr'. | None |
