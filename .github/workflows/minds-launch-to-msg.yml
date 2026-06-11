@@ -43,34 +43,31 @@ concurrency:
   group: mac-runner
   cancel-in-progress: false
 
-# `actions: write` lets `update_marker` use the default GITHUB_TOKEN to
-# call `gh variable set LAUNCH_TO_MSG_LAST_PAIR_KEY`. Read-only `vars`
-# context (`vars.LAUNCH_TO_MSG_LAST_PAIR_KEY`) doesn't need a permission,
-# only the write does.
+# The marker that gates the skip-on-unchanged decision lives in an
+# actions/cache entry keyed by the (mngr, FCT) pair fingerprint.
+# `actions/cache/save` and `actions/cache/restore` use the runner's
+# injected cache token, not GITHUB_TOKEN, so no `actions: write`
+# is needed. Default `contents: read` is enough.
 permissions:
   contents: read
-  actions: write
 
 jobs:
   # Free Linux job that decides whether the rest of the pipeline runs.
-  # Fingerprints the (mngr main HEAD, FCT main HEAD) pair and compares
-  # to the `LAUNCH_TO_MSG_LAST_PAIR_KEY` variable updated by the last
-  # green run. Schedule-triggered runs skip when nothing has moved;
-  # dispatch-triggered runs always run unless `force` was set (and even
-  # then we always recompute the pair key so `update_marker` records it
-  # on success).
+  # Fingerprints the (mngr main HEAD, FCT main HEAD) pair and looks for
+  # an actions/cache entry keyed by that fingerprint. A cache hit means
+  # the last green run already verified this exact pair, so we skip the
+  # expensive jobs. The cache action only checks existence
+  # (`lookup-only: true`), so no download happens here.
   check_should_run:
     runs-on: ubuntu-latest
     outputs:
-      should_run: ${{ steps.check.outputs.should_run }}
-      pair_key:   ${{ steps.check.outputs.pair_key }}
-      mngr_sha:   ${{ steps.check.outputs.mngr_sha }}
-      fct_sha:    ${{ steps.check.outputs.fct_sha }}
+      should_run: ${{ steps.decide.outputs.should_run }}
+      pair_key:   ${{ steps.compute.outputs.pair_key }}
+      mngr_sha:   ${{ steps.compute.outputs.mngr_sha }}
+      fct_sha:    ${{ steps.compute.outputs.fct_sha }}
     steps:
-      - name: compute (mngr, FCT) pair key and compare to marker
-        id: check
-        env:
-          LAST_PAIR_KEY: ${{ vars.LAUNCH_TO_MSG_LAST_PAIR_KEY }}
+      - name: compute (mngr, FCT) pair key
+        id: compute
         run: |
           set -euo pipefail
           # Resolve the mngr ref we're going to verify. workflow_dispatch
@@ -115,23 +112,34 @@ jobs:
             echo "fct_sha=$FCT_SHA"
             echo "pair_key=$PAIR_KEY"
           } >> "$GITHUB_OUTPUT"
+      - name: look up marker cache
+        id: marker
+        uses: actions/cache/restore@v4
+        with:
+          # Path is required by the action even with lookup-only; the
+          # file never has to exist locally because we're not restoring.
+          path: /tmp/launch-to-msg-marker.txt
+          key: launch-to-msg-green-${{ steps.compute.outputs.pair_key }}
+          lookup-only: true
+      - name: decide
+        id: decide
+        run: |
+          set -euo pipefail
           {
             echo "## Pair-key fingerprint"
-            echo "- mngr: \`$MNGR_SHA\`"
-            echo "- FCT:  \`$FCT_SHA\`"
-            echo "- pair_key: \`$PAIR_KEY\`"
-            echo "- last green pair_key: \`${LAST_PAIR_KEY:-<unset>}\`"
+            echo "- mngr: \`${{ steps.compute.outputs.mngr_sha }}\`"
+            echo "- FCT:  \`${{ steps.compute.outputs.fct_sha }}\`"
+            echo "- pair_key: \`${{ steps.compute.outputs.pair_key }}\`"
+            echo "- marker cache-hit: \`${{ steps.marker.outputs.cache-hit }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          # Skip when the pair hasn't moved since the last green run AND
-          # the caller didn't ask to bypass via `force`. Applies to both
-          # schedule and dispatch -- dispatch with the same pair as the
-          # last green run is almost always wasted CI; `force=true` makes
-          # the intent explicit when re-verification is wanted (e.g.
-          # after a runner reset).
-          if [[ "$PAIR_KEY" == "$LAST_PAIR_KEY" \
-             && "${{ inputs.force }}" != "true" ]]; then
+          # Skip when the marker cache hit (pair already verified green)
+          # AND the caller didn't pass force=true. Applies to both schedule
+          # and dispatch -- dispatch on an already-green pair is wasted CI;
+          # force=true makes the bypass intent explicit.
+          if [[ '${{ steps.marker.outputs.cache-hit }}' == 'true' \
+             && '${{ inputs.force }}' != 'true' ]]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "- decision: **skip** (pair unchanged since last green; set force=true to bypass)" >> "$GITHUB_STEP_SUMMARY"
+            echo "- decision: **skip** (pair already green; set force=true to bypass)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             echo "- decision: **run**" >> "$GITHUB_STEP_SUMMARY"
@@ -972,23 +980,36 @@ jobs:
     if: needs.launch_to_msg.result == 'success' && needs.macos_launch.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: store pair key for next-run skip
+      - name: write marker file
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           set -euo pipefail
-          # `gh variable set` requires repo admin via the workflow's
-          # `permissions: actions: write` (declared at the workflow level).
-          # If GitHub's permission model differs in the future, the
-          # workflow surfaces the error here loudly rather than silently
-          # leaving the marker stale.
-          gh variable set LAUNCH_TO_MSG_LAST_PAIR_KEY \
-            --repo '${{ github.repository }}' \
-            --body "$PAIR_KEY"
+          {
+            echo "pair_key: $PAIR_KEY"
+            echo "mngr: $MNGR_SHA"
+            echo "fct:  $FCT_SHA"
+            echo "saved_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | tee /tmp/launch-to-msg-marker.txt
+      - name: save marker cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/launch-to-msg-marker.txt
+          key: launch-to-msg-green-${{ needs.check_should_run.outputs.pair_key }}
+      - name: emit summary
+        env:
+          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+        run: |
           {
             echo "## Marker updated"
-            echo "- LAUNCH_TO_MSG_LAST_PAIR_KEY -> \`$PAIR_KEY\`"
+            echo "- cache key: \`launch-to-msg-green-$PAIR_KEY\`"
             echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
             echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo ""
+            echo "**To inspect the latest green pair manually:**"
+            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches"
+            echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green- --limit 5\`"
           } >> "$GITHUB_STEP_SUMMARY"
