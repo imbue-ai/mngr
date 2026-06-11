@@ -109,23 +109,27 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It also provisions a `mngr-aws` IAM role / inline policy / instance profile that lets mngr-managed instances stop themselves (the self-stopping idle watcher). The inline policy scopes `ec2:StopInstances` to instances tagged `mngr-provider` (any value), so its blast radius is limited to mngr-managed instances. It needs:
 
 - `ec2:DescribeSecurityGroups`
 - `ec2:CreateSecurityGroup`
 - `ec2:AuthorizeSecurityGroupIngress`
+- `iam:CreateRole`
+- `iam:PutRolePolicy`
+- `iam:CreateInstanceProfile`
+- `iam:AddRoleToInstanceProfile`
 
-After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
+After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG- or IAM-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
 
 ## Teardown: `mngr aws cleanup`
 
-`mngr aws cleanup` is the inverse of `prepare`: it deletes the `mngr-aws` security group so the region returns to its pre-`prepare` state (useful when retiring a provider or testing the first-run experience).
+`mngr aws cleanup` is the inverse of `prepare`: it deletes the `mngr-aws` security group and the `mngr-aws` self-stop IAM role / inline policy / instance profile so the region (and account) returns to its pre-`prepare` state (useful when retiring a provider or testing the first-run experience).
 
 ```bash
 mngr aws cleanup --region us-east-1
 ```
 
-It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
+It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent (and AWS would refuse to delete an IAM role/profile a live instance still references). Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group and IAM resources are already gone. It needs `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`, plus `iam:RemoveRoleFromInstanceProfile`, `iam:DeleteInstanceProfile`, `iam:DeleteRolePolicy`, and `iam:DeleteRole`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
 
 ## Required IAM permissions
 
@@ -144,13 +148,17 @@ ec2:DescribeImages
 For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
 
 ```
-ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress,
+iam:CreateRole, iam:PutRolePolicy, iam:CreateInstanceProfile,
+iam:AddRoleToInstanceProfile, iam:GetInstanceProfile
 ```
 
 For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeInstances` / `DescribeSecurityGroups`):
 
 ```
-ec2:DeleteSecurityGroup
+ec2:DeleteSecurityGroup,
+iam:RemoveRoleFromInstanceProfile, iam:DeleteInstanceProfile,
+iam:DeleteRolePolicy, iam:DeleteRole
 ```
 
 Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. After launch, `ec2:CreateTags`/`ec2:DeleteTags` are used to mirror per-agent metadata onto the instance (tags keyed `mngr-agent-<id>`) so a stopped host still lists its agents and resolves by name (see the offline-discovery note below). `mngr stop --stop-host` stops the EC2 **instance** itself (`ec2:StopInstances`) after stopping the inner container, so a paused agent costs only EBS storage; `mngr start` resumes it (`ec2:StartInstances`), preserving the root EBS volume and all on-disk state. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).

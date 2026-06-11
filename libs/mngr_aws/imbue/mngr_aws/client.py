@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -35,6 +36,13 @@ from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 # this tag (not the Name tag) to find leaked instances, which means tests
 # do not have to constrain host naming: any agent name works.
 AWS_PYTEST_LAUNCHED_TAG: Final[str] = "mngr-pytest-launched"
+
+# Name shared by the IAM role, its inline policy, and the instance profile that
+# ``mngr aws prepare`` provisions so mngr-managed instances can stop themselves
+# (the self-stopping idle watcher, a later increment, calls ``ec2:StopInstances``
+# on the instance it runs on). One name for all three keeps the resources easy
+# to find, reason about, and tear down together in ``mngr aws cleanup``.
+MNGR_AWS_IAM_ROLE_NAME: Final[str] = "mngr-aws"
 
 _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "pending": VpsInstanceStatus.PENDING,
@@ -87,12 +95,24 @@ class AwsVpsClient(VpsClientInterface):
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
     _cached_ec2_client: Any = PrivateAttr(default=None)
+    _cached_iam_client: Any = PrivateAttr(default=None)
 
     def _ec2(self) -> Any:
         """Return the EC2 client, building and caching it from the session on first use."""
         if self._cached_ec2_client is None:
             self._cached_ec2_client = self.session.client("ec2", region_name=self.region)
         return self._cached_ec2_client
+
+    def _iam(self) -> Any:
+        """Return the IAM client, building and caching it from the session on first use.
+
+        IAM is a global (non-regional) AWS service: its endpoint is the same
+        regardless of the EC2 region this client targets, so -- unlike
+        ``_ec2()`` -- this deliberately passes no ``region_name``.
+        """
+        if self._cached_iam_client is None:
+            self._cached_iam_client = self.session.client("iam")
+        return self._cached_iam_client
 
     @contextmanager
     def _translate_aws_errors(self) -> Iterator[None]:
@@ -324,6 +344,175 @@ class AwsVpsClient(VpsClientInterface):
                 if code != "InvalidPermission.Duplicate":
                     http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
                     raise VpsApiError(http_status, f"{code}: {e}") from e
+
+    # =========================================================================
+    # Self-stop IAM instance profile (idempotent)
+    # =========================================================================
+
+    def ensure_self_stop_instance_profile(self) -> str:
+        """Ensure the IAM role + inline policy + instance profile for instance self-stop exist.
+
+        The self-stopping idle watcher (a later increment) runs *on* the EC2
+        instance and calls ``ec2:StopInstances`` against itself when the host
+        has been idle long enough, so the instance must carry an IAM instance
+        profile granting that permission. This provisions that profile once,
+        out-of-band, as part of ``mngr aws prepare`` -- mirroring how the
+        security group is an admin one-shot rather than something the per-host
+        ``create`` path mutates.
+
+        Blast radius is deliberately tag-scoped: the inline policy allows
+        ``ec2:StopInstances`` only on resources tagged ``mngr-provider`` (any
+        value), so a compromised instance can at worst stop *other* mngr-managed
+        instances, never arbitrary EC2 capacity in the account. (Every instance
+        ``create_instance`` launches carries an ``mngr-provider`` tag.)
+
+        Fully idempotent so re-running ``prepare`` is safe: an already-existing
+        role / instance profile is treated as success (``EntityAlreadyExists``),
+        and an already-attached role surfaces as ``LimitExceeded`` on
+        ``add_role_to_instance_profile`` (an instance profile holds at most one
+        role), which is likewise swallowed. ``put_role_policy`` is a
+        create-or-replace upsert, so it needs no special handling. Returns the
+        instance-profile name (``MNGR_AWS_IAM_ROLE_NAME``) so the caller can
+        report / later attach it.
+
+        Needs iam:CreateRole, iam:PutRolePolicy, iam:CreateInstanceProfile,
+        iam:AddRoleToInstanceProfile.
+        """
+        name = MNGR_AWS_IAM_ROLE_NAME
+        trust_policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"Service": "ec2.amazonaws.com"},
+                        "Action": "sts:AssumeRole",
+                    }
+                ],
+            }
+        )
+        permission_policy = json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": "ec2:StopInstances",
+                        "Resource": "*",
+                        "Condition": {"StringLike": {"ec2:ResourceTag/mngr-provider": "*"}},
+                    }
+                ],
+            }
+        )
+
+        with self._translate_aws_errors():
+            self._create_role_idempotent(name, trust_policy)
+            self._iam().put_role_policy(RoleName=name, PolicyName=name, PolicyDocument=permission_policy)
+            self._create_instance_profile_idempotent(name)
+            self._add_role_to_instance_profile_idempotent(name)
+        logger.info("Ensured self-stop IAM instance profile {}", name)
+        return name
+
+    def _create_role_idempotent(self, name: str, trust_policy: str) -> None:
+        """Create the IAM role, treating an already-existing role as success."""
+        try:
+            self._iam().create_role(RoleName=name, AssumeRolePolicyDocument=trust_policy)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
+                raise
+
+    def _create_instance_profile_idempotent(self, name: str) -> None:
+        """Create the instance profile, treating an already-existing profile as success."""
+        try:
+            self._iam().create_instance_profile(InstanceProfileName=name)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "EntityAlreadyExists":
+                raise
+
+    def _add_role_to_instance_profile_idempotent(self, name: str) -> None:
+        """Attach the role to the instance profile, treating an already-attached role as success.
+
+        An instance profile holds at most one role, so re-attaching the same
+        role raises ``LimitExceeded`` ("Cannot exceed quota for
+        InstanceSessionsPerInstanceProfile" / role-already-attached); that means
+        the desired end state already holds and is swallowed as success.
+        """
+        try:
+            self._iam().add_role_to_instance_profile(InstanceProfileName=name, RoleName=name)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "LimitExceeded":
+                raise
+
+    def delete_self_stop_instance_profile(self) -> str | None:
+        """Tear down the self-stop IAM role + inline policy + instance profile.
+
+        The inverse of ``ensure_self_stop_instance_profile``, called by
+        ``mngr aws cleanup``: the instance profile is mngr-managed (created by
+        ``prepare``), so cleanup removes it alongside the security group to
+        return the account to its pre-prepare state. Order matters -- a role
+        cannot be deleted while still attached to an instance profile, and an
+        instance profile/role with a referencing instance cannot be deleted at
+        all, so callers (``mngr aws cleanup``) must terminate all mngr-managed
+        instances first.
+
+        Idempotent: each step swallows ``NoSuchEntity`` so cleaning an
+        already-clean account is a no-op. Returns the name
+        (``MNGR_AWS_IAM_ROLE_NAME``) if any real delete happened, else ``None``
+        (nothing existed to delete).
+
+        Needs iam:RemoveRoleFromInstanceProfile, iam:DeleteInstanceProfile,
+        iam:DeleteRolePolicy, iam:DeleteRole.
+        """
+        name = MNGR_AWS_IAM_ROLE_NAME
+        deleted_anything = False
+        with self._translate_aws_errors():
+            deleted_anything = self._remove_role_from_instance_profile_if_present(name) or deleted_anything
+            deleted_anything = self._delete_instance_profile_if_present(name) or deleted_anything
+            deleted_anything = self._delete_role_policy_if_present(name) or deleted_anything
+            deleted_anything = self._delete_role_if_present(name) or deleted_anything
+        if deleted_anything:
+            logger.info("Deleted self-stop IAM instance profile {}", name)
+        return name if deleted_anything else None
+
+    def _remove_role_from_instance_profile_if_present(self, name: str) -> bool:
+        """Detach the role from the instance profile; return False if it was already absent."""
+        try:
+            self._iam().remove_role_from_instance_profile(InstanceProfileName=name, RoleName=name)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "NoSuchEntity":
+                raise
+            return False
+
+    def _delete_instance_profile_if_present(self, name: str) -> bool:
+        """Delete the instance profile; return False if it was already absent."""
+        try:
+            self._iam().delete_instance_profile(InstanceProfileName=name)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "NoSuchEntity":
+                raise
+            return False
+
+    def _delete_role_policy_if_present(self, name: str) -> bool:
+        """Delete the role's inline policy; return False if it was already absent."""
+        try:
+            self._iam().delete_role_policy(RoleName=name, PolicyName=name)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "NoSuchEntity":
+                raise
+            return False
+
+    def _delete_role_if_present(self, name: str) -> bool:
+        """Delete the IAM role; return False if it was already absent."""
+        try:
+            self._iam().delete_role(RoleName=name)
+            return True
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code", "") != "NoSuchEntity":
+                raise
+            return False
 
     # =========================================================================
     # Instance Operations

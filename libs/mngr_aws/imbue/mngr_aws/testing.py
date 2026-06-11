@@ -85,6 +85,16 @@ class _StubbedAwsVpsClient(AwsVpsClient):
         description="Pre-built EC2 client to use instead of session.client('ec2'). "
         "Typically a Stubber-wrapped client created by the test fixture."
     )
+    stubbed_iam_client: Any = Field(
+        default=None,
+        description="Pre-built IAM client to use instead of session.client('iam'). "
+        "Typically a Stubber-wrapped client created by the test fixture. Defaults to "
+        "None so the many tests that only exercise EC2 do not have to supply one; "
+        "tests that exercise the self-stop IAM provisioning pass a real stubbed client.",
+    )
 
     def _ec2(self) -> Any:
         return self.stubbed_ec2_client
+
+    def _iam(self) -> Any:
+        return self.stubbed_iam_client
