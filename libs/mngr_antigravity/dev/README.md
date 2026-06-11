@@ -102,8 +102,11 @@ uv run python decode_agy_conversation_db.py <conversation.db>
 
 A self-contained protobuf wire-walker keyed to the field map above -- **no `protobuf`
 library and no shipped descriptors required** (only Python's stdlib `sqlite3`). This is the
-reference for the production transcript decoder. It opens the `.db` read-only/immutable, so
-it is safe to read while agy is writing.
+reference for the production transcript decoder. It opens the `.db` read-only with
+`immutable=1` because it reads a completed, static snapshot -- not a db agy is actively
+writing. (The production decoder, which streams a *live* db, deliberately uses `mode=ro`
+*without* `immutable=1`; see its `stream_conversation` docstring for why `immutable=1` is
+unsafe against a concurrent writer.)
 
 ## Redoing this after an agy release
 
@@ -504,7 +507,10 @@ def decode_step(step_type: int, payload: bytes) -> tuple[str, str]:
 def decode_conversation(db_path: Path) -> Iterator[tuple[int, str, int | None, str]]:
     """Yield ``(idx, label, source, text)`` for each step, dropping conversation-history rows.
 
-    Opens the database read-only/immutable so it is safe to read while agy is writing.
+    Opens the database read-only with immutable=1, which is safe here because this tool reads
+    a completed, static snapshot (not a db agy is concurrently writing). The production
+    streaming decoder must instead use mode=ro without immutable=1; see its stream_conversation
+    docstring for why immutable=1 is unsafe against a live writer.
     """
     connection = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     try:
