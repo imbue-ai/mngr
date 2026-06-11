@@ -224,8 +224,10 @@ class GcpProviderBackend(ProviderBackendInterface):
             # (mngr.api.list._construct_and_discover_for_provider), so without
             # this warning a misconfigured GCP provider would silently vanish
             # from those listings with no user-visible reason. Warn once per
-            # skip, naming the provider and the actionable cause (str(e) carries
-            # the "run gcloud auth ..." / pin-project guidance). Mirrors Vultr's
+            # skip, naming the provider and the actionable cause. Use e.reason
+            # (the bare "run gcloud auth ..." / pin-project guidance) rather than
+            # str(e), which would double the provider name and the "has no state
+            # yet" framing already in the wrapped message. Mirrors Vultr's
             # read-path warning shape (mngr_vultr.backend.VultrProvider.
             # _list_provider_vps_hostnames).
             #
@@ -233,7 +235,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             # creation resolves the same credentials first and lets the error
             # surface directly, so `mngr create --provider gcp` shows the failure
             # without a misleading "skipping discovery" line.
-            logger.warning("GCP provider {!r}: {} -- skipping discovery", name, str(e))
+            logger.warning("GCP provider {!r}: {} -- skipping discovery", name, e.reason)
             raise
 
         gcp_client = GcpVpsClient(
