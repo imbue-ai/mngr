@@ -199,7 +199,7 @@ Destroy a specific pool host (cancels its OVH VPS, then drops the row):
 
 ```bash
 just list-pool-hosts                          # find the row id (tier activated)
-uv run minds pool destroy <pool-host-id>      # OVH creds read from the tier's Vault entry
+just destroy-pool-host <pool-host-id>         # cancels the OVH VPS; creds + DSN from the tier's Vault entry
 ```
 
 Released hosts (after a user destroys their lease) can be bulk-cleaned with:
