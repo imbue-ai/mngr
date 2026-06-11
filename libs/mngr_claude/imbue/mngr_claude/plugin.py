@@ -122,10 +122,13 @@ depending on the build machine's home directory path.
 """
 
 
-# Per-agent Claude session JSONLs live at <agent_state_dir>/plugin/claude/anthropic/projects/.
-# Both live local mngr agents and preserved agents mirror this layout under the local
-# host dir, so --adopt-session can resolve a session ID against either.
-_AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic" / "projects"
+# An mngr agent's isolated Claude config dir lives at
+# <agent_state_dir>/plugin/claude/anthropic/ (the per-agent replacement for ~/.claude/),
+# with session JSONLs filed under its projects/ subdir. Both live local mngr agents and
+# preserved agents mirror this layout, so --adopt-session can resolve a session ID against
+# either.
+_AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic"
+_AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = _AGENT_CLAUDE_CONFIG_RELPATH / "projects"
 
 
 def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
@@ -369,7 +372,7 @@ def should_trust_work_dir(config: ClaudeAgentConfig, ctx: ProvisioningContext) -
     return ctx.is_unattended or config.auto_dismiss_dialogs
 
 
-_MNGR_AGENT_CONFIG_DIR_MARKER: Final[str] = "/plugin/claude/anthropic/"
+_MNGR_AGENT_CONFIG_DIR_MARKER: Final[str] = f"/{_AGENT_CLAUDE_CONFIG_RELPATH.as_posix()}/"
 """Path segment that identifies an mngr agent's Claude config directory.
 
 Agent config dirs follow the pattern: <agent_state_dir>/plugin/claude/anthropic/.
@@ -1504,7 +1507,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
-        return self._get_agent_dir() / "plugin" / "claude" / "anthropic"
+        return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
 
     def get_stream_buffer_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
@@ -2222,6 +2225,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
     ) -> None:
         """Position sessions named on the command line under the destination's
         encoded project dir and finalize. Used by ``--adopt-session``.
+
+        When multiple sessions are named, each one's source project dir is
+        copied into the destination so all of them are available in the new
+        agent's session list, but only the *last* named session is written to
+        ``claude_session_id`` and thus resumed on startup -- Claude can only
+        resume a single session at a time.
         """
         config_dir = self.get_claude_config_dir()
         copied_project_dirs: set[str] = set()
@@ -2335,7 +2344,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Layout: plugin/claude/anthropic/projects/<encoded-work-dir>/<sid>.jsonl.
         # The shallow ``*/*.jsonl`` glob excludes nested subagent transcripts
         # at ``<sid>/subagents/agent-X.jsonl``.
-        source_projects_dir = source_state_dir / "plugin" / "claude" / "anthropic" / "projects"
+        source_projects_dir = source_state_dir / _AGENT_CLAUDE_PROJECTS_RELPATH
         latest_on_source = source_host.execute_idempotent_command(
             f"ls -t {shlex.quote(str(source_projects_dir))}/*/*.jsonl 2>/dev/null | head -n1",
             timeout_seconds=5.0,
@@ -2361,7 +2370,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # clobber a pre-existing target: collision means the source had a
         # multi-cwd setup whose encoded name coincidentally matched ours,
         # and silent clobber would risk losing data we don't realize is there.
-        dest_projects_dir = self._get_agent_dir() / "plugin" / "claude" / "anthropic" / "projects"
+        dest_projects_dir = self._get_agent_dir() / _AGENT_CLAUDE_PROJECTS_RELPATH
         dest_project_name = encode_claude_project_dir_name(self._resolve_work_dir_on_host())
         if source_project_name != dest_project_name:
             source_subdir = dest_projects_dir / source_project_name
@@ -2467,7 +2476,7 @@ def _claude_preserved_items(is_shared_config: bool) -> list[PreservedItem]:
     """
     items: list[PreservedItem] = []
     if not is_shared_config:
-        items.append(PreservedItem(rel_path="plugin/claude/anthropic/projects", kind=FileType.DIRECTORY))
+        items.append(PreservedItem(rel_path=_AGENT_CLAUDE_PROJECTS_RELPATH.as_posix(), kind=FileType.DIRECTORY))
     items.append(PreservedItem(rel_path="logs/claude_transcript", kind=FileType.DIRECTORY))
     items.append(PreservedItem(rel_path="events/claude/common_transcript", kind=FileType.DIRECTORY))
     items.append(PreservedItem(rel_path="claude_session_id_history", kind=FileType.FILE))
@@ -2612,8 +2621,10 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
                     help="Adopt an existing Claude Code session into this agent. "
                     "Accepts a session ID or a path to a .jsonl file. A session ID is "
                     "searched in the current and user-scope Claude config dirs, every "
-                    "live local mngr agent, and preserved sessions from destroyed agents "
-                    "[repeatable].",
+                    "live local mngr agent, and preserved sessions from destroyed agents. "
+                    "Repeatable: every named session is made available in the new agent, "
+                    "but only the last one is resumed on startup (Claude can only resume "
+                    "one session at a time).",
                 ),
             ]
         }
