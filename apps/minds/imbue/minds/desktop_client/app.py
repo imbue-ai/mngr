@@ -2173,15 +2173,23 @@ async def _handle_chrome_events(
             #
             # Clearing at the bottom of the loop instead would lose the
             # wakeup for any producer that fires between the drain and the
-            # bottom-of-loop clear, leaving the queued item idle for up to
-            # 30s -- a UX regression for health-state transitions like
-            # RESTARTING -> HEALTHY.
+            # bottom-of-loop clear, leaving the queued item idle until the
+            # next idle-wake timeout -- a UX regression for health-state
+            # transitions like RESTARTING -> HEALTHY.
             shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
             while connected and not shutdown_event.is_set():
-                # Wait for a change signal or timeout (timeout for disconnect checks).
+                # Wait for a change signal or timeout. The timeout bounds both
+                # disconnect-detection latency and -- since the periodic status
+                # backstop below only runs on a loop wake -- the worst-case
+                # re-assert cadence on an otherwise-idle connection. Cap it at
+                # the re-assert interval so a steadily-stuck workspace really is
+                # re-asserted on that cadence rather than being stretched to a
+                # longer idle-wake period.
                 try:
-                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(
+                        change_event.wait(), timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                    )
                 except TimeoutError:
                     pass
                 # Clear BEFORE draining so any producer firing between drain
