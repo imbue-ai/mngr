@@ -39,11 +39,12 @@
     return btn;
   }
 
-  // lucide ``arrow-up-right`` (Figma "Space switcher menu", node 238-8163):
-  // a bare diagonal arrow, not the old external-link box. Drawn in the
-  // builder's 16px viewBox at lucide's standard 29.17% inset (span 4.67-11.33).
+  // Figma "Space switcher menu" open-in-new arrow (node 560-5109): a bare
+  // diagonal arrow-up-right. The vector is 8x8 centered in the 16px frame
+  // (span 4-12 here); the shaft runs corner-to-corner while the arrowhead
+  // legs stop one unit short of it (7/8 of the span).
   var OPEN_NEW_PATH =
-    '<path d="M11.33 11.33V4.67H4.67"/><path d="M11.33 4.67L4.67 11.33"/>';
+    '<path d="M12 11V4H5"/><path d="M12 4L4 12"/>';
 
   var SETTINGS_PATH =
     '<circle cx="8" cy="8" r="2"/>'

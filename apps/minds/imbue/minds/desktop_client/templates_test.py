@@ -60,8 +60,8 @@ def test_render_landing_page_has_open_in_new_window_button_before_settings() -> 
     # to the main process in Electron (or opens a new tab in a browser).
     html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
     assert "window.landingOpenInNewWindow(this)" in html
-    # The lucide arrow-up-right diagonal shaft is the open-in-new glyph.
-    assert '<path d="M7 17L17 7"/>' in html
+    # The diagonal shaft of the open-in-new arrow (Figma node 560-5109).
+    assert '<path d="M18 6L6 18"/>' in html
     # It sits before the settings button within the row.
     assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
 
@@ -1307,12 +1307,12 @@ def test_icon24_size_axis() -> None:
 
 
 def test_icon24_renders_arrow_up_right() -> None:
-    # The lucide ``arrow-up-right`` glyph backs the "open in new window"
-    # affordance on workspace rows (landing page + sidebar).
+    # The diagonal open-in-new arrow (Figma node 560-5109) backs the
+    # "open in new window" affordance on workspace rows (landing page + sidebar).
     html = CATALOG.render("Icon24", name="arrow-up-right")
     assert 'viewBox="0 0 24 24"' in html
-    assert '<path d="M7 7h10v10"/>' in html
-    assert '<path d="M7 17L17 7"/>' in html
+    assert '<path d="M18 16.5V6H7.5"/>' in html
+    assert '<path d="M18 6L6 18"/>' in html
 
 
 def test_icon24_renders_menu() -> None:

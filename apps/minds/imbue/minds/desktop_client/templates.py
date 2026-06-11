@@ -116,10 +116,12 @@ _ICONS_24: Final[Mapping[str, str]] = {
         '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
         '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
     ),
-    # lucide ``arrow-up-right``: a bare diagonal arrow, used for the
-    # "open in new window" affordance on workspace rows (matches the Figma
-    # "Space switcher menu" treatment and the sidebar's open-in-new icon).
-    "arrow-up-right": '<path d="M7 7h10v10"/><path d="M7 17L17 7"/>',
+    # Figma "Space switcher menu" open-in-new arrow (node 560-5109): a bare
+    # diagonal arrow-up-right for the "open in new window" affordance on
+    # workspace rows. Mirrors the sidebar's open-in-new glyph (8x8 in a 16px
+    # frame) scaled to this 24px viewBox (span 6-18); the shaft runs
+    # corner-to-corner while the arrowhead legs stop short (7/8 of the span).
+    "arrow-up-right": '<path d="M18 16.5V6H7.5"/><path d="M18 6L6 18"/>',
 }
 
 # 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
