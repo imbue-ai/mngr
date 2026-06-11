@@ -14,8 +14,11 @@ from uuid import uuid4
 
 from azure.core.exceptions import HttpResponseError
 from azure.mgmt.compute import ComputeManagementClient
+from azure.mgmt.compute import models as compute_models
 from azure.mgmt.network import NetworkManagementClient
+from azure.mgmt.network import models as network_models
 from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.resource.resources.models import ResourceGroup
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -258,7 +261,7 @@ class AzureVpsClient(VpsClientInterface):
         with self._translate_azure_errors():
             self._resource().resource_groups.create_or_update(
                 self.resource_group,
-                {"location": self.region, "tags": self._base_tags()},
+                ResourceGroup(location=self.region, tags=self._base_tags()),
             )
         nsg_id = self._ensure_nsg()
         self._ensure_vnet_and_subnet(nsg_id)
@@ -274,51 +277,49 @@ class AzureVpsClient(VpsClientInterface):
 
     def _ensure_nsg(self) -> str:
         """Create / update the NSG opening SSH ingress. Returns its resource id."""
-        security_rules: list[dict[str, Any]] = []
+        security_rules: list[Any] = []
         priority = 1000
         for port in ("22", str(self.container_ssh_port)):
             security_rules.append(
-                {
-                    "name": f"mngr-allow-tcp-{port}",
-                    "protocol": "Tcp",
-                    "source_port_range": "*",
-                    "destination_port_range": port,
-                    "source_address_prefixes": list(self.allowed_ssh_cidrs),
-                    "destination_address_prefix": "*",
-                    "access": "Allow",
-                    "priority": priority,
-                    "direction": "Inbound",
-                }
+                network_models.SecurityRule(
+                    name=f"mngr-allow-tcp-{port}",
+                    protocol="Tcp",
+                    source_port_range="*",
+                    destination_port_range=port,
+                    source_address_prefixes=list(self.allowed_ssh_cidrs),
+                    destination_address_prefix="*",
+                    access="Allow",
+                    priority=priority,
+                    direction="Inbound",
+                )
             )
             priority += 10
+        nsg = network_models.NetworkSecurityGroup(
+            location=self.region, security_rules=security_rules, tags=self._base_tags()
+        )
         with self._translate_azure_errors():
             poller = self._network().network_security_groups.begin_create_or_update(
-                self.resource_group,
-                self.nsg_name,
-                {"location": self.region, "security_rules": security_rules, "tags": self._base_tags()},
+                self.resource_group, self.nsg_name, nsg
             )
-            nsg = poller.result()
-        return nsg.id
+            created_nsg = poller.result()
+        return created_nsg.id
 
     def _ensure_vnet_and_subnet(self, nsg_id: str) -> None:
         """Create / update the vnet with a single subnet that references the NSG."""
+        vnet = network_models.VirtualNetwork(
+            location=self.region,
+            address_space=network_models.AddressSpace(address_prefixes=[self.vnet_address_prefix]),
+            subnets=[
+                network_models.Subnet(
+                    name=self.subnet_name,
+                    address_prefix=self.subnet_address_prefix,
+                    network_security_group=network_models.NetworkSecurityGroup(id=nsg_id),
+                )
+            ],
+            tags=self._base_tags(),
+        )
         with self._translate_azure_errors():
-            self._network().virtual_networks.begin_create_or_update(
-                self.resource_group,
-                self.vnet_name,
-                {
-                    "location": self.region,
-                    "address_space": {"address_prefixes": [self.vnet_address_prefix]},
-                    "subnets": [
-                        {
-                            "name": self.subnet_name,
-                            "address_prefix": self.subnet_address_prefix,
-                            "network_security_group": {"id": nsg_id},
-                        }
-                    ],
-                    "tags": self._base_tags(),
-                },
-            ).result()
+            self._network().virtual_networks.begin_create_or_update(self.resource_group, self.vnet_name, vnet).result()
 
     def resolve_subnet_id(self) -> str:
         """Look up the prepared subnet id without creating anything. Returns the id.
@@ -392,10 +393,10 @@ class AzureVpsClient(VpsClientInterface):
             vm_tags[AZURE_PYTEST_LAUNCHED_TAG] = "true"
 
         nic_id = self._create_public_ip_and_nic(vm_name, subnet_id, vm_tags)
-        vm_params = self._build_vm_params(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
+        vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
 
         with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_create_or_update(self.resource_group, vm_name, vm_params).result()
+            self._compute().virtual_machines.begin_create_or_update(self.resource_group, vm_name, vm_model).result()
         logger.info(
             "Created Azure VM {} (label: {}, region: {}, size: {}, image: {}:{}:{})",
             vm_name,
@@ -437,38 +438,36 @@ class AzureVpsClient(VpsClientInterface):
         is reaped when the VM is deleted (the VM's network profile sets the NIC's
         ``delete_option=Delete``).
         """
-        ip_config: dict[str, Any] = {"name": "ipconfig1", "subnet": {"id": subnet_id}}
+        ip_config = network_models.NetworkInterfaceIPConfiguration(
+            name="ipconfig1", subnet=network_models.Subnet(id=subnet_id)
+        )
         if self.associate_public_ip:
+            public_ip = network_models.PublicIPAddress(
+                location=self.region,
+                sku=network_models.PublicIPAddressSku(name="Standard"),
+                public_ip_allocation_method="Static",
+                public_ip_address_version="IPV4",
+                tags=dict(vm_tags),
+            )
             with self._translate_azure_errors():
-                public_ip = (
+                created_ip = (
                     self._network()
                     .public_ip_addresses.begin_create_or_update(
-                        self.resource_group,
-                        self._public_ip_name(vm_name),
-                        {
-                            "location": self.region,
-                            "sku": {"name": "Standard"},
-                            "public_ip_allocation_method": "Static",
-                            "public_ip_address_version": "IPV4",
-                            "tags": dict(vm_tags),
-                        },
+                        self.resource_group, self._public_ip_name(vm_name), public_ip
                     )
                     .result()
                 )
-            ip_config["public_ip_address"] = {"id": public_ip.id, "delete_option": "Delete"}
+            ip_config.public_ip_address = network_models.PublicIPAddress(id=created_ip.id, delete_option="Delete")
+        nic = network_models.NetworkInterface(location=self.region, ip_configurations=[ip_config], tags=dict(vm_tags))
         with self._translate_azure_errors():
-            nic = (
+            created_nic = (
                 self._network()
-                .network_interfaces.begin_create_or_update(
-                    self.resource_group,
-                    self._nic_name(vm_name),
-                    {"location": self.region, "ip_configurations": [ip_config], "tags": dict(vm_tags)},
-                )
+                .network_interfaces.begin_create_or_update(self.resource_group, self._nic_name(vm_name), nic)
                 .result()
             )
-        return nic.id
+        return created_nic.id
 
-    def _build_vm_params(
+    def _build_vm_model(
         self,
         vm_name: str,
         plan: str,
@@ -477,50 +476,60 @@ class AzureVpsClient(VpsClientInterface):
         nic_id: str,
         vm_tags: Mapping[str, str],
         spot: bool,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "location": self.region,
-            "tags": dict(vm_tags),
-            "hardware_profile": {"vm_size": plan},
-            "storage_profile": {
-                "image_reference": {
-                    "publisher": self.image_publisher,
-                    "offer": self.image_offer,
-                    "sku": self.image_sku,
-                    "version": self.image_version,
-                },
-                "os_disk": {
-                    "create_option": "FromImage",
-                    "delete_option": "Delete",
-                    "disk_size_gb": self.os_disk_size_gb,
-                    "managed_disk": {"storage_account_type": self.os_disk_type},
-                },
-            },
-            "os_profile": {
-                "computer_name": _computer_name(vm_name),
-                "admin_username": self.admin_username,
-                "linux_configuration": {
-                    "disable_password_authentication": True,
-                    "ssh": {
-                        "public_keys": [
-                            {
-                                "path": f"/home/{self.admin_username}/.ssh/authorized_keys",
-                                "key_data": public_key,
-                            }
+    ) -> Any:
+        # azure-mgmt-compute 38.x "flattens" the per-VM sub-profiles into
+        # ``properties`` at runtime, but its typed __init__ overload only exposes
+        # ``properties=...`` (not the flattened names), so the nested
+        # ``VirtualMachineProperties`` is constructed explicitly to stay type-clean.
+        properties = compute_models.VirtualMachineProperties(
+            hardware_profile=compute_models.HardwareProfile(vm_size=plan),
+            storage_profile=compute_models.StorageProfile(
+                image_reference=compute_models.ImageReference(
+                    publisher=self.image_publisher,
+                    offer=self.image_offer,
+                    sku=self.image_sku,
+                    version=self.image_version,
+                ),
+                os_disk=compute_models.OSDisk(
+                    create_option="FromImage",
+                    delete_option="Delete",
+                    disk_size_gb=self.os_disk_size_gb,
+                    managed_disk=compute_models.ManagedDiskParameters(storage_account_type=self.os_disk_type),
+                ),
+            ),
+            os_profile=compute_models.OSProfile(
+                computer_name=_computer_name(vm_name),
+                admin_username=self.admin_username,
+                linux_configuration=compute_models.LinuxConfiguration(
+                    disable_password_authentication=True,
+                    ssh=compute_models.SshConfiguration(
+                        public_keys=[
+                            compute_models.SshPublicKey(
+                                path=f"/home/{self.admin_username}/.ssh/authorized_keys", key_data=public_key
+                            )
                         ]
-                    },
-                },
+                    ),
+                ),
                 # Azure requires custom_data base64-encoded; the Ubuntu cloud-init
                 # Azure datasource decodes it and runs it as user-data on first boot.
-                "custom_data": base64.b64encode(user_data.encode("utf-8")).decode("ascii"),
-            },
-            "network_profile": {"network_interfaces": [{"id": nic_id, "primary": True, "delete_option": "Delete"}]},
-        }
+                custom_data=base64.b64encode(user_data.encode("utf-8")).decode("ascii"),
+            ),
+            network_profile=compute_models.NetworkProfile(
+                network_interfaces=[
+                    compute_models.NetworkInterfaceReference(
+                        id=nic_id,
+                        properties=compute_models.NetworkInterfaceReferenceProperties(
+                            primary=True, delete_option="Delete"
+                        ),
+                    )
+                ]
+            ),
+        )
         if spot:
-            params["priority"] = "Spot"
-            params["eviction_policy"] = "Delete"
-            params["billing_profile"] = {"max_price": -1.0}
-        return params
+            properties.priority = "Spot"
+            properties.eviction_policy = "Delete"
+            properties.billing_profile = compute_models.BillingProfile(max_price=-1.0)
+        return compute_models.VirtualMachine(location=self.region, tags=dict(vm_tags), properties=properties)
 
     def _public_ip_name(self, vm_name: str) -> str:
         return f"{vm_name}-ip"
@@ -666,16 +675,15 @@ class AzureVpsClient(VpsClientInterface):
         # Azure snapshots have no description field; stash it in a tag so
         # list_snapshots can round-trip it.
         snapshot_tags = {**self._base_tags(), "description": description}
+        snapshot = compute_models.Snapshot(
+            location=self.region,
+            tags=snapshot_tags,
+            properties=compute_models.SnapshotProperties(
+                creation_data=compute_models.CreationData(create_option="Copy", source_resource_id=os_disk_id)
+            ),
+        )
         with self._translate_azure_errors():
-            self._compute().snapshots.begin_create_or_update(
-                self.resource_group,
-                snapshot_name,
-                {
-                    "location": self.region,
-                    "creation_data": {"create_option": "Copy", "source_resource_id": os_disk_id},
-                    "tags": snapshot_tags,
-                },
-            ).result()
+            self._compute().snapshots.begin_create_or_update(self.resource_group, snapshot_name, snapshot).result()
         logger.info("Created Azure snapshot {} from OS disk of {}", snapshot_name, instance_id)
         return VpsSnapshotId(snapshot_name)
 

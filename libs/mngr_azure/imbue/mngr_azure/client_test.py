@@ -45,7 +45,8 @@ def _make_client(
     )
 
 
-def _created_vm_params(client: _StubbedAzureVpsClient) -> dict[str, Any]:
+def _created_vm(client: _StubbedAzureVpsClient) -> Any:
+    """Return the single VirtualMachine model captured by the fake compute client."""
     compute = client.stubbed_compute_client
     assert len(compute.virtual_machines.created) == 1
     return compute.virtual_machines.created[0][1]
@@ -71,16 +72,15 @@ def test_create_instance_builds_public_ip_nic_and_vm() -> None:
     # A public IP and a NIC were created.
     assert len(network.public_ip_addresses.created) == 1
     assert len(network.network_interfaces.created) == 1
-    nic_params = network.network_interfaces.created[0][1]
-    ip_config = nic_params["ip_configurations"][0]
-    assert ip_config["subnet"] == {"id": "/subnets/mngr-subnet"}
-    assert ip_config["public_ip_address"]["delete_option"] == "Delete"
+    nic = network.network_interfaces.created[0][1]
+    ip_config = nic.ip_configurations[0]
+    assert ip_config.subnet.id == "/subnets/mngr-subnet"
+    assert ip_config.public_ip_address.delete_option == "Delete"
     # The VM references the NIC with delete_option=Delete (cascade on destroy).
-    params = _created_vm_params(client)
-    network_interfaces = params["network_profile"]["network_interfaces"]
-    assert network_interfaces[0]["delete_option"] == "Delete"
-    assert params["storage_profile"]["os_disk"]["delete_option"] == "Delete"
-    assert params["hardware_profile"]["vm_size"] == "Standard_B2s"
+    vm = _created_vm(client)
+    assert vm.network_profile.network_interfaces[0].delete_option == "Delete"
+    assert vm.storage_profile.os_disk.delete_option == "Delete"
+    assert vm.hardware_profile.vm_size == "Standard_B2s"
     assert str(instance_id).startswith("my-agent-")
 
 
@@ -95,11 +95,11 @@ def test_create_instance_injects_ssh_key_and_base64_custom_data() -> None:
         ssh_key_ids=["k1"],
         tags={"mngr-host-id": "host-xyz"},
     )
-    params = _created_vm_params(client)
-    linux = params["os_profile"]["linux_configuration"]
-    assert linux["disable_password_authentication"] is True
-    assert linux["ssh"]["public_keys"][0]["key_data"] == "ssh-ed25519 PUBKEY"
-    decoded = base64.b64decode(params["os_profile"]["custom_data"]).decode("utf-8")
+    vm = _created_vm(client)
+    linux = vm.os_profile.linux_configuration
+    assert linux.disable_password_authentication is True
+    assert linux.ssh.public_keys[0].key_data == "ssh-ed25519 PUBKEY"
+    decoded = base64.b64decode(vm.os_profile.custom_data).decode("utf-8")
     assert decoded == "#cloud-config\nruncmd: []\n"
 
 
@@ -116,10 +116,10 @@ def test_create_instance_tags_pytest_launched() -> None:
         ssh_key_ids=["k1"],
         tags={"mngr-host-id": "host-abc"},
     )
-    params = _created_vm_params(client)
-    assert params["tags"]["mngr-pytest-launched"] == "true"
-    assert params["tags"]["managed-by"] == "mngr"
-    assert "mngr-created-at" in params["tags"]
+    vm = _created_vm(client)
+    assert vm.tags["mngr-pytest-launched"] == "true"
+    assert vm.tags["managed-by"] == "mngr"
+    assert "mngr-created-at" in vm.tags
 
 
 def test_create_instance_sets_spot_fields_when_requested() -> None:
@@ -134,10 +134,10 @@ def test_create_instance_sets_spot_fields_when_requested() -> None:
         tags={"mngr-host-id": "host-abc"},
         spot=True,
     )
-    params = _created_vm_params(client)
-    assert params["priority"] == "Spot"
-    assert params["eviction_policy"] == "Delete"
-    assert params["billing_profile"] == {"max_price": -1.0}
+    vm = _created_vm(client)
+    assert vm.priority == "Spot"
+    assert vm.eviction_policy == "Delete"
+    assert vm.billing_profile.max_price == -1.0
 
 
 def test_create_instance_omits_spot_fields_by_default() -> None:
@@ -151,8 +151,8 @@ def test_create_instance_omits_spot_fields_by_default() -> None:
         ssh_key_ids=["k1"],
         tags={"mngr-host-id": "host-abc"},
     )
-    params = _created_vm_params(client)
-    assert "priority" not in params
+    vm = _created_vm(client)
+    assert vm.priority is None
 
 
 def test_create_instance_cross_region_raises() -> None:
@@ -216,16 +216,16 @@ def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
     # Resource providers registered.
     assert set(resource.providers.registered) == {"Microsoft.Compute", "Microsoft.Network", "Microsoft.Storage"}
     # RG created with the managed-by tag.
-    assert resource.resource_groups.created[0][1]["tags"]["managed-by"] == "mngr"
+    assert resource.resource_groups.created[0][1].tags["managed-by"] == "mngr"
     network = client.stubbed_network_client
     assert len(network.network_security_groups.created) == 1
-    nsg_rules = network.network_security_groups.created[0][1]["security_rules"]
-    assert {rule["destination_port_range"] for rule in nsg_rules} == {"22", "2222"}
-    assert nsg_rules[0]["source_address_prefixes"] == ["203.0.113.4/32"]
+    nsg = network.network_security_groups.created[0][1]
+    assert {rule.destination_port_range for rule in nsg.security_rules} == {"22", "2222"}
+    assert nsg.security_rules[0].source_address_prefixes == ["203.0.113.4/32"]
     # vnet+subnet created, subnet references the NSG.
     assert len(network.virtual_networks.created) == 1
-    subnet = network.virtual_networks.created[0][1]["subnets"][0]
-    assert subnet["network_security_group"]["id"] == "/nsg/mngr-nsg"
+    subnet = network.virtual_networks.created[0][1].subnets[0]
+    assert subnet.network_security_group.id == "/nsg/mngr-nsg"
 
 
 def test_resolve_subnet_id_returns_id_when_present() -> None:
@@ -362,9 +362,9 @@ def test_create_snapshot_from_os_disk() -> None:
     client = _make_client(compute=compute)
     snapshot_id = client.create_snapshot(VpsInstanceId("vm1"), "my snapshot")
     assert len(compute.snapshots.created) == 1
-    snap_params = compute.snapshots.created[0][1]
-    assert snap_params["creation_data"]["source_resource_id"] == "/disks/os"
-    assert snap_params["tags"]["description"] == "my snapshot"
+    snapshot = compute.snapshots.created[0][1]
+    assert snapshot.creation_data.source_resource_id == "/disks/os"
+    assert snapshot.tags["description"] == "my snapshot"
     assert str(snapshot_id).startswith("mngr-snap-")
 
 

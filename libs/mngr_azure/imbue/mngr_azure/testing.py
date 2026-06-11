@@ -105,7 +105,7 @@ class FakeVirtualMachinesOperations:
     """Fake ComputeManagementClient.virtual_machines: records calls, returns canned data."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
         self.deleted: list[str] = []
         self.create_error: Exception | None = None
         self.delete_error: Exception | None = None
@@ -116,7 +116,7 @@ class FakeVirtualMachinesOperations:
         self.list_result: list[Any] = []
         self.list_error: Exception | None = None
 
-    def begin_create_or_update(self, resource_group: str, vm_name: str, parameters: dict[str, Any]) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, vm_name: str, parameters: Any) -> FakePoller:
         self.created.append((vm_name, parameters))
         return FakePoller(error=self.create_error)
 
@@ -146,13 +146,11 @@ class FakeSnapshotsOperations:
     """Fake ComputeManagementClient.snapshots: records create/delete, returns canned list."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
         self.deleted: list[str] = []
         self.list_result: list[Any] = []
 
-    def begin_create_or_update(
-        self, resource_group: str, snapshot_name: str, parameters: dict[str, Any]
-    ) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, snapshot_name: str, parameters: Any) -> FakePoller:
         self.created.append((snapshot_name, parameters))
         return FakePoller()
 
@@ -176,12 +174,12 @@ class FakePublicIPAddressesOperations:
     """Fake NetworkManagementClient.public_ip_addresses."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
         self.get_result: Any = None
         self.get_error: Exception | None = None
         self.list_result: list[Any] = []
 
-    def begin_create_or_update(self, resource_group: str, name: str, parameters: dict[str, Any]) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/pip/{name}", name=name, ip_address="203.0.113.7"))
 
@@ -198,9 +196,9 @@ class FakeNetworkInterfacesOperations:
     """Fake NetworkManagementClient.network_interfaces."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
 
-    def begin_create_or_update(self, resource_group: str, name: str, parameters: dict[str, Any]) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/nic/{name}", name=name))
 
@@ -209,9 +207,9 @@ class FakeVirtualNetworksOperations:
     """Fake NetworkManagementClient.virtual_networks."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
 
-    def begin_create_or_update(self, resource_group: str, name: str, parameters: dict[str, Any]) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/vnet/{name}", name=name))
 
@@ -235,9 +233,9 @@ class FakeNetworkSecurityGroupsOperations:
     """Fake NetworkManagementClient.network_security_groups."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
 
-    def begin_create_or_update(self, resource_group: str, name: str, parameters: dict[str, Any]) -> FakePoller:
+    def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/nsg/{name}", name=name))
 
@@ -257,12 +255,12 @@ class FakeResourceGroupsOperations:
     """Fake ResourceManagementClient.resource_groups."""
 
     def __init__(self) -> None:
-        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.created: list[tuple[str, Any]] = []
         self.deleted: list[str] = []
         self.get_result: Any = None
         self.get_error: Exception | None = None
 
-    def create_or_update(self, resource_group: str, parameters: dict[str, Any]) -> Any:
+    def create_or_update(self, resource_group: str, parameters: Any) -> Any:
         self.created.append((resource_group, parameters))
         return SimpleNamespace(name=resource_group)
 
