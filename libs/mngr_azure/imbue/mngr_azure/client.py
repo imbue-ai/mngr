@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from typing import Any
 from typing import Final
@@ -74,6 +75,14 @@ _VM_NAME_STEM_LENGTH: Final[int] = _MAX_VM_NAME_LENGTH - 33
 # How long to wait for a resource-provider registration to flip to "Registered".
 _PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
 _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
+
+# Minimum age before an unattached NIC / public IP is eligible for reclaim by the
+# next create. Azure reserves a NIC for its would-be VM for 180s after a failed
+# create, so a younger unattached NIC is either still reserved (delete would
+# fail) or belongs to a create that is mid-flight on another machine -- this
+# margin keeps the self-healing sweep from ever deleting an in-flight create's
+# NIC.
+_ORPHAN_RECLAIM_MIN_AGE_SECONDS: Final[float] = 240.0
 
 
 def _make_vm_name(label: str, tags: Mapping[str, str]) -> str:
@@ -381,6 +390,10 @@ class AzureVpsClient(VpsClientInterface):
             )
 
         subnet_id = self.resolve_subnet_id()
+        # Self-heal: reclaim NIC/public-IP orphans left by an earlier failed
+        # create whose 180s NIC reservation has since expired. Done here (on the
+        # next create) rather than by blocking the failed create for ~3 minutes.
+        self._reclaim_orphaned_network_resources()
         vm_name = _make_vm_name(label, tags)
         public_key = self._resolve_ssh_public_key(ssh_key_ids)
 
@@ -558,19 +571,101 @@ class AzureVpsClient(VpsClientInterface):
         before the VM when VM creation fails. The NIC references the public IP, so
         it must be deleted first; each delete is best-effort (a 404 / already-gone
         is fine) so cleanup never masks the original create failure.
+
+        When VM creation failed for *capacity* reasons (``SkuNotAvailable``),
+        Azure reserves the NIC for the would-be VM for 180s, so the delete here
+        raises ``NicReservedForAnotherVm``. That is expected, not an error: the
+        next ``create_instance`` reclaims it via ``_reclaim_orphaned_network_resources``
+        once the reservation expires, so it is logged at info, not warning.
         """
         try:
             with self._translate_azure_errors():
                 self._network().network_interfaces.begin_delete(self.resource_group, self._nic_name(vm_name)).result()
         except VpsApiError as e:
-            logger.warning("Failed to delete orphaned NIC for {}: {}", vm_name, e)
+            self._log_orphan_cleanup_failure("NIC", vm_name, e)
         try:
             with self._translate_azure_errors():
                 self._network().public_ip_addresses.begin_delete(
                     self.resource_group, self._public_ip_name(vm_name)
                 ).result()
         except VpsApiError as e:
-            logger.warning("Failed to delete orphaned public IP for {}: {}", vm_name, e)
+            self._log_orphan_cleanup_failure("public IP", vm_name, e)
+
+    def _log_orphan_cleanup_failure(self, kind: str, vm_name: str, error: VpsApiError) -> None:
+        if "NicReservedForAnotherVm" in str(error) or "PublicIPAddressCannotBeDeleted" in str(error):
+            logger.info(
+                "Orphaned {} for {} is still reserved by the failed VM; it will be reclaimed on the next create.",
+                kind,
+                vm_name,
+            )
+        else:
+            logger.warning("Failed to delete orphaned {} for {}: {}", kind, vm_name, error)
+
+    def _is_reclaimable_orphan(self, resource: Any, cutoff: datetime) -> bool:
+        """True if ``resource`` is an mngr-tagged NIC/IP created before ``cutoff``.
+
+        The age gate ensures the sweep never deletes a NIC/IP belonging to a
+        concurrent create that is still mid-flight (its NIC is briefly unattached
+        before the VM associates it).
+        """
+        tags = dict(resource.tags or {})
+        if tags.get("mngr-provider") is None:
+            return False
+        created_raw = tags.get("mngr-created-at")
+        if created_raw is None:
+            return False
+        try:
+            created_at = datetime.fromisoformat(created_raw)
+        except ValueError:
+            return False
+        return created_at < cutoff
+
+    def _reclaim_orphaned_network_resources(self) -> None:
+        """Best-effort delete unattached, aged mngr NICs / public IPs from failed creates.
+
+        ``create_instance`` provisions a public IP + NIC before the VM; a VM
+        create that fails (capacity / quota) leaves them orphaned, and Azure
+        reserves the NIC for the would-be VM for 180s so immediate cleanup is
+        blocked. Rather than block a failed create for ~3 minutes, the next create
+        reclaims them here -- self-healing on the next operation, the same pattern
+        discovery / GC use. Only resources older than the reservation window
+        (``_ORPHAN_RECLAIM_MIN_AGE_SECONDS``) are touched, so an in-flight
+        concurrent create is never disturbed. The whole sweep is best-effort: a
+        list / delete failure is logged and never blocks the create that follows.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=_ORPHAN_RECLAIM_MIN_AGE_SECONDS)
+        # NICs first -- a public IP attached to a NIC cannot be deleted.
+        try:
+            with self._translate_azure_errors():
+                nics = list(self._network().network_interfaces.list(self.resource_group))
+        except VpsApiError as e:
+            logger.debug("Skipping orphan NIC reclaim (list failed): {}", e)
+            nics = []
+        for nic in nics:
+            if nic.virtual_machine is not None or not self._is_reclaimable_orphan(nic, cutoff):
+                continue
+            try:
+                with self._translate_azure_errors():
+                    self._network().network_interfaces.begin_delete(self.resource_group, nic.name).result()
+                logger.info("Reclaimed orphaned NIC {}", nic.name)
+            except VpsApiError as e:
+                logger.warning("Failed to reclaim orphaned NIC {}: {}", nic.name, e)
+        # Then unattached public IPs (their NIC is gone, or never had one).
+        try:
+            with self._translate_azure_errors():
+                public_ips = list(self._network().public_ip_addresses.list(self.resource_group))
+        except VpsApiError as e:
+            logger.debug("Skipping orphan public-IP reclaim (list failed): {}", e)
+            public_ips = []
+        for public_ip in public_ips:
+            if public_ip.ip_configuration is not None or not self._is_reclaimable_orphan(public_ip, cutoff):
+                continue
+            try:
+                with self._translate_azure_errors():
+                    self._network().public_ip_addresses.begin_delete(self.resource_group, public_ip.name).result()
+                logger.info("Reclaimed orphaned public IP {}", public_ip.name)
+            except VpsApiError as e:
+                logger.warning("Failed to reclaim orphaned public IP {}: {}", public_ip.name, e)
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         try:

@@ -120,6 +120,14 @@ mngr destroy my-agent
 running); `mngr destroy` deletes the VM, and the NIC, public IP and OS disk are
 reaped automatically via their `delete_option=Delete` (no orphaned resources).
 
+If a `mngr create` fails *after* the public IP + NIC are provisioned but before
+the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
+immediately when possible, or otherwise reclaimed at the start of the next
+`mngr create` (Azure reserves the NIC for the would-be VM for 180s, so immediate
+deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
+size has no capacity in the region right now; pick another size with
+`-b --azure-vm-size=...` or another region.
+
 ## How it works
 
 - **Per-host create:** a Standard-SKU static public IP + a NIC bound to the

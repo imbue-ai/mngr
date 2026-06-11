@@ -203,6 +203,7 @@ class FakeNetworkInterfacesOperations:
     def __init__(self) -> None:
         self.created: list[tuple[str, Any]] = []
         self.deleted: list[str] = []
+        self.list_result: list[Any] = []
 
     def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
@@ -211,6 +212,9 @@ class FakeNetworkInterfacesOperations:
     def begin_delete(self, resource_group: str, name: str) -> FakePoller:
         self.deleted.append(name)
         return FakePoller()
+
+    def list(self, resource_group: str) -> list[Any]:
+        return self.list_result
 
 
 class FakeVirtualNetworksOperations:

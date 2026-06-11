@@ -34,6 +34,7 @@ import pytest
 from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.compute import ComputeManagementClient
+from azure.mgmt.network import NetworkManagementClient
 from loguru import logger
 
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
@@ -118,6 +119,59 @@ def _find_orphan_test_vms(compute: Any) -> list[str]:
     return leaked
 
 
+def _reclaim_orphan_test_network(network: Any) -> None:
+    """Best-effort delete unattached pytest-launched NICs / public IPs at session end.
+
+    A test create that fails *after* provisioning the NIC + public IP but before
+    the VM (e.g. ``SkuNotAvailable``) leaves those orphaned, and the production
+    reclaim runs only on the *next* create -- which may never come in a finished
+    session. These are not a test bug (they stem from Azure capacity), so they are
+    cleaned silently rather than failing the session. NICs go first (they hold the
+    public IPs). Only mngr pytest-launched resources are touched.
+    """
+    cutoff = datetime.now(timezone.utc) - _TEST_LEAK_TTL
+    try:
+        nics = list(network.network_interfaces.list(AZURE_DEFAULT_RESOURCE_GROUP))
+    except AzureError as e:
+        logger.warning("Failed to list NICs for session-end orphan reclaim: {}", e)
+        nics = []
+    for nic in nics:
+        if nic.virtual_machine is not None or not _is_orphan_test_resource(nic, cutoff):
+            continue
+        try:
+            network.network_interfaces.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, nic.name)
+            logger.info("Reclaimed orphaned test NIC {}", nic.name)
+        except AzureError as e:
+            logger.warning("Failed to reclaim orphaned test NIC {}: {}", nic.name, e)
+    try:
+        public_ips = list(network.public_ip_addresses.list(AZURE_DEFAULT_RESOURCE_GROUP))
+    except AzureError as e:
+        logger.warning("Failed to list public IPs for session-end orphan reclaim: {}", e)
+        public_ips = []
+    for public_ip in public_ips:
+        if public_ip.ip_configuration is not None or not _is_orphan_test_resource(public_ip, cutoff):
+            continue
+        try:
+            network.public_ip_addresses.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, public_ip.name)
+            logger.info("Reclaimed orphaned test public IP {}", public_ip.name)
+        except AzureError as e:
+            logger.warning("Failed to reclaim orphaned test public IP {}: {}", public_ip.name, e)
+
+
+def _is_orphan_test_resource(resource: Any, cutoff: datetime) -> bool:
+    tags = dict(resource.tags or {})
+    if tags.get(AZURE_PYTEST_LAUNCHED_TAG) != "true":
+        return False
+    created_raw = tags.get("mngr-created-at")
+    if created_raw is None:
+        return False
+    try:
+        created_at = datetime.fromisoformat(created_raw)
+    except ValueError:
+        return False
+    return created_at < cutoff
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Detect and clean up leaked Azure resources at session end.
 
@@ -126,10 +180,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     actually opted into (``MNGR_AZURE_RELEASE_TESTS=1``), credentials are
     available, and a subscription is resolvable -- the same conjunction that
     gates the release-test ``pytestmark``, so the cleanup hook never makes a live
-    Azure call from a run that did not opt into Azure-using tests. If leaks are
-    found, force-deletes them and sets ``session.exitstatus`` to ``TESTS_FAILED``
-    -- but only when the session was otherwise passing, so a more-specific
-    failure (INTERRUPTED, INTERNAL_ERROR, etc.) is preserved.
+    Azure call from a run that did not opt into Azure-using tests. Leaked VMs
+    force-fail the session (a real test bug); orphaned NICs / public IPs from
+    capacity-failed creates are reclaimed silently. The session exit status is set
+    to ``TESTS_FAILED`` only for VM leaks, and only when the session was otherwise
+    passing so a more-specific failure (INTERRUPTED, INTERNAL_ERROR, etc.) is
+    preserved.
     """
     del exitstatus
     if not (AZURE_RELEASE_TESTS_OPT_IN and azure_credentials_available()):
@@ -140,9 +196,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     try:
         compute = ComputeManagementClient(DefaultAzureCredential(), subscription_id)
+        network = NetworkManagementClient(DefaultAzureCredential(), subscription_id)
     except AzureError as e:
-        logger.warning("Failed to build Compute client for session-end leak scan: {}", e)
+        logger.warning("Failed to build Azure clients for session-end leak scan: {}", e)
         return
+
+    _reclaim_orphan_test_network(network)
 
     orphans = _find_orphan_test_vms(compute)
     if not orphans:

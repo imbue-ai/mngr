@@ -1,5 +1,6 @@
 import base64
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from types import SimpleNamespace
 from typing import Any
@@ -207,6 +208,63 @@ def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
     # NIC must be deleted before the public IP it references.
     assert network.network_interfaces.deleted[0].endswith("-nic")
     assert network.public_ip_addresses.deleted[0].endswith("-ip")
+
+
+def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_attr: str, tagged: bool = True) -> Any:
+    created_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    tags = (
+        {"mngr-provider": "azure", "mngr-created-at": created_at.isoformat(), "managed-by": "mngr"} if tagged else {}
+    )
+    return SimpleNamespace(
+        name=name, tags=tags, **{attach_attr: SimpleNamespace(id="/attached") if attached else None}
+    )
+
+
+def test_create_instance_reclaims_aged_orphan_nic_and_ip() -> None:
+    # A NIC + public IP left unattached by an earlier failed create, now older
+    # than the reservation window, are reclaimed at the start of the next create.
+    network = FakeNetworkClient()
+    network.network_interfaces.list_result = [
+        _orphan_resource("old-nic", age_seconds=600, attached=False, attach_attr="virtual_machine")
+    ]
+    network.public_ip_addresses.list_result = [
+        _orphan_resource("old-ip", age_seconds=600, attached=False, attach_attr="ip_configuration")
+    ]
+    client = _make_client(network=network)
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    client.create_instance(
+        label="agent",
+        region=_REGION,
+        plan="Standard_B2s",
+        user_data="#cloud-config\n",
+        ssh_key_ids=["k1"],
+        tags={"mngr-host-id": "host-abc"},
+    )
+    assert "old-nic" in network.network_interfaces.deleted
+    assert "old-ip" in network.public_ip_addresses.deleted
+
+
+def test_reclaim_skips_recent_attached_and_untagged() -> None:
+    network = FakeNetworkClient()
+    network.network_interfaces.list_result = [
+        # Too young: could be an in-flight concurrent create -- must not be touched.
+        _orphan_resource("young-nic", age_seconds=10, attached=False, attach_attr="virtual_machine"),
+        # Attached to a VM -- in use.
+        _orphan_resource("attached-nic", age_seconds=600, attached=True, attach_attr="virtual_machine"),
+        # Not mngr-tagged -- not ours.
+        _orphan_resource("foreign-nic", age_seconds=600, attached=False, attach_attr="virtual_machine", tagged=False),
+    ]
+    client = _make_client(network=network)
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    client.create_instance(
+        label="agent",
+        region=_REGION,
+        plan="Standard_B2s",
+        user_data="#cloud-config\n",
+        ssh_key_ids=["k1"],
+        tags={"mngr-host-id": "host-abc"},
+    )
+    assert network.network_interfaces.deleted == []
 
 
 def test_create_instance_requires_uploaded_ssh_key() -> None:
