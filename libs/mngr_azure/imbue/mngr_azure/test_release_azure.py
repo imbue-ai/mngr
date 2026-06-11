@@ -43,6 +43,7 @@ from imbue.mngr_azure.testing import AZURE_DEFAULT_RESOURCE_GROUP
 from imbue.mngr_azure.testing import AZURE_RELEASE_TESTS_OPT_IN
 from imbue.mngr_azure.testing import AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_azure.testing import AZURE_TEST_NAME_PREFIX
+from imbue.mngr_azure.testing import AZURE_TEST_VM_SIZE
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
 
@@ -73,6 +74,7 @@ def _write_release_settings(settings_dir: Path, subscription_id: str) -> None:
         'backend = "azure"\n'
         f'subscription_id = "{subscription_id}"\n'
         f'default_region = "{AZURE_DEFAULT_REGION}"\n'
+        f'default_vm_size = "{AZURE_TEST_VM_SIZE}"\n'
         f'resource_group = "{AZURE_DEFAULT_RESOURCE_GROUP}"\n'
         f"auto_shutdown_minutes = {AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
         # The test SSH connection from the CI runner / developer laptop needs
