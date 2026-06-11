@@ -10,11 +10,16 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import emit_docker_build_output
 from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
@@ -26,6 +31,7 @@ from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
 
 _DEFAULT_REGION = "ewr"
 _DEFAULT_PLAN = "vc2-1c-1gb"
@@ -599,3 +605,44 @@ def test_wait_for_cloud_init_marker_raises_on_persistent_connection_error() -> N
             sleeper=clock.sleep,
         )
     assert stub.call_count >= 2
+
+
+# =========================================================================
+# create_host runs pre-create validation before any provider write
+# =========================================================================
+
+
+class _ValidateRaisesProvider(MinimalVpsDockerProvider):
+    """MinimalVpsDockerProvider whose pre-create validation always raises.
+
+    Used to assert that ``create_host`` calls ``_validate_provider_args_for_create``
+    before the first provider write (the SSH key upload), so a failed precondition
+    aborts cleanly with no leaked resources.
+    """
+
+    def _validate_provider_args_for_create(self) -> None:
+        raise MngrError("SENTINEL: pre-create validation ran")
+
+
+def test_create_host_runs_pre_create_validation_before_any_provider_write(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A failing ``_validate_provider_args_for_create`` aborts ``create_host`` before upload_ssh_key.
+
+    This guards the onboarding UX motivating the GCP firewall pre-flight: a
+    provider precondition (e.g. a missing ``mngr gcp prepare`` firewall rule)
+    must fail before any SSH key upload or instance creation, not mid-create
+    under a "Host creation failed, attempting cleanup..." path.
+    ``ExternallyManagedVpsClient`` raises on ``upload_ssh_key``; if validation
+    did NOT run first, we would see that error (a different message) instead of
+    the sentinel.
+    """
+    provider = _ValidateRaisesProvider(
+        name=ProviderInstanceName("test-vps-docker"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsDockerProviderConfig(backend=ProviderBackendName("test-vps-docker")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    with pytest.raises(MngrError, match="SENTINEL: pre-create validation ran"):
+        provider.create_host(HostName("test-host"))
