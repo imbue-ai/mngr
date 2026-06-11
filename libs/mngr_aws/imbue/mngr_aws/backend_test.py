@@ -171,17 +171,22 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 
 
 # =============================================================================
-# Read-path discovery skip is user-visible
+# Read-path discovery skip is user-visible, but the create path stays quiet
 # =============================================================================
 #
 # ``build_provider_instance`` raises ``ProviderEmptyError`` when AWS credentials
 # or AMIs cannot be resolved. The shared discovery code in
 # ``mngr.api.list._construct_and_discover_for_provider`` swallows that
-# exception at ``logger.debug``, so the backend must emit a ``logger.warning``
-# at each raise site for misconfigured providers to remain visible in
-# ``mngr list`` / ``mngr connect``. The tests below pin both halves of the
-# contract: ``ProviderEmptyError`` still raises, AND exactly one warning is
-# emitted naming the provider.
+# exception at ``logger.debug``, so ``build_provider_instance`` emits a
+# ``logger.warning`` for misconfigured providers to remain visible in
+# ``mngr list`` / ``mngr connect`` / ``mngr gc``.
+#
+# The create path must NOT emit that warning: ``mngr create`` resolves the same
+# credentials + AMI first via ``bootstrap_for_host_creation``, which surfaces
+# the error directly so build's warning is never reached. These tests lock in
+# both halves: read paths warn exactly once; the create path raises the same
+# error with no misleading "skipping discovery" line, and succeeds quietly
+# when credentials + AMI resolve.
 
 
 def test_build_provider_instance_warns_and_raises_when_credentials_missing(
@@ -209,9 +214,8 @@ def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     temp_mngr_ctx: MngrContext,
     log_warnings: list[str],
 ) -> None:
+    """Credentials resolve but no AMI does -- the second failure mode still warns."""
     clear_aws_env(monkeypatch)
-    # Make credentials resolve cleanly so we exercise the *second* raise site
-    # (no usable AMI), not the first.
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(
@@ -227,3 +231,68 @@ def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
     assert "aws-test" in log_warnings[0]
     assert "skipping discovery" in log_warnings[0]
+
+
+def test_bootstrap_for_host_creation_raises_provider_empty_without_warning_when_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """The create path surfaces the error directly and emits no discovery warning.
+
+    This is the differentiator from the read paths above: ``mngr create`` calls
+    ``bootstrap_for_host_creation`` before ``build_provider_instance``, so the
+    error is raised here (cleanly, as the create command's top-level failure)
+    and build's read-path warning is never reached.
+    """
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
+    name = ProviderInstanceName("aws-test")
+
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+    assert log_warnings == [], f"create path must not emit a discovery warning, got {log_warnings!r}"
+
+
+def test_bootstrap_for_host_creation_raises_provider_empty_without_warning_when_no_ami_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """The second failure mode (no usable AMI) also surfaces silently on the create path."""
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    config = AwsProviderConfig(
+        backend=AWS_BACKEND_NAME,
+        default_ami_id="",
+        default_ami_by_region={},
+    )
+    name = ProviderInstanceName("aws-test")
+
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+    assert log_warnings == [], f"create path must not emit a discovery warning, got {log_warnings!r}"
+
+
+def test_bootstrap_for_host_creation_succeeds_quietly_when_credentials_and_ami_resolve(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """When credentials + AMI resolve, bootstrap is a quiet no-op (no raise, no warn)."""
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
+
+    AwsProviderBackend.bootstrap_for_host_creation(
+        name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
+    )
+
+    assert log_warnings == []
