@@ -1,1 +1,0 @@
-Fixed the e2e tutorial test fixture (`conftest.py`) that wrote an invalid `settings.local.toml` with a duplicated `type = "claude"` key under `[commands.create]`. The duplicate key caused a TOML parse error ("Cannot overwrite a value") during `mngr create`, breaking agent creation in the e2e tutorial tests.

@@ -25,7 +25,6 @@ the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import threading
 from collections.abc import Callable
@@ -678,10 +677,9 @@ def start_mngr_forward(
     would be dispatched against an empty callback list and silently
     dropped.
     """
-    binary = _resolve_mngr_binary(config.mngr_binary)
     preauth_cookie = secrets.token_urlsafe(_PREAUTH_TOKEN_LENGTH)
     command: list[str] = [
-        binary,
+        config.mngr_binary,
         "forward",
         "--host",
         "127.0.0.1",
@@ -719,17 +717,6 @@ def start_mngr_forward(
     )
     consumer.attach(process)
     return consumer, preauth_cookie
-
-
-def _resolve_mngr_binary(candidate: str) -> str:
-    """Resolve the mngr binary, falling back to PATH lookup if the candidate is just 'mngr'."""
-    if "/" in candidate:
-        return candidate
-    resolved = shutil.which(candidate)
-    if resolved is None:
-        # Best-effort: trust the bare name. Popen will raise if it's missing.
-        return candidate
-    return resolved
 
 
 def _redact_secrets(command: list[str]) -> list[str]:

@@ -1,11 +1,14 @@
 """Tests for git utilities."""
 
+import os
 import subprocess
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
@@ -26,6 +29,7 @@ from imbue.mngr.utils.git_utils import parse_project_name_from_url
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
 from imbue.mngr.utils.git_utils import resolve_project_filter_values
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def test_github_https_url() -> None:
@@ -346,6 +350,63 @@ def test_find_git_worktree_root_returns_root_when_in_git(tmp_path: Path, cg: Con
     assert result == git_dir
 
 
+def _install_failing_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a fake ``git`` on PATH that exits non-zero with an unrelated error.
+
+    Returns a work directory to run in. Used to verify the repo-detection helpers
+    raise on unexpected git failures rather than swallowing them into a
+    misleading "not a git repository" sentinel. PATH is prepended (not replaced)
+    so the fake git wins while other tools (e.g. tmux, used by autouse fixtures)
+    stay resolvable.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    write_executable_script(fake_bin / "git", "#!/bin/bash\necho 'fatal: something went wrong' >&2\nexit 1\n")
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    return work_dir
+
+
+def test_find_git_worktree_root_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_git_worktree_root should raise, not return None, when git fails for a
+    reason other than "not a git repository".
+
+    Only a clean "not a git repository" result means "no worktree root"; any
+    other failure (here, a git that exits non-zero with an unrelated error) must
+    surface loudly rather than be swallowed into None, which would silently drop
+    the project config layer with no explanation.
+    """
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
+
+    with pytest.raises(ProcessError):
+        find_git_worktree_root(work_dir, cg)
+
+
+def test_is_git_repository_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """is_git_repository should raise on an unexpected git failure rather than
+    swallowing it into a misleading False."""
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
+
+    with pytest.raises(ProcessError):
+        is_git_repository(work_dir, cg)
+
+
+def test_find_git_common_dir_raises_on_unexpected_git_failure(
+    tmp_path: Path, cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find_git_common_dir should raise on an unexpected git failure rather than
+    swallowing it into a misleading None."""
+    work_dir = _install_failing_git(tmp_path, monkeypatch)
+
+    with pytest.raises(ProcessError):
+        find_git_common_dir(work_dir, cg)
+
+
 def test_find_git_common_dir_returns_none_when_not_in_git(tmp_path: Path, cg: ConcurrencyGroup) -> None:
     """Test that find_git_common_dir returns None when not in a git repo."""
     non_git_dir = tmp_path / "not-a-repo"
@@ -512,13 +573,21 @@ def test_find_source_repo_of_worktree_returns_path_for_valid_worktree(
 
 
 def test_get_current_branch_returns_branch_name(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
-    """get_current_branch should return the current branch name."""
-    # temp_git_repo is initialized with git init, which creates a default branch
+    """get_current_branch should return the exact name of the checked-out branch."""
+    # Check out a deterministic, uniquely-named branch so we can assert the exact value
+    # rather than just "some non-empty, non-HEAD string" (which would still pass if the
+    # function returned a commit-ish or a remote ref).
+    expected_branch = f"known-branch-{uuid4().hex}"
+    subprocess.run(
+        ["git", "checkout", "-b", expected_branch],
+        cwd=temp_git_repo,
+        capture_output=True,
+        check=True,
+    )
+
     branch = get_current_branch(temp_git_repo, cg)
-    # The branch name depends on git config, but it should be a non-empty string
-    assert isinstance(branch, str)
-    assert len(branch) > 0
-    assert branch != "HEAD"
+
+    assert branch == expected_branch
 
 
 def test_get_current_branch_raises_on_detached_head(temp_git_repo: Path, cg: ConcurrencyGroup) -> None:
