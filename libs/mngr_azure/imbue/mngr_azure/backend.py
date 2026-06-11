@@ -32,10 +32,6 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
-# ARM scope used to eagerly validate that a credential can actually acquire a
-# management token (DefaultAzureCredential authenticates lazily otherwise).
-_AZURE_MANAGEMENT_SCOPE: Final[str] = "https://management.azure.com/.default"
-
 
 def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
     """Build a ``ProviderUnavailableError`` with Azure-specific, actionable help text.
@@ -234,40 +230,6 @@ class AzureProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_start_args_help() -> str:
         return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
-
-    @staticmethod
-    def bootstrap_for_host_creation(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Fail fast on ``mngr create --provider azure`` with curated auth guidance.
-
-        The create-host flow calls this once, before ``build_provider_instance``
-        (the only path that does -- see ``ProviderBackendInterface``). Mirrors the
-        AWS/GCP bootstrap pre-flights: ``DefaultAzureCredential`` authenticates
-        lazily, so without this an unusable credential would otherwise first
-        surface deep inside ``create_instance`` (as a subnet-flavored or generic
-        error). Resolving the subscription and acquiring a management token here
-        turns that into one clear, actionable error up front.
-
-        Creates no backend resources: Azure's one-time infrastructure (resource
-        group / vnet / subnet / NSG) is provisioned by ``mngr azure prepare``, and
-        ``create_instance`` already resolves the subnet first (before any NIC/IP),
-        so prepare-state is checked there with its own ``mngr azure prepare``
-        pointer -- no need to duplicate that network call here.
-        """
-        del mngr_ctx
-        if not isinstance(config, AzureProviderConfig):
-            raise MngrError(f"Expected AzureProviderConfig, got {type(config).__name__}")
-        try:
-            config.get_subscription_id()
-        except ValueError as e:
-            raise _azure_unavailable_error(name, str(e)) from e
-        try:
-            config.get_credential().get_token(_AZURE_MANAGEMENT_SCOPE)
-        except AzureError as e:
-            raise _azure_unavailable_error(name, f"Azure credential is not usable: {e}") from e
 
     @staticmethod
     def build_provider_instance(
