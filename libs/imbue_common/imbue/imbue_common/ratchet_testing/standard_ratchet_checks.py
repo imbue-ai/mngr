@@ -132,7 +132,10 @@ def check_base_exception_catch(source_dir: Path, max_count: int) -> None:
 
 
 def check_builtin_exception_raises(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, max_count)
+    # Test files are excluded: tests legitimately raise built-in exceptions to simulate error
+    # conditions, and the custom-exception requirement only applies to production code.
+    chunks = check_ratchet_rule(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, _SELF_EXCLUSION + TEST_FILE_PATTERNS)
+    assert len(chunks) <= max_count, PREVENT_BUILTIN_EXCEPTION_RAISES.format_failure(chunks)
 
 
 def check_silent_decode_error_catches(source_dir: Path, max_count: int) -> None:

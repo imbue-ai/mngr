@@ -75,6 +75,22 @@
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
     };
 
+    window.landingOpenInNewWindow = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      if (isElectronShell) {
+        // Route through the content relay -> main process, which opens (or
+        // focuses) a dedicated window for this workspace. Same channel the
+        // sidebar's open-in-new arrow uses.
+        window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
+      } else {
+        // Plain browser: no native windows, so open the workspace URL in a
+        // new tab instead.
+        window.open(row.dataset.defaultHref, '_blank', 'noopener');
+      }
+    };
+
     // -- Mind Start / Stop controls --
 
     // Apply a (possibly transient) liveness label to a shutdown-capable row: swap
@@ -265,7 +281,7 @@
         // handle the tight padding + flex layout. Keep this string in
         // sync with Card.jinja's class output when extending the
         // primitive.
-        row.className = 'minds-card flex items-center gap-3 px-4 py-2.5';
+        row.className = 'minds-card flex items-center gap-1.5 px-4 py-2.5';
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
@@ -604,6 +620,12 @@
                   <Icon24 name="restart" />
                 </Button>
               {% endif %}
+              <Button variant="ghost" size="icon"
+                      onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
+                      title="Open in new window"
+                      aria-label="Open workspace in new window">
+                <Icon24 name="arrow-up-right" />
+              </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
                       title="Settings"

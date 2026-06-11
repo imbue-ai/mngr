@@ -51,7 +51,7 @@ TELEGRAM_WEB_URL = "https://web.telegram.org/a/"
 LATCHKEY_DUMP_PATH = Path("/tmp/latchkey-telegram-dump.json")
 
 
-class TelegramCredentialError(Exception):
+class TelegramCredentialError(ValueError):
     """Raised when Telegram credentials cannot be resolved."""
 
     ...
@@ -78,7 +78,7 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
         main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
         if not main_match:
-            raise ValueError("Could not find main bundle in Telegram Web HTML")
+            raise TelegramCredentialError("Could not find main bundle in Telegram Web HTML")
 
         main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
         main_js = urllib.request.urlopen(main_js_url).read().decode()
@@ -98,7 +98,7 @@ def _fetch_telegram_web_api_credentials() -> tuple[int, str]:
             if cred_match:
                 return int(cred_match.group(1)), cred_match.group(2)
 
-        raise ValueError("Credential pattern not found in any bundle chunk")
+        raise TelegramCredentialError("Credential pattern not found in any bundle chunk")
 
     except (urllib.error.URLError, OSError, ValueError) as exc:
         sys.stderr.write(
