@@ -676,6 +676,7 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
         "Window controls",
         "Sidebar items",
         "Accent spine",
+        "Color swatches",
         "Spinner",
         "Buttons",
         "Notices",
