@@ -627,15 +627,7 @@ def _emit_result(
     result_data = {
         "destroyed_agents": [str(n) for n in result.destroyed_agents],
         "stopped_agents": [str(n) for n in result.stopped_agents],
-        "failures": [
-            {
-                "category": failure.category.value,
-                "message": failure.message,
-                "agent_name": str(failure.agent_name) if failure.agent_name is not None else None,
-                "host_id": str(failure.host_id) if failure.host_id is not None else None,
-            }
-            for failure in result.failures
-        ],
+        "failures": [failure.model_dump(mode="json") for failure in result.failures],
         "destroyed_count": len(result.destroyed_agents),
         "stopped_count": len(result.stopped_agents),
         "failure_count": len(result.failures),

@@ -185,15 +185,7 @@ def _output_result(
     result_data = {
         "stopped_agents": list(stopped_agents),
         "count": len(stopped_agents),
-        "failures": [
-            {
-                "category": failure.category.value,
-                "message": failure.message,
-                "agent_name": str(failure.agent_name) if failure.agent_name is not None else None,
-                "host_id": str(failure.host_id) if failure.host_id is not None else None,
-            }
-            for failure in failures
-        ],
+        "failures": [failure.model_dump(mode="json") for failure in failures],
         "failure_count": len(failures),
         "exit_code": exit_code_for_failures(failures),
     }
