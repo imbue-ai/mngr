@@ -180,7 +180,7 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
-| Field generators (waiting_reason) | Y (online) | - | - | - | - |
+| Field generators (waiting_reason) | Y (online) | - | - | - | Y (online; PERMISSIONS + END_OF_TURN) |
 | Installation management | Y | - | Y | - (no version pinning) | partial (mngr-side update notify + opt-in auto-update; no pinning) |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - (app-server variant deferred) |
 
@@ -981,15 +981,16 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   (`allow`/`deny`/`ask`) and opencode **emits no permission-request event** when an `ask`
   policy blocks, so `PERMISSIONS` is **not feasible** without an upstream change. `END_OF_TURN`
   is feasible from the `active` marker.
-- **codex**: implements neither yet, but **both reasons are verified feasible**. Codex has a
-  full Claude-style hooks system (stable); `PermissionRequest` and `PostToolUse` were
-  confirmed firing live against codex 0.139.0 (the marker is set on `PermissionRequest` while
-  the approval dialog is open and cleared on `PostToolUse`), so the same `permissions_waiting`
-  pattern ports directly. Note codex has **no** `PostToolUseFailure` event (claude does), so
-  cleanup is `PostToolUse` + `Stop` only. `END_OF_TURN` follows from the `active` marker
-  (already maintained, OR of `codex_root_active` and a non-empty `codex_subagents/`,
-  recomputed under lock). See `codex-waiting-reason-scoping.md` for the full plan and the
-  live verification trace.
+- **codex**: **implements `waiting_reason`** (both `PERMISSIONS` and `END_OF_TURN`), via
+  `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
+  hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a
+  safety net. `CodexAgent.get_lifecycle_state` also promotes RUNNING -> WAITING while the
+  marker is present, mirroring claude. Note codex has **no** `PostToolUseFailure` event (claude
+  does), so cleanup is `PostToolUse` + `Stop` only. `END_OF_TURN` follows from the `active`
+  marker (OR of `codex_root_active` and a non-empty `codex_subagents/`, recomputed under lock).
+  Verified live against codex 0.139.0 with the exact production inline hook commands. Codex
+  does **not** implement `offline_agent_field_generators`. See
+  `codex-waiting-reason-scoping.md` for the design and the live verification trace.
 
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
 `waiting_reason` field is a plugin-specific embellishment. Surfacing *why* an agent is

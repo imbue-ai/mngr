@@ -95,11 +95,26 @@ If your agent errors on the first message with the "not supported" 400, set `mod
 your account supports (e.g. `"gpt-5.5"`), or authenticate with an API key (which carries the
 full model entitlement).
 
+## Waiting reason
+
+Like `mngr_claude`, codex surfaces *why* an agent is waiting via the
+`claude`-parallel `waiting_reason` listing field (`mngr list`), reading marker
+files without SSH/tmux:
+
+- `PERMISSIONS` -- blocked on a tool-approval dialog. The `PermissionRequest`
+  hook touches a `permissions_waiting` marker (and `get_lifecycle_state` reports
+  WAITING rather than RUNNING while it is present); `PostToolUse` clears it once
+  the approved tool runs, and the root `Stop` clears any stranded marker.
+- `END_OF_TURN` -- idle, turn complete (the `active` marker is absent).
+
+This only applies in supervised mode: with `auto_allow_permissions = true`
+(`approval_policy = "never"`) codex never prompts, so the marker never appears.
+
 ## Not yet implemented
 
 Relative to `mngr_claude`, these are not yet ported (tracked for follow-up): session
-preservation on destroy, deploy/scheduling contributions, field generators (`waiting_reason`),
-the streaming snapshot, and installation/version management.
+preservation on destroy, deploy/scheduling contributions, the streaming snapshot, and
+installation/version management.
 
 ## Future direction: an app-server-backed agent variant
 

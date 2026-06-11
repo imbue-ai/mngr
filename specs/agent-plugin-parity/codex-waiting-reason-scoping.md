@@ -1,13 +1,16 @@
 # Scoping: `waiting_reason` for `mngr_codex`
 
-Status: scoping (not yet implemented). This document scopes porting the
-Claude-style `waiting_reason` listing field to the codex plugin. It is a
-follow-up to the gap recorded in `spec.md` section P and in `README.md`
-("Not yet implemented").
+Status: **implemented** (the plan below was carried out). This document records
+the design and the live verification behind the codex `waiting_reason` field.
 
 The central open question -- does codex's `PermissionRequest` hook fire live --
-has now been **verified** against real codex 0.139.0 (see "Live verification"
-below). Both reasons are confirmed implementable.
+was **verified** against real codex 0.139.0 (see "Live verification" below),
+including a second pass with the exact production inline hook commands. Both
+reasons (`PERMISSIONS`, `END_OF_TURN`) are implemented:
+`PermissionRequest`/`PostToolUse` maintain a `permissions_waiting` marker (inline
+hook commands), the root `Stop` clears any stranded marker,
+`CodexAgent.get_lifecycle_state` promotes RUNNING -> WAITING while it is present,
+and `agent_field_generators` exposes `codex.waiting_reason`.
 
 ## Goal
 

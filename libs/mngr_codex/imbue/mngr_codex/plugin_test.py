@@ -15,13 +15,16 @@ from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_codex.codex_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
@@ -31,6 +34,10 @@ from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
 from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
+from imbue.mngr_codex.plugin import WaitingReason
+from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
+from imbue.mngr_codex.plugin import _waiting_reason
+from imbue.mngr_codex.plugin import agent_field_generators
 from imbue.mngr_codex.plugin import register_agent_type
 
 # =============================================================================
@@ -285,6 +292,8 @@ def test_provision_builds_the_codex_home_tree(codex_agent: CodexAgent, isolated_
     hooks_text = hooks_path.read_text()
     assert SET_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
     assert CLEAR_ACTIVE_MARKER_SCRIPT_NAME in hooks_text
+    # The permission-waiting marker hooks (PermissionRequest/PostToolUse) are wired too.
+    assert PERMISSIONS_WAITING_FILENAME in hooks_text
 
     # auth.json is a symlink to the shared user auth.json. With the shared auth
     # seeded (isolated_codex_home), the symlink resolves to that real file rather
@@ -554,3 +563,74 @@ def test_read_codex_versions_latest_is_none_for_unusable_cache(
     installed, latest = agent._read_codex_versions(agent.host, user_home)
     assert installed == "1.2.3"
     assert latest is None
+
+
+# =============================================================================
+# Lifecycle promotion + waiting_reason field generator
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "base_state, is_blocked, expected",
+    [
+        # Only a RUNNING base is promoted, and only while blocked on a dialog.
+        (AgentLifecycleState.RUNNING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.RUNNING, False, AgentLifecycleState.RUNNING),
+        # Every non-RUNNING base passes through unchanged, blocked or not.
+        (AgentLifecycleState.WAITING, True, AgentLifecycleState.WAITING),
+        (AgentLifecycleState.STOPPED, True, AgentLifecycleState.STOPPED),
+        (AgentLifecycleState.REPLACED, True, AgentLifecycleState.REPLACED),
+        (AgentLifecycleState.DONE, True, AgentLifecycleState.DONE),
+        (
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+            True,
+            AgentLifecycleState.RUNNING_UNKNOWN_AGENT_TYPE,
+        ),
+    ],
+)
+def test_resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
+) -> None:
+    assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
+
+
+def test_get_lifecycle_state_never_reports_running_while_blocked_on_permission(codex_agent: CodexAgent) -> None:
+    """Exercises the override wiring (super() + marker read). With no live tmux pane
+    the base state is non-RUNNING, so the only guarantee here is that a blocked agent
+    is never RUNNING; the promotion rule itself is covered above."""
+    agent_dir = codex_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert codex_agent.get_lifecycle_state() != AgentLifecycleState.RUNNING
+
+
+def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
+    result = agent_field_generators()
+    assert result is not None
+    plugin_name, generators = result
+    assert plugin_name == "codex"
+    assert "waiting_reason" in generators
+    assert callable(generators["waiting_reason"])
+
+
+def test_waiting_reason_returns_permissions_even_when_active(codex_agent: CodexAgent) -> None:
+    """permissions_waiting takes priority: an approval dialog is open even though the
+    active marker (set at turn start) is still present."""
+    agent_dir = codex_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.PERMISSIONS
+
+
+def test_waiting_reason_returns_end_of_turn_when_idle(codex_agent: CodexAgent) -> None:
+    agent_dir = codex_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.END_OF_TURN
+
+
+def test_waiting_reason_returns_none_when_active(codex_agent: CodexAgent) -> None:
+    agent_dir = codex_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / ACTIVE_MARKER_FILENAME).touch()
+    assert _waiting_reason(codex_agent, codex_agent.host) is None
