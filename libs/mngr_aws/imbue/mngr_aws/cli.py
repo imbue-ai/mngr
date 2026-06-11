@@ -35,12 +35,20 @@ def _build_operator_client(
     """Construct an ``AwsVpsClient`` for the ``mngr aws`` operator commands.
 
     Bridges click options into the client constructor: each option falls
-    back to the corresponding ``AwsProviderConfig`` default when not
-    supplied. Pulled out of the click callbacks purely for readability --
-    the defaults-and-fallback construction would otherwise crowd each
-    callback body alongside the credential-error handling. ``prepare`` passes
-    the effective ingress CIDRs; ``cleanup`` passes ``()`` (it only deletes,
-    never authorizes ingress, so the value is unused on that path).
+    back to the corresponding ``AwsProviderConfig`` *class default*
+    (constructed below as ``AwsProviderConfig()``) when not supplied. This
+    deliberately does NOT consult the user's ``[providers.aws]`` block
+    from ``settings.toml`` -- ``mngr aws prepare`` / ``mngr aws cleanup``
+    are operator one-shots that do not load a ``MngrContext``. When the
+    user's provider config diverges from the class defaults (e.g. a
+    different ``default_region`` or ``vpc_id``), pass ``--region`` /
+    ``--vpc-id`` explicitly so the SG lands in the same region/VPC the
+    runtime create path will use. Pulled out of the click callbacks
+    purely for readability -- the defaults-and-fallback construction
+    would otherwise crowd each callback body alongside the
+    credential-error handling. ``prepare`` passes the effective ingress
+    CIDRs; ``cleanup`` passes ``()`` (it only deletes, never authorizes
+    ingress, so the value is unused on that path).
     """
     base = AwsProviderConfig()
     effective_region = region or base.default_region

@@ -171,7 +171,7 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         if self.default_ami_id:
             return self.default_ami_id
         ami = self.default_ami_by_region.get(region)
-        if ami is not None and ami:
+        if ami:
             return ami
         raise ValueError(
             f"No AMI configured for region {region!r}. Set default_ami_id or add an entry to "
