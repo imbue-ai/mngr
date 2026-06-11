@@ -936,6 +936,7 @@ async def amain() -> int:
     }
     env.pop("ELECTRON_RUN_AS_NODE", None)
     logger.info("launching {} --remote-debugging-port={}", MINDS_APP_PATH, cdp_port)
+    launch_start_s = time.monotonic()
     minds_proc = subprocess.Popen(
         [str(MINDS_APP_PATH), f"--remote-debugging-port={cdp_port}"],
         env=env,
@@ -962,7 +963,9 @@ async def amain() -> int:
 
         # 2. Wait for backend, auth via OTC
         base = await asyncio.get_event_loop().run_in_executor(None, wait_backend_url)
-        logger.info("backend up at {}", base)
+        launch_to_ready_s = time.monotonic() - launch_start_s
+        logger.info("backend up at {} (launch->ready={:.1f}s)", base, launch_to_ready_s)
+        logger.info("[ci-metric] launch_to_ready_s={:.1f}", launch_to_ready_s)
         code = await asyncio.get_event_loop().run_in_executor(None, mint_one_time_code)
         # ``win`` here is ``ctx.pages[0]``, which can be the file:// splash
         # depending on Electron startup order. ``location.origin`` on the
@@ -1012,6 +1015,7 @@ async def amain() -> int:
                 "phase_durations_s": w1_result.phase_durations,
                 "total_create_s": w1_result.total_create_s,
             }
+            logger.info("[ci-metric] w1_create_s={:.1f}", w1_result.total_create_s)
 
             # Iter 15 (reload chat persists state): real users hit F5 / Cmd-R
             # in the chat tab. The chat must reattach to the agent's event
@@ -1272,6 +1276,7 @@ async def amain() -> int:
                 "phase_durations_s": w2_result.phase_durations,
                 "total_create_s": w2_result.total_create_s,
             }
+            logger.info("[ci-metric] w2_create_s={:.1f}", w2_result.total_create_s)
             w2_chat_url = w2_result.chat_url
 
             logger.info("=== cross-workspace: ping W1 chat ({}) ===", w1_chat_url)

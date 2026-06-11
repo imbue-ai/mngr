@@ -405,6 +405,16 @@ jobs:
     if: needs.check_should_run.outputs.should_run == 'true' && needs.build.result == 'success'
     runs-on: [self-hosted, macOS, minds-runner]
     timeout-minutes: 40
+    outputs:
+      # Three per-run metrics surfaced to the slack notification. The
+      # e2e prints `[ci-metric] <key>=<float>` lines on stdout as each
+      # value becomes known; the `extract ci-metrics` step greps the
+      # tee'd log and emits whichever values were captured before the
+      # run finished (so a partial failure still surfaces the prefix
+      # it got to).
+      launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
+      w1_create:       ${{ steps.timings.outputs.w1_create }}
+      w2_create:       ${{ steps.timings.outputs.w2_create }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
@@ -670,6 +680,21 @@ jobs:
           mkdir -p /tmp/launch-to-msg-logs
           uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py 2>&1 \
             | tee /tmp/launch-to-msg-logs/e2e-stdout.log
+
+      - name: extract ci-metrics
+        id: timings
+        if: always()
+        # The e2e prints `[ci-metric] <key>=<float>` lines as each value
+        # becomes known: launch_to_ready_s right after backend ready,
+        # w1_create_s after W1's create flow lands DONE, w2_create_s after
+        # W2's. Grepping is robust to partial runs -- a failure mid-W2
+        # still emits launch_to_ready and w1_create.
+        run: |
+          log=/tmp/launch-to-msg-logs/e2e-stdout.log
+          for k in launch_to_ready_s w1_create_s w2_create_s; do
+            v=$(grep -oE "${k}=[0-9.]+" "$log" 2>/dev/null | tail -1 | cut -d= -f2 || true)
+            echo "${k%_s}=${v:-}" >> "$GITHUB_OUTPUT"
+          done
 
       - name: probe agent VM + container state on failure
         if: failure()
@@ -1042,6 +1067,12 @@ jobs:
           MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
           UPDATE_MARKER_RESULT: ${{ needs.update_marker.result }}
           CHECK_SHOULD_RUN_RESULT: ${{ needs.check_should_run.result }}
+          # Per-run metrics extracted from the e2e by launch_to_msg's
+          # `extract ci-metrics` step. Empty strings when launch_to_msg
+          # didn't run (skip path) or didn't reach the relevant point.
+          LAUNCH_TO_READY_S: ${{ needs.launch_to_msg.outputs.launch_to_ready }}
+          W1_CREATE_S: ${{ needs.launch_to_msg.outputs.w1_create }}
+          W2_CREATE_S: ${{ needs.launch_to_msg.outputs.w2_create }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
         run: |
@@ -1091,6 +1122,26 @@ jobs:
           fi
           MNGR_SHORT="${MNGR_SHA:0:12}"
           FCT_SHORT="${FCT_SHA:0:12}"
+          # Format the e2e per-run metrics line. Each metric is the raw
+          # float in seconds; only include the ones we actually got, so a
+          # mid-W2 failure still shows launch->ready and w1.
+          fmt_float_s() {
+            # Strip the decimal, then route through fmt_duration for the
+            # ms/s/m formatting used everywhere else in this message.
+            local f=$1
+            [[ -z "$f" ]] && return
+            local s=${f%%.*}
+            fmt_duration "$s"
+          }
+          metrics_line=""
+          have_any=""
+          for kv in "launch->ready:$LAUNCH_TO_READY_S" "w1:$W1_CREATE_S" "w2:$W2_CREATE_S"; do
+            label="${kv%%:*}"
+            v="${kv##*:}"
+            [[ -z "$v" ]] && continue
+            metrics_line+="${have_any:+  }${label}=$(fmt_float_s "$v")"
+            have_any=1
+          done
           if [[ -n "$failed_jobs" ]]; then
             emoji=":x:"
             verdict="failed in $duration"
@@ -1108,10 +1159,21 @@ jobs:
             verdict="ran in $duration"
             detail=""
           fi
-          text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n<%s|run logs>' \
-            "$emoji" "$verdict" "$detail" \
-            "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
-            "$RUN_URL")
+          # Two-line vs three-line body depending on whether we have
+          # per-run metrics. The skipped path has no metrics; ran/failed
+          # may have any prefix of the three.
+          if [[ -n "$metrics_line" ]]; then
+            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n%s\n<%s|run logs>' \
+              "$emoji" "$verdict" "$detail" \
+              "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
+              "$metrics_line" \
+              "$RUN_URL")
+          else
+            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n<%s|run logs>' \
+              "$emoji" "$verdict" "$detail" \
+              "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
+              "$RUN_URL")
+          fi
           payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "$payload" "$WEBHOOK"
