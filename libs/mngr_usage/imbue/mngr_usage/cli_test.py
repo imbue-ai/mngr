@@ -24,7 +24,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr_usage.api import aggregate_events_to_snapshots
+from imbue.mngr_usage.api import aggregate_process_cumulative
 from imbue.mngr_usage.api import parse_events_from_content
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
@@ -41,6 +41,28 @@ from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
+
+
+def aggregate_events_to_snapshots(
+    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> list[UsageSnapshot]:
+    """Test helper: build a snapshot per source via the process-cumulative strategy.
+
+    These rendering tests all use the Claude source, whose production aggregation
+    is ``aggregate_process_cumulative`` (also the dispatcher's fallback). Calling
+    it directly keeps the rendering assertions focused; the reader-hook dispatch
+    itself is covered by the per-plugin hookimpl tests and the integration tests
+    in this file that invoke the CLI with a real plugin manager.
+    """
+    snapshots: list[UsageSnapshot] = []
+    for source_name, agents_events in events_by_source.items():
+        snapshot = aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return snapshots
 
 
 def _write_event(events_file: Path, event: dict[str, Any]) -> None:

@@ -980,28 +980,6 @@ def _combine_agent_walks(
 
 
 @pure
-def aggregate_events_to_snapshots(
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
-    *,
-    since_seconds: int,
-    now: int,
-) -> list[UsageSnapshot]:
-    """Build a UsageSnapshot per source from already-parsed events.
-
-    ``events_by_source`` is keyed ``source_name -> agent_id -> events``.
-    Per-agent grouping is preserved by the caller so the aggregator can
-    detect Claude Code process boundaries via cost drops within a single
-    agent's stream (cost is per-process and would falsely appear to drop
-    every time we crossed an agent boundary if we'd merged streams).
-    """
-    snapshots: list[UsageSnapshot] = []
-    for source_name, agents_events in events_by_source.items():
-        snapshot = aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)
-        if snapshot is not None:
-            snapshots.append(snapshot)
-    return snapshots
-
-
 # =============================================================================
 # Derived window fields
 # =============================================================================

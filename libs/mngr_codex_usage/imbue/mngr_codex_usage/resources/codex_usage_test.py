@@ -130,3 +130,42 @@ def test_writer_dedups_token_count_lines_across_passes(tmp_path: Path) -> None:
         env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state)},
     )
     assert len(_usage_events(state)) == 1
+
+
+def _append_and_rerun(state: Path, rollout_lines: list[dict[str, Any]]) -> None:
+    """Append more rollout lines and run another single pass over the same state dir."""
+    raw = state / "logs" / "codex_transcript" / "events.jsonl"
+    with raw.open("a") as handle:
+        for line in rollout_lines:
+            handle.write(json.dumps(line) + "\n")
+    result = subprocess.run(
+        ["bash", str(_SCRIPT), "--single-pass"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state)},
+    )
+    assert result.returncode == 0, f"writer failed:\n{result.stdout}\n{result.stderr}"
+
+
+def test_writer_processes_only_new_lines_and_carries_session_model_across_passes(tmp_path: Path) -> None:
+    # Pass 1: meta + turn_context + one token_count.
+    state = _run(
+        tmp_path,
+        [
+            _session_meta("sess-uuid"),
+            _turn_context("gpt-5.2-codex"),
+            _token_count({"input_tokens": 10, "cached_input_tokens": 2, "output_tokens": 3}),
+        ],
+    )
+    assert len(_usage_events(state)) == 1
+    # Pass 2: append ONLY a later token_count (no meta/turn_context). The cursor
+    # must carry session_id + model from the persisted state so the new event
+    # still resolves them.
+    _append_and_rerun(state, [_token_count({"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 30})])
+    events = _usage_events(state)
+    assert len(events) == 2
+    latest = events[-1]
+    assert latest["session_id"] == "sess-uuid"
+    assert latest["model"] == "openai/gpt-5.2-codex"
+    assert latest["tokens"] == {"input": 80, "output": 30, "cache_read": 20, "cache_creation": None}

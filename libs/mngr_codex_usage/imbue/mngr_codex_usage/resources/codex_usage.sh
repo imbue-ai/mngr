@@ -31,13 +31,17 @@ set -euo pipefail
 AGENT_DATA_DIR="${MNGR_AGENT_STATE_DIR:?MNGR_AGENT_STATE_DIR must be set}"
 INPUT_FILE="$AGENT_DATA_DIR/logs/codex_transcript/events.jsonl"
 OUTPUT_FILE="$AGENT_DATA_DIR/events/codex/usage/events.jsonl"
+# Cursor state (lines already consumed + last-seen session/model) so each poll
+# is O(new lines), not O(whole transcript). Mirrors stream_transcript.sh's
+# per-rollout offset approach.
+STATE_FILE="$AGENT_DATA_DIR/plugin/codex/.usage_cursor"
 POLL_INTERVAL=5
 
 emit_new_usage_events() {
     if [ ! -f "$INPUT_FILE" ]; then
         return
     fi
-    _INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" python3 << 'EMIT_SCRIPT' 2>>"$AGENT_DATA_DIR/events/logs/codex_usage_stderr.log" || true
+    _INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" _STATE_FILE="$STATE_FILE" python3 << 'EMIT_SCRIPT' 2>>"$AGENT_DATA_DIR/events/logs/codex_usage_stderr.log" || true
 import json
 import os
 
@@ -98,30 +102,55 @@ def _rate_limits(raw_rate_limits):
     return windows or None
 
 
+def _load_state(state_file):
+    """Return (offset_bytes, line_no, session_id, model) from the cursor file (defaults if absent)."""
+    try:
+        with open(state_file) as handle:
+            state = json.load(handle)
+        return (
+            int(state.get("offset", 0)),
+            int(state.get("line_no", 0)),
+            state.get("session_id"),
+            state.get("model"),
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return 0, 0, None, None
+
+
+def _save_state(state_file, offset, line_no, session_id, model):
+    os.makedirs(os.path.dirname(state_file), exist_ok=True)
+    with open(state_file, "w") as handle:
+        json.dump({"offset": offset, "line_no": line_no, "session_id": session_id, "model": model}, handle)
+
+
 def emit():
     input_file = os.environ["_INPUT_FILE"]
     output_file = os.environ["_OUTPUT_FILE"]
-    existing_ids = set()
-    if os.path.exists(output_file):
-        with open(output_file) as handle:
-            for line in handle:
-                try:
-                    existing_ids.add(json.loads(line).get("event_id"))
-                except json.JSONDecodeError:
-                    continue
+    state_file = os.environ["_STATE_FILE"]
     if not os.path.exists(input_file):
         return
 
+    offset, line_no, session_id, model = _load_state(state_file)
+    # The transcript is append-only; a file shorter than our saved offset means it
+    # rotated/truncated, so reprocess from the top rather than silently skipping a
+    # fresh rollout's events.
+    if os.path.getsize(input_file) < offset:
+        offset, line_no, session_id, model = 0, 0, None, None
+
+    # Seek to the saved byte offset and read only the new tail -- O(new bytes) per
+    # poll, not O(whole transcript). session_meta / turn_context are persisted in
+    # the state, so a token_count in the new tail still resolves its session/model
+    # even though those lines were consumed in an earlier pass.
     new_events = []
-    session_id = None
-    model = None
     with open(input_file) as handle:
-        for line_index, raw in enumerate(handle, start=1):
-            raw = raw.strip()
-            if not raw:
+        handle.seek(offset)
+        for raw in handle:
+            line_no += 1
+            stripped = raw.strip()
+            if not stripped:
                 continue
             try:
-                obj = json.loads(raw)
+                obj = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
             payload = obj.get("payload")
@@ -138,19 +167,20 @@ def emit():
                 continue
             if not (isinstance(payload, dict) and payload.get("type") == "token_count"):
                 continue
-            event_id = "line-%d-usage" % line_index
-            if event_id in existing_ids or not session_id:
+            if not session_id:
                 continue
             info = payload.get("info")
             tokens = _tokens_from_total_usage(info.get("total_token_usage")) if isinstance(info, dict) else None
-            raw_rate_limits = payload.get("rate_limits")
-            rate_limits = _rate_limits(raw_rate_limits)
+            rate_limits = _rate_limits(payload.get("rate_limits"))
             if tokens is None and rate_limits is None:
                 continue
             event = {
                 "source": _SOURCE,
                 "type": "cost_snapshot",
-                "event_id": event_id,
+                # event_id need only be present; the reader dedups by freshest-per-session,
+                # so a re-emitted token_count (after a crash before the cursor advanced)
+                # is harmless -- it carries the same cumulative reading.
+                "event_id": "line-%d-usage" % line_no,
                 "timestamp": obj.get("timestamp"),
                 "session_id": session_id,
                 # No reported cost -- the reader estimates from tokens + model.
@@ -163,13 +193,16 @@ def emit():
             if rate_limits is not None:
                 event["rate_limits"] = rate_limits
             new_events.append(event)
+        new_offset = handle.tell()
 
-    if not new_events:
-        return
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "a") as out:
-        for event in new_events:
-            out.write(json.dumps(event, separators=(",", ":")) + "\n")
+    # Append events BEFORE advancing the cursor: a crash in between re-emits (the
+    # reader collapses duplicates), but never drops an event.
+    if new_events:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "a") as out:
+            for event in new_events:
+                out.write(json.dumps(event, separators=(",", ":")) + "\n")
+    _save_state(state_file, new_offset, line_no, session_id, model)
 
 
 emit()
