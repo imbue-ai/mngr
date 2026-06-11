@@ -35,8 +35,9 @@ target_path = "/code/mngr"
 # Unlike modal/docker, the AWS backend runs `docker build` on the remote VPS and
 # rewrites `--file=` relative to the uploaded build context, so the keyframe
 # `.mngr/dev/build/` tarball shape doesn't apply. Instead we use the real-source-tree
-# shape: context `.` (the worktree) is cloned + overlaid with uncommitted changes by
-# the mngr_vps_docker build flow, and the Dockerfile's `COPY . /code/mngr/` consumes it.
+# shape: context `.` (your checkout -- primary or linked worktree) is cloned + overlaid
+# with uncommitted changes by the mngr_vps_docker build flow, and the Dockerfile's
+# `COPY . /code/mngr/` consumes it.
 #
 # The shared [providers.aws] block (region/plan/builder/auto_shutdown) is committed below
 # in the providers section; only the per-developer allowed_ssh_cidrs lives in the
