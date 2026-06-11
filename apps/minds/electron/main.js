@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -18,6 +18,25 @@ if (app.isPackaged) {
   });
 } else {
   console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
+
+// Surface the git SHA the build was cut from in the standard macOS About
+// panel, appended to ToDesktop's buildId so you can map a shipped binary
+// back to a commit. Gated on app.isPackaged because dev runs do not
+// regenerate build-info.json and would otherwise show a stale SHA.
+if (app.isPackaged) {
+  try {
+    const { gitSha } = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
+    const pkg = require('../package.json');
+    const shortSha = gitSha.slice(0, 8);
+    app.setAboutPanelOptions({
+      applicationName: pkg.productName,
+      applicationVersion: pkg.version,
+      version: pkg.tdBuildId ? `${pkg.tdBuildId} · ${shortSha}` : shortSha,
+    });
+  } catch (err) {
+    console.warn(`[about-panel] Could not load build-info.json: ${err.message}`);
+  }
 }
 
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
@@ -441,8 +460,10 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools for dev-time inspection on both the chrome
-  // (titlebar) view and the workspace content view.
+  // Auto-open DevTools on both views when MINDS_OPEN_DEVTOOLS=1 is set.
+  // The built-in cmd+opt+I shortcut crashes on BaseWindow + WebContentsViews
+  // (Electron's menu handler assumes BrowserWindow), so this env var is
+  // the dev-time escape hatch.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
     chromeView.webContents.once('did-finish-load', () => {
       if (!chromeView.webContents.isDestroyed()) {
@@ -2699,6 +2720,47 @@ ipcMain.on('open-request-modal', (event, requestId) => {
 
 ipcMain.on('close-modal', (event) => {
   closeModal(getBundleFromEvent(event));
+});
+
+// Settings-page color picker: optimistic chrome-titlebar paint for the
+// bundle the picker is in, so the user sees the new color immediately
+// without waiting for the POST -> mngr label subprocess -> SSE
+// round-trip. The actual persistence still goes through the
+// /api/workspaces/<id>/color POST endpoint; this just shortcuts the
+// local-window UI feedback. Only content-relay-preload.js can emit
+// this channel, and it validates the agent id + accent shape there;
+// we re-validate here defensively and only forward to the *sending
+// bundle's* chrome view so a stray sender can't paint another
+// window's titlebar.
+ipcMain.on('preview-workspace-accent', (event, agentId, accent, accentFg) => {
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
+  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  bundle.chromeView.webContents.send('chrome-event', {
+    type: 'workspace_accent_preview',
+    agent_id: agentId,
+    accent,
+    accent_fg: accentFg,
+  });
+});
+
+// Create-form picker freeform preview: no workspace exists yet, so this
+// paints the chrome CSS variables directly. The next navigation event
+// (create succeeds -> ``current-workspace-changed`` fires for the new
+// workspace; or cancel -> back to last-workspace via the existing
+// fallback) repaints the bar through the regular accent path.
+ipcMain.on('preview-freeform-accent', (event, accent, accentFg) => {
+  if (typeof accent !== 'string' || !/^#[0-9a-f]{6}$/.test(accent)) return;
+  if (typeof accentFg !== 'string' || !/^(?:0 0 0|255 255 255)$/.test(accentFg)) return;
+  const bundle = getBundleFromEvent(event);
+  if (!bundle || !bundle.chromeView || bundle.chromeView.webContents.isDestroyed()) return;
+  bundle.chromeView.webContents.send('chrome-event', {
+    type: 'freeform_accent_preview',
+    accent,
+    accent_fg: accentFg,
+  });
 });
 
 // Native file/directory picker for the file-sharing permission dialog.

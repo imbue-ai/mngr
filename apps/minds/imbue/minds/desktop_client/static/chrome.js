@@ -11,11 +11,11 @@
 
   // -- Per-agent accent color ------------------------------------------------
   //
-  // The shared `window.mindsAccent.get(agentId, cb)` helper (loaded from
-  // /_static/workspace_accent.js) mirrors workspace_accent() in templates.py.
-  // The server also attaches `accent` to each workspace dict over SSE so the
-  // client doesn't need to compute in the common case.
-  function getAccent(agentId, cb) { window.mindsAccent.get(agentId, cb); }
+  // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
+  // (#rrggbb) and ``accent_fg`` (RGB triple for the contrasting titlebar
+  // foreground). The chrome caches both per agent id (see
+  // ``rememberWorkspaceAccents`` below) so accent application is a
+  // synchronous lookup. No client-side hash or hex math.
 
   // -- Navigation adapter ---------------------------------------------------
   function navigateContent(url) {
@@ -102,7 +102,8 @@
   //
   // The titlebar background and contrasting foreground are driven by three
   // CSS variables set on the document root:
-  //   --workspace-accent  the OKLCH color (also consumed by sidebar spines etc.)
+  //   --workspace-accent  the workspace's #rrggbb accent (also consumed by
+  //                       sidebar spines etc.)
   //   --titlebar-bg       the same color, used by the titlebar background
   //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
   //                       contrasting foreground; titlebar-* utility classes
@@ -120,37 +121,54 @@
   // must never write to ``currentTitleAgentId`` or trigger recovery, or a
   // stuck agent in another window will hijack this window's content view.
   var currentTitleAgentId = null;
-  // Tracks the in-flight accent target so the async ``getAccent`` callback
-  // can guard against landing after a newer accent application has already
-  // been kicked off. (``pickForeground`` is synchronous and applied inline,
-  // so it doesn't need a token.) Independent of ``currentTitleAgentId`` so
-  // the accent-only call paths (bootstrap + ``onLastWorkspaceAgentIdChanged``)
-  // can apply colors without claiming to represent the displayed workspace.
-  var pendingAccentAgentId = null;
+  // Per-agent {accent, accent_fg} map populated from each SSE
+  // ``workspaces`` payload. ``applyTitleAccent`` reads from this cache
+  // so accent application is synchronous.
+  // Workspaces missing from the cache (e.g. an agentId for which no SSE
+  // tick has arrived yet) leave the accent unset on this call and get
+  // painted by ``renderWorkspaces`` on the next tick.
+  var accentByAgentId = {};
+  // Tracks the agentId whose accent the chrome *wants* painted, regardless
+  // of whether the SSE cache has caught up yet. Bootstrap and the
+  // ``onLastWorkspaceAgentIdChanged`` path both set this even when the SSE
+  // workspaces payload hasn't arrived yet (cold start, freshly-created
+  // workspace); the next ``workspaces`` tick replays the paint with the
+  // now-populated cache. Independent of ``currentTitleAgentId`` so the
+  // accent-only call paths (bootstrap / last-workspace IPC) can update
+  // the titlebar without claiming to represent the displayed workspace.
+  var lastRequestedAccentAgentId = null;
+  function rememberWorkspaceAccents(workspaces) {
+    if (!workspaces) return;
+    workspaces.forEach(function (w) {
+      if (!w || !w.id) return;
+      accentByAgentId[w.id] = {
+        accent: typeof w.accent === 'string' ? w.accent : null,
+        fg: typeof w.accent_fg === 'string' ? w.accent_fg : null,
+      };
+    });
+  }
+
   function applyTitleAccent(agentId) {
+    lastRequestedAccentAgentId = agentId || null;
     if (!agentId) {
-      pendingAccentAgentId = null;
       document.documentElement.style.removeProperty('--workspace-accent');
       document.documentElement.style.removeProperty('--titlebar-bg');
       document.documentElement.style.removeProperty('--titlebar-fg');
       return;
     }
-    pendingAccentAgentId = agentId;
-    // ``pickForeground`` is synchronous (the threshold depends only on the
-    // accent's lightness, which is constant for today's hash-derived
-    // accents), so we apply ``--titlebar-fg`` immediately. The background
-    // color resolves asynchronously via SHA-256; the in-flight token
-    // (``pendingAccentAgentId``) guards against a stale callback landing
-    // after a newer ``applyTitleAccent`` has been kicked off.
-    document.documentElement.style.setProperty(
-      '--titlebar-fg',
-      window.mindsAccent.pickForeground(),
-    );
-    getAccent(agentId, function (c) {
-      if (pendingAccentAgentId !== agentId) return;
-      document.documentElement.style.setProperty('--workspace-accent', c);
-      document.documentElement.style.setProperty('--titlebar-bg', c);
-    });
+    var cached = accentByAgentId[agentId];
+    if (!cached || !cached.accent) {
+      // No SSE entry for this agent yet (cold start, workspace just
+      // created, etc.). Leave the bar at whatever it was; the next
+      // ``workspaces`` tick will replay this call via
+      // ``lastRequestedAccentAgentId`` and paint it.
+      return;
+    }
+    document.documentElement.style.setProperty('--workspace-accent', cached.accent);
+    document.documentElement.style.setProperty('--titlebar-bg', cached.accent);
+    if (cached.fg) {
+      document.documentElement.style.setProperty('--titlebar-fg', cached.fg);
+    }
   }
   // Update the "displayed workspace" tracker and trigger the recovery
   // redirect when warranted. Called from the displayed-workspace sources
@@ -473,9 +491,70 @@
 
   function handleChromeEvent(data) {
     try {
+      if (data.type === 'freeform_accent_preview') {
+        // Create-form preview: no workspace yet, so there's no agentId
+        // to key the cache by. Paint the CSS variables directly and
+        // drop the SSE replay target so a background ``workspaces``
+        // tick (a liveness flip or rename in any workspace) doesn't
+        // repaint the previous workspace's accent over the preview
+        // while the user is still on the create form. The next
+        // navigation event (``current-workspace-changed`` for the new
+        // workspace on submit, or the last-workspace re-query on
+        // cancel) re-establishes the regular accent path.
+        if (data.accent) {
+          lastRequestedAccentAgentId = null;
+          document.documentElement.style.setProperty('--workspace-accent', data.accent);
+          document.documentElement.style.setProperty('--titlebar-bg', data.accent);
+          if (data.accent_fg) {
+            document.documentElement.style.setProperty('--titlebar-fg', data.accent_fg);
+          }
+        }
+        return;
+      }
+      if (data.type === 'workspace_accent_preview') {
+        // Optimistic single-workspace cache update + repaint, emitted by
+        // main.js when the settings page in this bundle picks a color.
+        // Lets the chrome titlebar update instantly without waiting for
+        // the POST -> mngr label -> SSE round-trip. The cross-machine
+        // sync still goes through the normal SSE path; this is just a
+        // local-window shortcut.
+        //
+        // Unconditional paint: the settings page sends this with its
+        // own agent id (the workspace whose color was just picked), so
+        // painting the bar for that workspace is always the right call
+        // in this window. Main has already validated the agent-id +
+        // hex shape and only fires this for the *sending bundle's*
+        // chrome view, so a stray sender can't paint someone else's
+        // titlebar. Do not gate this on ``lastRequestedAccentAgentId``:
+        // /workspace/<id>/settings doesn't fire
+        // ``current-workspace-changed``, so the persisted last-workspace
+        // id may point at a different workspace than the one whose
+        // settings page is open.
+        if (data.agent_id && data.accent) {
+          accentByAgentId[data.agent_id] = {
+            accent: data.accent,
+            fg: typeof data.accent_fg === 'string' ? data.accent_fg : null,
+          };
+          applyTitleAccent(data.agent_id);
+        }
+        return;
+      }
       if (data.type === 'workspaces') {
         lastWorkspaces = data.workspaces || [];
+        rememberWorkspaceAccents(lastWorkspaces);
         renderWorkspaces(lastWorkspaces);
+        // Replay the most recent ``applyTitleAccent`` call now that the
+        // cache has fresh data. Catches two cases:
+        //   1. Cold start: bootstrap set ``lastRequestedAccentAgentId``
+        //      before any SSE tick; this tick fills the cache and paints.
+        //   2. Settings-page color save: the settings POST updated the
+        //      resolver snapshot which triggered this tick; the cached
+        //      hex is now the newly-picked one, so the chrome repaints.
+        // Independent of ``currentTitleAgentId`` because the settings
+        // page (and ``lastWorkspace``-driven Home views) don't update
+        // it -- the persisted last-opened workspace is what drives the
+        // accent.
+        if (lastRequestedAccentAgentId) applyTitleAccent(lastRequestedAccentAgentId);
       }
       if (data.type === 'auth_status') updateAuthUI(data);
       if (data.type === 'requests') updateRequestsBadge(data.count);

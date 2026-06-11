@@ -1,19 +1,20 @@
-// Dev styleguide accent-hue picker: slide the hue, watch every
-// --workspace-accent-driven swatch on the page update live.
+// Dev styleguide accent picker: choose a hex, watch every
+// --workspace-accent-driven swatch on the page update live. Mirrors the
+// real model (accents are user-picked #rrggbb hexes stored as an mngr
+// color label), minus the persistence.
 //
 // The accent swatch itself picks up the new color via its
 // .accent-swatch class -> var(--workspace-accent), so we only need to
 // mutate the CSS variable + the readout, not the swatch directly.
 (function () {
-  var hue = document.getElementById('styleguide-accent-hue');
+  var colorInput = document.getElementById('styleguide-accent-color');
   var value = document.getElementById('styleguide-accent-value');
-  if (!hue || !value) return;
+  if (!colorInput || !value) return;
   function apply() {
-    var color = 'oklch(85% 0.08 ' + hue.value + ')';
-    document.documentElement.style.setProperty('--workspace-accent', color);
-    value.textContent = color;
+    document.documentElement.style.setProperty('--workspace-accent', colorInput.value);
+    value.textContent = colorInput.value;
   }
-  hue.addEventListener('input', apply);
+  colorInput.addEventListener('input', apply);
   apply();
 })();
 
@@ -27,9 +28,9 @@
   var panel = document.getElementById('styleguide-sidebar-rows');
   if (!panel || !window.mindsSidebarRow) return;
   var samples = [
-    { id: 'agent-styleguide-current', name: 'current-workspace', accent: 'oklch(72% 0.12 230)' },
-    { id: 'agent-styleguide-other', name: 'another-workspace', accent: 'oklch(72% 0.12 70)' },
-    { id: 'agent-styleguide-stale', name: 'stale-workspace', accent: 'oklch(72% 0.12 320)', is_stale: true },
+    { id: 'agent-styleguide-current', name: 'current-workspace', accent: '#0b292b' },
+    { id: 'agent-styleguide-other', name: 'another-workspace', accent: '#9fbbd3' },
+    { id: 'agent-styleguide-stale', name: 'stale-workspace', accent: '#cecd0c', is_stale: true },
   ];
   panel.appendChild(window.mindsSidebarRow.buildRow(samples[0], { isCurrent: true, withOpenNew: true }));
   panel.appendChild(window.mindsSidebarRow.buildRow(samples[1], { withOpenNew: true }));
