@@ -1,1 +1,0 @@
-Regenerated the `mngr kanpan` CLI reference doc to document the new `--format json` / `--format jsonl` output (the command now prints a board snapshot for programmatic use instead of ignoring the flag).
