@@ -53,9 +53,13 @@ IMDS — no separate endpoint needed.
 3. **Idle-stop trigger = self-stopping instance + IAM role** (the faithful Modal analog). An
    outer-host watcher calls `ec2 stop-instances` on itself via IMDS-provided role credentials.
    Not control-plane-only (which would require a cron running `mngr gc` and has no Modal analog).
-4. **Backstop = stop, never auto-terminate.** Nothing tears the instance down automatically;
-   stopped EBS volumes persist (and accrue storage cost) until a human runs `mngr destroy`. The
-   existing `auto_shutdown_minutes` pytest leak-safety net stays (release tests only).
+4. **Backstop = stop on idle, auto-terminate only after a long retention (matching Modal).** Idle
+   → stop (volume preserved, resumable). GC acts **non-destructively**: it *stops* a reachable
+   idle/agent-less AWS host rather than terminating it (GC option (ii) below). A host that then
+   stays stopped/idle beyond a retention window (default ~7 days, mirroring Modal's
+   `destroyed_host_persisted_seconds`) is **auto-terminated** to reclaim the volume — the analog of
+   Modal's age-gated `gc_snapshots` cleanup. Manual `mngr destroy` terminates immediately. The
+   `auto_shutdown_minutes` pytest leak-safety net stays (release tests only).
 5. **Offline metadata = EC2 tags only** (host-level) for now. Paused hosts list with correct
    name/state/idle info; their agents reappear only after resume. S3-backed full parity (agents
    listable while paused, like Modal) is noted as a possible follow-up, not built now.
@@ -116,22 +120,24 @@ requires this to stop happening for AWS. Note GC is invocation-driven (`mngr gc`
 cleanup) and skips any host it cannot reach (a stopped instance), so the only window where GC could
 terminate is between an agent exiting and the idle watcher stopping the instance.
 
-Two candidate mechanisms (decision pending):
+**Chosen: (ii) GC stops instead of destroys, plus an age-gated auto-terminate.** This mirrors
+Modal most closely (its idle teardown is non-destructive; a separate age-gated pass does eventual
+cleanup).
 
-- **(i) AWS-local opt-out (zero core change).** `AwsProvider` overrides
-  `get_min_online_host_age_seconds` to effectively never let GC destroy a reachable AWS host.
-  Simplest and keeps all changes in `mngr_aws`. Tradeoff: GC also stops reaping genuinely-dead
-  AWS hosts (FAILED/CRASHED), which would then require manual `mngr destroy`.
-- **(ii) GC stops instead of destroys for stoppable providers (small gated core change).** At the
-  one `provider.destroy_host(host)` call site in `_gc_single_host`, if the provider opts in (a new
-  default-False `should_gc_stop_instead_of_destroy`), call `stop_host` instead. More robust (idle/
-  orphaned hosts get stopped — cost-safe and resumable — rather than terminated) but touches core
-  `mngr`. Other providers keep destroying.
+- **GC stop (non-destructive backstop).** At the single `provider.destroy_host(host)` call site in
+  `_gc_single_host`, when the provider opts in via a new default-False hook (e.g.
+  `should_gc_stop_instead_of_destroy`), call `stop_host` instead of `destroy_host`. AWS opts in;
+  every other provider keeps destroying (unchanged). This makes GC stop a reachable idle/agent-less
+  AWS host (cost-safe, volume kept, resumable) instead of terminating it.
+- **Age-gated auto-terminate (~7 days).** A GC pass terminates a host that has stayed stopped/idle
+  beyond the retention window (default mirrors `destroyed_host_persisted_seconds` ≈ 7 days),
+  reclaiming the volume. Because a stopped EC2 instance is unreachable, this decision must run off
+  metadata that survives the stop (EC2 tags / `DescribeInstances` launch+stop timestamps), not an
+  SSH read. Exact mechanism is Phase-3 design work; it is the analog of Modal's `gc_snapshots`.
 
-Manual `mngr destroy` remains the only path that terminates the instance and deletes the volume in
-either case. Keep the `auto_shutdown_minutes` + `InstanceInitiatedShutdownBehavior=terminate`
-mechanism exactly as-is — it is independent of the API-driven stop and is the release-test leak
-backstop.
+Manual `mngr destroy` terminates immediately. Keep the `auto_shutdown_minutes` +
+`InstanceInitiatedShutdownBehavior=terminate` mechanism exactly as-is — it is independent of the
+API-driven stop and is the release-test leak backstop.
 
 ### Phase 4 — Offline metadata via EC2 tags
 
