@@ -23,6 +23,18 @@ mngr kanpan --exclude 'state == "DONE"'
 
 When any filter is active, the header displays a `[filtered]` indicator.
 
+## JSON output
+
+Pass `--format json` (or `--format jsonl`) to skip the TUI and print a single board snapshot to stdout instead. This is a read-only one-shot intended for scripting: it fetches the board once (reusing the on-disk field cache, without writing it back) and exits. The same `--include`/`--exclude` filters apply.
+
+`--format json` emits one object with `columns`, `sections`, `errors`, and `fetch_time_seconds`:
+
+- `columns` lists the displayed columns in board order (mirroring `column_order`). Headers are the plain column titles.
+- `sections` groups agents the same way the board does, in `section_order`, omitting empty sections. Each entry carries both `cells` (the pre-rendered text/url/color shown on the board) and `fields` (the structured underlying values -- e.g. the PR number as an integer -- so consumers don't have to parse display text).
+- Sections you exclude from a custom `section_order` are omitted from the output too, matching what the board shows.
+
+`--format jsonl` emits one agent record per line (each the same shape as an `entries` element, in board order), followed by one `{"event": "error", "message": "..."}` line per fetch error. Use it for streaming/line-oriented consumers; the column and section-order metadata that `json` carries is omitted.
+
 ## Data sources
 
 Kanpan uses pluggable data sources to fetch per-agent data. Each data source produces typed fields that become columns on the board. Built-in data sources:
