@@ -19,8 +19,9 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 # family outer (Debian 12 "bookworm" for Vultr/OVH/AWS; Ubuntu 22.04 "jammy" for
 # GCP, whose images ship cloud-init where the stock GCE Debian images do not).
 # Confirm a new core against the live repo with ``apt-cache madison docker-ce``.
-# ``PINNED_DOCKER_APT_VERSION`` is the fully-rendered Debian 12 string, kept for
-# callers that target Debian directly (e.g. ``mngr_lima``).
+# ``PINNED_DOCKER_APT_VERSION`` is the fully-rendered Debian 12 apt version
+# string, exported for any caller or test that needs the exact Debian value
+# rather than the runtime-derived suffix.
 PINNED_DOCKER_VERSION: Final[str] = "29.5.1"
 _PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.5.1-1"
 PINNED_DOCKER_APT_VERSION: Final[str] = f"{_PINNED_DOCKER_APT_VERSION_CORE}~debian.12~bookworm"

@@ -52,7 +52,7 @@ def generate_cloud_init_user_data(
     ``authorized_user_public_key``, when provided, is written straight into
     root's authorized_keys by cloud-init itself, independent of the
     copy-from-default-user step above. On GCE the provider's SSH key is
-    provisioned into the ``debian`` user's authorized_keys asynchronously by the
+    provisioned into the ``ubuntu`` user's authorized_keys asynchronously by the
     google guest agent, which races the cloud-init ``runcmd`` copy and can leave
     root without the key; injecting it directly removes that dependency. Harmless
     and idempotent for the other cloud-init backends (the key also lands in root
@@ -66,8 +66,9 @@ def generate_cloud_init_user_data(
         )
     root_key_block = ""
     if authorized_user_public_key is not None:
-        # Append directly to root's authorized_keys (created by the mkdir below),
-        # quoting the key so its embedded spaces/comment survive the shell.
+        # Append directly to root's authorized_keys (the /root/.ssh dir is made
+        # by the mkdir runcmd entry rendered just above this block), quoting the
+        # key so its embedded spaces/comment survive the shell.
         root_key_block = (
             f"  - printf '%s\\n' {shlex.quote(authorized_user_public_key)} >> /root/.ssh/authorized_keys\n"
         )
