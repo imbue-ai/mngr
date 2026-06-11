@@ -59,9 +59,11 @@ def _atomic_write_text(path: Path, content: str, mode: int) -> None:
             os.fsync(f.fileno())
         tmp_path.chmod(mode)
         os.replace(tmp_path, path)
-    except BaseException:
+    finally:
+        # On success ``os.replace`` already consumed the temp file, so this is a
+        # no-op; on any failure (including KeyboardInterrupt) it removes the
+        # leftover temp file. Cleanup on every exit path without catching.
         tmp_path.unlink(missing_ok=True)
-        raise
 
 
 def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Path]:
