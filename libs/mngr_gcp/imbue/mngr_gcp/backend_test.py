@@ -11,6 +11,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
 from imbue.mngr_gcp.backend import GcpProvider
 from imbue.mngr_gcp.backend import GcpProviderBackend
+from imbue.mngr_gcp.backend import ParsedGcpBuildOptions
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
 
@@ -208,6 +209,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
     # region holds the zone for GCP (base threads it to create_instance).
     assert parsed.region == "us-west1-a"
     assert parsed.plan == "e2-small"
+    assert parsed.spot is False
     assert parsed.git_depth is None
     assert parsed.docker_build_args == ()
 
@@ -218,15 +220,25 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
         [
             "--gcp-zone=us-west1-b",
             "--gcp-machine-type=e2-medium",
+            "--gcp-spot",
             "--git-depth=1",
             "--file=Dockerfile",
             ".",
         ]
     )
+    assert isinstance(parsed, ParsedGcpBuildOptions)
     assert parsed.region == "us-west1-b"
     assert parsed.plan == "e2-medium"
+    assert parsed.spot is True
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_parse_build_args_rejects_gcp_spot_with_value(temp_mngr_ctx: MngrContext) -> None:
+    """``--gcp-spot`` is presence-only; passing a value (e.g. ``--gcp-spot=true``) raises."""
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    with pytest.raises(MngrError, match="presence-only flag"):
+        provider._parse_build_args(["--gcp-spot=true"])
 
 
 def test_parse_build_args_rejects_unknown_gcp_flag(temp_mngr_ctx: MngrContext) -> None:

@@ -1,4 +1,5 @@
 import os
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Final
@@ -25,9 +26,11 @@ from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
+from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import extract_single_value_arg
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
@@ -59,6 +62,28 @@ def _resolve_credentials_and_project_or_unavailable(
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
         raise ProviderUnavailableError(name, str(e)) from e
     return credentials, project_id
+
+
+class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
+    """``ParsedVpsBuildOptions`` extended with the GCP-only ``--gcp-spot`` knob.
+
+    Returned by ``GcpProvider._parse_build_args`` and consumed by
+    ``GcpProvider._create_vps_instance`` so the Spot opt-in flows through to
+    ``GcpVpsClient.create_instance`` without touching the shared
+    ``VpsClientInterface`` (mirrors ``ParsedAwsBuildOptions``).
+    """
+
+    spot: bool = Field(
+        default=False,
+        description=(
+            "Per-host opt-in for GCE Spot capacity, from the presence-only ``--gcp-spot`` build arg. "
+            "When True, ``GcpVpsClient.create_instance`` launches the VM with "
+            "``scheduling.provisioning_model=SPOT`` (and ``instance_termination_action=DELETE`` so a "
+            "preempted Spot VM is deleted, not left stopped). GCE may preempt Spot VMs at any time "
+            "with ~30s notice; opt-in only -- safe for ephemeral / experimental agents, risky for "
+            "long-lived ones."
+        ),
+    )
 
 
 class GcpProvider(VpsDockerProvider):
@@ -123,12 +148,13 @@ class GcpProvider(VpsDockerProvider):
         # extra GET is cheap and is what lets the failure happen early and clean.
         self.gcp_client.resolve_firewall()
 
-    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedGcpBuildOptions:
         """Parse GCP-prefixed build args.
 
         Accepts ``--gcp-zone=ZONE`` (GCE VMs are zonal, so the placement knob is
         a zone, not a region; it must equal the provider's bound zone), the
-        machine type via ``--gcp-machine-type=TYPE``, and the shared
+        machine type via ``--gcp-machine-type=TYPE``, ``--gcp-spot``
+        (presence-only, opts the host onto GCE Spot capacity), and the shared
         ``--git-depth=N``. Composed from the shared low-level helpers (rather
         than the ``parse_vps_build_args`` convenience, which hardcodes a
         ``--<prefix>-region=`` flag) so the flag is named ``--gcp-zone`` to
@@ -140,18 +166,53 @@ class GcpProvider(VpsDockerProvider):
         args = list(build_args or ())
         zone, args = extract_single_value_arg(args, "--gcp-zone=")
         machine_type, args = extract_single_value_arg(args, "--gcp-machine-type=")
+        spot, args = extract_presence_flag(args, "--gcp-spot")
         git_depth, args = extract_git_depth(args)
-        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--git-depth=")
+        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--gcp-spot", "--git-depth=")
         docker_build_args: list[str] = []
         for arg in args:
             raise_if_vps_migration_arg(arg)
             raise_if_unknown_provider_arg(arg, "gcp", valid_args)
             docker_build_args.append(arg)
-        return ParsedVpsBuildOptions(
+        return ParsedGcpBuildOptions(
             region=zone or self.gcp_config.default_zone,
             plan=machine_type or self.gcp_config.default_machine_type,
+            spot=spot,
             git_depth=git_depth,
             docker_build_args=tuple(docker_build_args),
+        )
+
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """GCP override: thread the per-host ``--gcp-spot`` opt-in into ``GcpVpsClient.create_instance``.
+
+        Calls through ``self.gcp_client`` (the concrete typed GCP client) rather
+        than the shared ``self.vps_client`` interface so the GCP-only ``spot``
+        kwarg is statically visible, mirroring ``AwsProvider._create_vps_instance``.
+        """
+        match parsed:
+            case ParsedGcpBuildOptions(spot=spot):
+                pass
+            case _:
+                raise MngrError(
+                    f"GcpProvider._create_vps_instance expected ParsedGcpBuildOptions, "
+                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
+                    "non-GCP shape; _parse_build_args must return ParsedGcpBuildOptions."
+                )
+        return self.gcp_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+            spot=spot,
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -192,6 +253,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             "  --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal\n"
             "                           the provider's configured zone; default: us-west1-a)\n"
             "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
+            "  --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).\n"
             "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
             "\n"
             "The GCE VM image is taken from the provider config (default_source_image);\n"
