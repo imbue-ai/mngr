@@ -57,7 +57,19 @@ class AwsVpsClient(VpsClientInterface):
 
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
     region: str = Field(frozen=True, description="AWS region this client targets")
-    ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
+    ami_id: str = Field(
+        default="",
+        frozen=True,
+        description=(
+            "Fallback AMI ID used when ``create_instance`` is invoked without an "
+            "``ami_id_override``. The production code path always supplies an override "
+            "(``AwsProvider._create_vps_instance`` resolves the AMI just-in-time from "
+            "``AwsProviderConfig.get_ami_id_for_region``), so this defaults to empty "
+            "and ``create_instance`` raises if neither source supplies one. Kept as a "
+            "field so tests can pin a known AMI without going through the resolution "
+            "path."
+        ),
+    )
     security_group: SecurityGroupSpec = Field(
         default_factory=AutoCreateSecurityGroup,
         description=(
@@ -368,6 +380,15 @@ class AwsVpsClient(VpsClientInterface):
             )
 
         effective_ami_id = ami_id_override or self.ami_id
+        if not effective_ami_id:
+            raise VpsApiError(
+                400,
+                "AwsVpsClient.create_instance called without a usable AMI: neither "
+                "ami_id_override nor self.ami_id is set. The production path resolves "
+                "the AMI in AwsProvider._create_vps_instance and always supplies an "
+                "override; if you see this from a test, pass ami_id_override=... or "
+                "construct the client with ami_id=... explicitly.",
+            )
 
         sg_id = self.resolve_security_group_id()
 
