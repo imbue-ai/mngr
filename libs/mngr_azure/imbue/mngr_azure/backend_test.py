@@ -56,6 +56,50 @@ def test_build_provider_instance_raises_provider_unavailable_without_subscriptio
         )
 
 
+def test_unavailable_error_help_text_is_azure_curated_not_start_docker(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The unresolvable-provider error must give cloud-auth guidance, not 'start Docker'.
+
+    The generic ProviderUnavailableError help text tells the user to start Docker,
+    which is wrong advice for an Azure subscription/credential failure.
+    """
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    config = AzureProviderConfig()
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        AzureProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("azure"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+    help_text = exc_info.value.user_help_text
+    assert help_text is not None
+    assert "Docker" not in help_text
+    assert "AZURE_SUBSCRIPTION_ID" in help_text
+    assert "az login" in help_text
+    assert "mngr azure prepare" in help_text
+
+
+def test_bootstrap_for_host_creation_fails_fast_without_subscription(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The create-path pre-flight refuses up front (curated error) when no subscription resolves.
+
+    Without this, an unresolvable subscription would only surface deeper in the
+    create flow. bootstrap_for_host_creation is the create path's first check, so
+    `mngr create --provider azure` fails immediately with actionable guidance.
+    """
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    config = AzureProviderConfig()
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        AzureProviderBackend.bootstrap_for_host_creation(
+            name=ProviderInstanceName("azure"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+    help_text = exc_info.value.user_help_text
+    assert help_text is not None
+    assert "az login" in help_text
+
+
 def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=None)
     with pytest.raises(MngrError, match="auto_shutdown_minutes"):

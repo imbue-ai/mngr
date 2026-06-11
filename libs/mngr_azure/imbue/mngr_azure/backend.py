@@ -32,6 +32,30 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
+# ARM scope used to eagerly validate that a credential can actually acquire a
+# management token (DefaultAzureCredential authenticates lazily otherwise).
+_AZURE_MANAGEMENT_SCOPE: Final[str] = "https://management.azure.com/.default"
+
+
+def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
+    """Build a ``ProviderUnavailableError`` with Azure-specific, actionable help text.
+
+    The generic ``ProviderUnavailableError`` help text tells the user to "start
+    Docker", which is wrong advice for a cloud auth/subscription failure. Azure's
+    "unavailable" causes are a missing subscription, an unusable credential, or
+    skipped one-time setup -- so we curate the guidance accordingly.
+    """
+    help_text = (
+        "Azure could not be reached. Check, in order:\n"
+        "  - subscription: set AZURE_SUBSCRIPTION_ID, set `subscription_id` in [providers.azure], "
+        "or run `az account set --subscription <id>`;\n"
+        "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
+        "AZURE_CLIENT_SECRET for a service principal);\n"
+        "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
+        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+    )
+    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+
 
 class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     """``ParsedVpsBuildOptions`` extended with the Azure-only spot knob.
@@ -212,6 +236,40 @@ class AzureProviderBackend(ProviderBackendInterface):
         return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
 
     @staticmethod
+    def bootstrap_for_host_creation(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Fail fast on ``mngr create --provider azure`` with curated auth guidance.
+
+        The create-host flow calls this once, before ``build_provider_instance``
+        (the only path that does -- see ``ProviderBackendInterface``). Mirrors the
+        AWS/GCP bootstrap pre-flights: ``DefaultAzureCredential`` authenticates
+        lazily, so without this an unusable credential would otherwise first
+        surface deep inside ``create_instance`` (as a subnet-flavored or generic
+        error). Resolving the subscription and acquiring a management token here
+        turns that into one clear, actionable error up front.
+
+        Creates no backend resources: Azure's one-time infrastructure (resource
+        group / vnet / subnet / NSG) is provisioned by ``mngr azure prepare``, and
+        ``create_instance`` already resolves the subnet first (before any NIC/IP),
+        so prepare-state is checked there with its own ``mngr azure prepare``
+        pointer -- no need to duplicate that network call here.
+        """
+        del mngr_ctx
+        if not isinstance(config, AzureProviderConfig):
+            raise MngrError(f"Expected AzureProviderConfig, got {type(config).__name__}")
+        try:
+            config.get_subscription_id()
+        except ValueError as e:
+            raise _azure_unavailable_error(name, str(e)) from e
+        try:
+            config.get_credential().get_token(_AZURE_MANAGEMENT_SCOPE)
+        except AzureError as e:
+            raise _azure_unavailable_error(name, f"Azure credential is not usable: {e}") from e
+
+    @staticmethod
     def build_provider_instance(
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
@@ -230,14 +288,14 @@ class AzureProviderBackend(ProviderBackendInterface):
             # NOT ProviderEmptyError: read paths (mngr list) must surface a warning
             # rather than silently dropping the provider and its agents from the
             # listing. Host-creation paths surface this same error to the user.
-            raise ProviderUnavailableError(name, str(e)) from e
+            raise _azure_unavailable_error(name, str(e)) from e
 
         try:
             credential = config.get_credential()
         except AzureError as e:
             # Same rationale: a credential we couldn't obtain leaves Azure's state
             # unknown, so this is unavailable (warned), not empty (silently skipped).
-            raise ProviderUnavailableError(name, str(e)) from e
+            raise _azure_unavailable_error(name, str(e)) from e
 
         azure_client = AzureVpsClient(
             credential=credential,
