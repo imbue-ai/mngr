@@ -1317,33 +1317,32 @@ class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
         raise ProviderUnavailableError(self.name, "backend offline")
 
 
-@pytest.mark.allow_warnings(match=r"Skipping provider .* during discovery \(unavailable\)")
-def test_discover_provider_hosts_and_agents_skips_unavailable_provider(
+def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """An unreachable backend is skipped during discovery, not fatal.
+    """The per-provider worker propagates ProviderUnavailableError unwrapped.
 
-    Regression test: a single offline provider (e.g. a Docker daemon that is
-    down) must not abort discovery for every other provider, so commands like
-    `mngr rsync <local-agent>` keep working. The provider contributes no hosts
-    and no exception escapes.
+    Availability is a multi-provider policy decision, so this per-provider unit
+    does not swallow the error -- it lets it propagate (and, crucially, does NOT
+    wrap it in ProviderDiscoveryError) so the orchestrator can distinguish
+    "unavailable -> skip" from a genuine discovery failure. The skip-and-continue
+    behavior itself is covered at the orchestrator level by
+    test_discover_hosts_and_agents_skips_unavailable_provider_and_continues.
     """
     provider = _UnavailableDiscoveryProviderInstance(
         name=ProviderInstanceName("offline-provider"),
         host_dir=temp_host_dir,
         mngr_ctx=temp_mngr_ctx,
     )
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
 
-    _discover_provider_hosts_and_agents(
-        provider,
-        agents_by_host,
-        include_destroyed=True,
-        results_lock=Lock(),
-        cg=temp_mngr_ctx.concurrency_group,
-    )
-
-    assert agents_by_host == {}
+    with pytest.raises(ProviderUnavailableError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
 
 
 def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
@@ -1368,6 +1367,54 @@ def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
             results_lock=Lock(),
             cg=temp_mngr_ctx.concurrency_group,
         )
+
+
+def _make_unavailable_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one offline provider."""
+    provider_config = ProviderInstanceConfig(backend=_UNAVAILABLE_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("offline-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+@pytest.mark.allow_warnings(match=r"Skipping provider .* during discovery \(unavailable\)")
+def test_discover_hosts_and_agents_skips_unavailable_provider_and_continues(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An unreachable provider is skipped and discovery continues with the rest.
+
+    Regression test for the volume-data-loss fix: when one provider's backend is
+    down (e.g. a Docker daemon), the multi-provider orchestrator must skip just
+    that provider and still return the hosts of the providers that *are*
+    available, so commands like `mngr rsync <local-agent>` keep working. No
+    exception escapes, and the offline provider contributes no hosts.
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
+
+        agents_by_host, _ = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=None,
+            agent_identifiers=None,
+            include_destroyed=True,
+            reset_caches=False,
+        )
+
+        provider_names = {host_ref.provider_name for host_ref in agents_by_host}
+        assert ProviderInstanceName("offline-provider") not in provider_names
+        assert ProviderInstanceName("local") in provider_names
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
 
 
 class _RaisingDetailProviderInstance(MockProviderInstance):
@@ -1490,6 +1537,47 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_UNAVAILABLE_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-unavailable-discovery-backend")
+
+
+class _UnavailableDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _UnavailableDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is unreachable during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+        is_for_host_creation: bool = False,
+    ) -> ProviderInstanceInterface:
+        del is_for_host_creation
+        return _UnavailableDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
