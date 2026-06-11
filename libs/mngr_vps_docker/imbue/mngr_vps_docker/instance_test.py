@@ -15,6 +15,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps_docker.container_setup import emit_docker_build_output
 from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
@@ -397,32 +398,55 @@ def test_redact_secret_env_no_op_when_no_match() -> None:
     assert redact_secret_env(cmd) == "docker build ."
 
 
-def test_is_retryable_rsync_error_true_on_known_pattern() -> None:
-    """Connection-class rsync stderr strings are flagged retryable."""
-    # Pick from the documented retry patterns; any one of them suffices.
-    assert is_retryable_rsync_error("rsync: Connection reset by peer")
+# One representative stderr string per entry in _RETRYABLE_RSYNC_PATTERNS, so every
+# retryable branch is exercised (a dropped pattern flips exactly one case to failing).
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "rsync: write error: Broken pipe (32)",
+        "rsync: Connection reset by peer",
+        "ssh: connect to host 1.2.3.4 port 22: Connection refused",
+        "rsync: [sender] failed: Connection timed out",
+        "client_loop: send disconnect: Broken pipe",
+        "ssh: connect to host 1.2.3.4 port 22: No route",
+        "kex_exchange_identification: read: Connection reset by peer",
+        "connect to address 1.2.3.4: Network is unreachable",
+    ],
+)
+def test_is_retryable_rsync_error_true_for_each_connection_class_pattern(stderr: str) -> None:
+    """Every connection-class pattern in _RETRYABLE_RSYNC_PATTERNS must be flagged retryable."""
+    assert is_retryable_rsync_error(stderr)
 
 
-def test_is_retryable_rsync_error_false_on_unknown_pattern() -> None:
-    """Unrelated rsync stderr should not be retried."""
-    assert not is_retryable_rsync_error("rsync: permission denied")
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "rsync: permission denied (13)",
+        "unexpected EOF in tar header",
+        "",
+    ],
+)
+def test_is_retryable_rsync_error_false_for_non_connection_errors(stderr: str) -> None:
+    """Application-level rsync failures (and empty stderr) must NOT be retried."""
+    assert not is_retryable_rsync_error(stderr)
 
 
-def test_is_retryable_rsync_error_false_on_empty_string() -> None:
-    """No stderr -> nothing to match -> not retryable."""
-    assert not is_retryable_rsync_error("")
+def test_emit_docker_build_output_logs_stripped_nonempty_line_at_build_level() -> None:
+    """A non-empty line is logged exactly once at BUILD level, with surrounding whitespace stripped."""
+    with capture_loguru(level="BUILD") as log_output:
+        emit_docker_build_output("  Step 1/5 : FROM debian:bookworm-slim  ")
+    # The BUILD sink uses a "{message}" format, so the captured text is just the
+    # rendered (stripped) line followed by loguru's trailing newline.
+    assert log_output.getvalue() == "Step 1/5 : FROM debian:bookworm-slim\n"
 
 
-def test_emit_docker_build_output_handles_nonempty_line() -> None:
-    """Non-empty lines are logged; the call should not raise."""
-    emit_docker_build_output("Step 1/5 : FROM debian:bookworm-slim")
-
-
-def test_emit_docker_build_output_skips_whitespace_only() -> None:
-    """Whitespace-only / empty lines are silently dropped."""
-    emit_docker_build_output("")
-    emit_docker_build_output("   ")
-    emit_docker_build_output("\n")
+def test_emit_docker_build_output_drops_whitespace_only_lines() -> None:
+    """Whitespace-only / empty lines must produce no log output at all."""
+    with capture_loguru(level="BUILD") as log_output:
+        emit_docker_build_output("")
+        emit_docker_build_output("   ")
+        emit_docker_build_output("\n")
+    assert log_output.getvalue() == ""
 
 
 # =============================================================================
