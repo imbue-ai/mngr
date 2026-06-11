@@ -1122,6 +1122,11 @@ jobs:
           fi
           MNGR_SHORT="${MNGR_SHA:0:12}"
           FCT_SHORT="${FCT_SHA:0:12}"
+          # Slack mrkdwn hyperlink syntax: <URL|display>. Wrap the short
+          # SHAs so each is a clickable link to the corresponding github
+          # commit page -- one click in Slack jumps you to the source.
+          MNGR_LINK="<https://github.com/imbue-ai/mngr/commit/$MNGR_SHA|$MNGR_SHORT>"
+          FCT_LINK="<https://github.com/imbue-ai/forever-claude-template/commit/$FCT_SHA|$FCT_SHORT>"
           # Format the e2e per-run metrics line. Each metric is the raw
           # float in seconds; only include the ones we actually got, so a
           # mid-W2 failure still shows launch->ready and w1.
@@ -1163,15 +1168,15 @@ jobs:
           # per-run metrics. The skipped path has no metrics; ran/failed
           # may have any prefix of the three.
           if [[ -n "$metrics_line" ]]; then
-            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n%s\n<%s|run logs>' \
+            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=%s  fct=%s  trigger=`%s`\n%s\n<%s|run logs>' \
               "$emoji" "$verdict" "$detail" \
-              "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
+              "$MNGR_LINK" "$FCT_LINK" "$TRIGGER" \
               "$metrics_line" \
               "$RUN_URL")
           else
-            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n<%s|run logs>' \
+            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=%s  fct=%s  trigger=`%s`\n<%s|run logs>' \
               "$emoji" "$verdict" "$detail" \
-              "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
+              "$MNGR_LINK" "$FCT_LINK" "$TRIGGER" \
               "$RUN_URL")
           fi
           payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
