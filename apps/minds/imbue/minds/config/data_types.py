@@ -20,6 +20,7 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
+# `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
 
@@ -327,9 +328,12 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
     """Extract agent records from the first JSON object line of ``mngr list --format json`` stdout.
 
     Raises ``MalformedMngrOutputError`` when the first non-empty line is not a
-    JSON object. stdout is reserved for JSON data; if log lines or SSH errors
+    JSON object, when stdout is empty/blank, or when the parsed object lacks an
+    ``agents`` key. stdout is reserved for JSON data; if log lines or SSH errors
     are leaking onto it, fix the underlying process rather than papering over
-    it here.
+    it here. ``mngr list --format json`` always serializes its result set as a
+    ``{"agents": [...]}`` object (zero agents is ``{"agents": []}``), so empty
+    stdout means the command produced no output at all rather than "no agents".
     """
     for line in stdout.splitlines():
         stripped = line.strip()
@@ -340,5 +344,7 @@ def parse_agents_from_mngr_output(stdout: str) -> list[dict[str, object]]:
                 f"Expected JSON object on first non-empty mngr output line, got: {stripped[:200]!r}"
             )
         data = json.loads(stripped)
+        if "agents" not in data:
+            raise MalformedMngrOutputError(f"mngr output JSON object missing 'agents' key: {stripped[:200]!r}")
         return data["agents"]
-    return []
+    raise MalformedMngrOutputError("Expected a JSON object in mngr output, but stdout was empty/blank")

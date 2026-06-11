@@ -91,6 +91,8 @@ _ICONS_24: Final[Mapping[str, str]] = {
     "forward": '<polyline points="9 6 15 12 9 18"/>',
     "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "play": '<polygon points="6 4 20 12 6 20 6 4"/>',
     "settings": (
         '<circle cx="12" cy="12" r="3"/>'
         '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
@@ -193,6 +195,8 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -219,6 +223,7 @@ def render_landing_page(
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
     agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
@@ -229,6 +234,8 @@ def render_landing_page(
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
+        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
     )
 
 
@@ -237,7 +244,10 @@ def render_landing_page(
 # ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
-_FALLBACK_BRANCH: Final[str] = ""
+# Pin to an annotated FCT tag so a shipped binary clones the exact FCT
+# snapshot it was verified against. Bump to a newer tag only after
+# re-verifying launch-to-msg CI against (this binary, the new tag).
+FALLBACK_BRANCH: Final[str] = "v0.3.0"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -312,7 +322,7 @@ def render_create_form(
     effective_name = (
         host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
     )
-    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
+    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)

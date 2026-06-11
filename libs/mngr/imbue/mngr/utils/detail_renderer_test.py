@@ -429,11 +429,22 @@ def test_render_test_detail_embeds_cast_as_base64_data_url(tmp_path: Path) -> No
 
 
 def test_render_test_detail_cast_player_init_script_is_present(tmp_path: Path) -> None:
-    """A DOMContentLoaded script initialising AsciinemaPlayer is emitted."""
+    """A DOMContentLoaded script initialising AsciinemaPlayer for the right div is emitted.
+
+    The init call must target the player div by its actual id ("player-0", matching the
+    div emitted for the first cast file) so the player attaches to the correct element.
+    A bug that pointed the create() call at the wrong element id would slip past a bare
+    "AsciinemaPlayer.create(" substring check, so we assert the wiring explicitly.
+    """
     (tmp_path / "rec.cast").write_bytes(b'{"version": 2}\n')
     result = render_test_detail(tmp_path)
-    assert "AsciinemaPlayer.create(" in result
-    assert "DOMContentLoaded" in result
+    # The create() call wires to the same div id rendered for the first (only) cast file.
+    assert 'id="player-0" class="cast-player"' in result
+    assert 'AsciinemaPlayer.create("data:text/plain;base64' in result
+    assert 'document.getElementById("player-0")' in result
+    # The create() call must run inside the DOMContentLoaded handler, not at top level.
+    handler_start = result.index("DOMContentLoaded")
+    assert result.index("AsciinemaPlayer.create(") > handler_start
 
 
 def test_render_test_detail_no_script_when_no_cast_files(tmp_path: Path) -> None:

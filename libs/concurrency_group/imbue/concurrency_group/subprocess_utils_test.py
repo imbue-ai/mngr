@@ -1,4 +1,5 @@
 import gc
+import signal
 import subprocess
 import time
 import warnings
@@ -16,6 +17,7 @@ from imbue.concurrency_group.subprocess_utils import PartialOutputContainer
 from imbue.concurrency_group.subprocess_utils import _is_timeout
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
+from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 
 
 def test_check_raises_process_timeout_error_when_timed_out() -> None:
@@ -218,32 +220,22 @@ def test_is_timeout_returns_false_when_time_has_not_passed() -> None:
     assert _is_timeout(future_time) is False
 
 
-def test_shutdown_popen_terminates_process_with_sigterm() -> None:
+def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() -> None:
+    # A process that dies cleanly on SIGTERM must be reaped within the shutdown timeout, and
+    # _shutdown_popen must return its signal-based returncode (negative SIGTERM on POSIX) rather than
+    # escalating to SIGKILL. Asserting the exact signal (not merely "not None") pins down that the
+    # graceful-terminate path was taken; the SIGKILL-escalation path is covered separately by
+    # test_shutdown_popen_raises_when_process_cannot_be_killed below.
     process = subprocess.Popen(
-        ["sleep", "30"],
+        ["sleep", LONG_SLEEP_SECONDS],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
-    returncode = _shutdown_popen(process, "sleep 30", shutdown_timeout_sec=5.0)
+    returncode = _shutdown_popen(process, f"sleep {LONG_SLEEP_SECONDS}", shutdown_timeout_sec=5.0)
 
-    assert returncode is not None
-    assert process.poll() is not None
-
-
-def test_shutdown_popen_returns_returncode_after_terminate() -> None:
-    # Use a simple sleep command that terminates cleanly on SIGTERM
-    # Short sleep time to avoid hanging if shutdown fails
-    process = subprocess.Popen(
-        ["sleep", "5"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    returncode = _shutdown_popen(process, "sleep command", shutdown_timeout_sec=2.0)
-
-    assert returncode is not None
-    assert process.poll() is not None
+    assert returncode == -signal.SIGTERM
+    assert process.poll() == -signal.SIGTERM
 
 
 class _UnkillablePopen:

@@ -78,15 +78,23 @@ class GcCliOptions(CommonCliOptions):
 @click.pass_context
 def gc(ctx: click.Context, **kwargs) -> None:
     try:
-        _gc_impl(ctx, **kwargs)
+        any_provider_skipped = _gc_impl(ctx, **kwargs)
     except AbortError as e:
         # AbortError means we should exit immediately with an error
         logger.error("Aborted: {}", e.message)
         ctx.exit(1)
+        return
+    if any_provider_skipped:
+        ctx.exit(1)
 
 
-def _gc_impl(ctx: click.Context, **kwargs) -> None:
-    """Implementation of gc command (extracted for exception handling)."""
+def _gc_impl(ctx: click.Context, **kwargs) -> bool:
+    """Implementation of gc command (extracted for exception handling).
+
+    Returns True if any explicitly-requested provider was skipped because it
+    was empty or unavailable, signalling that the CLI should exit non-zero
+    after the rest of the work has run.
+    """
     # Setup command context (config, logging, output options)
     # This loads the config, applies defaults, and creates the final options
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -95,14 +103,19 @@ def _gc_impl(ctx: click.Context, **kwargs) -> None:
         command_class=GcCliOptions,
     )
 
-    _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
+    return _run_gc_iteration(mngr_ctx=mngr_ctx, opts=opts, output_opts=output_opts)
 
 
-def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> None:
-    """Run a single gc iteration."""
+def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: OutputOptions) -> bool:
+    """Run a single gc iteration.
+
+    Returns True if any explicitly-requested provider was skipped (empty or
+    unavailable). Other per-resource errors are reported in the summary but
+    do not change the CLI exit code.
+    """
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    providers = _get_selected_providers(mngr_ctx=mngr_ctx, opts=opts)
+    providers, skipped_provider_errors = _get_selected_providers(mngr_ctx=mngr_ctx, opts=opts)
 
     # Always GC all resource types
     resource_types = GcResourceTypes(
@@ -124,6 +137,10 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
         on_resource_type_start=lambda rt: _emit_resource_type_start(rt, output_opts.output_format),
     )
 
+    # Surface explicitly-requested providers that were skipped (empty/unavailable)
+    # as errors so the user sees them in the summary and the CLI exits non-zero.
+    result.errors.extend(skipped_provider_errors)
+
     # Emit destroyed events for CLI output
     for work_dir in result.work_dirs_destroyed:
         _emit_destroyed("work_dir", work_dir, output_opts.output_format, opts.dry_run)
@@ -142,6 +159,8 @@ def _run_gc_iteration(mngr_ctx: MngrContext, opts: GcCliOptions, output_opts: Ou
 
     # Emit final summary
     _emit_final_summary(result=result, output_format=output_opts.output_format, dry_run=opts.dry_run)
+
+    return bool(skipped_provider_errors)
 
 
 _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
@@ -326,30 +345,40 @@ def _emit_jsonl_summary(result: GcResult, dry_run: bool) -> None:
     emit_event("summary", event, OutputFormat.JSONL)
 
 
-def _get_selected_providers(mngr_ctx: MngrContext, opts: GcCliOptions) -> list[ProviderInstanceInterface]:
-    """Get providers based on CLI options."""
+def _get_selected_providers(
+    mngr_ctx: MngrContext, opts: GcCliOptions
+) -> tuple[list[ProviderInstanceInterface], list[str]]:
+    """Get providers based on CLI options.
+
+    Returns the resolved providers and a list of error messages for any
+    explicitly-requested providers that were skipped (empty or unavailable).
+    Skipping lets gc still run against the providers that did resolve;
+    surfacing the errors lets the caller exit non-zero so the user sees that
+    their explicit request was not fully honored.
+    """
     if opts.all_providers:
-        return list(get_all_provider_instances(mngr_ctx))
+        return list(get_all_provider_instances(mngr_ctx)), []
 
     if opts.provider:
         providers = []
+        skipped_errors: list[str] = []
         for provider_name in opts.provider:
             name = ProviderInstanceName(provider_name)
-            # Skip providers that report themselves empty (e.g. the Modal
-            # per-user environment doesn't exist yet) or unreachable. gc is a
-            # read/cleanup path: an empty provider has nothing to collect, so
-            # erroring out would make `mngr gc --provider modal` fail on a fresh
-            # setup. This mirrors get_all_provider_instances, which skips these
-            # same providers for the unfiltered `mngr gc` case.
+            # An explicitly-requested provider that is empty (e.g. a fresh
+            # Modal per-user environment with nothing to collect) or
+            # unavailable is still recorded as an error: the user asked us to
+            # gc it specifically and we did not. Continue so the remaining
+            # providers' work still happens; the CLI exits non-zero at the end.
             try:
                 providers.append(get_provider_instance(name, mngr_ctx))
             except ProviderEmptyError as e:
                 logger.debug("Skipping provider {} (empty -- nothing to gc): {}", name, e)
             except ProviderUnavailableError as e:
-                logger.debug("Skipping provider {} (unavailable): {}", name, e)
-        return providers
+                logger.error("Skipping provider {} (unavailable): {}", name, e)
+                skipped_errors.append(f"provider {name} is unavailable: {e}")
+        return providers, skipped_errors
 
-    return list(get_all_provider_instances(mngr_ctx))
+    return list(get_all_provider_instances(mngr_ctx)), []
 
 
 # Register help metadata for git-style help formatting
