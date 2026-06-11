@@ -1,3 +1,0 @@
-The GitHub data source now pages through PR search results instead of fetching only the first 100. Boards tracking more than 100 agents previously hit GitHub's hard per-page cap and silently rendered "Create PR" for the overflow agents; kanpan now follows the search cursor and fetches every page (up to GitHub's ~1000-result ceiling, beyond which it surfaces an explicit error).
-
-Each page request is also retried with exponential backoff when GitHub returns a transient failure (HTTP 403 secondary rate limit, 5xx, or an unparseable body). A failure on a later page keeps the pages already fetched and retries only the failing page, so earlier results are never re-fetched.

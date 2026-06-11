@@ -17,8 +17,6 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -30,6 +28,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.agent_setup import ensure_minds_schema_in_existing_host_files
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -98,17 +98,13 @@ _SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
 }
 
 
-def _build_slack_services_catalog(
-    gateway_client: FakeLatchkeyGatewayClient | None = None,
-) -> ServicesCatalog:
+def _build_slack_services_catalog() -> ServicesCatalog:
     """Return a :class:`ServicesCatalog` pre-seeded with the Slack fixture.
 
-    Uses the gateway client's ``available_services_payload`` hook so we
-    don't depend on the real ``services.json`` data file.
+    Uses an explicit catalog payload so we don't depend on the real
+    ``services.json`` data file.
     """
-    client = gateway_client if gateway_client is not None else build_fake_gateway_client()
-    client.available_services_payload = dict(_SLACK_AVAILABLE_PAYLOAD)
-    return ServicesCatalog(gateway_client=client)
+    return ServicesCatalog.from_catalog_payload(_SLACK_AVAILABLE_PAYLOAD)
 
 
 _DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
@@ -736,7 +732,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
@@ -770,7 +766,7 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
@@ -833,7 +829,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=handler.latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=handler.mngr_message_sender,
         gateway_client=fake_client,
     )
@@ -881,7 +877,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
