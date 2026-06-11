@@ -159,7 +159,7 @@ For `mngr aws prepare` (one-time admin setup; in addition to the above for conve
 ```
 ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress,
 iam:CreateRole, iam:PutRolePolicy, iam:CreateInstanceProfile,
-iam:AddRoleToInstanceProfile, iam:GetInstanceProfile
+iam:AddRoleToInstanceProfile
 ```
 
 For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeInstances` / `DescribeSecurityGroups`):
