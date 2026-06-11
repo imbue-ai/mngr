@@ -17,7 +17,6 @@ from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
 from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.discover import discovery_scope_for_agent_and_host
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.list import AgentErrorInfo
@@ -60,7 +59,6 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -1041,34 +1039,6 @@ def test_all_identifiers_found_returns_true_for_empty_identifiers() -> None:
     assert _all_identifiers_found([], {})
 
 
-def test_discovery_scope_for_agent_and_host_derives_hints() -> None:
-    """The scope helper maps an (agent, host) reference to discovery hints.
-
-    This is the single derivation that discover_by_address, rsync, git, and the
-    events host path all share -- it lets a command query only the provider(s)
-    that could hold the target instead of every provider, so an unrelated
-    unavailable provider is never touched. A provider qualifier scopes by
-    provider; an agent scopes by identifier (resolved via the event stream);
-    with neither, it returns (None, None) and a full scan is needed.
-    """
-    modal = HostAddress(host=HostName("h"), provider=ProviderInstanceName("modal"))
-
-    # Agent only (bare name) -> scope by agent identifier.
-    assert discovery_scope_for_agent_and_host(AgentName("a"), None) == (None, ("a",))
-
-    # Agent on an explicitly qualified host -> scope by both.
-    assert discovery_scope_for_agent_and_host(AgentName("a"), modal) == (("modal",), ("a",))
-
-    # Qualified host, no agent (e.g. mngr event @host.modal) -> scope by provider only.
-    assert discovery_scope_for_agent_and_host(None, modal) == (("modal",), None)
-
-    # Host without a provider qualifier -> nothing to scope by; full scan.
-    assert discovery_scope_for_agent_and_host(None, HostAddress(host=HostName("h"))) == (None, None)
-
-    # Neither agent nor host -> full scan.
-    assert discovery_scope_for_agent_and_host(None, None) == (None, None)
-
-
 # =============================================================================
 # agent_field_generators integration tests
 # =============================================================================
@@ -1418,12 +1388,10 @@ def test_discover_hosts_and_agents_propagates_unavailable_provider(
 ) -> None:
     """An unreachable provider fails a full (enumerate-all) discovery loudly.
 
-    Discovery is deliberately dumb: it does not swallow an unreachable provider.
     For an enumerate-all call (provider_names=None), a down provider could hold a
     target, so the error propagates and the command fails rather than silently
     omitting that provider's agents. Targeted commands avoid this by scoping
-    discovery (see discovery_scope_for_agent_and_host), so an unrelated down
-    provider is never queried.
+    discovery to the relevant provider(s).
     """
     _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
     _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig

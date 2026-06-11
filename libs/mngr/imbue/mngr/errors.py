@@ -202,13 +202,9 @@ class ProviderError(MngrError):
 class ProviderUnavailableError(ProviderError):
     """Provider backend is not reachable (e.g. Docker daemon not running).
 
-    The backend's state is *unknown* (we couldn't reach it, agents may still
-    exist), so silently skipping it risks hiding real data. Multi-provider
-    discovery therefore propagates this error rather than swallowing it: an
-    enumerate-all command fails loudly instead of quietly omitting a down
-    provider's agents. A few commands with their own per-provider handling
-    (``mngr gc``, ``mngr list``) instead catch it at their own boundary and
-    continue with the providers that *are* available.
+    Discovery propagates this rather than swallowing it, since the backend's
+    state is unknown and skipping it could hide real agents. ``mngr gc`` and
+    ``mngr list`` catch it per-provider and continue.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:

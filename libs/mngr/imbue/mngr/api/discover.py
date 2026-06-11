@@ -14,7 +14,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
@@ -77,16 +76,8 @@ def _discover_provider_hosts_and_agents(
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
     except ProviderUnavailableError:
-        # Propagate unwrapped (do NOT turn it into a ProviderDiscoveryError). An
-        # unreachable backend is a real failure, and discovery deliberately does
-        # not paper over it: a provider that might hold a target must not be
-        # silently dropped, or e.g. `mngr message my-agent` could miss an
-        # instance on a down provider without telling the user. Surfacing it as
-        # ProviderUnavailableError keeps the clear "provider is not available"
-        # message (and its "start the backend, or disable the provider" help).
-        # Whether that is fatal is the caller's call -- most commands let it
-        # abort; gc (`_discover_hosts_for_gc`) and `mngr list` have their own
-        # per-provider handling.
+        # Propagate unwrapped (not as a ProviderDiscoveryError) so the caller
+        # sees the clear "provider is not available" error.
         raise
     except Exception as exc:
         raise ProviderDiscoveryError(provider.name, exc) from exc
@@ -131,13 +122,8 @@ def _run_discovery(
                 )
             )
 
-    # Re-raise any thread exception. Discovery is deliberately "dumb": it does
-    # not swallow an unreachable provider, so ProviderUnavailableError (and any
-    # ProviderDiscoveryError) propagates to the caller, which decides whether an
-    # unavailable provider is fatal. Targeted commands (rsync, git, ...) scope
-    # discovery to the relevant provider(s), so an *unrelated* down provider is
-    # never queried; an enumerate-all command (message, limit, ...) fails loudly
-    # rather than silently miss agents on the down provider.
+    # Re-raise any thread exception. Discovery does not swallow an unreachable
+    # provider: the error propagates and the caller decides what to do.
     for future in futures:
         future.result()
 
@@ -213,33 +199,6 @@ def discover_hosts_and_agents(
         return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
 
 
-@pure
-def discovery_scope_for_agent_and_host(
-    agent: AgentNameOrId | None,
-    host: HostAddress | None,
-) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
-    """Derive ``(provider_names, agent_identifiers)`` discovery hints from an agent/host reference.
-
-    Lets a command scope discovery to only the provider(s) that could hold the
-    target instead of a blind multi-provider scan. The two hints differ in
-    strength: a ``.PROVIDER`` qualifier on ``host`` is an exact scope -- only
-    that provider is ever queried -- while an ``agent`` identifier is
-    best-effort: :func:`discover_hosts_and_agents` resolves it through the
-    discovery event stream and falls back to a full scan on a cold/stale cache
-    (which can still hit -- and fail on -- an unrelated unavailable provider).
-    The point is correctness, not just speed: with discovery now propagating
-    ``ProviderUnavailableError`` rather than swallowing it, scoping keeps an
-    unrelated unavailable provider from failing the command.
-
-    Returns ``(None, None)`` when there is nothing to scope by (no agent and no
-    provider qualifier), which genuinely needs a full scan to locate.
-    """
-    provider = host.provider if host is not None else None
-    provider_names = (str(provider),) if provider is not None else None
-    agent_identifiers = (str(agent),) if agent is not None else None
-    return provider_names, agent_identifiers
-
-
 def discover_by_address(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -253,11 +212,14 @@ def discover_by_address(
     optimization. After discovery, results are filtered by the address's full
     host/provider constraint.
     """
-    provider_names, agent_identifiers = discovery_scope_for_agent_and_host(address.agent, address.host)
+    provider_names: tuple[str, ...] | None = None
+    if address.host is not None and address.host.provider is not None:
+        provider_names = (str(address.host.provider),)
+
     agents_by_host, providers = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
-        agent_identifiers=agent_identifiers,
+        agent_identifiers=(str(address.agent),),
         include_destroyed=include_destroyed,
         reset_caches=reset_caches,
     )

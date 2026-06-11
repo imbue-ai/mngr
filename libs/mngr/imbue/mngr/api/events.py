@@ -25,7 +25,6 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.discover import discovery_scope_for_agent_and_host
 from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
@@ -202,13 +201,10 @@ def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -
 
 
 def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> EventsTarget:
-    # Scope discovery to the qualified provider when the address carries one
-    # (``HOST.PROVIDER``), so a target on an available provider isn't failed by
-    # an unrelated provider being down -- discovery now propagates
-    # ProviderUnavailableError rather than swallowing it. A bare ``HOST`` has no
-    # provider to scope to, so it still searches every provider (and fails if
-    # any potential match's provider is unavailable).
-    provider_names, _ = discovery_scope_for_agent_and_host(agent=None, host=address)
+    # Scope to the qualified provider when given (a bare HOST still scans all).
+    provider_names: tuple[str, ...] | None = None
+    if address.provider is not None:
+        provider_names = (str(address.provider),)
     host_agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
