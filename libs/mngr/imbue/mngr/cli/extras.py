@@ -186,11 +186,9 @@ def _install_completion(
     else:
         write_human_line("Shell completion enabled in {}", rc_path)
     # A child process can't load completion into the parent shell, so tell the user
-    # how to activate it now without opening a new shell.
-    write_human_line(
-        "To use it in this shell now, run:  source {}  (new shells pick it up automatically)",
-        get_managed_completion_script_path(shell_type),
-    )
+    # how to activate it. The source command is on its own line for easy copying.
+    write_human_line("To use it, start a new shell, or run:")
+    write_human_line("source {}", get_managed_completion_script_path(shell_type))
     return True
 
 
