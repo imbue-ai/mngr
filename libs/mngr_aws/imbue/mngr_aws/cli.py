@@ -65,11 +65,24 @@ def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsPr
     pointed ``[providers.aws]`` at a non-AWS backend), fall back to class
     defaults rather than erroring -- the operator command's CLI options
     (``--region`` / ``--vpc-id`` / ``--sg-name``) can still drive an
-    AWS-targeted run.
+    AWS-targeted run. A warning is emitted in this case so the user notices
+    their ``--provider`` selection did not have the intended effect (a silent
+    fallback to class defaults would otherwise land the SG in
+    ``default_region`` / no VPC with no visible signal). The missing-block
+    case is silent because that is the expected first-run shape.
     """
     config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
     if isinstance(config, AwsProviderConfig):
         return config
+    if config is not None:
+        logger.warning(
+            "Provider {!r} is configured but is not an AWS backend (got {}); "
+            "falling back to AwsProviderConfig class defaults. Pass "
+            "--region / --vpc-id / --sg-name to override, or point --provider "
+            "at an AWS-backed block.",
+            provider_name,
+            type(config).__name__,
+        )
     return AwsProviderConfig()
 
 
@@ -277,10 +290,14 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     with `mngr destroy <agent>` so a running agent is never stranded (and so AWS
     does not refuse to delete an IAM role/profile a live instance still
     references). With no instances present, deletes the auto-created security
-    group (name taken from the resolved `[providers.<--provider>]` block, or
-    overridden by `--sg-name`; default `mngr-aws`) and the `mngr-aws` self-stop
-    IAM role / inline policy / instance profile. Idempotent: a no-op (exit 0)
-    when they are already gone.
+    group and the `mngr-aws` self-stop IAM role / inline policy / instance
+    profile. The security group name comes from `--sg-name` if supplied;
+    otherwise from the resolved `[providers.<--provider>]` block's
+    `security_group.name` when that block configures an
+    `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS, or configured
+    with an `ExistingSecurityGroup` -- which carries an `id` rather than a name)
+    the default `mngr-aws` is used. Idempotent: a no-op (exit 0) when they are
+    already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup, plus iam:RemoveRoleFromInstanceProfile +
