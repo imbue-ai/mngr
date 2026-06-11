@@ -693,7 +693,8 @@ class AwsProvider(VpsDockerProvider):
         """
         value = self._compact_agent_tag_value(agent_data)
         if value is None:
-            logger.warning("Cannot persist agent data without id+name for host {}", host_id)
+            # _compact_agent_tag_value already logged the specific reason (missing
+            # id/name, or a record too large to fit the tag limit).
             return
         instance = self._find_instance_for_host(host_id)
         if instance is None:
@@ -799,17 +800,25 @@ class AwsProvider(VpsDockerProvider):
     def _compact_agent_tag_value(self, agent_data: Mapping[str, object]) -> str | None:
         """Build a compact JSON tag value (id/name[/type][/labels]) under the 256-char tag limit.
 
-        Returns ``None`` when the required ``id``/``name`` are missing. Prefers
-        the richest representation that fits, dropping ``labels`` (user metadata)
-        first, then ``type``, before the required id+name minimum (which always
-        fits and is enough to resolve by name). Including ``labels`` lets an
-        offline ``mngr label`` on a stopped host actually round-trip; if a given
-        agent's labels are too large to fit, they are dropped and a warning is
-        logged so the write does not silently no-op.
+        Returns ``None`` when the agent cannot be persisted in a tag: either the
+        required ``id``/``name`` are missing, or even the id+name minimum exceeds
+        the 256-char tag-value limit (e.g. a very long agent name). Otherwise
+        prefers the richest representation that fits, dropping ``labels`` (user
+        metadata) first, then ``type``, before the id+name minimum. Including
+        ``labels`` lets an offline ``mngr label`` on a stopped host actually
+        round-trip; if a given agent's labels are too large to fit, they are
+        dropped and a warning is logged so the write does not silently no-op. An
+        agent whose id+name alone do not fit is skipped (with a warning) rather
+        than returning an over-limit value that AWS would reject.
         """
         agent_id = agent_data.get("id")
         agent_name = agent_data.get("name")
         if agent_id is None or agent_name is None:
+            logger.warning(
+                "Cannot mirror agent data to an EC2 tag without both an id and a name (got id={!r}, name={!r})",
+                agent_id,
+                agent_name,
+            )
             return None
         minimal: dict[str, object] = {"id": agent_id, "name": agent_name}
         with_type = dict(minimal)
@@ -831,7 +840,13 @@ class AwsProvider(VpsDockerProvider):
                         _MAX_TAG_VALUE_LEN,
                     )
                 return value
-        return value
+        logger.warning(
+            "Agent {} cannot be mirrored to an EC2 tag: even its id+name exceeds the {}-char tag "
+            "limit, so it will not be listed by name while the host is stopped",
+            agent_name,
+            _MAX_TAG_VALUE_LEN,
+        )
+        return None
 
     def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
         """Parse the ``mngr-agent-*`` tags off a normalized instance dict into agent records."""

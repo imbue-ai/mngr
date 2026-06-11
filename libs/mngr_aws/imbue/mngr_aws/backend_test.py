@@ -344,6 +344,20 @@ def test_compact_agent_tag_value_drops_oversized_labels_with_warning(
     assert any("do not fit" in w for w in log_warnings), log_warnings
 
 
+def test_compact_agent_tag_value_none_when_id_and_name_alone_exceed_limit(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """An agent whose id+name alone overflow the tag limit yields None + a warning, not an over-limit value.
+
+    Otherwise persist_agent_data would hand an over-256-char value to CreateTags,
+    which AWS rejects -- crashing agent create instead of degrading gracefully.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "x" * 300})
+    assert value is None
+    assert any("id+name exceeds" in w for w in log_warnings), log_warnings
+
+
 def test_validate_provider_args_under_pytest_raises_when_unset(
     temp_mngr_ctx: MngrContext,
 ) -> None:
