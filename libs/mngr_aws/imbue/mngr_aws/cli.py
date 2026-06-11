@@ -116,14 +116,17 @@ def _build_operator_client(
     )
 
 
-def _perform_cleanup(client: AwsVpsClient) -> str | None:
-    """Core of ``mngr aws cleanup``: refuse if instances exist, else delete the SG.
+def _perform_cleanup(client: AwsVpsClient) -> tuple[str | None, str | None]:
+    """Core of ``mngr aws cleanup``: refuse if instances exist, else delete the SG + IAM profile.
 
-    Returns the deleted security group id, or ``None`` when there was nothing
-    to delete. Raises ``click.ClickException`` when any mngr-managed instance
-    still exists in the region, so cleanup never strands a running agent. Split
-    from the click callback so the refuse/delete decision is unit-testable
-    against a stubbed client, without the click runtime or real credentials.
+    Returns ``(deleted_sg_id, deleted_instance_profile_name)``, each ``None``
+    when that resource was already absent (idempotent). Raises
+    ``click.ClickException`` when any mngr-managed instance still exists in the
+    region, so cleanup never strands a running agent -- and, since AWS refuses
+    to delete an IAM role/instance-profile that a running instance still
+    references, this guard must run *first*. Split from the click callback so
+    the refuse/delete decision is unit-testable against a stubbed client,
+    without the click runtime or real credentials.
     """
     instances = client.list_mngr_managed_instances()
     if instances:
@@ -133,7 +136,9 @@ def _perform_cleanup(client: AwsVpsClient) -> str | None:
             f"instance(s) still exist: {summary}. Destroy them first with `mngr destroy "
             "<agent>` (or terminate them), then re-run `mngr aws cleanup`."
         )
-    return client.delete_security_group()
+    deleted_sg_id = client.delete_security_group()
+    deleted_profile_name = client.delete_self_stop_instance_profile()
+    return deleted_sg_id, deleted_profile_name
 
 
 @click.group(name="aws")
@@ -184,13 +189,20 @@ def aws_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Create (or reuse) the AWS security group for mngr-managed instances.
+    """Provision the AWS security group + self-stop IAM instance profile for mngr instances.
 
-    Idempotent: re-running re-authorizes any missing ingress rules but does
-    not duplicate. Needs ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup
-    + ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
-    --provider aws` only needs RunInstances + DescribeSecurityGroups +
-    DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
+    Creates (or reuses) the `mngr-aws` security group, then ensures the
+    `mngr-aws` IAM role / inline policy / instance profile that lets
+    mngr-managed instances stop themselves (scoped to `mngr-provider`-tagged
+    instances, for the self-stopping idle watcher).
+
+    Idempotent: re-running re-authorizes any missing ingress rules and re-ensures
+    the IAM resources without duplicating. Needs ec2:DescribeSecurityGroups +
+    ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress, plus
+    iam:CreateRole + iam:PutRolePolicy + iam:CreateInstanceProfile +
+    iam:AddRoleToInstanceProfile. After this succeeds, `mngr create --provider
+    aws` only needs RunInstances + DescribeSecurityGroups + DescribeInstances +
+    ImportKeyPair etc. (no SG- or IAM-management permissions).
     """
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -213,7 +225,10 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         raise click.ClickException(str(e)) from e
     sg_id = client.ensure_security_group()
     logger.info("Prepared AWS security group {} in region {}", sg_id, client.region)
-    write_human_line(sg_id)
+    profile_name = client.ensure_self_stop_instance_profile()
+    logger.info("Prepared AWS self-stop IAM instance profile {}", profile_name)
+    write_human_line(f"security group: {sg_id}")
+    write_human_line(f"instance profile: {profile_name}")
 
 
 @aws_cli_group.command(name="cleanup")
@@ -249,18 +264,21 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 @add_common_options
 @click.pass_context
 def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
-    """Undo `mngr aws prepare`: delete the mngr-managed security group.
+    """Undo `mngr aws prepare`: delete the mngr-managed security group + IAM instance profile.
 
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
-    with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created `mngr-aws` security group.
-    Idempotent: a no-op (exit 0) when the security group is already gone.
+    with `mngr destroy <agent>` so a running agent is never stranded (and so AWS
+    does not refuse to delete an IAM role/profile a live instance still
+    references). With no instances present, deletes the auto-created `mngr-aws`
+    security group and the `mngr-aws` self-stop IAM role / inline policy /
+    instance profile. Idempotent: a no-op (exit 0) when they are already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
-    ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
-    created and deleted by the create/destroy lifecycle, not by `prepare`
-    or `cleanup`.
+    ec2:DeleteSecurityGroup, plus iam:RemoveRoleFromInstanceProfile +
+    iam:DeleteInstanceProfile + iam:DeleteRolePolicy + iam:DeleteRole. Does not
+    touch per-host keypairs -- those are created and deleted by the
+    create/destroy lifecycle, not by `prepare` or `cleanup`.
     """
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -274,12 +292,22 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # Same credential / environment errors as the prepare path.
         raise click.ClickException(str(e)) from e
 
-    deleted_sg_id = _perform_cleanup(client)
+    deleted_sg_id, deleted_profile_name = _perform_cleanup(client)
+    if deleted_sg_id is None and deleted_profile_name is None:
+        write_human_line(
+            f"Nothing to clean up: no mngr-managed security group or IAM instance profile in region {client.region}."
+        )
+        return
     if deleted_sg_id is None:
-        write_human_line(f"Nothing to clean up: no mngr-managed security group in region {client.region}.")
+        write_human_line(f"security group: nothing to delete (already gone in region {client.region})")
     else:
         logger.info("Cleaned up AWS security group {} in region {}", deleted_sg_id, client.region)
-        write_human_line(deleted_sg_id)
+        write_human_line(f"security group: {deleted_sg_id}")
+    if deleted_profile_name is None:
+        write_human_line("instance profile: nothing to delete (already gone)")
+    else:
+        logger.info("Cleaned up AWS self-stop IAM instance profile {}", deleted_profile_name)
+        write_human_line(f"instance profile: {deleted_profile_name}")
 
 
 @aws_cli_group.command(name="ami")

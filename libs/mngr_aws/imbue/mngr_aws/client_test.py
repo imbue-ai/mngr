@@ -7,6 +7,8 @@ requests and canned responses.
 """
 
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 
 import boto3
 import pytest
@@ -87,6 +89,192 @@ def auto_sg_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
         stubber.deactivate()
 
 
+@pytest.fixture()
+def iam_stubbed_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
+    """Yield a _StubbedAwsVpsClient whose underlying IAM client is wrapped in a Stubber.
+
+    The self-stop instance-profile methods only call IAM, so this fixture wires
+    a Stubber around a real ``iam`` client (the EC2 client is a bare stubbed
+    client that no IAM test exercises). IAM is a global service, so the client
+    is built without a region.
+    """
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    iam = session.client("iam")
+    iam_stubber = Stubber(iam)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test",
+        security_group=AutoCreateSecurityGroup(name="mngr-aws-test"),
+        stubbed_ec2_client=ec2,
+        stubbed_iam_client=iam,
+    )
+    iam_stubber.activate()
+    try:
+        yield client, iam_stubber
+    finally:
+        iam_stubber.deactivate()
+
+
+# =============================================================================
+# ensure_self_stop_instance_profile / delete_self_stop_instance_profile
+# =============================================================================
+
+
+def _add_get_role_response(stubber: Stubber) -> None:
+    """Queue a minimal create_role response (botocore requires the Role shape)."""
+    stubber.add_response(
+        "create_role",
+        {
+            "Role": {
+                "Path": "/",
+                "RoleName": "mngr-aws",
+                "RoleId": "AROATESTAROATEST00",
+                "Arn": "arn:aws:iam::123456789012:role/mngr-aws",
+                "CreateDate": datetime(2026, 1, 1, tzinfo=timezone.utc),
+            }
+        },
+        expected_params={"RoleName": "mngr-aws", "AssumeRolePolicyDocument": ANY},
+    )
+
+
+def test_ensure_self_stop_instance_profile_creates_all(
+    iam_stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When nothing exists yet, all four IAM calls fire and the profile name is returned."""
+    client, stubber = iam_stubbed_client
+    _add_get_role_response(stubber)
+    stubber.add_response(
+        "put_role_policy",
+        {},
+        expected_params={"RoleName": "mngr-aws", "PolicyName": "mngr-aws", "PolicyDocument": ANY},
+    )
+    stubber.add_response(
+        "create_instance_profile",
+        {
+            "InstanceProfile": {
+                "Path": "/",
+                "InstanceProfileName": "mngr-aws",
+                "InstanceProfileId": "AIPATESTAIPATEST00",
+                "Arn": "arn:aws:iam::123456789012:instance-profile/mngr-aws",
+                "CreateDate": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "Roles": [],
+            }
+        },
+        expected_params={"InstanceProfileName": "mngr-aws"},
+    )
+    stubber.add_response(
+        "add_role_to_instance_profile",
+        {},
+        expected_params={"InstanceProfileName": "mngr-aws", "RoleName": "mngr-aws"},
+    )
+    assert client.ensure_self_stop_instance_profile() == "mngr-aws"
+    stubber.assert_no_pending_responses()
+
+
+def test_ensure_self_stop_instance_profile_idempotent_when_exists(
+    iam_stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Already-existing role/profile (and already-attached role) is treated as success, no raise."""
+    client, stubber = iam_stubbed_client
+    stubber.add_client_error(
+        "create_role",
+        service_error_code="EntityAlreadyExists",
+        service_message="Role with name mngr-aws already exists.",
+        http_status_code=409,
+        expected_params={"RoleName": "mngr-aws", "AssumeRolePolicyDocument": ANY},
+    )
+    stubber.add_response(
+        "put_role_policy",
+        {},
+        expected_params={"RoleName": "mngr-aws", "PolicyName": "mngr-aws", "PolicyDocument": ANY},
+    )
+    stubber.add_client_error(
+        "create_instance_profile",
+        service_error_code="EntityAlreadyExists",
+        service_message="Instance Profile mngr-aws already exists.",
+        http_status_code=409,
+        expected_params={"InstanceProfileName": "mngr-aws"},
+    )
+    stubber.add_client_error(
+        "add_role_to_instance_profile",
+        service_error_code="LimitExceeded",
+        service_message="Cannot exceed quota for InstanceSessionsPerInstanceProfile.",
+        http_status_code=409,
+        expected_params={"InstanceProfileName": "mngr-aws", "RoleName": "mngr-aws"},
+    )
+    assert client.ensure_self_stop_instance_profile() == "mngr-aws"
+    stubber.assert_no_pending_responses()
+
+
+def test_ensure_self_stop_instance_profile_translates_other_errors(
+    iam_stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """A non-already-exists IAM error surfaces as VpsApiError (e.g. an access denial)."""
+    client, stubber = iam_stubbed_client
+    stubber.add_client_error(
+        "create_role",
+        service_error_code="AccessDenied",
+        service_message="not authorized to perform iam:CreateRole",
+        http_status_code=403,
+        expected_params={"RoleName": "mngr-aws", "AssumeRolePolicyDocument": ANY},
+    )
+    with pytest.raises(VpsApiError, match="AccessDenied"):
+        client.ensure_self_stop_instance_profile()
+
+
+def test_delete_self_stop_instance_profile_deletes_all(
+    iam_stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When all resources exist, the four deletes fire and the name is returned."""
+    client, stubber = iam_stubbed_client
+    stubber.add_response(
+        "remove_role_from_instance_profile",
+        {},
+        expected_params={"InstanceProfileName": "mngr-aws", "RoleName": "mngr-aws"},
+    )
+    stubber.add_response(
+        "delete_instance_profile",
+        {},
+        expected_params={"InstanceProfileName": "mngr-aws"},
+    )
+    stubber.add_response(
+        "delete_role_policy",
+        {},
+        expected_params={"RoleName": "mngr-aws", "PolicyName": "mngr-aws"},
+    )
+    stubber.add_response("delete_role", {}, expected_params={"RoleName": "mngr-aws"})
+    assert client.delete_self_stop_instance_profile() == "mngr-aws"
+    stubber.assert_no_pending_responses()
+
+
+def test_delete_self_stop_instance_profile_is_noop_when_absent(
+    iam_stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Every step swallowing NoSuchEntity means a fully-clean account returns None, no raise."""
+    client, stubber = iam_stubbed_client
+    for operation, params in (
+        ("remove_role_from_instance_profile", {"InstanceProfileName": "mngr-aws", "RoleName": "mngr-aws"}),
+        ("delete_instance_profile", {"InstanceProfileName": "mngr-aws"}),
+        ("delete_role_policy", {"RoleName": "mngr-aws", "PolicyName": "mngr-aws"}),
+        ("delete_role", {"RoleName": "mngr-aws"}),
+    ):
+        stubber.add_client_error(
+            operation,
+            service_error_code="NoSuchEntity",
+            service_message="The entity does not exist.",
+            http_status_code=404,
+            expected_params=params,
+        )
+    assert client.delete_self_stop_instance_profile() is None
+    stubber.assert_no_pending_responses()
+
+
 # =============================================================================
 # create_instance
 # =============================================================================
@@ -109,6 +297,9 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
             "KeyName": "key-1",
+            # attach_self_stop_role defaults to True, so the mngr-aws self-stop
+            # instance profile is attached by default.
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     instance_id = client.create_instance(
@@ -140,6 +331,7 @@ def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     instance_id = client.create_instance(
@@ -172,6 +364,7 @@ def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tup
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     assert client.create_instance(
@@ -201,6 +394,7 @@ def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
             "InstanceMarketOptions": {"MarketType": "spot"},
         },
     )
@@ -239,6 +433,7 @@ def test_create_instance_no_spot_omits_instance_market_options(
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     assert client.create_instance(
@@ -249,6 +444,166 @@ def test_create_instance_no_spot_omits_instance_market_options(
         ssh_key_ids=[],
         tags={},
     ) == VpsInstanceId("i-ondemand")
+
+
+def test_create_instance_attaches_self_stop_profile_by_default(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """With attach_self_stop_role defaulting to True, RunInstances carries IamInstanceProfile=mngr-aws."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-self-stop"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-self-stop")
+
+
+def test_create_instance_falls_back_without_profile_on_passrole_error(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+    log_warnings: list[str],
+) -> None:
+    """A PassRole denial on the default self-stop profile logs a warning and retries without it."""
+    client, stubber = stubbed_client
+    # First attempt: RunInstances *with* the IAM instance profile is rejected for
+    # lack of iam:PassRole.
+    stubber.add_client_error(
+        "run_instances",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform: iam:PassRole on the mngr-aws role",
+        http_status_code=403,
+    )
+    # Second attempt: RunInstances *without* IamInstanceProfile succeeds.
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-no-profile"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-no-profile")
+    assert any("self-stop" in msg for msg in log_warnings)
+
+
+def test_create_instance_does_not_attach_when_disabled() -> None:
+    """attach_self_stop_role=False (and no explicit profile) launches with no IamInstanceProfile."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        attach_self_stop_role=False,
+        stubbed_ec2_client=ec2,
+    )
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-bare"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    stubber.activate()
+    try:
+        assert client.create_instance(
+            label="mngr-test-aws-host",
+            region="us-east-1",
+            plan="t3.small",
+            user_data="test-user-data",
+            ssh_key_ids=[],
+            tags={},
+        ) == VpsInstanceId("i-bare")
+    finally:
+        stubber.deactivate()
+
+
+def test_create_instance_explicit_profile_failure_is_not_swallowed() -> None:
+    """An explicit iam_instance_profile failing RunInstances raises (no silent fallback)."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        iam_instance_profile="custom-profile",
+        stubbed_ec2_client=ec2,
+    )
+    # Only ONE run_instances error is queued: if create_instance retried (it must
+    # not, for an explicit profile), the Stubber would raise StubAssertionError
+    # for an unstubbed second call rather than VpsApiError.
+    stubber.add_client_error(
+        "run_instances",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform: iam:PassRole",
+        http_status_code=403,
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(VpsApiError, match="UnauthorizedOperation"):
+            client.create_instance(
+                label="mngr-test-aws-host",
+                region="us-east-1",
+                plan="t3.small",
+                user_data="test-user-data",
+                ssh_key_ids=[],
+                tags={},
+            )
+    finally:
+        stubber.deactivate()
 
 
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -375,6 +730,40 @@ def test_start_instance_times_out_if_not_active(stubbed_client: tuple[AwsVpsClie
     )
     with pytest.raises(VpsProvisioningError, match="did not become active"):
         client.start_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
+def test_add_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """add_tags upserts the given tags onto the instance via CreateTags."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x", "Value": "v"}]},
+    )
+    client.add_tags(VpsInstanceId("i-abc"), {"mngr-agent-x": "v"})
+
+
+def test_add_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """No tags means no CreateTags call (an unexpected call would make the Stubber raise)."""
+    client, _stubber = stubbed_client
+    client.add_tags(VpsInstanceId("i-abc"), {})
+
+
+def test_remove_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """remove_tags deletes tags by key via DeleteTags (Value omitted)."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "delete_tags",
+        {},
+        expected_params={"Resources": ["i-abc"], "Tags": [{"Key": "mngr-agent-x"}]},
+    )
+    client.remove_tags(VpsInstanceId("i-abc"), ["mngr-agent-x"])
+
+
+def test_remove_tags_empty_is_noop(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """No keys means no DeleteTags call."""
+    client, _stubber = stubbed_client
+    client.remove_tags(VpsInstanceId("i-abc"), [])
 
 
 def test_get_instance_status_running(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:

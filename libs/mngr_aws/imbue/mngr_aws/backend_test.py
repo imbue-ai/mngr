@@ -1,11 +1,18 @@
 """Tests for AWS provider backend registration."""
 
+import json
+
 import boto3
 import pytest
+from botocore.stub import Stubber
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
@@ -14,6 +21,7 @@ from imbue.mngr_aws.backend import ParsedAwsBuildOptions
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
+from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
 
 
@@ -59,6 +67,248 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
         aws_client=client,
         aws_config=config,
     )
+
+
+def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]:
+    """Build an AwsProvider whose EC2 client is a botocore Stubber.
+
+    Used by the ``_find_instance_for_host`` tests, which need to script a
+    ``describe_instances`` response (the tag-based lookup that resolves a
+    stopped instance) without any real AWS call.
+    """
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_minutes=60)
+    session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-x",
+        security_group=ExistingSecurityGroup(id="sg-x"),
+        stubbed_ec2_client=ec2,
+    )
+    provider = AwsProvider(
+        name=ProviderInstanceName("aws-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=mngr_ctx,
+        config=config,
+        vps_client=client,
+        aws_client=client,
+        aws_config=config,
+    )
+    return provider, stubber
+
+
+def _describe_instances_response(instances: list[dict]) -> dict:
+    return {"Reservations": [{"Instances": instances}]}
+
+
+def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id tag, no SSH."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                {
+                    "InstanceId": "i-match",
+                    "State": {"Name": "stopped"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(host_id)},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+                {
+                    "InstanceId": "i-other",
+                    "State": {"Name": "running"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(HostId.generate())},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert found is not None
+    assert found["id"] == "i-match"
+
+
+def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: MngrContext) -> None:
+    """A host with no matching instance tag (e.g. terminated and gone) resolves to None."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                {
+                    "InstanceId": "i-other",
+                    "State": {"Name": "running"},
+                    "Tags": [{"Key": "mngr-host-id", "Value": str(HostId.generate())}],
+                },
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(HostId.generate())
+    finally:
+        stubber.deactivate()
+    assert found is None
+
+
+def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict[str, str]) -> dict:
+    entry: dict = {"InstanceId": instance_id, "State": {"Name": state}}
+    if public_ip:
+        entry["PublicIpAddress"] = public_ip
+    entry["Tags"] = [{"Key": k, "Value": v} for k, v in tags.items()]
+    return entry
+
+
+def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext) -> None:
+    """persist_agent_data finds the instance by host tag and upserts a compact mngr-agent-<id> tag."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [_instance_with_tags("i-1", "running", "1.2.3.4", {"mngr-host-id": str(host_id)})]
+        ),
+    )
+    expected_value = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={"Resources": ["i-1"], "Tags": [{"Key": f"mngr-agent-{agent_id}", "Value": expected_value}]},
+    )
+    stubber.activate()
+    try:
+        provider.persist_agent_data(
+            host_id,
+            {"id": str(agent_id), "name": "a1", "type": "command", "command": "sleep 1", "work_dir": "/w"},
+        )
+    finally:
+        stubber.deactivate()
+
+
+def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContext) -> None:
+    """list_persisted_agent_data_for_host parses mngr-agent-* tags off a (stopped) instance."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1", "stopped", "", {"mngr-host-id": str(host_id), f"mngr-agent-{agent_id}": agent_json}
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        agents = provider.list_persisted_agent_data_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert len(agents) == 1
+    assert agents[0]["id"] == str(agent_id)
+    assert agents[0]["name"] == "a1"
+
+
+def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
+    """A stopped instance (no public IP) is reconstructed from tags as a STOPPED host with its agents."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "mngr-provider": "aws-test",
+                        "Name": "mngr-myhost",
+                        f"mngr-agent-{agent_id}": agent_json,
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    hosts = list(result.keys())
+    assert len(hosts) == 1
+    assert hosts[0].host_id == host_id
+    assert str(hosts[0].host_name) == "myhost"
+    assert hosts[0].host_state == HostState.STOPPED
+    agents = result[hosts[0]]
+    assert len(agents) == 1
+    assert agents[0].agent_id == agent_id
+    assert str(agents[0].agent_name) == "a1"
+
+
+def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
+    """to_offline_host rebuilds a STOPPED offline host from tags when the base SSH path can't reach it."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "Name": "mngr-myhost",
+                        "mngr-created-at": "2026-01-01T00:00:00+00:00",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        offline = provider.to_offline_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert offline.id == host_id
+    assert str(offline.get_certified_data().host_name) == "myhost"
+    assert offline.get_state() == HostState.STOPPED
+
+
+def test_compact_agent_tag_value_falls_back_to_minimal_when_too_long(temp_mngr_ctx: MngrContext) -> None:
+    """When id+name+type would exceed the 256-char tag limit, type is dropped (id+name still fit)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "a1", "type": "x" * 300})
+    assert value is not None
+    assert len(value) <= 256
+    assert json.loads(value) == {"id": "agent-1", "name": "a1"}
+
+
+def test_compact_agent_tag_value_none_without_id_or_name(temp_mngr_ctx: MngrContext) -> None:
+    """No id or no name -> None (nothing resolvable to persist)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    assert provider._compact_agent_tag_value({"name": "a1"}) is None
+    assert provider._compact_agent_tag_value({"id": "agent-1"}) is None
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(

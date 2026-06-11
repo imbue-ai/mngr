@@ -1,9 +1,14 @@
 # AWS EC2 stop/start lifecycle (idle-pause + resume)
 
-Status: **spec only — not yet implemented.** Captures the design agreed while planning how to
-give AWS agents a Modal-like "idle-paused but resumable" lifecycle. Branch: `mngr/ebs-snapshot`
-(the name predates the decision below to drop EBS snapshots; the actual feature is native EC2
-stop/start).
+Status: **Phases 1 and 4 implemented; Phases 2, 3, 5 pending.** Captures the design agreed while
+planning how to give AWS agents a Modal-like "idle-paused but resumable" lifecycle. Branch:
+`mngr/aws-stop`. Landed: native EC2 stop/start (`AwsVpsClient.stop_instance`/`start_instance` + the
+`AwsProvider.stop_host`/`start_host` overrides, `mngr stop --stop-host`), and EC2-tag offline
+discovery so a stopped host still lists its agents and resolves by name (Phase 4 — required for
+Phase 1 to be usable). Covered by unit tests plus a `mngr stop --stop-host` -> `start` release
+test. Pending: the self-stopping idle watcher + IAM (Phase 2), the GC stop-instead-of-destroy +
+age-gated terminate (Phase 3), and an S3-backed agent store for many-agent hosts (Phase 5 / Phase-4
+follow-up).
 
 ## Goal
 
@@ -142,7 +147,29 @@ Manual `mngr destroy` terminates immediately. Keep the `auto_shutdown_minutes` +
 `InstanceInitiatedShutdownBehavior=terminate` mechanism exactly as-is — it is independent of the
 API-driven stop and is the release-test leak backstop.
 
-### Phase 4 — Offline metadata via EC2 tags
+### Phase 4 — Offline metadata via EC2 tags (REQUIRED for resume-by-name, not optional)
+
+**Finding (Phase 1 follow-up):** a fully-stopped EC2 instance has no public IP, so it drops out of
+`AwsProvider._list_provider_vps_hostnames` and therefore out of discovery entirely. That breaks
+`mngr start <name>`: name resolution goes through discovery (`find_all_agents` →
+`discover_hosts_and_agents`), so a stopped host can't be resolved by name and can't be started. So
+Phase 4 is a hard prerequisite for Phase 1 to be user-usable, not a nice-to-have.
+
+Two sub-parts, with an open decision on the second:
+
+1. **Host-level discovery from tags.** Surface stopped instances in discovery by reconstructing a
+   `DiscoveredHost` (host_id from the `mngr-host-id` tag, host_name from the `Name=mngr-<name>` tag)
+   without SSH. `start_host` already resolves the instance by tag, so once the host is discoverable
+   the resume path works.
+2. **Agent-level resolution while stopped (the open fork).** `mngr start` is agent-addressed
+   (`mngr start --host` is `NotImplementedError`), so resolving `mngr start <agent>` needs the
+   stopped host's *agents* to be discoverable. But agent records live on the unreadable EBS volume.
+   Options: (a) persist a minimal agent record (id/name/type/command) into EC2 tags and serve it via
+   `list_persisted_agent_data_for_host` (no new infra; capped by EC2's 50-tag / 256-char limits, so
+   fine for few-agent hosts); (b) persist agent records to S3 (full parity, any count; the
+   previously-deferred piece); or (c) implement `mngr start --host <name>` so resume targets the
+   host and skips agent resolution. Modal's analog is (a/b): it serves stopped-host agents via
+   `list_persisted_agent_data_for_host` backed by its persistent volume.
 
 - On create and on every host-record update (at least on stop), write the host-level record into
   EC2 tags: host name, `stop_reason`, `created_at`, and a compact idle config (timeout, sources).

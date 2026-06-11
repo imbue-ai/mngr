@@ -96,7 +96,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
-| `iam_instance_profile` | `None` | IAM instance profile name. |
+| `iam_instance_profile` | `None` | IAM instance profile name. When set, it takes precedence over `attach_self_stop_role`. |
+| `attach_self_stop_role` | `true` | Attach the `mngr-aws` self-stop IAM instance profile (provisioned by `mngr aws prepare`) to launched instances so the idle watcher can stop the instance. Requires `iam:PassRole` for the `mngr-aws` role; if that permission is absent (or `prepare` was never run), `mngr create` still succeeds but launches the instance **without** the profile (no self-stop) and logs a warning. Set `false` to opt out (and silence the warning). Ignored when `iam_instance_profile` is set explicitly. |
 | `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## One-time setup: `mngr aws prepare`
@@ -109,23 +110,27 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It also provisions a `mngr-aws` IAM role / inline policy / instance profile that lets mngr-managed instances stop themselves (the self-stopping idle watcher). The inline policy scopes `ec2:StopInstances` to instances tagged `mngr-provider` (any value), so its blast radius is limited to mngr-managed instances. It needs:
 
 - `ec2:DescribeSecurityGroups`
 - `ec2:CreateSecurityGroup`
 - `ec2:AuthorizeSecurityGroupIngress`
+- `iam:CreateRole`
+- `iam:PutRolePolicy`
+- `iam:CreateInstanceProfile`
+- `iam:AddRoleToInstanceProfile`
 
-After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
+After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG- or IAM-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
 
 ## Teardown: `mngr aws cleanup`
 
-`mngr aws cleanup` is the inverse of `prepare`: it deletes the `mngr-aws` security group so the region returns to its pre-`prepare` state (useful when retiring a provider or testing the first-run experience).
+`mngr aws cleanup` is the inverse of `prepare`: it deletes the `mngr-aws` security group and the `mngr-aws` self-stop IAM role / inline policy / instance profile so the region (and account) returns to its pre-`prepare` state (useful when retiring a provider or testing the first-run experience).
 
 ```bash
 mngr aws cleanup --region us-east-1
 ```
 
-It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent. Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group is already gone. It needs `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
+It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any mngr-managed instance still exists in the region, so it can never strand a running agent (and AWS would refuse to delete an IAM role/profile a live instance still references). Destroy those first with `mngr destroy <agent>`, then re-run. It is idempotent -- a no-op when the security group and IAM resources are already gone. It needs `ec2:DescribeInstances`, `ec2:DescribeSecurityGroups`, and `ec2:DeleteSecurityGroup`, plus `iam:RemoveRoleFromInstanceProfile`, `iam:DeleteInstanceProfile`, `iam:DeleteRolePolicy`, and `iam:DeleteRole`. It does **not** delete per-host keypairs: those are created and removed by the `mngr create` / `mngr destroy` lifecycle, not by `prepare`.
 
 ## Required IAM permissions
 
@@ -133,25 +138,40 @@ For `mngr create --provider aws` (per-host path):
 
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
+ec2:StopInstances, ec2:StartInstances,
+ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
 ```
 
+Because `attach_self_stop_role` defaults to `true`, `mngr create` additionally
+needs `iam:PassRole` (scoped to the `mngr-aws` role) to attach the self-stop
+instance profile to the launched instance. This is graceful, not required: if
+`iam:PassRole` is absent (or `mngr aws prepare` was never run, so the profile
+does not exist), `mngr create` still succeeds — it launches the instance
+**without** the self-stop profile (so the idle watcher cannot stop it; you can
+still `mngr stop --stop-host`) and logs a warning. Set `attach_self_stop_role =
+false` on the provider config to opt out and silence the warning.
+
 For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
 
 ```
-ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress
+ec2:CreateSecurityGroup, ec2:AuthorizeSecurityGroupIngress,
+iam:CreateRole, iam:PutRolePolicy, iam:CreateInstanceProfile,
+iam:AddRoleToInstanceProfile, iam:GetInstanceProfile
 ```
 
 For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeInstances` / `DescribeSecurityGroups`):
 
 ```
-ec2:DeleteSecurityGroup
+ec2:DeleteSecurityGroup,
+iam:RemoveRoleFromInstanceProfile, iam:DeleteInstanceProfile,
+iam:DeleteRolePolicy, iam:DeleteRole
 ```
 
-Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). Stop/start operate on the container inside the instance (Docker over SSH), not on the EC2 instance itself, so `ec2:StopInstances` / `ec2:StartInstances` are not needed. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. After launch, `ec2:CreateTags`/`ec2:DeleteTags` are used to mirror per-agent metadata onto the instance (tags keyed `mngr-agent-<id>`) so a stopped host still lists its agents and resolves by name (see the offline-discovery note below). `mngr stop --stop-host` stops the EC2 **instance** itself (`ec2:StopInstances`) after stopping the inner container, so a paused agent costs only EBS storage; `mngr start` resumes it (`ec2:StartInstances`), preserving the root EBS volume and all on-disk state. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 
@@ -159,7 +179,9 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - EC2 instances are tagged with `mngr-provider=<name>`, `mngr-host-id=<id>`, and `mngr-created-at=<iso8601>` for discovery and cleanup-tracking.
 - SSH key auth: each host gets a per-host EC2 KeyPair via `ImportKeyPair`, deleted on `destroy_host`.
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
-- Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
+- Instance shutdown behavior is set to `terminate` so a self-halted instance (e.g. via `auto_shutdown_minutes`) is garbage-collected automatically. This is independent of `mngr stop --stop-host`, which uses the `StopInstances` API (not an OS halt) and so leaves the instance recoverable.
+- **Stop/resume** (`mngr stop --stop-host` / `mngr start`): the provider overrides `stop_host`/`start_host` to stop and start the EC2 instance via the API, preserving the root EBS volume across the stop. A stopped instance loses its public IPv4, so `start_host` reads the fresh IP, rewrites `vps_ip` in the host record, and re-points known_hosts before restarting the container. For a stable address across stops, see the Elastic IP item under "Future improvements".
+- **Offline discovery of stopped hosts**: a stopped instance has no public IP, so it falls out of the SSH-based discovery the base provider uses. To keep paused hosts visible in `mngr list` and resolvable for `mngr start`, agent records are mirrored into EC2 tags (`mngr-agent-<id>`, written via `persist_agent_data`) and `AwsProvider` reconstructs stopped hosts + their agents from tags in `discover_hosts_and_agents` / `to_offline_host`. Per-agent tags are capped by EC2's 50-tag / 256-char limits, so this comfortably covers few-agent hosts; an S3-backed store for many-agent hosts is a possible future addition.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.

@@ -150,6 +150,15 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="Optional IAM instance profile name attached to launched instances.",
     )
+    attach_self_stop_role: bool = Field(
+        default=True,
+        description=(
+            "Attach the mngr-aws self-stop IAM instance profile (from `mngr aws prepare`) to "
+            "launched instances so the idle watcher can stop the instance. Set False to launch "
+            "without it. Ignored when iam_instance_profile is set explicitly (that takes "
+            "precedence)."
+        ),
+    )
 
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.

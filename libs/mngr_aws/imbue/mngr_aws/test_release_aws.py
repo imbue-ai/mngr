@@ -52,6 +52,8 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 
 pytestmark = [
     pytest.mark.release,
@@ -329,6 +331,78 @@ def test_provider_lifecycle_create_stop_start_destroy(
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
         time.sleep(20)
+
+
+def _find_instance_id_by_name_tag(client: AwsVpsClient, name: str) -> str | None:
+    """Return the EC2 instance id whose ``Name`` tag equals ``name`` (or None).
+
+    ``list_instances`` normalizes tags to ``"key=value"`` strings and includes
+    stopped instances, so this resolves the instance even while it is stopped.
+    """
+    for instance in client.list_instances():
+        if f"Name={name}" in instance.get("tags", ()):
+            return instance["id"]
+    return None
+
+
+@pytest.mark.rsync
+def test_provider_stop_host_stops_ec2_instance_and_start_resumes(
+    aws_test_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """``mngr stop --stop-host`` stops the EC2 instance itself; ``mngr start`` resumes it.
+
+    This is the native-EC2-stop lifecycle the AWS provider adds on top of the
+    base (which only stops the inner Docker container). It asserts, via the EC2
+    API, that the instance reaches ``stopped`` after ``--stop-host`` (compute
+    billing ends, the EBS volume is preserved) and ``running`` after ``start``,
+    and that a post-resume ``exec`` works -- proving the on-disk state survived
+    the stop and the provider rebound to the instance's fresh public IP.
+    """
+    agent_name = f"{AWS_TEST_NAME_PREFIX}sh-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        aws_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    try:
+        instance_id = _find_instance_id_by_name_tag(aws_release_client, f"mngr-{agent_name}")
+        assert instance_id is not None, "could not find the created EC2 instance by Name tag"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name, "--stop-host")
+        assert result.returncode == 0, f"stop --stop-host failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED, (
+            "EC2 instance should be stopped (HALTED) after `mngr stop --stop-host`"
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running (ACTIVE) after `mngr start`"
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-host-restart")
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "alive-after-host-restart" in result.stdout
+    finally:
+        # --force skips the destroy confirmation. Best-effort cleanup; result
+        # unchecked. No post-destroy settle sleep here (the session-end leak
+        # scanner and cloud-init auto-shutdown are the real backstops), to avoid
+        # adding a time.sleep the ratchet flags.
+        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
 
 
 # =============================================================================
