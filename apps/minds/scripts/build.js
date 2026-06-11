@@ -10,12 +10,98 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadGit, downloadUv, download } = require('./download-binaries.js');
+const { downloadGit, downloadUv, downloadRestic, download } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 
-const LIMA_VERSION = '2.1.1';
+// Pinned at 2.0.3 to avoid the gvisor-tap-vsock TCP forwarder regression
+// introduced in lima 2.1.0. Lima 2.1.x's usernet forwarder (the path used
+// when the guest's systemd < 256, which includes Debian 12 / systemd 252,
+// the mngr_lima default image) wedges fresh ssh connections post-VM-READY:
+// TCP-accepted on the host then CLOSE_WAIT, no data flow to the in-VM
+// sshd, no git-receive-pack ever spawns -- mngr create hangs forever at
+// "Transferring git repository...". Root cause is the inetaf/tcpproxy
+// "half-close dance" leaking goroutines in io.Copy; lima a2b52885
+// (gvisor-tap-vsock 0.8.7 -> 0.8.8) is the regression boundary.
+// Tracked upstream as lima-vm/lima#4558 + #5042, no fix in flight yet.
+// Unaffected by mngr_lima's PINNED_DOCKER_APT_VERSION: the bug sits in
+// lima's host-side TCP forwarder, below the guest docker daemon.
+const LIMA_VERSION = '2.0.3';
+
+const MONOREPO_ROOT = path.resolve(ROOT, '../..');
+
+/**
+ * Workspace packages bundled into the standalone app. Each entry maps the
+ * package name (as it appears in `dependencies` / `[tool.uv.sources]`) to its
+ * path inside the monorepo.
+ *
+ * The packaged app only needs the transitive runtime closure of what minds
+ * imports; other workspace members (e.g. mngr_vps_docker, mngr_kanpan) are
+ * not included.
+ *
+ * This list is mirrored in electron/env-setup.js, electron/pyproject/
+ * pyproject.toml, and scripts/build_test.py. The drift guard
+ * `test_workspace_package_lists_are_consistent` in build_test.py fails if any
+ * of them disagree, so update all four together.
+ */
+const WORKSPACE_PACKAGES = {
+  'minds':                  'apps/minds',
+  'imbue-mngr':             'libs/mngr',
+  'imbue-mngr-claude':      'libs/mngr_claude',
+  'imbue-mngr-forward':     'libs/mngr_forward',
+  'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
+  'imbue-mngr-latchkey':    'libs/mngr_latchkey',
+  'imbue-mngr-lima':        'libs/mngr_lima',
+  'imbue-mngr-modal':       'libs/mngr_modal',
+  'imbue-mngr-ovh':         'libs/mngr_ovh',
+  'imbue-mngr-vps-docker':  'libs/mngr_vps_docker',
+  'imbue-common':           'libs/imbue_common',
+  'concurrency-group':      'libs/concurrency_group',
+  'resource-guards':        'libs/resource_guards',
+  'modal-proxy':            'libs/modal_proxy',
+};
+
+/**
+ * Build each workspace package as a wheel into `resources/wheels/`.
+ *
+ * Relies on each package's `pyproject.toml` (and hatchling's
+ * `[tool.hatch.build.targets.wheel]` config) to determine what goes into the
+ * wheel. In particular, the `exclude = [...]` line in each package's config
+ * is what keeps tests out of the wheel.
+ *
+ * Returns a map of package name → wheel filename, used downstream when
+ * rewriting `pyproject.toml` to reference the wheels.
+ */
+function buildWorkspaceWheels() {
+  const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
+  fs.mkdirSync(wheelsDir, { recursive: true });
+
+  const wheelByPackage = {};
+  for (const name of Object.keys(WORKSPACE_PACKAGES)) {
+    execSync(`uv build --package ${JSON.stringify(name)} --wheel --out-dir ${JSON.stringify(wheelsDir)}`, {
+      cwd: MONOREPO_ROOT, stdio: 'inherit',
+    });
+    // Wheel filenames follow PEP 427: `{name}-{version}-{py}-{abi}-{platform}.whl`
+    // where `name` has hyphens normalized to underscores. Since we build
+    // serially and clean RESOURCES_DIR at the top of main(), exactly one
+    // wheel per package should exist with the expected prefix.
+    const normalized = name.replace(/-/g, '_');
+    const matches = fs.readdirSync(wheelsDir).filter(
+      (f) => f.endsWith('.whl') && f.startsWith(normalized + '-'),
+    );
+    if (matches.length !== 1) {
+      throw new Error(
+        `Expected exactly one wheel for ${name} (prefix "${normalized}-") in ${wheelsDir}, ` +
+        `found ${matches.length}: ${JSON.stringify(matches)}`,
+      );
+    }
+    wheelByPackage[name] = matches[0];
+    console.log(`Built wheel for ${name}: ${matches[0]}`);
+  }
+  return wheelByPackage;
+}
+
 
 function getPlatformArch() {
   const platform = process.platform;
@@ -98,50 +184,48 @@ function dereferenceSymlinksInPlace(root) {
 }
 
 /**
- * Resolve the on-disk package.json for a dependency as seen from a given
- * starting directory. Handles pnpm's layout (where transitive deps aren't
- * hoisted to the root node_modules) by threading the right search path.
- */
-function resolveInstalledPackage(name, fromDir) {
-  const packageJsonPath = require.resolve(`${name}/package.json`, {
-    paths: [fromDir],
-  });
-  return { packageJsonPath, pkg: readJson(packageJsonPath) };
-}
-
-/**
  * Bundle the latchkey npm CLI (plus all its runtime dependencies) into
  * ``resources/latchkey/``.
  *
  * Context:
  *   apps/minds is managed by pnpm, which installs each package into its own
  *   ``node_modules/.pnpm/<pkg>@<ver>/node_modules/<pkg>/`` directory and
- *   wires up sibling symlinks for deps. Naively copying just the latchkey
- *   package directory leaves Node unable to resolve ``commander``, ``zod``,
- *   etc., because those live as siblings in the pnpm virtual store rather
- *   than as nested directories inside the package.
+ *   wires up sibling symlinks for deps. The store cannot be shipped inside
+ *   asar: copied symlinks break on relocate/sign and the packager can't
+ *   traverse the store.
  *
- *   To get a self-contained, portable bundle we do a fresh, flat
- *   ``npm install`` into a scratch staging directory and copy the resulting
- *   hoisted ``node_modules/`` tree wholesale into ``resources/latchkey/``.
+ *   ``pnpm deploy`` is the purpose-built tool for producing a
+ *   self-contained, copyable package directory. With ``inject-workspace-
+ *   packages=true`` (modern, non-legacy mode) it uses the workspace
+ *   lockfile to pin every transitive, so the bundled
+ *   ``playwright`` / ``playwright-core`` match exactly what
+ *   ``pnpm-lock.yaml`` resolved. We deploy the ``minds`` workspace
+ *   package itself with ``--prod`` to exclude minds' devDeps (the e2e
+ *   playwright + electron) and copy the resulting ``node_modules`` into
+ *   ``resources/latchkey/``.
  *
- * Platform-fanout (native prebuilds):
- *   Some deps use ``optionalDependencies`` to ship one platform-specific
- *   prebuilt native addon per target. Specifically:
- *     - ``@napi-rs/keyring`` fans out to ``@napi-rs/keyring-<os>-<arch>[-libc]``.
- *     - ``playwright`` has an optional ``fsevents`` for macOS.
- *   npm's default installer skips any optional dep whose ``os``/``cpu``
- *   doesn't match the build host, which breaks cross-platform packaging
- *   (todesktop builds multiple targets from one host). We sidestep that by
- *   listing every such fanout dep explicitly as a top-level dependency in
- *   the staging ``package.json`` (with ``--force`` so npm doesn't refuse
- *   them). The fanout set is read from each parent package's own
- *   ``optionalDependencies``, so it tracks upstream version bumps without
- *   manual intervention.
+ *   The ``--config`` flags steer the deploy:
+ *     - ``node-linker=hoisted`` produces a flat top-level layout (real
+ *       directories, not symlinks into a virtual store) so asar can
+ *       traverse it. Only ``node_modules/.bin/*`` retain internal
+ *       symlinks; dereferenceSymlinksInPlace() materializes those.
+ *     - ``ignore-scripts=true`` prevents playwright's postinstall from
+ *       downloading ~500MB of browser binaries into the bundle --
+ *       latchkey fetches Chromium lazily at runtime via ``ensure-browser``.
+ *     - ``inject-workspace-packages=true`` is the gate pnpm 10 requires
+ *       to use the modern (lockfile-respecting) deploy implementation.
+ *       It's a no-op for our case because minds has no workspace deps.
  *
- *   ``--ignore-scripts`` prevents playwright's postinstall from downloading
- *   ~500MB of browser binaries into the staging tree -- latchkey only uses
- *   playwright lazily, and any needed browsers are fetched at runtime.
+ *   Cross-platform native prebuilds (``@napi-rs/keyring-*``, playwright
+ *   ``fsevents``) come in via the workspace-level ``supportedArchitectures``
+ *   block in ``pnpm-workspace.yaml`` -- pnpm materializes every prebuild
+ *   variant listed there, regardless of the build host's OS/arch/libc.
+ *
+ *   ``@todesktop/runtime`` and its own transitives (electron-updater,
+ *   builder-util-runtime, ...) ride along because they're also prod deps
+ *   of minds. They sit next to latchkey in ``resources/latchkey/``
+ *   without colliding; the small extra weight is acceptable in exchange
+ *   for not having to compute a latchkey-only transitive closure.
  *
  * Runtime:
  *   A small shell shim at ``resources/latchkey/bin/latchkey`` invokes the
@@ -154,82 +238,38 @@ function bundleLatchkey() {
   const destNodeModules = path.join(destDir, 'node_modules');
   const destBinDir = path.join(destDir, 'bin');
 
-  // Discover versions and fanout sets from the already-pnpm-installed deps
-  // under apps/minds/node_modules/. This keeps the bundled versions in lock
-  // step with what dev mode and pnpm-lock.yaml pin. keyring and playwright
-  // are transitive deps of latchkey, so under pnpm they aren't hoisted to
-  // apps/minds/node_modules -- we resolve them starting from latchkey's own
-  // install directory.
-  const latchkey = resolveInstalledPackage('latchkey', ROOT);
-  const latchkeyDir = path.dirname(latchkey.packageJsonPath);
-  const keyring = resolveInstalledPackage('@napi-rs/keyring', latchkeyDir);
-  const playwright = resolveInstalledPackage('playwright', latchkeyDir);
-
-  const cliRelative =
-    typeof latchkey.pkg.bin === 'string'
-      ? latchkey.pkg.bin
-      : latchkey.pkg.bin && latchkey.pkg.bin.latchkey;
-  if (!cliRelative) {
-    throw new Error(`latchkey@${latchkey.pkg.version} is missing a "bin" entry`);
-  }
-
-  // Union of every platform-specific optional prebuild we want to guarantee
-  // is in the bundle, regardless of the build host's OS/arch/libc.
-  const fanoutDeps = {
-    ...(keyring.pkg.optionalDependencies || {}),
-    ...(playwright.pkg.optionalDependencies || {}),
-  };
-
   const stagingParent = fs.mkdtempSync(path.join(os.tmpdir(), 'minds-latchkey-'));
   try {
     const stagingDir = path.join(stagingParent, 'staging');
-    fs.mkdirSync(stagingDir, { recursive: true });
 
-    const stagingPackage = {
-      name: 'minds-latchkey-bundle',
-      version: '0.0.0',
-      private: true,
-      dependencies: {
-        latchkey: latchkey.pkg.version,
-        ...fanoutDeps,
-      },
-    };
-    fs.writeFileSync(
-      path.join(stagingDir, 'package.json'),
-      JSON.stringify(stagingPackage, null, 2) + '\n'
-    );
-
-    console.log(
-      `Installing latchkey@${latchkey.pkg.version} into staging with ` +
-      `${Object.keys(fanoutDeps).length} platform-fanout deps...`
-    );
+    console.log('Running pnpm deploy to stage latchkey + minds prod deps...');
     execFileSync(
-      'npm',
+      'pnpm',
       [
-        'install',
-        '--omit=dev',
-        '--ignore-scripts',
-        '--force',
-        '--no-audit',
-        '--no-fund',
-        '--no-package-lock',
+        '--filter', 'minds',
+        'deploy',
+        '--prod',
+        '--config.node-linker=hoisted',
+        '--config.ignore-scripts=true',
+        '--config.inject-workspace-packages=true',
+        stagingDir,
       ],
-      { cwd: stagingDir, stdio: 'inherit' }
+      { cwd: ROOT, stdio: 'inherit' }
     );
 
     const stagingNodeModules = path.join(stagingDir, 'node_modules');
     if (!fs.existsSync(path.join(stagingNodeModules, 'latchkey', 'package.json'))) {
       throw new Error(
-        `npm install did not produce latchkey under ${stagingNodeModules}`
+        `pnpm deploy did not produce latchkey under ${stagingNodeModules}`
       );
     }
 
     // Copy the flat, self-contained node_modules tree into resources/.
-    // dereference: true handles most symlinks, but nested symlinks (notably
-    // node_modules/.bin/*) end up pointing back at the source tree rather
-    // than being materialized as real files. dereferenceSymlinksInPlace()
-    // below walks the copied tree and fixes that up, so the bundle is fully
-    // self-contained and safe to package/sign/relocate.
+    // Top-level package directories are real (hoisted linker); only
+    // node_modules/.bin/* are symlinks (internal, relative to siblings).
+    // dereferenceSymlinksInPlace() materializes those as real files so
+    // macOS code-signing doesn't ENOENT on dangling targets after the
+    // scratch dir is removed.
     fs.mkdirSync(destDir, { recursive: true });
     fs.cpSync(stagingNodeModules, destNodeModules, {
       recursive: true,
@@ -238,6 +278,15 @@ function bundleLatchkey() {
     dereferenceSymlinksInPlace(destNodeModules);
   } finally {
     fs.rmSync(stagingParent, { recursive: true, force: true });
+  }
+
+  const latchkeyPkg = readJson(path.join(destNodeModules, 'latchkey', 'package.json'));
+  const cliRelative =
+    typeof latchkeyPkg.bin === 'string'
+      ? latchkeyPkg.bin
+      : latchkeyPkg.bin && latchkeyPkg.bin.latchkey;
+  if (!cliRelative) {
+    throw new Error(`latchkey@${latchkeyPkg.version} is missing a "bin" entry`);
   }
 
   // Emit the shim. It resolves the CLI relative to its own location so the
@@ -287,7 +336,7 @@ function bundleLatchkey() {
   execFileSync(process.execPath, [bundledCli, '--version'], { stdio: 'inherit' });
 
   console.log(
-    `latchkey@${latchkey.pkg.version} bundled at ${destNodeModules} ` +
+    `latchkey@${latchkeyPkg.version} bundled at ${destNodeModules} ` +
     `(shim: ${shimPath})`
   );
 }
@@ -338,31 +387,22 @@ async function downloadLima({ platform, arch }) {
   }
 }
 
-function copyPyproject() {
-  const srcDir = path.join(ROOT, 'electron', 'pyproject');
-  const destDir = path.join(RESOURCES_DIR, 'pyproject');
-  fs.mkdirSync(destDir, { recursive: true });
-
-  // Copy pyproject.toml, stripping any [tool.uv.sources] section that
-  // contains local editable paths (only valid in the monorepo layout)
-  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
-  if (fs.existsSync(pyprojectSrc)) {
-    let content = fs.readFileSync(pyprojectSrc, 'utf-8');
-    content = content.replace(/\[tool\.uv\.sources\][^\[]*/, '').trimEnd() + '\n';
-    fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
-    console.log(`Copied pyproject.toml to ${destDir} (stripped local sources)`);
-  } else {
-    console.warn(`Warning: ${pyprojectSrc} not found`);
+/**
+ * Write the current git SHA into electron/build-info.json so the runtime
+ * can surface it in the About panel. Falls back to "unknown" if the
+ * working tree has no .git (e.g. building from a tarball).
+ */
+function bakeBuildInfo() {
+  let gitSha;
+  try {
+    gitSha = execSync('git rev-parse HEAD', { cwd: MONOREPO_ROOT }).toString().trim();
+  } catch (err) {
+    console.warn(`Could not resolve git SHA (${err.message}); falling back to "unknown".`);
+    gitSha = 'unknown';
   }
-
-  // Copy lockfile as-is
-  const lockSrc = path.join(srcDir, 'uv.lock');
-  if (fs.existsSync(lockSrc)) {
-    fs.copyFileSync(lockSrc, path.join(destDir, 'uv.lock'));
-    console.log(`Copied uv.lock to ${destDir}`);
-  } else {
-    console.warn(`Warning: ${lockSrc} not found`);
-  }
+  const buildInfoPath = path.join(ROOT, 'electron', 'build-info.json');
+  fs.writeFileSync(buildInfoPath, JSON.stringify({ gitSha }) + '\n');
+  console.log(`Bundled gitSha=${gitSha} -> ${buildInfoPath}`);
 }
 
 /**
@@ -466,6 +506,68 @@ function bundleClientConfig() {
   fs.writeFileSync(bundledRootNameFile, rootNameBundle + '\n');
   console.log(`Bundled ${resolvedConfig} -> ${bundledClient}`);
   console.log(`Bundled MINDS_ROOT_NAME=${rootNameBundle} -> ${bundledRootNameFile}`);
+
+  // The source-tree _bundled/ above ends up inside app.asar, which the
+  // Python backend subprocess cannot read. paths.js getBundledConfigDir()
+  // resolves the packaged-mode bundle under the pyproject resources dir
+  // (extraResources copies resources/ -> Resources/), so stage a second
+  // copy there on the real filesystem where `minds run --config-file`
+  // can reach it.
+  const packagedBundledDir = path.join(
+    RESOURCES_DIR,
+    'pyproject',
+    'imbue',
+    'minds',
+    'config',
+    'envs',
+    '_bundled'
+  );
+  fs.mkdirSync(packagedBundledDir, { recursive: true });
+  fs.copyFileSync(resolvedConfig, path.join(packagedBundledDir, 'client.toml'));
+  fs.writeFileSync(path.join(packagedBundledDir, 'root_name'), rootNameBundle + '\n');
+  console.log(`Staged bundled config for packaged runtime at ${packagedBundledDir}`);
+}
+
+/**
+ * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
+ *
+ * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
+ * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
+ * and then runs `uv lock` in-place so the lockfile matches the rewritten
+ * pyproject. This re-resolves PyPI deps from scratch, which is fine -- they're
+ * the same deps, just locked against the new workspace source definitions.
+ */
+function stageRuntimePyproject(wheelByPackage) {
+  const srcDir = path.join(ROOT, 'electron', 'pyproject');
+  const destDir = path.join(RESOURCES_DIR, 'pyproject');
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
+  let content = fs.readFileSync(pyprojectSrc, 'utf-8');
+
+  const sourceLines = ['[tool.uv.sources]'];
+  for (const [name, whlFile] of Object.entries(wheelByPackage)) {
+    sourceLines.push(`${name} = { path = "../wheels/${whlFile}" }`);
+  }
+  const newSources = sourceLines.join('\n') + '\n';
+
+  // Anchor at start-of-line so the literal "[tool.uv.sources]" substring
+  // inside the file-level docstring (a comment that names the section) is
+  // not mistaken for the section header itself.
+  const sectionRe = /^\[tool\.uv\.sources\][^\[]*/m;
+  if (sectionRe.test(content)) {
+    content = content.replace(sectionRe, newSources);
+  } else {
+    content = content.trimEnd() + '\n\n' + newSources;
+  }
+  fs.writeFileSync(path.join(destDir, 'pyproject.toml'), content);
+  console.log(`Staged pyproject.toml at ${destDir}`);
+
+  // Regenerate the lockfile against the rewritten pyproject. This is simpler
+  // and more robust than string-surgery on the dev-time uv.lock: uv emits the
+  // exact right shape for wheel-path sources itself.
+  execSync('uv lock', { cwd: destDir, stdio: 'inherit' });
+  console.log(`Regenerated uv.lock at ${destDir}`);
 }
 
 async function main() {
@@ -485,11 +587,14 @@ async function main() {
     downloadUv(RESOURCES_DIR, { platform, arch }),
     downloadLima({ platform, arch }),
     downloadGit(RESOURCES_DIR, { platform }),
+    downloadRestic(RESOURCES_DIR, { platform, arch }),
   ]);
 
   bundleLatchkey();
-  copyPyproject();
+  const wheelByPackage = buildWorkspaceWheels();
+  stageRuntimePyproject(wheelByPackage);
   bundleClientConfig();
+  bakeBuildInfo();
 
   console.log('\nBuild complete!');
   console.log(`Resources directory: ${RESOURCES_DIR}`);

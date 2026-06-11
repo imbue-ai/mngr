@@ -20,6 +20,7 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
+# `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
 

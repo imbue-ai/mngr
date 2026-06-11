@@ -341,24 +341,30 @@ def clone_git_repo(
 ) -> None:
     """Clone a git repository into the specified directory.
 
-    The clone_dir must not already exist -- git clone will create it.
+    The clone_dir must not already exist -- this function creates it.
 
-    When ``branch`` is given, only that branch is fetched (``--single-branch
-    --branch``), which avoids downloading every other branch's history. This is
-    still a *complete* (non-shallow) clone of that branch -- its full ancestry is
-    present. We deliberately do NOT offer a shallow (``--depth 1``) clone: this
-    clone is the source ``mngr create`` mirror-pushes into the agent container's
-    bare repo, and git rejects pushes from a shallow source with "shallow update
-    not allowed" (the pushed tip's parent is missing from the pack).
+    ``branch`` accepts a branch name, a tag name, or a commit SHA -- git
+    fetch handles all three uniformly. The fetched ref lands in
+    ``FETCH_HEAD``; the caller materialises HEAD by calling
+    :func:`checkout_branch` next.
 
-    Raises GitCloneError if the clone fails (including when ``branch`` does not
-    exist on the remote).
+    Implementation is ``git init`` + ``git remote add origin`` + ``git
+    fetch origin <ref>`` rather than ``git clone --single-branch --branch
+    <ref>``. ``--branch`` rejects commit SHAs (``fatal: Remote branch
+    <sha> not found in upstream origin``); ``git fetch`` does not. The
+    fetch downloads only the requested ref's full ancestry -- same shape
+    as ``--single-branch``, still non-shallow.
+
+    We deliberately do NOT shallow-clone (no ``--depth``): this clone is
+    the source ``mngr create`` mirror-pushes into the agent container's
+    bare repo, and git rejects pushes from a shallow source with "shallow
+    update not allowed" (the pushed tip's parent is missing from the pack).
+
+    Raises GitCloneError if any step fails (including when ``branch`` does
+    not exist on the remote and is not a reachable commit).
     """
     logger.debug("Cloning {} to {}", _redact_url_credentials(str(git_url)), clone_dir)
-    command = ["git", "clone"]
-    if branch is not None:
-        command.extend(["--single-branch", "--branch", str(branch)])
-    command.extend([str(git_url), str(clone_dir)])
+    clone_dir.mkdir(parents=True, exist_ok=False)
 
     # Wrap the caller's on_output so git's per-line stdout/stderr is scrubbed
     # of embedded credentials before being forwarded. Git commonly echoes the
@@ -366,22 +372,37 @@ def clone_git_repo(
     # which would otherwise leak tokens from credentialed URLs into logs.
     redacted_on_output = _RedactingOutputCallback(inner=on_output) if on_output is not None else None
 
+    # `init` and `remote add` are local-only and never fail in healthy
+    # environments; `fetch` is the step that can legitimately error
+    # (auth, network, ref-not-found). All three are wrapped under the
+    # same child concurrency group so cancellation is uniform; the
+    # failure is raised AFTER the `with cg` block to keep GitCloneError
+    # from being wrapped in a ConcurrencyExceptionGroup.
     cg = _make_child_cg("git-clone", parent_cg)
+    failed: tuple[str, str] | None = None
     with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            on_output=redacted_on_output,
-        )
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-        raise GitCloneError(
-            "git clone failed (exit code {}):\n{}".format(
-                result.returncode,
-                _redact_url_credentials_in_text(stderr if stderr else stdout),
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "remote", "add", "origin", str(git_url)],
+            ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
+        ):
+            result = cg.run_process_to_completion(
+                command=command,
+                cwd=clone_dir,
+                is_checked_after=False,
+                on_output=redacted_on_output,
             )
-        )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                failed = (command[1], stderr if stderr else stdout)
+                break
+    if failed is not None:
+        step_name, output = failed
+        raise GitCloneError("git {} failed:\n{}".format(step_name, _redact_url_credentials_in_text(output)))
+
+
+_FULL_SHA_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
 
 
 def checkout_branch(
@@ -391,22 +412,36 @@ def checkout_branch(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Check out a specific branch in a cloned repository.
+    """Check out the just-fetched ref as a named local branch.
 
-    Raises GitOperationError if the checkout fails (e.g. branch does not exist).
+    Uses ``git checkout -B <local-name> FETCH_HEAD`` -- FETCH_HEAD is the
+    pseudo-ref :func:`clone_git_repo`'s fetch just landed on, so this is
+    the unambiguous source whether the input was a branch, a tag, or a
+    SHA. ``-B`` creates the local branch (rather than leaving HEAD
+    detached) so downstream ``mngr.create``'s source-base autodetection
+    (``git rev-parse --abbrev-ref HEAD``) returns a real branch name.
+
+    When ``branch`` is a 40-char lowercase hex SHA, the local branch is
+    named ``sha-<sha>`` instead of ``<sha>`` to avoid git's "refname is
+    ambiguous" warning that fires on any subsequent operation that types
+    a 40-hex string. Cosmetic only -- operations work either way.
+
+    Raises GitOperationError if the checkout fails.
     """
-    logger.debug("Checking out branch {} in {}", branch, repo_dir)
+    ref = str(branch)
+    local_name = f"sha-{ref}" if _FULL_SHA_RE.match(ref) else ref
+    logger.debug("Checking out {} as local branch {} in {}", ref, local_name, repo_dir)
     cg = _make_child_cg("git-checkout", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
-            command=["git", "checkout", str(branch)],
+            command=["git", "checkout", "-B", local_name, "FETCH_HEAD"],
             cwd=repo_dir,
             is_checked_after=False,
             on_output=on_output,
         )
     if result.returncode != 0:
         raise GitOperationError(
-            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+            "git checkout failed for ref '{}' (exit code {}):\n{}".format(
                 branch,
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
@@ -486,11 +521,11 @@ def _build_mngr_create_command(
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
     every minds workspace; the host name (the user's input from the
-    create-project form) is the workspace identifier. ``--reuse`` and
-    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
-    resets the agent on the same host instead of failing on a duplicate
-    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
-    is not meaningful there).
+    create-project form) is the workspace identifier. Only IMBUE_CLOUD
+    passes ``--reuse`` (to satisfy the pre-baked services-agent on the
+    pool host); the other modes rely on ``--new-host`` for fresh-host
+    intent and pass neither ``--reuse`` nor ``--update`` because
+    mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
     the FCT template's own ``pass_(host_)env`` declarations, not by inline
@@ -580,7 +615,12 @@ def _build_mngr_create_command(
             # transfer + provisioning round the bake already paid for.
             mngr_command.append("--reuse")
         case _:
-            mngr_command.extend(["--reuse", "--update"])
+            # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
+            # the create form is "give me a new agent on a new host", and
+            # ``--reuse`` matches only on agent name (``system-services``)
+            # without scoping to host, so it collides across hosts. The
+            # ``--new-host`` flag below already covers fresh-host intent.
+            pass
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides
@@ -1302,12 +1342,14 @@ class AgentCreator(MutableModel):
                         # .git/worktrees/ dir, which breaks when copied into Docker.
                         # Clone locally to get a standalone repo.
                         #
-                        # Full clone (no --depth=1): mngr's downstream mirror push
-                        # to the agent container's bare `.git` rejects shallow
-                        # updates with "shallow update not allowed" whenever the
-                        # source's tip has a parent not in the pack. Cloning
-                        # deeply avoids that failure mode. Local file:// clones
-                        # are cheap regardless.
+                        # Full clone (no --depth=1): a shallow clone only pulls
+                        # the default branch (e.g. main) and not the user's
+                        # target branch (e.g. pilot), so the subsequent
+                        # `git checkout <branch>` fails with `pathspec did not
+                        # match`. mngr's downstream mirror push into the agent
+                        # container's bare receiver also rejects shallow source
+                        # packs with "shallow update not allowed". Cloning
+                        # deeply avoids both. Local file:// clones are cheap.
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
