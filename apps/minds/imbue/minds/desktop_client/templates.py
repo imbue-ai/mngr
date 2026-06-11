@@ -86,7 +86,13 @@ _INPUT_BASE: Final[str] = (
 # stroke-linejoin=round). The dict is the single source of truth -- to
 # add or swap an icon, edit one entry here.
 _ICONS_24: Final[Mapping[str, str]] = {
-    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    # lucide ``menu`` (Figma node 559-5101): three horizontal lines, used by
+    # the titlebar button that opens the floating workspace menu.
+    "menu": (
+        '<line x1="4" y1="6" x2="20" y2="6"/>'
+        '<line x1="4" y1="12" x2="20" y2="12"/>'
+        '<line x1="4" y1="18" x2="20" y2="18"/>'
+    ),
     "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
     "back": '<polyline points="15 18 9 12 15 6"/>',
     "forward": '<polyline points="9 6 15 12 9 18"/>',

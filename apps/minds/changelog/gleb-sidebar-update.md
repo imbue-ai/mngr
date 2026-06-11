@@ -83,3 +83,12 @@ The landing page's workspace rows gain the same "open in new window"
 arrow, placed just left of the settings gear. In the desktop app it
 opens (or focuses) a dedicated window for that workspace; in a plain
 browser it opens the workspace in a new tab.
+
+The titlebar button that opens the workspace menu now uses a hamburger
+"menu" glyph (three horizontal lines) instead of the old panel-left
+sidebar glyph (Figma node 559-5101). The ICONS_24 catalog entry was
+renamed sidebar -> menu accordingly.
+
+The settings gear inside the floating workspace menu rows is rendered
+smaller (Figma node 560-5111) so it reads as a lighter secondary action
+next to the workspace name, rather than competing with it.

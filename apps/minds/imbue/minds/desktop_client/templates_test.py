@@ -1311,6 +1311,16 @@ def test_icon24_renders_arrow_up_right() -> None:
     assert '<path d="M7 17L17 7"/>' in html
 
 
+def test_icon24_renders_menu() -> None:
+    # The lucide ``menu`` glyph (three horizontal lines) is the titlebar
+    # button that opens the floating workspace menu.
+    html = CATALOG.render("Icon24", name="menu")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<line x1="4" y1="6" x2="20" y2="6"/>' in html
+    assert '<line x1="4" y1="12" x2="20" y2="12"/>' in html
+    assert '<line x1="4" y1="18" x2="20" y2="18"/>' in html
+
+
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
     html = CATALOG.render("Icon12", name="close")
     assert 'viewBox="0 0 12 12"' in html

@@ -17,7 +17,7 @@
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildOpenNewBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
-//                                                    dataAttr, agentId);
+//                                                    dataAttr, agentId, sizeClass);
 //
 // ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
 // the "open in new window" arrow (Electron only -- browser mode has no
@@ -26,7 +26,7 @@
 // Event wiring (click / context-menu) is the caller's job -- this builds
 // DOM only.
 (function () {
-  function buildIconButton(title, pathSvg, dataAttr, agentId) {
+  function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'sidebar-row-icon flex items-center justify-center bg-transparent border-none p-0.5 cursor-pointer text-white/70 rounded hover:text-white hover:bg-white/10';
@@ -34,7 +34,7 @@
     btn.tabIndex = -1;
     btn.setAttribute(dataAttr, agentId);
     btn.innerHTML =
-      '<svg class="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+      '<svg class="' + (sizeClass || 'w-4 h-4') + '" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
       'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + pathSvg + '</svg>';
     return btn;
   }
@@ -54,7 +54,9 @@
   }
 
   function buildSettingsBtn(agentId) {
-    return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId);
+    // Smaller than the open-in-new arrow (Figma node 560-5111): the gear
+    // renders ~10-11px inside the 16px button rather than full-bleed.
+    return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId, 'w-3.5 h-3.5');
   }
 
   function buildRow(workspace, options) {
