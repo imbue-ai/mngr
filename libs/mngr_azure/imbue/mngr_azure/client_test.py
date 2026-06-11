@@ -183,6 +183,32 @@ def test_create_instance_raises_when_subnet_missing() -> None:
         )
 
 
+def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
+    # When the VM create fails (e.g. SkuNotAvailable / quota), create_instance
+    # raises before returning an instance id, so the create_host failure-cleanup
+    # cannot reach the public IP + NIC made before the VM. They must be deleted
+    # here so a failed create leaks nothing.
+    compute = FakeComputeClient()
+    compute.virtual_machines.create_error = make_azure_http_error(409, "SkuNotAvailable")
+    client = _make_client(compute=compute)
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    with pytest.raises(VpsApiError, match="SkuNotAvailable"):
+        client.create_instance(
+            label="agent",
+            region=_REGION,
+            plan="Standard_B2s",
+            user_data="#cloud-config\n",
+            ssh_key_ids=["k1"],
+            tags={"mngr-host-id": "host-abc"},
+        )
+    network = client.stubbed_network_client
+    assert len(network.network_interfaces.deleted) == 1
+    assert len(network.public_ip_addresses.deleted) == 1
+    # NIC must be deleted before the public IP it references.
+    assert network.network_interfaces.deleted[0].endswith("-nic")
+    assert network.public_ip_addresses.deleted[0].endswith("-ip")
+
+
 def test_create_instance_requires_uploaded_ssh_key() -> None:
     client = _make_client()
     with pytest.raises(VpsApiError, match="No in-memory SSH public key"):

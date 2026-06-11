@@ -175,6 +175,7 @@ class FakePublicIPAddressesOperations:
 
     def __init__(self) -> None:
         self.created: list[tuple[str, Any]] = []
+        self.deleted: list[str] = []
         self.get_result: Any = None
         self.get_error: Exception | None = None
         self.list_result: list[Any] = []
@@ -182,6 +183,10 @@ class FakePublicIPAddressesOperations:
     def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/pip/{name}", name=name, ip_address="203.0.113.7"))
+
+    def begin_delete(self, resource_group: str, name: str) -> FakePoller:
+        self.deleted.append(name)
+        return FakePoller()
 
     def get(self, resource_group: str, name: str) -> Any:
         if self.get_error is not None:
@@ -197,10 +202,15 @@ class FakeNetworkInterfacesOperations:
 
     def __init__(self) -> None:
         self.created: list[tuple[str, Any]] = []
+        self.deleted: list[str] = []
 
     def begin_create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakePoller:
         self.created.append((name, parameters))
         return FakePoller(result_value=SimpleNamespace(id=f"/nic/{name}", name=name))
+
+    def begin_delete(self, resource_group: str, name: str) -> FakePoller:
+        self.deleted.append(name)
+        return FakePoller()
 
 
 class FakeVirtualNetworksOperations:

@@ -395,8 +395,22 @@ class AzureVpsClient(VpsClientInterface):
         nic_id = self._create_public_ip_and_nic(vm_name, subnet_id, vm_tags)
         vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
 
-        with self._translate_azure_errors():
-            self._compute().virtual_machines.begin_create_or_update(self.resource_group, vm_name, vm_model).result()
+        # The public IP + NIC are created before the VM. If VM creation fails
+        # (e.g. SkuNotAvailable / quota), this method raises before returning an
+        # instance id, so the create_host failure-cleanup -- which deletes the VM
+        # by id -- can never reach the orphaned NIC + public IP. Delete them here
+        # so a failed create leaks nothing. On success the VM owns them and
+        # destroy_instance's delete cascades them via delete_option=Delete.
+        vm_created = False
+        try:
+            with self._translate_azure_errors():
+                self._compute().virtual_machines.begin_create_or_update(
+                    self.resource_group, vm_name, vm_model
+                ).result()
+            vm_created = True
+        finally:
+            if not vm_created:
+                self._delete_nic_and_public_ip(vm_name)
         logger.info(
             "Created Azure VM {} (label: {}, region: {}, size: {}, image: {}:{}:{})",
             vm_name,
@@ -536,6 +550,27 @@ class AzureVpsClient(VpsClientInterface):
 
     def _nic_name(self, vm_name: str) -> str:
         return f"{vm_name}-nic"
+
+    def _delete_nic_and_public_ip(self, vm_name: str) -> None:
+        """Best-effort delete the per-VM NIC then its public IP (NIC must go first).
+
+        Used to reclaim the NIC + public IP that ``create_instance`` provisions
+        before the VM when VM creation fails. The NIC references the public IP, so
+        it must be deleted first; each delete is best-effort (a 404 / already-gone
+        is fine) so cleanup never masks the original create failure.
+        """
+        try:
+            with self._translate_azure_errors():
+                self._network().network_interfaces.begin_delete(self.resource_group, self._nic_name(vm_name)).result()
+        except VpsApiError as e:
+            logger.warning("Failed to delete orphaned NIC for {}: {}", vm_name, e)
+        try:
+            with self._translate_azure_errors():
+                self._network().public_ip_addresses.begin_delete(
+                    self.resource_group, self._public_ip_name(vm_name)
+                ).result()
+        except VpsApiError as e:
+            logger.warning("Failed to delete orphaned public IP for {}: {}", vm_name, e)
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         try:
