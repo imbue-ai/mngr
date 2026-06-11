@@ -5,6 +5,7 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
@@ -12,6 +13,7 @@ from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
+from imbue.mngr_aws.conftest import clear_aws_env
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -166,3 +168,62 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
     with pytest.raises(MngrError, match="no longer supported"):
         provider._parse_build_args(["--vps-region=us-east-1"])
+
+
+# =============================================================================
+# Read-path discovery skip is user-visible
+# =============================================================================
+#
+# ``build_provider_instance`` raises ``ProviderEmptyError`` when AWS credentials
+# or AMIs cannot be resolved. The shared discovery code in
+# ``mngr.api.list._construct_and_discover_for_provider`` swallows that
+# exception at ``logger.debug``, so the backend must emit a ``logger.warning``
+# at each raise site for misconfigured providers to remain visible in
+# ``mngr list`` / ``mngr connect``. The tests below pin both halves of the
+# contract: ``ProviderEmptyError`` still raises, AND exactly one warning is
+# emitted naming the provider.
+
+
+def test_build_provider_instance_warns_and_raises_when_credentials_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
+    name = ProviderInstanceName("aws-test")
+
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "aws-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
+
+
+def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    clear_aws_env(monkeypatch)
+    # Make credentials resolve cleanly so we exercise the *second* raise site
+    # (no usable AMI), not the first.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    config = AwsProviderConfig(
+        backend=AWS_BACKEND_NAME,
+        default_ami_id="",
+        default_ami_by_region={},
+    )
+    name = ProviderInstanceName("aws-test")
+
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "aws-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
