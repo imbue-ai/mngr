@@ -2,11 +2,15 @@
 
 import socket
 import stat
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization import PublicFormat
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.serialization import load_ssh_private_key
 from pyinfra.api import Host as PyinfraHost
@@ -139,6 +143,40 @@ def test_load_or_create_ssh_keypair_custom_key_name(tmp_path: Path) -> None:
     private_path, _ = load_or_create_ssh_keypair(key_dir, key_name="mykey")
     assert private_path == key_dir / "mykey"
     assert (key_dir / "mykey.pub").exists()
+
+
+def test_load_or_create_ssh_keypair_concurrent_first_creation_is_consistent(tmp_path: Path) -> None:
+    """Concurrent first-time creation must yield one consistent, non-empty keypair.
+
+    The parallel host-discovery fan-out opens one SSH connection per VPS and
+    each lazily calls load_or_create_ssh_keypair on the same directory. Without
+    serialized, atomic creation, racing writers produced a transient zero-byte
+    or mismatched ``.pub`` (paramiko then raised "Not enough fields for public
+    blob"). All concurrent callers must observe the same fully-written keypair.
+    """
+    key_dir = tmp_path / "keys"
+    barrier = threading.Barrier(16)
+
+    def _worker() -> str:
+        # Release all workers simultaneously to maximize contention on first creation.
+        barrier.wait()
+        _, public_content = load_or_create_ssh_keypair(key_dir, key_name="vps_ssh_key")
+        return public_content
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        public_contents = [f.result() for f in [executor.submit(_worker) for _ in range(16)]]
+
+    # Every caller saw a non-empty public key, and they all agree on the same one.
+    assert all(content for content in public_contents)
+    assert len(set(public_contents)) == 1
+
+    # The on-disk public key matches the private key (a real, parseable pair),
+    # so no caller wrote a public key from a different generated keypair.
+    private_key = load_pem_private_key((key_dir / "vps_ssh_key").read_bytes(), password=None)
+    expected_public = (
+        private_key.public_key().public_bytes(encoding=Encoding.OpenSSH, format=PublicFormat.OpenSSH).decode("utf-8")
+    )
+    assert public_contents[0] == expected_public
 
 
 # =============================================================================

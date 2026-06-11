@@ -49,9 +49,11 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # 9 = 8 existing + 1 in _build_agent_details_from_raw for resilient listing
-    # (skip malformed agent data rather than crash the list command)
-    rc.check_broad_exception_catch(_DIR, snapshot(7))
+    # The +1 over the prior count is in _read_records_from_vps: host discovery
+    # SSHes every VPS the provider enumerates (OVH lists the whole account), so
+    # one unreachable/foreign/odd VPS must degrade to a warning rather than
+    # abort create -- the same best-effort pattern the destroy path already uses.
+    rc.check_broad_exception_catch(_DIR, snapshot(8))
 
 
 def test_prevent_base_exception_catch() -> None:

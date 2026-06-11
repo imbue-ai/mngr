@@ -1609,7 +1609,15 @@ class VpsDockerProvider(BaseProviderInstance):
                     return [], {}
                 agent_data = host_store.list_persisted_agent_data()
                 return [record], {host_id: agent_data}
-        except MngrError as e:
+        except Exception as e:
+            # Discovery is best-effort per VPS: ``_list_provider_vps_hostnames``
+            # may return VPSes this provider does not own (e.g. OVH lists every
+            # VPS in the account), and any one of them may be unreachable,
+            # foreign, or surface an unexpected SSH/key-loading error (paramiko
+            # raises a bare ``ValueError`` when a public-key file cannot be
+            # parsed). A single such VPS must never abort ``mngr create`` or a
+            # listing for every other host, so we degrade to a warning and fall
+            # back to any cached records for this VPS rather than re-raising.
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
