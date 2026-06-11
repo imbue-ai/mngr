@@ -1,4 +1,3 @@
-import tempfile
 import threading
 from pathlib import Path
 from queue import Empty
@@ -14,6 +13,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.local_process import run_background
+from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import poll_until
 
 
@@ -75,28 +75,29 @@ def test_run_background_mixed_stdout_stderr() -> None:
 def test_run_background_real_time_queue() -> None:
     """Test that output is available in real-time via queue."""
     output_queue: Queue[tuple[str, bool]] = Queue()
-    start_time = monotonic()
 
-    # Command that outputs with delays
+    # The command emits a line, sleeps, then emits a second line. The deliberate sleep gap is what
+    # proves real-time streaming: if output were only delivered after the process exited, both lines
+    # would arrive together with no measurable gap between them.
     process = run_background(["sh", "-c", "echo 'immediate'; sleep 0.1; echo 'delayed'"], output_queue=output_queue)
 
-    # Get first line immediately
-    line1, is_stdout1 = output_queue.get(timeout=0.2)
-    time1 = monotonic() - start_time
+    line1, is_stdout1 = output_queue.get(timeout=5.0)
+    time1 = monotonic()
 
-    # Get second line after delay
-    line2, is_stdout2 = output_queue.get(timeout=0.5)
-    time2 = monotonic() - start_time
+    line2, is_stdout2 = output_queue.get(timeout=5.0)
+    time2 = monotonic()
 
-    process.wait(timeout=1.0)
+    process.wait(timeout=5.0)
 
     assert line1 == "immediate\n"
     assert is_stdout1
-    assert time1 < 0.3  # First line should come quickly
-
     assert line2 == "delayed\n"
     assert is_stdout2
-    assert time2 > 0.08  # Second line should come after delay
+    # The gap between the two lines reflects the deliberate sleep in the command, proving the queue
+    # streams output as it is produced rather than buffering until the process exits. This is a
+    # lower bound gated by a real sleep, so it is not flaky under load (unlike an upper bound on
+    # process startup latency would be).
+    assert time2 - time1 > 0.08
 
     assert process.returncode == 0
 
@@ -135,7 +136,7 @@ def test_run_background_long_running_poll() -> None:
 
 def test_run_background_terminate() -> None:
     """Test terminating a background process."""
-    process = run_background(["sleep", "10"])
+    process = run_background(["sleep", LONG_SLEEP_SECONDS])
 
     # Wait until the process is running
     assert poll_until(lambda: not process.is_finished(), timeout=5.0)
@@ -151,7 +152,7 @@ def test_run_background_terminate() -> None:
 
 def test_run_background_wait_timeout() -> None:
     """Test that wait() properly times out."""
-    process = run_background(["sleep", "10"])
+    process = run_background(["sleep", LONG_SLEEP_SECONDS])
 
     start_time = monotonic()
     with pytest.raises(TimeoutExpired):  # subprocess.TimeoutExpired
@@ -167,22 +168,19 @@ def test_run_background_wait_timeout() -> None:
     process.terminate()
 
 
-def test_run_background_with_cwd() -> None:
+def test_run_background_with_cwd(tmp_path: Path) -> None:
     """Test running background process in specific directory."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmpdir_path = Path(tmpdir)
+    # Create test files
+    (tmp_path / "test1.txt").touch()
+    (tmp_path / "test2.txt").touch()
 
-        # Create test files
-        (tmpdir_path / "test1.txt").touch()
-        (tmpdir_path / "test2.txt").touch()
+    process = run_background(["ls"], cwd=tmp_path)
 
-        process = run_background(["ls"], cwd=tmpdir_path)
+    stdout, stderr = process.wait_and_read(timeout=5.0)
 
-        stdout, stderr = process.wait_and_read(timeout=5.0)
-
-        assert process.returncode == 0
-        assert "test1.txt" in stdout
-        assert "test2.txt" in stdout
+    assert process.returncode == 0
+    assert "test1.txt" in stdout
+    assert "test2.txt" in stdout
 
 
 def test_run_background_non_zero_exit() -> None:
@@ -218,7 +216,7 @@ def test_run_background_shutdown_event() -> None:
     """Test using shutdown event to interrupt background process."""
     shutdown_event = Event()
 
-    process = run_background(["sleep", "10"], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
+    process = run_background(["sleep", LONG_SLEEP_SECONDS], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
 
     # Wait until the process is running
     assert poll_until(lambda: not process.is_finished(), timeout=5.0)
@@ -242,7 +240,7 @@ def test_run_background_compound_shutdown_event() -> None:
 
     # RemoteRunningProcess lets shutdown_event be a ReadOnlyEvent, including CompoundEvent, but RunningProcess only allows MutableEvent
     process: RunningProcess = run_background(
-        ["sleep", "10"],
+        ["sleep", LONG_SLEEP_SECONDS],
         shutdown_event=compound_event,  # ty: ignore[invalid-argument-type]
         shutdown_timeout_sec=0.2,
     )
@@ -366,7 +364,7 @@ def test_run_background_empty_output() -> None:
 def test_run_background_timeout_parameter() -> None:
     """Test that the timeout parameter is passed to the underlying process."""
     # This should timeout because sleep takes longer than timeout
-    process = run_background(["sleep", "10"], timeout=0.1)
+    process = run_background(["sleep", LONG_SLEEP_SECONDS], timeout=0.1)
 
     # The process should fail due to timeout
     start_time = monotonic()
@@ -396,12 +394,14 @@ def test_run_background_interleaved_stdout_stderr() -> None:
         output.append((line.strip(), is_stdout))
 
     assert len(output) == 4
-    # Check we got the expected lines (order might vary slightly due to buffering)
     stdout_lines = [line for line, is_stdout in output if is_stdout]
     stderr_lines = [line for line, is_stdout in output if not is_stdout]
 
-    assert sorted(stdout_lines) == ["out1", "out2"]
-    assert sorted(stderr_lines) == ["err1", "err2"]
+    # Cross-stream interleaving order is not guaranteed (stdout vs stderr may be buffered
+    # independently), but order *within* a single stream is deterministic, so assert it without
+    # sorting -- sorting would hide a regression that scrambled a stream's own line order.
+    assert stdout_lines == ["out1", "out2"]
+    assert stderr_lines == ["err1", "err2"]
 
 
 def test_run_background_partial_line_handling() -> None:
@@ -420,66 +420,80 @@ def test_run_background_partial_line_handling() -> None:
     while not output_queue.empty():
         queue_items.append(output_queue.get())
 
-    # If there are items, verify they're correct
+    # Exactly one queue item is expected: the single partial line (no trailing newline).
     assert len(queue_items) == 1
     line, is_stdout = queue_items[0]
     assert "no newline" in line
 
 
-def test_run_background_thread_safety() -> None:
-    """Test that RunningProcess is thread-safe for concurrent access."""
-    process = run_background(["sh", "-c", "for i in 1 2 3; do echo $i; done"])
+def test_run_background_thread_safety(tmp_path: Path) -> None:
+    """Test that RunningProcess is thread-safe for concurrent poll/read access while it is running."""
+    release_file = tmp_path / "release"
+    # The process blocks on the release file before producing any output, so it is guaranteed to be
+    # *running* while the worker threads below hammer poll()/is_finished()/read_*(). Without this the
+    # process would finish before the threads even started, and the concurrent code paths the test
+    # claims to stress would never execute. Once released it emits known output and exits, so the
+    # workers also exercise concurrent access across the running->finished transition.
+    process = run_background(
+        ["sh", "-c", f"while [ ! -f {release_file} ]; do sleep 0.01; done; for i in 1 2 3; do echo $i; done"]
+    )
 
-    results: dict[str, list] = {"poll": [], "is_finished": [], "stdout": [], "stderr": []}
+    poll_results: list[int | None] = []
     errors: list[Exception] = []
+    stop_event = Event()
 
     def poll_thread() -> None:
         try:
-            while not process.is_finished():
-                results["poll"].append(process.poll())
+            while not stop_event.is_set():
+                poll_results.append(process.poll())
         except Exception as e:
             errors.append(e)
 
     def check_thread() -> None:
         try:
-            while not process.is_finished():
-                results["is_finished"].append(process.is_finished())
+            while not stop_event.is_set():
+                process.is_finished()
         except Exception as e:
             errors.append(e)
 
     def read_thread() -> None:
         try:
-            while not process.is_finished():
-                results["stdout"].append(process.read_stdout())
-                results["stderr"].append(process.read_stderr())
+            while not stop_event.is_set():
+                process.read_stdout()
+                process.read_stderr()
         except Exception as e:
             errors.append(e)
 
-    # Start threads
     threads = [
         threading.Thread(target=poll_thread),
         threading.Thread(target=check_thread),
         threading.Thread(target=read_thread),
     ]
-
     for t in threads:
         t.start()
 
-    # Wait for process and threads
-    process.wait(timeout=2.0)
+    # Confirm the worker threads observed the process while it was still running (poll() is None)
+    # before releasing it -- this is the concurrent-access window the test exists to stress.
+    assert poll_until(lambda: len(poll_results) > 0 and process.poll() is None, timeout=5.0)
+    release_file.write_text("go")
 
+    process.wait(timeout=5.0)
+    stop_event.set()
     for t in threads:
-        t.join()
+        t.join(timeout=5.0)
 
-    # Check no errors occurred
-    assert len(errors) == 0
+    assert errors == []
+    # At least one poll() observed the process while it was still running.
+    assert any(result is None for result in poll_results)
     assert process.returncode == 0
+    # The output produced after release is intact and correctly ordered despite the concurrent reads.
+    assert process.read_stdout().strip().split("\n") == ["1", "2", "3"]
 
 
 def test_run_background_shutdown_event_already_set() -> None:
     shutdown_event = Event()
     shutdown_event.set()
-    process = run_background(["sleep", "10"], shutdown_event=shutdown_event)
+    process = run_background(["sleep", LONG_SLEEP_SECONDS], shutdown_event=shutdown_event)
     process.wait(timeout=2.0)
     assert process.is_finished()
     assert process.returncode != 0

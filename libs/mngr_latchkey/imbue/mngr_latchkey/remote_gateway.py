@@ -25,7 +25,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
-LATCHKEY_VERSION: Final[str] = "2.15.1"
+LATCHKEY_VERSION: Final[str] = "2.15.4"
 
 # Port inside the container on which the VPS-resident gateway is reachable (the
 # VPS->container reverse tunnel binds it). Deliberately distinct from
@@ -294,12 +294,18 @@ def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
     ``encryption_key`` is interpolated as ``LATCHKEY_ENCRYPTION_KEY`` so the
     gateway can decrypt the synced ``credentials.json.enc`` (it must be the same
     key the desktop gateway uses).
+
+    ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` is set so the VPS gateway never
+    refreshes OAuth credentials. The credentials here are a synced *copy* of the
+    desktop's store (see :func:`sync_credentials`); the desktop-side latchkey is
+    the single owner of credential refresh.
     """
     # Detach from the SSH session: nohup + closed stdin + redirected stdio so
     # the channel can close while the gateway keeps running.
     launch_command = (
         f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
-        f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
+        f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1 "
+        f"LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
         f"nohup latchkey gateway "
         f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
     )

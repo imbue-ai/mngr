@@ -14,7 +14,7 @@
 <style>
   /* Things that can't easily be expressed as Tailwind utilities. */
   html, body { height: 100%; overflow: hidden; }
-  #minds-titlebar { -webkit-app-region: drag; box-shadow: var(--shadow-seam); }
+  #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
   .minds-user-area { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's
@@ -32,26 +32,31 @@
 <script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
+{# Body background tracks --titlebar-bg so the iframe's rounded top corners
+   (browser mode) and the chromeView's extension strip (Electron mode) both
+   reveal accent color through the curve. Falls back to zinc-900 when no
+   workspace is active. #}
 <Base title="Minds"
-      body_class="font-sans antialiased bg-zinc-900"
+      body_class="font-sans antialiased"
+      body_style="background-color: var(--titlebar-bg, #18181b);"
       head={{ _head }}
       body_attrs={{ _body_attrs }}
       scripts={{ _scripts }}>
   <div id="minds-titlebar"
-       class="fixed top-0 left-0 right-0 h-[38px] bg-zinc-900 flex items-center select-none z-[100] border-b border-white/10 px-1 {% if is_mac %}pl-[72px]{% endif %}">
+       style="background-color: var(--titlebar-bg, #18181b);"
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[72px]{% endif %}">
     <div class="flex gap-0.5">
       <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
       <TitlebarButton id="home-btn" title="Home"><Icon24 name="home" /></TitlebarButton>
       <TitlebarButton id="back-btn" title="Back"><Icon24 name="back" /></TitlebarButton>
       <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
     </div>
-    <div class="flex-1 flex items-center justify-center gap-2 px-2 min-w-0">
-      <span id="title-swatch" class="accent-swatch hidden w-2.5 h-2.5 rounded-sm shrink-0"></span>
-      <span id="page-title" class="text-zinc-200 text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+    <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+      <span id="page-title" class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
     </div>
     <div class="relative minds-user-area shrink-0">
       <button id="user-btn"
-              class="!w-auto !h-auto !inline-block text-zinc-400 cursor-pointer px-2.5 py-1 rounded-md text-xs font-sans whitespace-nowrap hover:bg-white/5 hover:text-zinc-200"
+              class="titlebar-account !w-auto !h-auto !inline-block cursor-pointer px-2.5 py-1 rounded-md text-xs font-sans whitespace-nowrap"
               title="Account">Log in</button>
     </div>
     <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
@@ -75,8 +80,23 @@
     </div>
   </div>
 
+  {# White "mirror" sized exactly like the Electron contentView (left:4
+     / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
+     and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the
+     iframe in browser mode (the iframe covers it completely so it's
+     invisible there) and shows through in Electron mode whenever the
+     WebContentsView's compositor surface goes briefly transparent --
+     which Chromium does on cross-origin history navigation
+     (goBack/goForward between Home and a workspace), between the old
+     frame tearing down and the new frame's first paint. Without this
+     mirror the chromeView body's accent color would flash through.
+     Pointer-events:none so it never intercepts clicks. #}
+  <div id="content-bg-mirror"
+       class="fixed left-[4px] top-[38px] rounded-xl bg-white pointer-events-none"
+       style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
+
   <iframe id="content-frame"
           src="/"
-          class="fixed left-[6px] top-[38px] border-0 rounded-xl bg-zinc-50"
-          style="width: calc(100% - 12px); height: calc(100% - 44px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
+          class="fixed left-[4px] top-[38px] border-0 rounded-xl bg-white"
+          style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
 </Base>

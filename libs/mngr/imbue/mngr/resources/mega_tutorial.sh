@@ -395,8 +395,8 @@ mngr msg my-task -m "Check the CI results and fix any failures"
 # send the same message to multiple agents by name
 mngr msg agent-1 agent-2 agent-3 -m "Wrap up and commit your changes"
 
-# send a message to all agents
-mngr msg -a -m "Stop what you are doing and commit your current progress"
+# send a message to every agent by piping their ids from `mngr list`
+mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"
 
 # send a message to agents matching a filter
 mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out of budget, please finish up"
@@ -407,7 +407,7 @@ mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out
 #   "abort", which means stop if any agent fails to receive the message
 # note that "abort" is kind of dangerous--you could easily have agents left in a strange state
 # thus the default is "continue"
-mngr msg -a -m "Status update please" --on-error continue
+mngr list --ids | mngr msg - -m "Status update please" --on-error continue
 
 ##############################################################################
 # EXECUTING COMMANDS ON AGENTS

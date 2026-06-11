@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-06-08
+
 ### Fixed
 
 - Fixed: Antigravity onboarding seed now also skips agy's first-run NUX for users authenticated through an enterprise account, by marking `enterpriseOnboardingComplete` as `True` (previously `False`); enterprise-authenticated users were getting stuck in the enterprise onboarding flow on their first message.
@@ -16,7 +18,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Added
 
 - Added: Stopped `antigravity` agents now resume their prior agy conversation on restart. A `PreInvocation` capture hook records the agent's active agy conversation ID to a per-agent file, and `mngr start` shell-evaluates the stored launch command to resume via `agy --conversation <id>`. If the conversation has been pruned, agy starts fresh on its own. Clone-resume is not yet supported because agy's conversation store is global rather than per-agent.
-- Added: Per-agent agy isolation — each `antigravity` agent now runs `agy` under its own per-agent `$HOME` at `<agent_state_dir>/plugin/antigravity/home/`, with its own permission policy, model, and isolated config/transcript/session state instead of the previous all-or-nothing `--dangerously-skip-permissions` and shared global `~/.gemini`. Three new agent-type config fields: `settings_overrides` (free-form blob merged into per-agent `settings.json` for `permissions`/`toolPermission`/`model`), `sync_home_settings` (base per-agent `settings.json` on a copy of the user's global one; default `true`), and `symlink_oauth_token` (symlink each agent's token to the shared `~/.gemini` token vs copy it; default `true`).
+- Added: Per-agent agy isolation — each `antigravity` agent now runs `agy` under its own per-agent `$HOME`, with its own permission policy, model, and isolated config/transcript/session state instead of the previous all-or-nothing `--dangerously-skip-permissions` and shared global `~/.gemini`. Three new agent-type config fields: `settings_overrides` (free-form blob merged into per-agent `settings.json`), `sync_home_settings` (base per-agent settings on a copy of the user's global one; default `true`), and `symlink_oauth_token` (symlink each agent's token to the shared `~/.gemini` token vs copy it; default `true`).
 - Added: Shared OAuth token via a write-through symlink to `~/.gemini/antigravity-cli/antigravity-oauth-token` — the first agent's login authenticates every other agent and propagates refreshes ("log in once, anywhere"), resolving the previously open "token-refresh clobbering" risk. `symlink_oauth_token = false` opts into per-agent isolation.
 
 ### Changed
@@ -24,7 +26,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: The transcript streamer now discovers conversation IDs from the same capture-hook file used by resume rather than grepping agy's `--log-file`. This makes the hook file the single source of truth and fixes a latent bug where resumed conversations were missed because their log line reads `Resuming conversation`, not the `Resumed conversation` the streamer matched.
 - Changed: Trust now splits by what is persisted — the durable source-repo path goes to the user's global agy settings (no re-prompt across agents/worktrees of the same repo), while the transient per-agent workspace path goes only into the per-agent settings. Consent gating is unchanged in spirit.
 - Changed: Lifecycle hooks now live at the per-agent `$HOME/.gemini/config/hooks.json` and execute directly; the previous `--add-dir` + `/tmp` hooks-symlink workaround is removed. agy's first-run NUX is skipped via a seeded `cache/onboarding.json`.
-- Changed: Path resolution is host-aware (the user's real `$HOME` and OS are resolved on the host in one round-trip), so token/settings/cache sharing also works on remote hosts. Heavy `ms-playwright-go` browser binaries are now shared across agents by symlinking each agent's home cache to the user's real host cache, set up at provision time via the new shared `symlink_on_host` / `copy_on_host` helpers in `imbue.mngr.hosts.common`.
+- Changed: Path resolution is host-aware (the user's real `$HOME` and OS are resolved on the host), so token/settings/cache sharing also works on remote hosts. Heavy `ms-playwright-go` browser binaries are now shared across agents by symlinking each agent's home cache to the user's real host cache.
 
 ### Fixed
 

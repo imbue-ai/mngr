@@ -36,62 +36,67 @@ Linux CI requires ``xvfb`` (the recipe wraps the invocation with
 ``xvfb-run -a``).
 """
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+import subprocess
 from pathlib import Path
 
 import pytest
 import tomlkit
 from loguru import logger
 
+from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
+from imbue.minds.desktop_client.e2e_workspace_runner import materialize_isolated_fct
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_fct_path
 from imbue.mngr.utils.testing import get_short_random_string
 
 
-@contextmanager
-def _fct_settings_opted_into_pytest(fct_path: Path) -> Iterator[None]:
-    """Temporarily opt FCT's ``.mngr/settings.toml`` into the pytest config guard.
+def _opt_into_pytest_config_guard(settings_path: Path) -> None:
+    """Set ``is_allowed_in_pytest = true`` in a throwaway ``settings.toml``.
 
-    The Electron-spawned ``mngr create`` loads FCT's ``.mngr/settings.toml`` (the
-    runner pins ``MNGR_ROOT_NAME=mngr`` to get the main/docker create templates).
-    mngr's pytest guard requires every config it loads during a test run to set
-    ``is_allowed_in_pytest = true``. We set that key here -- but only on this
-    checkout, not FCT's shipped config (which would disable the guard for every
-    FCT-based project). The original file contents are saved verbatim and
-    restored on exit (or the file removed if it did not exist) so an
-    operator-managed ``.external_worktrees/forever-claude-template/`` checkout is
-    not left dirty.
-
-    FCT is not expected to ship ``is_allowed_in_pytest`` at all. If the key is
-    already present we raise rather than overwrite it: a present key means the
-    opt-in (or an opt-out) has leaked into FCT's real config -- the exact thing
-    this transient edit exists to avoid -- so surface it loudly instead of
-    silently masking it.
+    mngr's config guard refuses to run under ``PYTEST_CURRENT_TEST`` unless every
+    config file it loads opts in. This writes the file in place with no restore,
+    so ``settings_path`` must live under ``tmp_path`` (or another throwaway tree
+    such as a clone of FCT) -- never a real checkout.
     """
-    settings_path = fct_path / ".mngr" / "settings.toml"
-    original = settings_path.read_text() if settings_path.exists() else None
-    doc = tomlkit.parse(original) if original is not None else tomlkit.document()
-    if "is_allowed_in_pytest" in doc:
-        raise AssertionError(
-            f"{settings_path} already sets is_allowed_in_pytest; FCT is not expected to ship this "
-            "key. The pytest guard opt-in may be leaking into FCT's real config -- investigate "
-            "rather than letting this test silently overwrite it."
-        )
+    doc = tomlkit.parse(settings_path.read_text()) if settings_path.exists() else tomlkit.document()
     doc["is_allowed_in_pytest"] = True
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(tomlkit.dumps(doc))
-    try:
-        yield
-    finally:
-        if original is None:
-            settings_path.unlink(missing_ok=True)
-        else:
-            settings_path.write_text(original)
+
+
+def _isolated_host_config_root(scratch_dir: Path) -> Path:
+    """Build a throwaway git repo holding an opted-in copy of the repo's mngr config.
+
+    The Electron app runs from the returned directory (passed as
+    ``create_workspace_via_electron``'s ``host_config_dir``), so the host-side
+    ``mngr`` it spawns -- ``mngr auth list`` for the account-discovery poll,
+    ``mngr forward`` for the workspace proxy and agent discovery -- resolves its
+    project config here instead of the real repo ``.mngr/``. We copy the repo's
+    ``settings.toml`` verbatim (preserving e.g. the ``forward`` plugin and the
+    provider config the proxy's agent discovery needs) and add the pytest opt-in,
+    deliberately omitting any ``settings.local.toml``: the repo's committed
+    ``is_allowed_in_pytest = false`` plus a developer's untracked
+    ``.mngr/settings.local.toml`` are exactly what would otherwise trip the guard.
+    ``git init`` makes this the worktree root mngr's project-config walk stops at.
+    """
+    root = scratch_dir / "mngr_host_config"
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "init", str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    settings_path = root / ".mngr" / "settings.toml"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text((_REPO_ROOT / ".mngr" / "settings.toml").read_text())
+    _opt_into_pytest_config_guard(settings_path)
+    return root
 
 
 # Carrying only the resource marks the *test process* sees a host-side
@@ -143,17 +148,37 @@ def test_create_local_docker_workspace_via_electron(
     # The env is inherited by the Electron child via `_build_electron_env`.
     monkeypatch.setenv("MNGR__PROVIDERS__MODAL__IS_ENABLED", "false")
 
-    fct_path = resolve_fct_path(tmp_path)
+    # FCT's `[providers.docker]` block sets `docker_runtime = "runsc"` to harden
+    # the local-docker provider with gVisor. CI runners (and most dev machines)
+    # do not have runsc installed, so `docker run --runtime runsc` would fail
+    # immediately with "unknown or invalid runtime name: runsc" and the test
+    # times out waiting for the agent navigation that never happens. Override
+    # back to the default runtime; FCT's settings.toml comment names this exact
+    # env var as the supported escape hatch for CI / Modal.
+    monkeypatch.setenv("MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME", "runc")
+
+    # The Electron-spawned `mngr` loads two project-config trees under
+    # PYTEST_CURRENT_TEST: the host-side tree (where `mngr auth list` / `mngr
+    # forward` and the proxy's agent discovery run) and the FCT checkout's (where
+    # `mngr create` runs). Both must opt into the pytest config guard or `mngr`
+    # refuses to run, and neither opt-in lives in committed state. The two need
+    # *different* configs -- the host side needs the repo's `.mngr` (its `forward`
+    # plugin + provider config drive the proxy/discovery), `mngr create` needs
+    # FCT's own templates -- and they differ only by cwd, so a single
+    # MNGR_PROJECT_CONFIG_DIR cannot serve both. Instead of editing the real
+    # files, we point the Electron host process at `host_config_root` (an
+    # opted-in copy of the repo's `.mngr`) and hand `mngr create` `fct_path` (a
+    # throwaway FCT tree) whose own opted-in `.mngr/settings.toml` rides into the
+    # container.
+    fct_path = materialize_isolated_fct(resolve_fct_path(tmp_path), tmp_path)
+    _opt_into_pytest_config_guard(fct_path / ".mngr" / "settings.toml")
+    host_config_root = _isolated_host_config_root(tmp_path)
+
     workspace_name = f"forever-{get_short_random_string()}"
     debug_port = find_free_port()
     logger.info("Workspace name: {}; CDP debug port: {}", workspace_name, debug_port)
 
-    # The Electron-spawned `mngr create` loads FCT's .mngr/settings.toml under
-    # PYTEST_CURRENT_TEST; opt that checkout into the pytest config guard for the
-    # duration of the run without shipping the opt-in in FCT's real config (the
-    # snapshot script, which runs outside pytest, never needs it).
-    with _fct_settings_opted_into_pytest(fct_path):
-        try:
-            create_workspace_via_electron(fct_path, workspace_name, debug_port)
-        finally:
-            destroy_agent_best_effort(workspace_name)
+    try:
+        create_workspace_via_electron(fct_path, workspace_name, debug_port, host_config_dir=host_config_root)
+    finally:
+        destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")

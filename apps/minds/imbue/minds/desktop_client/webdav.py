@@ -103,7 +103,18 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
     """Build the WsgiDAV config dict for ``share_roots``."""
     provider_mapping: dict[str, FilesystemProvider] = {}
     for root in share_roots:
-        provider_mapping[str(root)] = FilesystemProvider(str(root), readonly=False)
+        # WsgiDAV matches the request path against a *lowercased* copy of
+        # the share keys but then looks the matched share back up in
+        # ``provider_mapping`` using that lowercased string. A share key
+        # containing uppercase characters (e.g. a macOS home directory
+        # ``/Users/<name>``) therefore never resolves: the lookup misses,
+        # the provider comes back ``None``, and WsgiDAV answers 404. We
+        # register the share under a lowercased key so the lookup always
+        # hits; the ``FilesystemProvider`` keeps the real, correct-case
+        # path so files still resolve on case-sensitive filesystems. The
+        # share prefix length is identical regardless of case, so WsgiDAV's
+        # ``PATH_INFO`` stripping stays correct.
+        provider_mapping[str(root).lower()] = FilesystemProvider(str(root), readonly=False)
     return {
         "provider_mapping": provider_mapping,
         # Auth is enforced by the outer ASGI bearer-token gate; WsgiDAV
@@ -128,6 +139,20 @@ def _build_wsgidav_config(share_roots: tuple[Path, ...]) -> dict[str, Any]:
     }
 
 
+def get_file_sharing_roots() -> tuple[Path, ...]:
+    """Return the on-disk roots the WebDAV file server mounts.
+
+    Currently the current user's home directory and the system temp
+    directory. This is the single source of truth for "which paths are
+    shareable": the WebDAV mount is built from it, and the file-sharing
+    permission handler validates a requested (or user-edited) path
+    against it so a path outside these roots is rejected with a clear
+    error before it ever reaches the gateway (which would otherwise be
+    the only thing to catch it, and only as a less-friendly 4xx).
+    """
+    return (Path.home(), Path(tempfile.gettempdir()))
+
+
 def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
     """Build the ASGI app to mount under ``/api/v1/files``.
 
@@ -135,9 +160,7 @@ def create_webdav_app(expected_key_provider: ExpectedKeyProvider) -> ASGIApp:
     WebDAV, gated by the central minds-api Bearer token resolved through
     ``expected_key_provider`` on each request.
     """
-    home_root = Path.home()
-    tmp_root = Path(tempfile.gettempdir())
-    share_roots = (home_root, tmp_root)
+    share_roots = get_file_sharing_roots()
     config = _build_wsgidav_config(share_roots)
     wsgi_app = WsgiDAVApp(config)
     # ``a2wsgi.WSGIMiddleware`` is structurally an ASGI app, but it is
