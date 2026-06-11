@@ -366,6 +366,10 @@ class VpsDockerProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
+    # Whether the outer VPS was reachable over SSH during the last discovery probe,
+    # keyed by vps_ip. Distinguishes a cleanly-stopped container (VPS reachable,
+    # container down -> STOPPED) from a down/crashed VPS (unreachable -> CRASHED).
+    _outer_reachable_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
     @property
@@ -389,6 +393,7 @@ class VpsDockerProvider(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
         self._container_running_cache.clear()
+        self._outer_reachable_cache.clear()
         self._instances_cache = None
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
@@ -1497,6 +1502,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # than crashing the listing -- one bad VPS must not drop the
             # other VPSes' hosts.
             is_running = False
+            is_outer_reachable = False
             if record.vps_ip is not None and record.config is not None:
                 container_name = record.config.container_name
                 if container_name not in self._container_running_cache:
@@ -1505,6 +1511,7 @@ class VpsDockerProvider(BaseProviderInstance):
                             self._container_running_cache[container_name] = docker_inspect_running(
                                 outer, container_name
                             )
+                            self._outer_reachable_cache[record.vps_ip] = True
                     except MngrError as exc:
                         logger.warning(
                             "Failed to inspect container status for host {} on VPS {}: {}",
@@ -1513,17 +1520,37 @@ class VpsDockerProvider(BaseProviderInstance):
                             exc,
                         )
                         self._container_running_cache[container_name] = False
+                        self._outer_reachable_cache[record.vps_ip] = False
                 is_running = self._container_running_cache[container_name]
+                is_outer_reachable = self._outer_reachable_cache.get(record.vps_ip, False)
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
             is_failed = record.certified_host_data.failure_reason is not None
+            # A reachable VPS whose container is simply stopped (idle-watcher shutdown,
+            # a manual `mngr stop`, or a VPS reboot) is cleanly STOPPED and restartable
+            # via `mngr start` -- NOT crashed. We could only SSH in to inspect the
+            # container because the VPS is up, so this is never a host crash. Keep such
+            # hosts visible to `mngr conn`/`start` (which pass include_destroyed=False)
+            # instead of hiding them as if destroyed. An *unreachable* VPS with no
+            # recorded stop_reason still derives to CRASHED below -- there the host
+            # itself is down, which is the genuine failure case.
+            is_cleanly_stopped = is_outer_reachable and not is_running
 
-            if not is_running and not is_failed and not has_snapshots and not include_destroyed:
+            if (
+                not is_running
+                and not is_cleanly_stopped
+                and not is_failed
+                and not has_snapshots
+                and not include_destroyed
+            ):
                 continue
 
             if is_running and record.vps_ip is not None:
                 host_state = HostState.RUNNING
                 self._create_host_object(host_id, host_name, record.vps_ip)
+            elif is_cleanly_stopped:
+                host_state = HostState.STOPPED
+                self._create_offline_host(record)
             else:
                 host_state = derive_offline_host_state(
                     certified_data=record.certified_host_data,

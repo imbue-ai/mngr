@@ -33,6 +33,26 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
 
+def _azure_unavailable_error(name: ProviderInstanceName, reason: str) -> ProviderUnavailableError:
+    """Build a ``ProviderUnavailableError`` with Azure-specific, actionable help text.
+
+    The generic ``ProviderUnavailableError`` help text tells the user to "start
+    Docker", which is wrong advice for a cloud auth/subscription failure. Azure's
+    "unavailable" causes are a missing subscription, an unusable credential, or
+    skipped one-time setup -- so we curate the guidance accordingly.
+    """
+    help_text = (
+        "Azure could not be reached. Check, in order:\n"
+        "  - subscription: set AZURE_SUBSCRIPTION_ID, set `subscription_id` in [providers.azure], "
+        "or run `az account set --subscription <id>`;\n"
+        "  - credentials: run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
+        "AZURE_CLIENT_SECRET for a service principal);\n"
+        "  - one-time setup: run `mngr azure prepare` if you have not yet.\n"
+        f"Or disable the provider: mngr config set --scope user providers.{name}.is_enabled false"
+    )
+    return ProviderUnavailableError(name, reason, user_help_text=help_text)
+
+
 class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
     """``ParsedVpsBuildOptions`` extended with the Azure-only spot knob.
 
@@ -230,14 +250,14 @@ class AzureProviderBackend(ProviderBackendInterface):
             # NOT ProviderEmptyError: read paths (mngr list) must surface a warning
             # rather than silently dropping the provider and its agents from the
             # listing. Host-creation paths surface this same error to the user.
-            raise ProviderUnavailableError(name, str(e)) from e
+            raise _azure_unavailable_error(name, str(e)) from e
 
         try:
             credential = config.get_credential()
         except AzureError as e:
             # Same rationale: a credential we couldn't obtain leaves Azure's state
             # unknown, so this is unavailable (warned), not empty (silently skipped).
-            raise ProviderUnavailableError(name, str(e)) from e
+            raise _azure_unavailable_error(name, str(e)) from e
 
         azure_client = AzureVpsClient(
             credential=credential,

@@ -270,9 +270,11 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded (and so AWS
     does not refuse to delete an IAM role/profile a live instance still
-    references). With no instances present, deletes the auto-created `mngr-aws`
-    security group and the `mngr-aws` self-stop IAM role / inline policy /
-    instance profile. Idempotent: a no-op (exit 0) when they are already gone.
+    references). With no instances present, deletes the auto-created security
+    group (name taken from the resolved `[providers.<--provider>]` block, or
+    overridden by `--sg-name`; default `mngr-aws`) and the `mngr-aws` self-stop
+    IAM role / inline policy / instance profile. Idempotent: a no-op (exit 0)
+    when they are already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup, plus iam:RemoveRoleFromInstanceProfile +

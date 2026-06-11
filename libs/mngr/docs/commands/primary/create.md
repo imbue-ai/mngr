@@ -246,6 +246,7 @@ Provider: gcp
     --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal
                              the provider's configured zone; default: us-west1-a)
     --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
+    --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).
     --git-depth=N            Shallow-clone build context to depth N before upload
 
   The GCE VM image is taken from the provider config (default_source_image);

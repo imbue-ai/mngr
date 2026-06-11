@@ -184,9 +184,17 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 Release tests provision real GCE instances and cost money. They are double-gated:
 
 ```bash
-MNGR_GCP_RELEASE_TESTS=1 \
-  just test libs/mngr_gcp/imbue/mngr_gcp/test_release_gcp.py
+MNGR_GCP_RELEASE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=1800 \
+  uv run pytest --no-cov -n 0 -m release \
+  libs/mngr_gcp/imbue/mngr_gcp/test_release_gcp.py
 ```
+
+The `PYTEST_MAX_DURATION_SECONDS=1800` matters: the two lifecycle tests each boot
+a real GCE VM serially, exceeding the default ~600s budget. That env var sets the
+pytest global-lock deadline; once it passes, a concurrent pytest run kills this
+one, SIGTERMing the suite mid-test (and potentially leaking a VM). Run `uv run
+pytest` directly rather than `just test`, whose recipe hardcodes 600s. (Other long
+real-resource release tests use the same pattern.)
 
 Three layers of damage control limit leaks from killed-mid-run tests:
 
