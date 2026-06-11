@@ -973,10 +973,25 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   `permissions_waiting`/`active` markers without SSH/tmux to report `PERMISSIONS` vs
   `END_OF_TURN`. Claude does **not** implement `offline_agent_field_generators`.
 - **antigravity**: implements neither, and explicitly **cannot surface a permission-WAITING
-  reason** -- agy fires no hook while blocked at a permission dialog, so there's no signal.
+  reason** -- agy fires no hook (and emits no permission-request event) while blocked at a
+  permission dialog, so there's no signal. `END_OF_TURN` would be implementable from the
+  `active` marker alone.
+- **opencode**: implements neither. Its only extension point is the in-process event bus
+  (`session.status`/`session.idle`/`message.*`); permissions are an upfront config policy
+  (`allow`/`deny`/`ask`) and opencode **emits no permission-request event** when an `ask`
+  policy blocks, so `PERMISSIONS` is **not feasible** without an upstream change. `END_OF_TURN`
+  is feasible from the `active` marker.
+- **codex**: implements neither yet, but **is feasible for both reasons**. Codex has a full
+  Claude-style hooks system (stable) that fires `PermissionRequest` and `PostToolUse`, so the
+  same `permissions_waiting` marker pattern can be ported; `END_OF_TURN` follows from the
+  `active` marker (already maintained, OR of `codex_root_active` and a non-empty
+  `codex_subagents/`, recomputed under lock). See the codex scoping note below.
 
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
-`waiting_reason` field is a plugin-specific embellishment.
+`waiting_reason` field is a plugin-specific embellishment. Surfacing *why* an agent is
+WAITING (PERMISSIONS vs END_OF_TURN) requires the CLI to expose a permission-dialog signal;
+only claude (today) and codex (feasible) have one. agy and opencode emit no permission-request
+event, so they are limited to `END_OF_TURN`.
 
 ### Q. Installation management & version pinning
 

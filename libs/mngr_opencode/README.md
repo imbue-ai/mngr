@@ -118,5 +118,11 @@ Carried gaps (shared with `mngr_antigravity`): session preservation on destroy,
 scheduled-deploy contributions, the `waiting_reason` listing field, the live
 streaming snapshot, and clone carrying the source conversation forward.
 
+Note on `waiting_reason`: opencode's only extension point is its in-process event
+bus, and permissions are an upfront config policy (`allow`/`deny`/`ask`) rather than
+an interactive event. opencode emits no permission-request event when an `ask` policy
+blocks, so a `PERMISSIONS` waiting reason is not feasible without an upstream change;
+only `END_OF_TURN` (from the `active` marker) could be surfaced.
+
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md)
 for more details.
