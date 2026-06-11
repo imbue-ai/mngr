@@ -331,11 +331,8 @@ def _wait_for_cloud_init_marker(
     ``timeout_seconds`` is the hard wall.
 
     ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
-    so tests can drive this without slow real-time waits. In production the
-    caller passes ``slow_threshold_seconds`` from
-    ``VpsDockerProviderConfig.cloud_init_slow_warning_threshold_seconds``; the
-    defaults here (poll every 5s, warn past 30s) are only the unit-test
-    fallback.
+    so tests can drive this without slow real-time waits; defaults preserve
+    the production cadence (poll every 5s, warn if total > 30s).
 
     ``clock`` and ``sleeper`` are injected so tests can run against a
     virtual clock and avoid any real-time sleep.
@@ -577,11 +574,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
-        _wait_for_cloud_init_marker(
-            outer,
-            timeout_seconds=timeout_seconds,
-            slow_threshold_seconds=self.config.cloud_init_slow_warning_threshold_seconds,
-        )
+        _wait_for_cloud_init_marker(outer, timeout_seconds=timeout_seconds)
 
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
         """Wait for sshd on the VPS to be ready."""

@@ -716,6 +716,47 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
 
 
 # =============================================================================
+# delete_security_group (inverse of ensure; used by `mngr aws cleanup`)
+# =============================================================================
+
+
+def test_delete_security_group_deletes_when_present(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """An auto-created SG is looked up by name and deleted, returning its id."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-existing", "GroupName": "mngr-aws-test"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    stubber.add_response("delete_security_group", {}, expected_params={"GroupId": "sg-existing"})
+    assert client.delete_security_group() == "sg-existing"
+
+
+def test_delete_security_group_is_noop_when_missing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When no SG matches the name, delete is skipped and None is returned (idempotent)."""
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": []},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    assert client.delete_security_group() is None
+
+
+def test_delete_security_group_refuses_externally_managed_sg(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """An ``ExistingSecurityGroup`` is user-owned; delete must raise without any API call."""
+    client, _stubber = stubbed_client
+    with pytest.raises(MngrError, match="externally-managed"):
+        client.delete_security_group()
+
+
+# =============================================================================
 # resolve_security_group_id (lookup-only; used by create_instance hot path)
 # =============================================================================
 

@@ -14,15 +14,19 @@ Splits the test surface into two layers:
 """
 
 import boto3
+import click
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 from click.testing import CliRunner
 
+from imbue.mngr_aws.cli import _perform_cleanup
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
+
+_ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
 
 
 def _stubbed_aws_client(
@@ -85,6 +89,104 @@ def test_prepare_logic_reuses_sg_when_present() -> None:
         assert client.ensure_security_group() == "sg-reused"
     finally:
         stubber.deactivate()
+
+
+def test_cleanup_logic_deletes_sg_when_no_instances() -> None:
+    """With no mngr instances, cleanup looks up the SG and deletes it, returning its id."""
+    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": []},
+        expected_params={
+            "Filters": [
+                {"Name": "instance-state-name", "Values": _ACTIVE_STATES},
+                {"Name": "tag-key", "Values": ["mngr-provider"]},
+            ]
+        },
+    )
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": [{"GroupId": "sg-del123", "GroupName": "mngr-aws"}]},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws"]}]},
+    )
+    stubber.add_response("delete_security_group", {}, expected_params={"GroupId": "sg-del123"})
+    stubber.activate()
+    try:
+        assert _perform_cleanup(client) == "sg-del123"
+    finally:
+        stubber.deactivate()
+
+
+def test_cleanup_logic_is_noop_when_sg_missing() -> None:
+    """When the SG is already gone, cleanup deletes nothing and returns None (idempotent)."""
+    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": []},
+        expected_params={
+            "Filters": [
+                {"Name": "instance-state-name", "Values": _ACTIVE_STATES},
+                {"Name": "tag-key", "Values": ["mngr-provider"]},
+            ]
+        },
+    )
+    stubber.add_response(
+        "describe_security_groups",
+        {"SecurityGroups": []},
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws"]}]},
+    )
+    stubber.activate()
+    try:
+        assert _perform_cleanup(client) is None
+    finally:
+        stubber.deactivate()
+
+
+def test_cleanup_logic_refuses_when_instances_exist() -> None:
+    """A live mngr instance makes cleanup raise without describing or deleting the SG."""
+    client, stubber = _stubbed_aws_client(sg_name="mngr-aws")
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-abc123",
+                            "State": {"Name": "running"},
+                            "Tags": [{"Key": "mngr-provider", "Value": "aws"}],
+                        }
+                    ]
+                }
+            ]
+        },
+        expected_params={
+            "Filters": [
+                {"Name": "instance-state-name", "Values": _ACTIVE_STATES},
+                {"Name": "tag-key", "Values": ["mngr-provider"]},
+            ]
+        },
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(click.ClickException) as exc_info:
+            _perform_cleanup(client)
+        # The refusal must name the blocking instance so the operator knows what to destroy.
+        assert "i-abc123" in str(exc_info.value)
+        assert "Refusing" in str(exc_info.value)
+        # No SG describe/delete was queued, so the only stubbed call was consumed.
+        stubber.assert_no_pending_responses()
+    finally:
+        stubber.deactivate()
+
+
+def test_cleanup_command_help_is_reachable() -> None:
+    """`mngr aws cleanup --help` should render without invoking AWS."""
+    runner = CliRunner()
+    result = runner.invoke(aws_cli_group, ["cleanup", "--help"])
+    assert result.exit_code == 0
+    assert "--region" in result.output
+    assert "--sg-name" in result.output
 
 
 def test_ami_command_is_future_stub() -> None:

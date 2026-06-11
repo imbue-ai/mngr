@@ -155,6 +155,39 @@ class AwsVpsClient(VpsClientInterface):
             case _ as unreachable:
                 assert_never(unreachable)
 
+    def delete_security_group(self) -> str | None:
+        """Delete the auto-created security group, undoing ``ensure_security_group``.
+
+        The inverse of ``mngr aws prepare``. Returns the deleted SG id, or
+        ``None`` when no matching SG exists (idempotent: cleaning an
+        already-clean region is a no-op). Only valid for the auto-create case --
+        an externally-managed ``ExistingSecurityGroup`` is not mngr's to delete,
+        so this raises rather than touching a user-owned resource.
+
+        Needs ec2:DescribeSecurityGroups + ec2:DeleteSecurityGroup. AWS refuses
+        with ``DependencyViolation`` if any network interface still references
+        the SG, so callers must ensure all instances are terminated first (the
+        ``mngr aws cleanup`` command checks for live instances before calling).
+        """
+        match self.security_group:
+            case ExistingSecurityGroup(id=sg_id):
+                raise MngrError(
+                    f"Refusing to delete security group {sg_id!r}: it is configured as an "
+                    "existing (externally-managed) security group, not auto-created by mngr. "
+                    "If you really want it gone, delete it yourself."
+                )
+            case AutoCreateSecurityGroup(name=sg_name):
+                existing = self._describe_security_groups_or_raise_on_multi_vpc(sg_name)
+                if not existing:
+                    return None
+                sg_id = existing[0]["GroupId"]
+                with self._translate_aws_errors():
+                    self._ec2().delete_security_group(GroupId=sg_id)
+                logger.info("Deleted security group {} in region {}", sg_id, self.region)
+                return sg_id
+            case _ as unreachable:
+                assert_never(unreachable)
+
     def _describe_security_groups_or_raise_on_multi_vpc(self, sg_name: str) -> list[dict[str, Any]]:
         """Describe SGs matching ``sg_name`` (optionally vpc-scoped). Raise on multi-VPC name collision.
 
@@ -188,7 +221,7 @@ class AwsVpsClient(VpsClientInterface):
         if not existing:
             raise MngrError(
                 f"AWS security group named {sg_name!r} does not exist in region {self.region!r}. "
-                f"Run `uv run mngr aws prepare --region {self.region}` once to create it "
+                f"Run `mngr aws prepare --region {self.region}` once to create it "
                 "(needs ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress), then "
                 "retry the create with your usual RunInstances-only credentials. Alternatively, "
                 "set security_group = {kind = 'existing', id = 'sg-...'} on the provider config "
@@ -468,12 +501,33 @@ class AwsVpsClient(VpsClientInterface):
         Returns a normalized list of dicts with keys: ``id``, ``main_ip``, ``state``,
         ``tags`` (a list of ``"key=value"`` strings to mirror Vultr's tag shape).
         """
-        filters: list[dict[str, Any]] = [
-            {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]}
-        ]
+        extra_filters: list[dict[str, Any]] = []
         if provider_tag is not None:
-            filters.append({"Name": "tag:mngr-provider", "Values": [provider_tag]})
+            extra_filters.append({"Name": "tag:mngr-provider", "Values": [provider_tag]})
+        return self._list_active_instances(extra_filters)
 
+    def list_mngr_managed_instances(self) -> list[dict[str, Any]]:
+        """List non-terminated instances in this region carrying any ``mngr-provider`` tag.
+
+        Filters by tag-*key* presence (any value), so it spans every mngr
+        provider config bound to this region, not just one provider name. Used
+        by ``mngr aws cleanup`` to refuse deleting the shared security group
+        while any mngr-managed agent still exists in the region.
+        """
+        return self._list_active_instances([{"Name": "tag-key", "Values": ["mngr-provider"]}])
+
+    def _list_active_instances(self, extra_filters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Describe non-terminated instances in this region, normalized to dicts.
+
+        Shared spine for ``list_instances`` and ``list_mngr_managed_instances``:
+        both want the same state filter and the same ``id``/``main_ip``/``state``/
+        ``tags`` normalization, differing only in the extra filter that scopes
+        which instances count.
+        """
+        filters: list[dict[str, Any]] = [
+            {"Name": "instance-state-name", "Values": ["pending", "running", "stopping", "stopped"]},
+            *extra_filters,
+        ]
         instances: list[dict[str, Any]] = []
         # The paginator defers actual API calls until iteration, so the error
         # translation block must wrap the iteration itself, not just the
