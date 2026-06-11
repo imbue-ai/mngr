@@ -840,11 +840,17 @@ _pool-dsn-args:
 bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
     #!/bin/bash
     set -ueo pipefail
-    # Portable array read (works on stock macOS bash 3.2; no mapfile). The
-    # ${arr[@]+"..."} guard avoids the empty-array "unbound variable" trap
-    # under `set -u` on bash <4.4.
+    # Capture the helper's stdout via command substitution (NOT process
+    # substitution): a non-zero exit from `_pool-dsn-args` -- e.g. a Vault read
+    # failure on staging/production -- then propagates through `set -e` and
+    # aborts here, instead of being silently swallowed and falling through to a
+    # bake with no --database-url. Portable array build (stock macOS bash 3.2;
+    # no mapfile); the `[ -n ... ]` guard drops the lone empty line a
+    # here-string of empty output yields, and the ${arr[@]+"..."} guard avoids
+    # the empty-array "unbound variable" trap under `set -u` on bash <4.4.
+    dsn_args_raw="$(just _pool-dsn-args)"
     dsn_args=()
-    while IFS= read -r line; do dsn_args+=("$line"); done < <(just _pool-dsn-args)
+    while IFS= read -r line; do [ -n "$line" ] && dsn_args+=("$line"); done <<< "$dsn_args_raw"
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \
@@ -856,8 +862,11 @@ bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-tem
 list-pool-hosts:
     #!/bin/bash
     set -ueo pipefail
+    # Command substitution (not process substitution) so a `_pool-dsn-args`
+    # failure propagates through `set -e`; see `bake-pool-host` for the rationale.
+    dsn_args_raw="$(just _pool-dsn-args)"
     dsn_args=()
-    while IFS= read -r line; do dsn_args+=("$line"); done < <(just _pool-dsn-args)
+    while IFS= read -r line; do [ -n "$line" ] && dsn_args+=("$line"); done <<< "$dsn_args_raw"
     uv run minds pool list ${dsn_args[@]+"${dsn_args[@]}"}
 
 # Destroy and remove every host in the pool with status='released'.
