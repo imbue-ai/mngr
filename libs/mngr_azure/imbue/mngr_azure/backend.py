@@ -1,0 +1,281 @@
+import os
+from collections.abc import Mapping
+from collections.abc import Sequence
+from typing import Any
+from typing import Final
+
+import click
+from azure.core.exceptions import AzureError
+from pydantic import ConfigDict
+from pydantic import Field
+
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_azure import hookimpl
+from imbue.mngr_azure.cli import azure_cli_group
+from imbue.mngr_azure.client import AzureVpsClient
+from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
+from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import extract_git_depth
+from imbue.mngr_vps_docker.instance import extract_presence_flag
+from imbue.mngr_vps_docker.instance import extract_single_value_arg
+from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
+from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+
+AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
+
+
+class ParsedAzureBuildOptions(ParsedVpsBuildOptions):
+    """``ParsedVpsBuildOptions`` extended with the Azure-only spot knob.
+
+    Returned by ``AzureProvider._parse_build_args`` and consumed by
+    ``AzureProvider._create_vps_instance`` so the ``--azure-spot`` opt-in flows
+    through to ``AzureVpsClient.create_instance`` without touching the shared
+    ``VpsClientInterface``.
+    """
+
+    spot: bool = Field(
+        default=False,
+        description=(
+            "Per-host opt-in for Azure Spot capacity, from the presence-only ``--azure-spot`` build "
+            "arg. When True, ``AzureVpsClient.create_instance`` sets priority=Spot, "
+            "eviction_policy=Delete, max_price=-1. Azure may reclaim spot VMs on capacity pressure; "
+            "the host is deleted, not stopped, on eviction. Opt-in only -- safe for ephemeral / "
+            "experimental agents, risky for long-lived ones."
+        ),
+    )
+
+
+class AzureProvider(VpsDockerProvider):
+    """Azure-specific provider that discovers hosts via the VM list in the resource group."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    azure_client: AzureVpsClient = Field(frozen=True, description="Azure VM API client")
+    azure_config: AzureProviderConfig = Field(frozen=True, description="Azure-specific configuration")
+
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """List Azure VMs tagged with this provider's name."""
+        return self.azure_client.list_instances(provider_tag=str(self.name))
+
+    def _validate_provider_args_for_create(self) -> None:
+        """Refuse to create a VM under pytest without auto_shutdown_minutes set.
+
+        Mirrors the AWS guard: when ``PYTEST_CURRENT_TEST`` is set, the test
+        harness is responsible for configuring a safety net so a killed pytest
+        run cannot leak a billing VM. On Azure that net is two-layered --
+        cloud-init ``shutdown -P +N`` (from ``auto_shutdown_minutes``) powers off
+        the agent, and the conftest session-end orphan scanner force-deletes any
+        leaked VM tagged ``mngr-pytest-launched`` older than the TTL (derived
+        from the same ``auto_shutdown_minutes``). If it is unset, fail closed at
+        the pre-create hook rather than silently leak a VM.
+
+        NB: unlike AWS/GCP, an OS ``shutdown -P`` on Azure leaves the VM
+        "Stopped (not deallocated)", which still bills for compute -- so on Azure
+        the *cost* guarantee comes from the orphan scanner, not from
+        auto_shutdown. The guard is still required so the TTL the scanner derives
+        from auto_shutdown_minutes is well-defined.
+        """
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            return
+        minutes = self._get_effective_auto_shutdown_minutes()
+        if not (minutes and minutes > 0):
+            raise MngrError(
+                "Refusing to create an Azure VM during pytest without auto_shutdown_minutes set on "
+                "the Azure provider config. Set [providers.<instance>] auto_shutdown_minutes = <N> "
+                "in the project settings.toml so the session-end orphan scanner has a well-defined "
+                "TTL (and cloud-init schedules 'shutdown -P +N')."
+            )
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAzureBuildOptions:
+        """Parse Azure-prefixed build args.
+
+        Accepts ``--azure-region=REGION``, ``--azure-vm-size=SIZE``,
+        ``--azure-spot`` (presence-only), and the shared ``--git-depth=N``.
+        Composed from the shared low-level helpers rather than the convenience
+        ``parse_vps_build_args`` because Azure has a knob (spot) beyond region +
+        plan.
+        """
+        args = list(build_args or ())
+        region, args = extract_single_value_arg(args, "--azure-region=")
+        vm_size, args = extract_single_value_arg(args, "--azure-vm-size=")
+        spot, args = extract_presence_flag(args, "--azure-spot")
+        git_depth, args = extract_git_depth(args)
+        valid_args = (
+            "--azure-region=",
+            "--azure-vm-size=",
+            "--azure-spot",
+            "--git-depth=",
+        )
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            raise_if_unknown_provider_arg(arg, "azure", valid_args)
+            docker_build_args.append(arg)
+        return ParsedAzureBuildOptions(
+            region=region or self.azure_config.default_region,
+            plan=vm_size or self.azure_config.default_vm_size,
+            spot=spot,
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )
+
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """Azure override: thread the per-host ``spot`` opt-in into ``AzureVpsClient.create_instance``.
+
+        Calls through ``self.azure_client`` (the concrete typed client) rather
+        than the shared ``self.vps_client`` interface so the Azure-only ``spot``
+        kwarg is statically visible.
+        """
+        match parsed:
+            case ParsedAzureBuildOptions(spot=spot):
+                pass
+            case _:
+                raise MngrError(
+                    f"AzureProvider._create_vps_instance expected ParsedAzureBuildOptions, "
+                    f"got {type(parsed).__name__}. This indicates the parser hook returned a "
+                    "non-Azure shape; _parse_build_args must return ParsedAzureBuildOptions."
+                )
+        return self.azure_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+            spot=spot,
+        )
+
+    def _list_provider_vps_hostnames(self) -> list[str]:
+        """Return public IPs of Azure VMs tagged with this provider's name.
+
+        Credentials are guaranteed resolvable here: ``build_provider_instance``
+        raises ``ProviderEmptyError`` when ``config.get_subscription_id()`` fails,
+        so any AzureProvider that reaches this point has a subscription.
+        """
+        instances = self._list_instances_cached()
+        vps_ips: list[str] = []
+        for instance in instances:
+            main_ip = instance.get("main_ip", "")
+            if main_ip:
+                vps_ips.append(main_ip)
+        return vps_ips
+
+
+class AzureProviderBackend(ProviderBackendInterface):
+    """Backend for creating Azure VM VPS Docker provider instances."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return AZURE_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Runs agents in Docker containers on Azure Virtual Machines"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return AzureProviderConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return (
+            "Azure-specific args (consumed by provider, not passed to docker):\n"
+            "  --azure-region=REGION       Azure region / location (default: westus)\n"
+            "  --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)\n"
+            "  --azure-spot                Run on Azure Spot capacity (presence-only flag).\n"
+            "                              Azure may reclaim on capacity pressure; the host is\n"
+            "                              deleted, not stopped, on eviction. Opt-in only.\n"
+            "  --git-depth=N               Shallow-clone build context to depth N before upload\n"
+            "\n"
+            "All other build args are passed to 'docker build' on the VM.\n"
+            "Example: -b --azure-vm-size=Standard_D2s_v5 -b --file=Dockerfile -b .\n"
+        )
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "Start args are passed directly to 'docker run'. Run 'docker run --help' for details."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        if not isinstance(config, AzureProviderConfig):
+            raise MngrError(f"Expected AzureProviderConfig, got {type(config).__name__}")
+
+        try:
+            subscription_id = config.get_subscription_id()
+        except ValueError as e:
+            # Match the AWS/GCP pattern: when the provider cannot be reached
+            # (here: no resolvable subscription), raise ProviderEmptyError so read
+            # paths (mngr list / mngr gc / discovery) skip the Azure provider
+            # entirely instead of constructing a half-working placeholder.
+            # Host-creation paths surface this same error to the user.
+            raise ProviderEmptyError(name, str(e)) from e
+
+        try:
+            credential = config.get_credential()
+        except AzureError as e:
+            raise ProviderEmptyError(name, str(e)) from e
+
+        azure_client = AzureVpsClient(
+            credential=credential,
+            subscription_id=subscription_id,
+            region=config.default_region,
+            resource_group=config.resource_group,
+            vnet_name=config.vnet_name,
+            subnet_name=config.subnet_name,
+            nsg_name=config.nsg_name,
+            vnet_address_prefix=config.vnet_address_prefix,
+            subnet_address_prefix=config.subnet_address_prefix,
+            vm_size=config.default_vm_size,
+            image_publisher=config.image_publisher,
+            image_offer=config.image_offer,
+            image_sku=config.image_sku,
+            image_version=config.image_version,
+            admin_username=config.admin_username,
+            os_disk_size_gb=config.os_disk_size_gb,
+            os_disk_type=config.os_disk_type,
+            allowed_ssh_cidrs=config.allowed_ssh_cidrs,
+            associate_public_ip=config.associate_public_ip,
+            container_ssh_port=config.container_ssh_port,
+        )
+
+        return AzureProvider(
+            name=name,
+            host_dir=config.host_dir,
+            mngr_ctx=mngr_ctx,
+            config=config,
+            vps_client=azure_client,
+            azure_client=azure_client,
+            azure_config=config,
+        )
+
+
+@hookimpl
+def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
+    """Register the Azure provider backend."""
+    return (AzureProviderBackend, AzureProviderConfig)
+
+
+@hookimpl
+def register_cli_commands() -> Sequence[click.Command]:
+    """Register the ``mngr azure ...`` operator command group."""
+    return [azure_cli_group]

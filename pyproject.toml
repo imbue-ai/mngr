@@ -103,6 +103,7 @@ addopts = [
   "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",
   "--cov=imbue.mngr_gcp",
+  "--cov=imbue.mngr_azure",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",

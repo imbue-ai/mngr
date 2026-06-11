@@ -1,0 +1,86 @@
+import pytest
+
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_azure.backend import AzureProvider
+from imbue.mngr_azure.backend import AzureProviderBackend
+from imbue.mngr_azure.backend import ParsedAzureBuildOptions
+from imbue.mngr_azure.config import AzureProviderConfig
+
+
+def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None) -> AzureProvider:
+    """Construct an AzureProvider via the backend with the given auto-shutdown setting.
+
+    The credential is a real ``DefaultAzureCredential`` (constructed lazily, no
+    network call), and the guard/parse hooks under test never reach the SDK.
+    """
+    config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_minutes=auto_shutdown_minutes)
+    provider = AzureProviderBackend.build_provider_instance(
+        name=ProviderInstanceName("azure"), config=config, mngr_ctx=mngr_ctx
+    )
+    assert isinstance(provider, AzureProvider)
+    return provider
+
+
+def test_backend_name_and_config_class() -> None:
+    assert str(AzureProviderBackend.get_name()) == "azure"
+    assert AzureProviderBackend.get_config_class() is AzureProviderConfig
+
+
+def test_backend_build_args_help_mentions_azure_specific_args() -> None:
+    help_text = AzureProviderBackend.get_build_args_help()
+    assert "--azure-region=" in help_text
+    assert "--azure-vm-size=" in help_text
+    assert "--azure-spot" in help_text
+
+
+def test_build_provider_instance_raises_provider_empty_without_subscription(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    config = AzureProviderConfig()
+    with pytest.raises(ProviderEmptyError):
+        AzureProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("azure"), config=config, mngr_ctx=temp_mngr_ctx
+        )
+
+
+def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=None)
+    with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+        provider._validate_provider_args_for_create()
+
+
+def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    # Should not raise.
+    provider._validate_provider_args_for_create()
+
+
+def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    parsed = provider._parse_build_args(None)
+    assert isinstance(parsed, ParsedAzureBuildOptions)
+    assert parsed.region == "westus"
+    assert parsed.plan == "Standard_B2s"
+    assert parsed.spot is False
+    assert parsed.git_depth is None
+
+
+def test_parse_build_args_extracts_azure_knobs_plus_docker_passthrough(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    parsed = provider._parse_build_args(
+        ["--azure-region=eastus", "--azure-vm-size=Standard_D2s_v5", "--azure-spot", "--file=Dockerfile", "."]
+    )
+    assert parsed.region == "eastus"
+    assert parsed.plan == "Standard_D2s_v5"
+    assert parsed.spot is True
+    assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_parse_build_args_rejects_unknown_azure_flag(temp_mngr_ctx: MngrContext) -> None:
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    with pytest.raises(MngrError, match="Unknown azure build arg"):
+        provider._parse_build_args(["--azure-bogus=1"])
