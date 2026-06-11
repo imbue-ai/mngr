@@ -1010,6 +1010,6 @@ jobs:
             echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
             echo ""
             echo "**To inspect the latest green pair manually:**"
-            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches?query=launch-to-msg-green-mngr-"
-            echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green-mngr- --limit 5\`"
+            echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green-mngr- --limit 5\` (works regardless of branch)"
+            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches?ref=${{ github.ref }} (then type \`launch-to-msg-green-mngr-\` into the Filter caches box; URL is branch-scoped, the in-page filter is JS-only)"
           } >> "$GITHUB_STEP_SUMMARY"
