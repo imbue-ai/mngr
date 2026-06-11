@@ -13,7 +13,7 @@ from pydantic import Field
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -32,34 +32,32 @@ from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
 
-def _resolve_credentials_and_project_or_empty(
+def _resolve_credentials_and_project_or_unavailable(
     name: ProviderInstanceName, config: GcpProviderConfig
 ) -> tuple[Credentials, str]:
-    """Resolve ADC credentials + project, raising ``ProviderEmptyError`` on any failure.
+    """Resolve ADC credentials + project, raising ``ProviderUnavailableError`` on any failure.
 
     Validate the cheap, network-free zone/region config first, then resolve ADC
     (``google.auth.default()``), which serves double duty: it yields both the
     credentials and the project ADC infers from the environment
     (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set project`` / metadata), used by
     ``resolve_project_id`` as the fallback when no explicit ``project_id`` is set.
-    A single ``default()`` call serves both, so we never probe twice. When
-    credentials are absent the call raises; when neither an explicit ``project_id``
-    nor an ADC-resolved project exists, ``resolve_project_id`` raises -- both
-    surface here as ``ProviderEmptyError`` so the provider is treated as
-    unreachable rather than half-constructed.
+    A single ``default()`` call serves both, so we never probe twice.
 
-    Shared by ``build_provider_instance`` (the read-path entry) and
-    ``bootstrap_for_host_creation`` (the create-path entry) so both fail
-    identically. Deliberately does NOT log: each caller decides whether to warn
-    (read paths, where the skip would otherwise be silent) or let the error
-    surface directly to the user (the create path).
+    A failure here means we could not even authenticate to GCP, so the provider's
+    state is *unknown* -- there may well be running hosts we simply cannot see.
+    That is exactly ``ProviderUnavailableError`` (not ``ProviderEmptyError``,
+    which asserts "reached and definitively empty"): the shared discovery path
+    surfaces it to the user instead of silently dropping the provider, and
+    ``mngr gc`` skips it rather than treating an unreachable provider's hosts as
+    garbage. Mirrors the Azure provider's handling of the same condition.
     """
     try:
         config.validate_zone_in_region()
         credentials, adc_project = config.get_credentials_and_resolved_project()
         project_id = config.resolve_project_id(adc_project)
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
-        raise ProviderEmptyError(name, str(e)) from e
+        raise ProviderUnavailableError(name, str(e)) from e
     return credentials, project_id
 
 
@@ -160,7 +158,7 @@ class GcpProvider(VpsDockerProvider):
         """Return external IPs of GCE instances labeled with this provider's name.
 
         Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderEmptyError`` when ``config.get_credentials_and_resolved_project()``
+        raises ``ProviderUnavailableError`` when ``config.get_credentials_and_resolved_project()``
         fails, so any GcpProvider that reaches this point has working credentials.
         """
         instances = self._list_instances_cached()
@@ -216,27 +214,12 @@ class GcpProviderBackend(ProviderBackendInterface):
         if not isinstance(config, GcpProviderConfig):
             raise MngrError(f"Expected GcpProviderConfig, got {type(config).__name__}")
 
-        try:
-            credentials, project_id = _resolve_credentials_and_project_or_empty(name, config)
-        except ProviderEmptyError as e:
-            # Read paths (mngr list / connect / gc / discovery) reach this. The
-            # shared discovery loop swallows ProviderEmptyError at logger.debug
-            # (mngr.api.list._construct_and_discover_for_provider), so without
-            # this warning a misconfigured GCP provider would silently vanish
-            # from those listings with no user-visible reason. Warn once per
-            # skip, naming the provider and the actionable cause. Use e.reason
-            # (the bare "run gcloud auth ..." / pin-project guidance) rather than
-            # str(e), which would double the provider name and the "has no state
-            # yet" framing already in the wrapped message. Mirrors Vultr's
-            # read-path warning shape (mngr_vultr.backend.VultrProvider.
-            # _list_provider_vps_hostnames).
-            #
-            # The create path never reaches this warning: bootstrap_for_host_
-            # creation resolves the same credentials first and lets the error
-            # surface directly, so `mngr create --provider gcp` shows the failure
-            # without a misleading "skipping discovery" line.
-            logger.warning("GCP provider {!r}: {} -- skipping discovery", name, e.reason)
-            raise
+        # Resolve credentials + project. On failure this raises
+        # ProviderUnavailableError (state unknown), which the shared discovery
+        # path surfaces to the user on read paths (mngr list / connect / gc) and
+        # which mngr create surfaces directly -- no custom warning or create-path
+        # bootstrap hook is needed.
+        credentials, project_id = _resolve_credentials_and_project_or_unavailable(name, config)
 
         gcp_client = GcpVpsClient(
             credentials=credentials,
@@ -269,39 +252,6 @@ class GcpProviderBackend(ProviderBackendInterface):
             gcp_client=gcp_client,
             gcp_config=config,
         )
-
-    @staticmethod
-    def bootstrap_for_host_creation(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Fail fast on the create path when GCP credentials/project are unresolvable.
-
-        The create-host flow calls this exactly once, before
-        ``build_provider_instance`` -- and it is the only call path that does (see
-        ``ProviderBackendInterface.bootstrap_for_host_creation``). Resolving
-        credentials here serves two purposes:
-
-        1. A misconfigured ``mngr create --provider gcp`` surfaces the actionable
-           ``ProviderEmptyError`` (carrying the "run gcloud auth ..." / pin-project
-           guidance) directly, as the create command's top-level error.
-        2. Because this raises before ``build_provider_instance`` runs, that
-           method's read-path "skipping discovery" warning is never reached on the
-           create path. So an explicit create never emits a misleading discovery
-           warning -- the warning is reserved for the read paths that would
-           otherwise drop the provider silently.
-
-        Idempotent and cheap (ADC resolution is cached): on a successful create the
-        subsequent ``build_provider_instance`` resolves the same credentials again
-        to construct the client. Unlike Modal's/Docker's overrides, this creates no
-        backend-side resources -- GCP's one-time resource (the SSH firewall) is
-        provisioned out of band by ``mngr gcp prepare``, not here.
-        """
-        del mngr_ctx
-        if not isinstance(config, GcpProviderConfig):
-            raise MngrError(f"Expected GcpProviderConfig, got {type(config).__name__}")
-        _resolve_credentials_and_project_or_empty(name, config)
 
 
 @hookimpl
