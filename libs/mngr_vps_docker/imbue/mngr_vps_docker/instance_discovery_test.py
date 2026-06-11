@@ -45,10 +45,12 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -124,6 +126,12 @@ class _DiscoveryTestProvider(VpsDockerProvider):
     )
     per_vps_outer_errors: dict[str, Exception] = Field(default_factory=dict)
     state_container_ready: dict[str, bool] = Field(default_factory=dict)
+    # For the discover_hosts_and_agents container-inspect probe: whether the
+    # container on each vps_ip is running (drives the State.Running inspect).
+    container_running_by_ip: dict[str, bool] = Field(default_factory=dict)
+    # vps_ips whose outer is unreachable at container-inspect time, even though a
+    # record exists for them (records came from a cache, the VPS is now down).
+    inspect_unreachable_ips: set[str] = Field(default_factory=set)
     _list_hostnames_calls: int = PrivateAttr(default=0)
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -160,6 +168,14 @@ class _DiscoveryTestProvider(VpsDockerProvider):
         # mngr container (state-container-not-ready test).
         # Tests that don't opt in never reach here -- _read_records_from_vps
         # short-circuits with canned payloads above.
+        # For discover_hosts_and_agents' container-inspect probe:
+        # inspect_unreachable_ips -> raise (VPS down at inspect time);
+        # container_running_by_ip -> yield a stub answering the State.Running probe.
+        if vps_ip in self.inspect_unreachable_ips:
+            raise MngrError(f"VPS {vps_ip} unreachable at container inspect")
+        if vps_ip in self.container_running_by_ip:
+            yield cast(OuterHostInterface, _InspectOuter(self.container_running_by_ip[vps_ip]))
+            return
         exc = self.per_vps_outer_errors.get(vps_ip)
         if exc is not None:
             raise exc
@@ -199,6 +215,35 @@ class _DummyOuter:
         raise AssertionError(f"_DummyOuter.{name} must not be accessed in discovery tests")
 
 
+class _InspectOuter:
+    """Outer stub that answers only the ``docker inspect .State.Running`` probe.
+
+    ``discover_hosts_and_agents`` calls ``docker_inspect_running`` (a single
+    ``docker inspect --format '{{.State.Running}}'`` command) to decide whether a
+    host's container is up. This stub returns the configured running state and
+    raises on any other access, so an unexpected SSH command surfaces as a test
+    failure rather than a silent pass.
+    """
+
+    def __init__(self, running: bool) -> None:
+        self._running = running
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        if ".State.Running" in command:
+            return CommandResult(stdout="true" if self._running else "false", stderr="", success=True)
+        raise AssertionError(f"_InspectOuter received unexpected command: {command!r}")
+
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"_InspectOuter.{name} must not be accessed in discovery tests")
+
+
 def _make_certified_data(host_id: HostId, host_name: str) -> CertifiedHostData:
     now = datetime.now(timezone.utc)
     return CertifiedHostData(
@@ -217,6 +262,25 @@ def _make_record(host_id: HostId, host_name: str, vps_ip: str) -> VpsDockerHostR
     return VpsDockerHostRecord(
         certified_host_data=_make_certified_data(host_id, host_name),
         vps_ip=vps_ip,
+    )
+
+
+def _make_record_with_config(host_id: HostId, host_name: str, vps_ip: str) -> VpsDockerHostRecord:
+    """A record with a populated config, so discover_hosts_and_agents runs the container-inspect probe.
+
+    discover_hosts_and_agents only inspects the container when both ``vps_ip``
+    and ``config`` are set; the plain ``_make_record`` leaves config None.
+    """
+    return VpsDockerHostRecord(
+        certified_host_data=_make_certified_data(host_id, host_name),
+        vps_ip=vps_ip,
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId(f"vps-{host_id}"),
+            region="test-region",
+            plan="test-plan",
+            container_name=f"mngr-{host_name}",
+            volume_name=f"mngr-vol-{host_name}",
+        ),
     )
 
 
@@ -440,3 +504,77 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     # Discovery still warms the cache with what it did find, so a subsequent
     # lookup for the real host short-circuits.
     assert host_other in provider._host_record_cache
+
+
+# =========================================================================
+# discover_hosts_and_agents -- a cleanly-stopped container is STOPPED + visible,
+# not CRASHED + hidden (the idle-watcher / `mngr stop` reconnection bug)
+# =========================================================================
+
+
+def test_discover_reports_stopped_and_keeps_visible_when_vps_reachable_but_container_down(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """A reachable VPS whose container is stopped is STOPPED and visible to conn/start.
+
+    This is the regression that made an idle-stopped (or `mngr stop`-ed) agent
+    show CRASHED and vanish from ``mngr conn`` (which passes
+    include_destroyed=False): the host was filtered out entirely. A reachable
+    VPS with a stopped container is a clean stop, not a crash.
+    """
+    host_id = HostId.generate()
+    record = _make_record_with_config(host_id, "host-stopped", vps_ip="10.0.0.10")
+    provider.hostnames = ["10.0.0.10"]
+    provider.per_vps_records = {"10.0.0.10": ([record], {})}
+    provider.container_running_by_ip = {"10.0.0.10": False}
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=False)
+
+    hosts = list(result.keys())
+    assert len(hosts) == 1, "a reachable, cleanly-stopped host must remain visible to conn/start"
+    assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.STOPPED
+
+
+def test_discover_hides_unreachable_vps_host_when_not_including_destroyed(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """An *unreachable* VPS host (the genuine down/crash case) stays hidden from conn.
+
+    Distinct from the stopped-but-reachable case above: here the VPS itself is
+    unreachable, so we cannot confirm a clean stop. With include_destroyed=False
+    (the conn/start path) it is filtered out, preserving the prior behavior for
+    genuinely-down hosts.
+    """
+    host_id = HostId.generate()
+    record = _make_record_with_config(host_id, "host-down", vps_ip="10.0.0.11")
+    provider.hostnames = ["10.0.0.11"]
+    provider.per_vps_records = {"10.0.0.11": ([record], {})}
+    provider.inspect_unreachable_ips = {"10.0.0.11"}
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=False)
+
+    assert result == {}
+
+
+def test_discover_reports_unreachable_vps_host_as_crashed_when_including_destroyed(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """The same unreachable host surfaces as CRASHED in the full listing (include_destroyed=True).
+
+    `mngr list` uses include_destroyed=True, so a down VPS with no recorded
+    stop_reason and no snapshots derives to CRASHED -- the genuine failure
+    signal, unchanged by the stopped-but-reachable fix.
+    """
+    host_id = HostId.generate()
+    record = _make_record_with_config(host_id, "host-down", vps_ip="10.0.0.12")
+    provider.hostnames = ["10.0.0.12"]
+    provider.per_vps_records = {"10.0.0.12": ([record], {})}
+    provider.inspect_unreachable_ips = {"10.0.0.12"}
+
+    result = provider.discover_hosts_and_agents(cg=provider.mngr_ctx.concurrency_group, include_destroyed=True)
+
+    hosts = list(result.keys())
+    assert len(hosts) == 1
+    assert hosts[0].host_id == host_id
+    assert hosts[0].host_state == HostState.CRASHED
