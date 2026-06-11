@@ -2739,7 +2739,7 @@ def test_set_workspace_color_returns_502_when_mngr_label_fails(tmp_path: Path) -
     resolver = _make_workspace_color_resolver(agent_id)
     # Fake mngr that fails on the ``label`` subcommand.
     fake = tmp_path / "fake_mngr_failing"
-    fake.write_text('#!/bin/sh\necho "label failed" >&2\ncase "$1" in\n  label) exit 1 ;;\n  *) exit 0 ;;\nesac\n')
+    fake.write_text('#!/bin/sh\ncase "$1" in\n  label) echo "label failed" >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n')
     fake.chmod(0o755)
 
     with ConcurrencyGroup(name="test-color-failure") as cg:
