@@ -62,6 +62,10 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
+from imbue.mngr.api.preservation import PreservedItem
+from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import preserve_agent_state
+from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
@@ -70,9 +74,13 @@ from imbue.mngr.hosts.common import copy_on_host
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
@@ -84,6 +92,7 @@ from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
+from imbue.mngr_opencode.opencode_config import ROOT_SESSION_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
 from imbue.mngr_opencode.opencode_config import get_opencode_auth_path_for_data_home
 from imbue.mngr_opencode.opencode_config import get_opencode_config_dir
@@ -192,6 +201,14 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     emit_common_transcript: bool = Field(
         default=True,
         description="When True, emit a common-schema transcript that `mngr transcript` reads.",
+    )
+    preserve_on_destroy: bool = Field(
+        default=True,
+        description="Preserve this agent's transcripts locally before its state directory is "
+        "deleted on destroy. When enabled, the raw and common transcripts and the root session-id "
+        "history are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
+        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
+        "so they survive host destruction. Set to False to discard transcript data on destroy.",
     )
 
 
@@ -485,6 +502,44 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         if forwarded_args:
             launch_command = f"{launch_command} {forwarded_args}"
         return CommandString(launch_command)
+
+    def on_destroy(self, host: OnlineHostInterface) -> None:
+        """Preserve transcripts and session-id history before the state dir is deleted."""
+        if self.agent_config.preserve_on_destroy:
+            preserve_agent_state(_opencode_preserved_items(), self, host)
+
+
+def _opencode_preserved_items() -> list[PreservedItem]:
+    """Return the files to preserve from an opencode agent's state directory.
+
+    The raw and common transcripts plus the root session-id history. Native
+    session storage under the per-agent data home is not preserved -- that
+    directory also holds the auth-token file.
+    """
+    return [
+        *build_transcript_preserved_items("opencode"),
+        PreservedItem(rel_path=ROOT_SESSION_FILENAME, kind=FileType.FILE),
+    ]
+
+
+def _opencode_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list[PreservedItem] | None:
+    """Return the items to preserve for a discovered (offline) opencode agent, or None to skip it."""
+    if not ref.certified_data.get("agent_config", {}).get("preserve_on_destroy"):
+        return None
+    return _opencode_preserved_items()
+
+
+@hookimpl
+def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
+    """Preserve opencode transcripts from the host's volume before it is destroyed.
+
+    Mirrors ``OpenCodeAgent.on_destroy`` for the offline path, where a host is
+    destroyed without per-agent ``on_destroy`` calls but agent state still lives
+    on the host's persisted volume.
+    """
+    preserve_host_agents_on_destroy(
+        host, mngr_ctx, AgentTypeName("opencode"), _opencode_items_to_preserve_for_discovered_agent
+    )
 
 
 @hookimpl

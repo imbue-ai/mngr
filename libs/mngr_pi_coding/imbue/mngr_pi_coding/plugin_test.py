@@ -5,6 +5,8 @@ import json
 import os
 from collections.abc import Callable
 from collections.abc import Mapping
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import pluggy
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
@@ -25,6 +28,9 @@ from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostName
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_pi_coding.plugin import PiCodingAgent
 from imbue.mngr_pi_coding.plugin import PiCodingAgentConfig
@@ -785,3 +791,73 @@ def test_lifecycle_extension_contract_matches_python_constants() -> None:
             f"{name!r} is used in plugin.py but absent from {_LIFECYCLE_EXTENSION_NAME} -- "
             "the Python<->TypeScript contract has drifted"
         )
+
+
+# =============================================================================
+# Preservation on destroy
+# =============================================================================
+
+
+def test_pi_coding_config_preserves_on_destroy_by_default() -> None:
+    assert PiCodingAgentConfig().preserve_on_destroy is True
+
+
+def _make_local_pi_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, agent_config: PiCodingAgentConfig
+) -> PiCodingAgent:
+    """Build a PiCodingAgent on a real local host/ctx so the preservation rsync path works.
+
+    The shared ``make_pi_agent`` fixture constructs against a FakeHost with no
+    mngr_ctx, which is insufficient for the on-destroy preservation path.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir(exist_ok=True)
+    return PiCodingAgent.model_construct(
+        id=AgentId.generate(),
+        name=AgentName("test-pi"),
+        agent_type=AgentTypeName("pi-coding"),
+        work_dir=work_dir,
+        create_time=datetime.now(timezone.utc),
+        host_id=host.id,
+        mngr_ctx=local_provider.mngr_ctx,
+        agent_config=agent_config,
+        host=host,
+    )
+
+
+def _populate_pi_transcripts(agent: PiCodingAgent) -> None:
+    """Write the raw/common transcripts and the session-file pointer into the state dir."""
+    agent_dir = agent._get_agent_dir()
+    (agent_dir / "logs" / "pi-coding_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "logs" / "pi-coding_transcript" / "events.jsonl").write_text('{"type":"raw"}\n')
+    (agent_dir / "events" / "pi-coding" / "common_transcript").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "events" / "pi-coding" / "common_transcript" / "events.jsonl").write_text('{"type":"common"}\n')
+    (agent_dir / _SESSION_FILE_NAME).write_text("/path/to/session.json\n")
+
+
+@pytest.mark.rsync
+def test_on_destroy_preserves_transcripts(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy copies transcripts and the session-file pointer to the mirrored preserved layout."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=True))
+    _populate_pi_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert (dest_dir / "logs" / "pi-coding_transcript" / "events.jsonl").read_text() == '{"type":"raw"}\n'
+    assert (
+        dest_dir / "events" / "pi-coding" / "common_transcript" / "events.jsonl"
+    ).read_text() == '{"type":"common"}\n'
+    assert (dest_dir / _SESSION_FILE_NAME).read_text() == "/path/to/session.json\n"
+
+
+def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """on_destroy preserves nothing when preserve_on_destroy is False."""
+    agent = _make_local_pi_agent(local_provider, tmp_path, PiCodingAgentConfig(preserve_on_destroy=False))
+    _populate_pi_transcripts(agent)
+
+    agent.on_destroy(agent.host)
+
+    dest_dir = get_local_preserved_agent_dir(agent.mngr_ctx, agent.name, agent.id)
+    assert not dest_dir.exists()
