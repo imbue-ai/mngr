@@ -141,9 +141,7 @@ def _run_discovery(
         try:
             future.result()
         except ProviderUnavailableError as exc:
-            logger.warning(
-                "Skipping provider {} during discovery (unavailable): {}", exc.provider_name, exc
-            )
+            logger.warning("Skipping provider {} during discovery (unavailable): {}", exc.provider_name, exc)
 
     # Warn if any host names are duplicated within the same provider
     warn_on_duplicate_host_names(agents_by_host)
