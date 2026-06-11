@@ -92,3 +92,8 @@ renamed sidebar -> menu accordingly.
 The settings gear inside the floating workspace menu rows is rendered
 smaller (Figma node 560-5111) so it reads as a lighter secondary action
 next to the workspace name, rather than competing with it.
+
+The shared Card component's row layouts (``row`` / ``row-spread``) now use
+a tighter ``gap-1.5`` (6px) between children instead of ``gap-3`` (12px),
+so the landing-page workspace rows, account rows, and settings rows pack
+their badges and action icons more closely.

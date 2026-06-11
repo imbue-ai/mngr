@@ -1182,12 +1182,16 @@ def test_card_row_spread_layout_adds_justify_between() -> None:
     html = CATALOG.render("Card", layout="row-spread", _content="x")
     assert "justify-between" in html
     assert "items-center" in html
+    assert "gap-1.5" in html
 
 
 def test_card_row_layout_omits_justify_between() -> None:
     html = CATALOG.render("Card", layout="row", _content="x")
     assert "items-center" in html
     assert "justify-between" not in html
+    # Row children sit at a tight gap-1.5 (6px), not the old gap-3.
+    assert "gap-1.5" in html
+    assert "gap-3" not in html
 
 
 def test_card_tight_padding_uses_px4_py25() -> None:
