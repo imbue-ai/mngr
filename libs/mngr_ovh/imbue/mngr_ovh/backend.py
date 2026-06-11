@@ -360,7 +360,8 @@ class OvhProvider(VpsDockerProvider):
 
         The OS image is taken from ``OvhProviderConfig.default_image_name``;
         per-host image overrides are not supported via build args, matching
-        the Vultr / AWS conventions.
+        the Vultr convention. (AWS now allows a per-host override via
+        ``--aws-ami=<ami-id>``.)
 
         Returns the OVH ``serviceName`` for both the instance id *and* the
         SSH-reachable hostname -- OVH's serviceName is itself a DNS name
