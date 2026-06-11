@@ -168,10 +168,11 @@ def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
 
     ``services info <svc> --offline`` reports ``missing`` for any service
     named in the ``FAKE_MISSING_SERVICES`` env var (comma-separated) and
-    ``valid`` otherwise. ``auth re-encrypt`` writes the destination file
-    as JSON recording the requested service names. Together these let
-    ``sync_credentials`` be exercised end-to-end without a real (and
-    as-yet-hypothetical) ``auth re-encrypt`` implementation.
+    ``valid`` otherwise. ``auth re-encrypt`` writes ``credentials.json.enc``
+    into the destination *directory* as JSON recording the requested service
+    names (matching the real CLI, which takes an output directory). Together
+    these let ``sync_credentials`` be exercised end-to-end without a real
+    ``auth re-encrypt`` implementation.
     """
     script = tmp_path / "fake-latchkey"
     script.write_text(
@@ -186,7 +187,8 @@ def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
         'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
         "rest = sys.argv[4:]\n"
         "services = rest[1:] if rest[:1] == ['--services'] else []\n"
-        "open(sys.argv[3], 'w').write(json.dumps({'services': services}))\n"
+        "out = os.path.join(sys.argv[3], 'credentials.json.enc')\n"
+        "open(out, 'w').write(json.dumps({'services': services}))\n"
         "sys.exit(0)\n"
     )
     script.chmod(0o755)

@@ -196,56 +196,92 @@ class LatchkeyDiscoveryHandler(MutableModel):
         ``127.0.0.1:INNER_PORT``, so they can reach both gateways at once. That
         heavy provisioning is thrown onto its own fire-and-forget CG thread
         (which then owns clearing the pending flag); local agents clear it here.
+
+        The two paths are independent -- the agent reaches the desktop gateway on
+        ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at the
+        same time -- so each is attempted with its own error handling and a
+        failure of one never prevents the other.
         """
         is_pending_handed_off = False
         try:
-            # Always: make the desktop-side gateway reachable on the agent's
-            # ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``. The ``agent_id`` tag lets the
-            # destruction handler drop this tunnel via
-            # ``remove_reverse_tunnels_for_agent``; without it the registry leaks
-            # across destroyed agents and the 30s health-check loop spins
-            # paramiko transports against ports that no longer exist.
+            self._setup_desktop_gateway_reachability(agent_id, ssh_info, host_side_port)
+            is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
+                agent_id, host_id, ssh_info, provider_name
+            )
+        finally:
+            # The provisioning thread owns clearing the pending flag once the
+            # heavy work finishes; otherwise (local agents, or provisioning was
+            # not dispatched) clear it here.
+            if not is_pending_handed_off:
+                with self._pending_lock:
+                    self._pending_remote_agents.discard(str(agent_id))
+
+    def _setup_desktop_gateway_reachability(
+        self, agent_id: AgentId, ssh_info: RemoteSSHInfo, host_side_port: int
+    ) -> None:
+        """Reverse-tunnel the desktop-side gateway onto the agent's ``127.0.0.1:AGENT_SIDE_LATCHKEY_PORT``.
+
+        The ``agent_id`` tag lets the destruction handler drop this tunnel via
+        ``remove_reverse_tunnels_for_agent``; without it the registry leaks
+        across destroyed agents and the 30s health-check loop spins paramiko
+        transports against ports that no longer exist. Failures are logged
+        rather than raised so they never prevent the independent VPS-resident
+        gateway provisioning path.
+        """
+        try:
             self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=ssh_info,
                 local_port=host_side_port,
                 remote_port=AGENT_SIDE_LATCHKEY_PORT,
                 agent_id=str(agent_id),
             )
-            # Additionally, for VPS agents: throw the (potentially minutes-long)
-            # VPS-resident gateway provisioning onto its own CG thread and return
-            # immediately. The CG's ObservableThread logs any uncaught failure at
-            # error level, so a provisioning failure is never silently missed;
-            # the thread is unchecked so a single agent's failure does not tear
-            # down the shared supervisor.
-            if self._host_has_outer_host(host_id, provider_name):
-                self.concurrency_group.start_new_thread(
-                    target=self._run_remote_gateway_provisioning,
-                    args=(agent_id, host_id, ssh_info, provider_name),
-                    name=f"latchkey-provision-{str(agent_id)}",
-                    is_checked=False,
-                )
-                is_pending_handed_off = True
-        except (
-            SSHTunnelError,
-            OSError,
-            paramiko.SSHException,
-            ConcurrencyExceptionGroup,
-            InvalidConcurrencyGroupStateError,
-            RuntimeError,
-        ) as e:
+        except (SSHTunnelError, OSError, paramiko.SSHException) as e:
             logger.warning(
-                "Failed to set up Latchkey reachability for agent {} (host-side port {}): {}",
+                "Failed to set up desktop-side Latchkey reachability for agent {} (host-side port {}): {}",
                 agent_id,
                 host_side_port,
                 e,
             )
-        finally:
-            # The provisioning thread owns clearing the pending flag once the
-            # heavy work finishes; otherwise (local agents, or a failure before
-            # the provisioning thread was dispatched) clear it here.
-            if not is_pending_handed_off:
-                with self._pending_lock:
-                    self._pending_remote_agents.discard(str(agent_id))
+
+    def _maybe_dispatch_remote_gateway_provisioning(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> bool:
+        """Dispatch VPS-resident gateway provisioning for agents whose host has an outer host.
+
+        Returns ``True`` when the (potentially minutes-long) provisioning was
+        handed off to its own fire-and-forget CG thread -- which then owns
+        clearing the pending flag. Returns ``False`` for non-VPS agents and when
+        the dispatch itself fails (logged so a later discovery fire retries).
+        The thread is unchecked so a single agent's provisioning failure does
+        not tear down the shared supervisor; the CG's ObservableThread logs any
+        uncaught failure at error level so it is never silently missed.
+
+        Independent of the desktop-side reachability tunnel: a failure there
+        does not prevent this provisioning, since the agent can reach the VPS
+        gateway on ``127.0.0.1:INNER_PORT`` even when the desktop gateway tunnel
+        is down.
+        """
+        if not self._host_has_outer_host(host_id, provider_name):
+            return False
+        try:
+            self.concurrency_group.start_new_thread(
+                target=self._run_remote_gateway_provisioning,
+                args=(agent_id, host_id, ssh_info, provider_name),
+                name=f"latchkey-provision-{str(agent_id)}",
+                is_checked=False,
+            )
+        except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError) as e:
+            logger.warning(
+                "Failed to dispatch VPS-resident Latchkey gateway provisioning for agent {}: {}",
+                agent_id,
+                e,
+            )
+            return False
+        return True
 
     def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
         """Cheaply decide whether the agent's host has an accessible outer host (the VPS).

@@ -17,6 +17,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
@@ -808,6 +809,22 @@ class _RecordingTunnelManager(SSHTunnelManager):
         return 0
 
 
+class _RaisingTunnelManager(SSHTunnelManager):
+    """SSHTunnelManager whose reverse-tunnel setup always fails (no SSH)."""
+
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        remote_port: int = 0,
+        agent_id: str | None = None,
+    ) -> int:
+        raise SSHTunnelError("simulated reverse-tunnel failure")
+
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        return 0
+
+
 def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -957,6 +974,42 @@ def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tu
         # Both paths ran: the desktop gateway is reverse-tunneled onto the
         # agent-side port AND the VPS-resident gateway provisioning was dispatched.
         assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+        assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A desktop-side reverse-tunnel failure must not prevent VPS-resident gateway provisioning.
+
+    The two paths are independent (the agent reaches the desktop gateway on
+    ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at once),
+    so a failing desktop tunnel still leaves the VPS provisioning dispatched.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RaisingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+
+        # Provisioning runs on its own fire-and-forget CG thread; poll for it.
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
 
