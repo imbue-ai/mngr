@@ -1,13 +1,9 @@
 """Tests for AWS provider backend registration."""
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any
 
 import boto3
 import pytest
-from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -19,28 +15,6 @@ from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
-
-
-@contextmanager
-def _capture_warnings() -> Iterator[list[str]]:
-    """Capture loguru WARNING-level messages emitted inside the ``with`` block.
-
-    Yields a list that the caller can inspect after the block exits. Uses a
-    local sink (mirrors the pattern in ``imbue_common.logging_test``); pytest's
-    ``caplog`` only sees stdlib ``logging`` and misses loguru emissions.
-    """
-    messages: list[str] = []
-
-    def sink(message: Any) -> None:
-        record = message.record
-        if record["level"].name == "WARNING":
-            messages.append(record["message"])
-
-    handler_id = logger.add(sink, level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        logger.remove(handler_id)
 
 
 def _clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,6 +200,7 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 def test_build_provider_instance_warns_and_raises_when_credentials_missing(
     monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     _clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
@@ -234,18 +209,18 @@ def test_build_provider_instance_warns_and_raises_when_credentials_missing(
     config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
     name = ProviderInstanceName("aws-test")
 
-    with _capture_warnings() as warnings:
-        with pytest.raises(ProviderEmptyError):
-            AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
 
-    assert len(warnings) == 1, f"expected exactly one warning, got {warnings!r}"
-    assert "aws-test" in warnings[0]
-    assert "skipping discovery" in warnings[0]
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "aws-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
 
 
 def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     _clear_aws_env(monkeypatch)
     # Make credentials resolve cleanly so we exercise the *second* raise site
@@ -259,10 +234,9 @@ def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     )
     name = ProviderInstanceName("aws-test")
 
-    with _capture_warnings() as warnings:
-        with pytest.raises(ProviderEmptyError):
-            AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+    with pytest.raises(ProviderEmptyError):
+        AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
 
-    assert len(warnings) == 1, f"expected exactly one warning, got {warnings!r}"
-    assert "aws-test" in warnings[0]
-    assert "skipping discovery" in warnings[0]
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "aws-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
