@@ -6,6 +6,7 @@ from typing import Final
 
 import click
 from botocore.exceptions import BotoCoreError
+from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
@@ -252,6 +253,13 @@ class AwsProviderBackend(ProviderBackendInterface):
             # raise ProviderEmptyError so read paths (mngr list / mngr gc / discovery)
             # skip the AWS provider entirely instead of constructing a half-working
             # placeholder. Host-creation paths surface this same error to the user.
+            # Warn before raising so the silent ``logger.debug`` swallow at
+            # ``mngr.api.list._construct_and_discover_for_provider`` does not hide
+            # the skip -- mirrors Vultr's read-path warning shape, see
+            # ``mngr_vultr.backend.VultrProvider._list_provider_vps_hostnames``.
+            # The exception's ``str(e)`` already contains the actionable how-to-fix
+            # (env vars / profile / instance role).
+            logger.warning("AWS provider {!r}: {} -- skipping discovery", name, str(e))
             raise ProviderEmptyError(name, str(e)) from e
 
         try:
@@ -259,7 +267,10 @@ class AwsProviderBackend(ProviderBackendInterface):
         except ValueError as e:
             # No usable AMI configured -- analogous to the missing-creds case
             # above. Surfaces clearly on `mngr create --provider aws` while
-            # letting `mngr list` skip the provider.
+            # letting `mngr list` skip the provider. Warn for the same reason
+            # as the credentials case: the shared discovery path swallows
+            # ProviderEmptyError at ``logger.debug``.
+            logger.warning("AWS provider {!r}: {} -- skipping discovery", name, str(e))
             raise ProviderEmptyError(name, str(e)) from e
 
         aws_client = AwsVpsClient(

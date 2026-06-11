@@ -1174,6 +1174,39 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
+    # FIXME: two duplicate-name footguns this 409 doesn't cover:
+    # (1) API + empty ``host_name``: a second POST with the same
+    #     ``git_url`` auto-derives the same name via
+    #     ``extract_repo_name`` and fails as a deferred ``FAILED``
+    #     status mid-creation. Fix: derive + uniquify here, or
+    #     reject the duplicate inline.
+    # (2) Form + default ``"assistant"``: the form pre-fills with
+    #     ``_FALLBACK_HOST_NAME``, but ``_handle_create_form_submit``
+    #     never runs this check, so a second Create with the
+    #     untouched default also fails as ``FAILED``. Fix: uniquify
+    #     the default at render time, or mirror this 409 on the form
+    #     path.
+    if host_name:
+        backend_resolver = request.app.state.backend_resolver
+        existing_names: set[str] = set()
+        for existing_id in backend_resolver.list_known_workspace_ids():
+            existing_name = backend_resolver.get_workspace_name(existing_id)
+            if existing_name is not None:
+                existing_names.add(existing_name)
+        if host_name in existing_names:
+            return Response(
+                status_code=409,
+                content=json.dumps(
+                    {
+                        "error": (
+                            "An agent named '{}' already exists. "
+                            "Pick a different name, or destroy the existing one first."
+                        ).format(host_name)
+                    }
+                ),
+                media_type="application/json",
+            )
+
     backup_request, backup_error = _build_backup_request_or_error(
         backup_provider=backup_provider,
         encryption_method=backup_encryption_method,
