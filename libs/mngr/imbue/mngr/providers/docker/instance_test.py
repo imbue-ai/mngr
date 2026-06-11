@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -326,6 +328,45 @@ def test_build_docker_run_command_omits_runtime_by_default(temp_mngr_ctx: MngrCo
         start_args=(),
     )
     assert "--runtime" not in cmd
+
+
+def _make_unknown_runtime_process_error(runtime: str) -> ProcessError:
+    """Build a `ProcessError` mirroring Docker's unregistered-runtime failure."""
+    return ProcessError(
+        command=("docker", "run", "--runtime", runtime, "debian:bookworm-slim"),
+        stdout="",
+        stderr=f"docker: Error response from daemon: unknown or invalid runtime name: {runtime}\n",
+        returncode=125,
+    )
+
+
+def test_runtime_not_registered_error_maps_unknown_runtime_process_error(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    error = provider._runtime_not_registered_error_or_none(_make_unknown_runtime_process_error("runsc"))
+    assert isinstance(error, DockerRuntimeNotRegisteredError)
+    assert error.runtime_name == "runsc"
+    # The message names the runtime and the help text offers the runc escape hatch.
+    assert "runsc" in str(error)
+    assert error.user_help_text is not None
+    assert "runc" in error.user_help_text
+
+
+def test_runtime_not_registered_error_ignores_unrelated_process_error(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    unrelated = ProcessError(
+        command=("docker", "run", "--runtime", "runsc", "debian:bookworm-slim"),
+        stdout="",
+        stderr="docker: Error response from daemon: pull access denied for debian\n",
+        returncode=125,
+    )
+    assert provider._runtime_not_registered_error_or_none(unrelated) is None
+
+
+def test_runtime_not_registered_error_none_when_runtime_unset(temp_mngr_ctx: MngrContext) -> None:
+    # With the default runtime there is no `--runtime` flag, so even an output
+    # carrying the marker is not attributable to a configured runtime.
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime=None)
+    assert provider._runtime_not_registered_error_or_none(_make_unknown_runtime_process_error("runsc")) is None
 
 
 def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx: MngrContext) -> None:
