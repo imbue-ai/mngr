@@ -720,19 +720,24 @@ def stream_all_events(
             target, state, cel_include_filters, cel_exclude_filters, source_filters
         )
 
-        # Start tail threads for follow mode
+        # Start tail threads for follow mode. While the target is offline (we
+        # are reading a stopped agent's persisted files, which nothing can write
+        # to until the host comes back), tailing would just re-read unchanging
+        # files every poll, so we skip it and let the periodic online check in
+        # _consume_event_queue start tailing once the host comes online.
         if is_follow:
             offset_dir = tempfile.TemporaryDirectory(prefix="mngr-events-offsets-")
-            tail_threads = _start_tail_threads_for_sources(
-                target,
-                sources,
-                initial_byte_offsets,
-                event_queue,
-                cel_include_filters,
-                cel_exclude_filters,
-                stop_event,
-                Path(offset_dir.name),
-            )
+            if state.is_online:
+                tail_threads = _start_tail_threads_for_sources(
+                    target,
+                    sources,
+                    initial_byte_offsets,
+                    event_queue,
+                    cel_include_filters,
+                    cel_exclude_filters,
+                    stop_event,
+                    Path(offset_dir.name),
+                )
 
         # Rotation guard: re-scan for newly rotated files that appeared during startup
         with log_span("Checking for newly rotated files"):
@@ -1018,8 +1023,13 @@ def _consume_event_queue(
         except queue.Empty:
             now = time.monotonic()
 
-            # Periodically re-scan for new source directories
-            if now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
+            # Periodically re-scan for new source directories. A new source
+            # directory only appears when the agent writes a new kind of event,
+            # which requires a running (online) host, so while the target is
+            # offline we skip the scan and its per-directory listing cost. When
+            # the host returns, _handle_online_offline_transition resumes
+            # tailing and the next scan picks up any genuinely new sources.
+            if state.is_online and now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
                 _rescan_and_start_new_tail_threads(
                     target=target_holder[0],
                     state=state,
@@ -1144,9 +1154,11 @@ def _handle_online_offline_transition(
 ) -> None:
     """Check for online/offline transitions and restart tail threads if needed.
 
-    When the host transitions between online and offline states, the existing
-    tail threads are stopped and new ones are started with the updated target.
-    Event deduplication via emitted_event_ids ensures no events are emitted twice.
+    On any transition the existing tail threads are stopped. New tail threads
+    are started only when the host has come *online*: while it is offline its
+    persisted files cannot change, so we stop tailing and wait for it to return
+    rather than re-reading unchanging files every poll. Event deduplication via
+    emitted_event_ids ensures no events are emitted twice when tailing resumes.
     """
     target = target_holder[0]
     try:
@@ -1178,8 +1190,12 @@ def _handle_online_offline_transition(
     # Reset the stop event for the new threads
     stop_event.clear()
 
-    # Restart tail threads for all known sources with the new target
-    if offset_dir_path is not None:
+    # Restart tail threads only when the host is now online. When it went
+    # offline its persisted files are immutable until it returns, so we leave
+    # tailing stopped (the threads were already torn down above) and wait for
+    # the next online transition to resume -- avoiding a poll-every-second
+    # re-read of unchanging files for a stopped agent.
+    if is_now_online and offset_dir_path is not None:
         for source_path in state.known_source_paths:
             thread = _start_tail_thread(
                 target=new_target,

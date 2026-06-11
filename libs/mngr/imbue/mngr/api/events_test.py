@@ -1428,6 +1428,58 @@ def test_handle_online_offline_transition_no_change_when_same_state() -> None:
     assert len(tail_threads) == 0
 
 
+def test_handle_online_offline_transition_stops_tailing_when_going_offline(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    """Going offline tears down tailing and does NOT restart it.
+
+    A stopped agent's persisted event files cannot change until its host
+    returns, so the follow loop must stop re-reading them every poll -- the
+    repeated volume reads (one ``docker exec`` each) are the high-CPU load this
+    fix targets. The handler should leave ``tail_threads`` empty and leave the
+    consume loop's ``stop_event`` clear so the periodic online check can later
+    resume tailing.
+    """
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    # The volume-backed host is a reader but explicitly not online.
+    assert not isinstance(host, OnlineHostInterface)
+    events_dir = host.host_dir / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
+
+    # provider / host_id / events_subpath are left unset so refresh_events_target
+    # is a no-op and the target stays the offline host built above.
+    target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+
+    state = _AllEventsStreamState(is_online=True, known_source_paths={"src"})
+    target_holder = [target]
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    stop_event = threading.Event()
+    tail_threads: list[threading.Thread] = []
+
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+
+    _handle_online_offline_transition(
+        target_holder=target_holder,
+        state=state,
+        event_queue=event_queue,
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        stop_event=stop_event,
+        tail_threads=tail_threads,
+        offset_dir_path=offset_dir,
+    )
+
+    # Transitioned online -> offline: tailing is torn down and not restarted.
+    assert state.is_online is False
+    assert tail_threads == []
+    # The consume loop must keep running (stop_event left clear) so a later
+    # online check can resume tailing.
+    assert not stop_event.is_set()
+
+
 # =============================================================================
 # _build_event_sources_from_grouped_files tests
 # =============================================================================
