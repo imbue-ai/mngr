@@ -29,7 +29,6 @@ provider instances; mirrors the conftest pattern used by
 ``mngr_vps_docker`` and ``mngr_schedule``.
 """
 
-import os
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timedelta
@@ -53,20 +52,6 @@ from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
 from imbue.mngr_aws.testing import aws_credentials_available
 
 register_plugin_test_fixtures(globals())
-
-
-def clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip every ``AWS_*`` env var so credential-chain probes start clean.
-
-    boto3's chain inspects a dozen-plus env vars; clearing only those each
-    test cares about by name leaks knowledge of the chain into tests. Wipe
-    them all and let the test re-set only what it wants. Used by both the
-    config-level credential resolution tests and the backend-level
-    discovery-warning tests.
-    """
-    for key in list(os.environ.keys()):
-        if key.startswith("AWS_"):
-            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(autouse=True)

@@ -9,7 +9,7 @@ from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
-from imbue.mngr_aws.conftest import clear_aws_env
+from imbue.mngr_aws.testing import clear_aws_env
 
 
 def write_default_credentials_file(directory: Path) -> Path:
