@@ -275,28 +275,39 @@ def test_resolve_provider_config_uses_user_provider_block(
 
 def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """When the named provider block doesn't exist, class defaults are used.
+    """When the named provider block doesn't exist, class defaults are used silently.
 
     Operator commands must work for first-run users who haven't yet pinned a
-    ``[providers.aws]`` block, so the fallback is a feature not a bug.
+    ``[providers.aws]`` block, so the fallback is a feature not a bug -- and
+    no warning is emitted because this is the expected shape (distinct from
+    the wrong-type case, which does warn).
     """
     resolved = _resolve_provider_config(temp_mngr_ctx, "aws-does-not-exist")
 
     assert resolved == AwsProviderConfig()
+    assert log_warnings == [], f"missing-block fallback must be silent, got {log_warnings!r}"
 
 
 def test_resolve_provider_config_falls_back_when_named_block_is_non_aws(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back.
+    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back and warn.
 
     The operator CLI still works against the class defaults plus whatever the
     user passes on the command line; refusing here would block a legitimate
-    out-of-band run.
+    out-of-band run. But the user's ``--provider`` selection did not have the
+    intended effect, so a warning is emitted to make the silent-fallback
+    visible (distinct from the missing-block case, which is silent because it
+    is the expected first-run shape).
     """
     ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws", LocalProviderConfig())
 
     resolved = _resolve_provider_config(ctx_with_provider, "aws")
 
     assert resolved == AwsProviderConfig()
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "'aws'" in log_warnings[0]
+    assert "LocalProviderConfig" in log_warnings[0]
