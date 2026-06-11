@@ -1,7 +1,5 @@
 """Tests for AWS provider backend registration."""
 
-import os
-
 import boto3
 import pytest
 
@@ -15,18 +13,7 @@ from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
-
-
-def _clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip every AWS_* env var so ``config.get_session()`` finds no credentials.
-
-    Mirrors the fixture in ``config_test.py``; duplicated here to keep this
-    file's tests self-contained (and because moving it to ``conftest.py`` would
-    silently broaden its blast radius to every other test in this package).
-    """
-    for key in list(os.environ.keys()):
-        if key.startswith("AWS_"):
-            monkeypatch.delenv(key, raising=False)
+from imbue.mngr_aws.conftest import clear_aws_env
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -187,14 +174,14 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 # Read-path discovery skip is user-visible
 # =============================================================================
 #
-# When ``build_provider_instance`` raises ``ProviderEmptyError``, the shared
-# discovery code in ``mngr.api.list._construct_and_discover_for_provider``
-# swallows it with ``logger.debug`` -- so a misconfigured AWS provider used to
-# disappear from ``mngr list`` / ``mngr connect`` with no surface output and
-# no way for the user to tell why. The backend now emits a ``logger.warning``
-# at each raise site so that swallow is no longer silent. These tests lock in
-# the warning content and the continued ProviderEmptyError raise (the warning
-# is additive, not a behavior-replacement).
+# ``build_provider_instance`` raises ``ProviderEmptyError`` when AWS credentials
+# or AMIs cannot be resolved. The shared discovery code in
+# ``mngr.api.list._construct_and_discover_for_provider`` swallows that
+# exception at ``logger.debug``, so the backend must emit a ``logger.warning``
+# at each raise site for misconfigured providers to remain visible in
+# ``mngr list`` / ``mngr connect``. The tests below pin both halves of the
+# contract: ``ProviderEmptyError`` still raises, AND exactly one warning is
+# emitted naming the provider.
 
 
 def test_build_provider_instance_warns_and_raises_when_credentials_missing(
@@ -202,7 +189,7 @@ def test_build_provider_instance_warns_and_raises_when_credentials_missing(
     temp_mngr_ctx: MngrContext,
     log_warnings: list[str],
 ) -> None:
-    _clear_aws_env(monkeypatch)
+    clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
@@ -222,7 +209,7 @@ def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     temp_mngr_ctx: MngrContext,
     log_warnings: list[str],
 ) -> None:
-    _clear_aws_env(monkeypatch)
+    clear_aws_env(monkeypatch)
     # Make credentials resolve cleanly so we exercise the *second* raise site
     # (no usable AMI), not the first.
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
