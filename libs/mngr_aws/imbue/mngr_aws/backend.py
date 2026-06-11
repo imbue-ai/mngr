@@ -897,10 +897,19 @@ class AwsProvider(VpsDockerProvider):
         tags = self._tag_dict_from_normalized(instance)
         created_at_raw = tags.get("mngr-created-at")
         now = datetime.now(timezone.utc)
-        try:
-            created_at = datetime.fromisoformat(created_at_raw) if created_at_raw else now
-        except ValueError:
-            created_at = now
+        created_at = now
+        if created_at_raw:
+            try:
+                created_at = datetime.fromisoformat(created_at_raw)
+            except ValueError as e:
+                # mngr writes this tag at launch, so a parse failure means the tag
+                # was externally edited/corrupted: surface it rather than silently
+                # using now() (which would misreport a long-stopped host as fresh).
+                logger.opt(exception=e).warning(
+                    "Malformed mngr-created-at tag {!r} on host {}; falling back to now()",
+                    created_at_raw,
+                    host_id,
+                )
         certified = CertifiedHostData(
             host_id=str(host_id),
             host_name=str(self._host_name_from_tags(tags)),

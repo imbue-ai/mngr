@@ -304,6 +304,35 @@ def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: Mngr
     assert offline.get_state() == HostState.STOPPED
 
 
+def test_to_offline_host_warns_on_malformed_created_at_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A malformed mngr-created-at tag is surfaced (warning) and falls back to now(), not silently swallowed."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {"mngr-host-id": str(host_id), "Name": "mngr-myhost", "mngr-created-at": "not-a-timestamp"},
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        offline = provider.to_offline_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert offline.id == host_id
+    assert offline.get_state() == HostState.STOPPED
+    assert any("Malformed mngr-created-at" in w for w in log_warnings), log_warnings
+
+
 def test_compact_agent_tag_value_falls_back_to_minimal_when_too_long(temp_mngr_ctx: MngrContext) -> None:
     """When id+name+type would exceed the 256-char tag limit, type is dropped (id+name still fit)."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
