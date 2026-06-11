@@ -304,13 +304,15 @@ already uses to keep `apps/modal_litellm/app.py` and
 - `modal_litellm` keeps its inline Anthropic pricing verbatim (its deploy image
   stays thin; no `libs/` dependency is pulled into the Modal image, and the
   static `config.yaml` mirror is unaffected).
-- A new test asserts `modal_litellm`'s Anthropic entries equal the canonical
-  table's Anthropic entries. The canonical table is the single source of truth;
-  the test makes drift impossible without changing the import graph.
+- A drift test asserts every Anthropic model `modal_litellm` prices also exists
+  in the canonical table with identical per-token prices (the canonical table may
+  carry additional models). Changing a price on either side without the other
+  fails the test, making the "mirrored verbatim" claim enforceable without
+  changing the import graph.
 
-This is a follow-up that must **not block** Layers 1 and 3: build the canonical
-table inside the usage work first (designed from day one to be the shared
-source), ship the writers, then add the cross-drift test in a separate PR.
+**Implemented:** `apps/modal_litellm/mngr_usage_pricing_drift_test.py` loads
+`app.py`'s `LITELLM_CONFIG` (the same way `config_drift_test.py` does) and
+compares against `mngr_usage`'s `MODEL_PRICING`.
 
 ## Layer 3: per-harness writer plugins
 
@@ -432,8 +434,8 @@ is what usage data the tool exposes.
   default); `TokenSnapshot` aggregation; model-id normalization.
 - **Pricing accuracy test:** curated table vs litellm bundled map with
   allow-list.
-- **modal_litellm cross-drift test:** Anthropic subset equality (Layer 2
-  follow-up PR).
+- **modal_litellm cross-drift test:** Anthropic price equality (implemented:
+  `apps/modal_litellm/mngr_usage_pricing_drift_test.py`).
 - **Integration:** each writer, given a representative harness payload / rollout
   line, appends a well-formed cumulative event; the reader produces the expected
   per-session cost and tokens.
@@ -502,7 +504,7 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
    estimate-from-tokens fallback and `provider/model` normalization.
 4. **Codex writer** — first purely token-derived harness, via the rollout
    streamer; also populates `rate_limits`.
-5. **modal_litellm cross-drift test** — separate PR; does not block the above.
+5. **modal_litellm cross-drift test** — done (landed alongside the pricing table).
 6. **Antigravity spike** — separate investigation; build-vs-defer decision.
 
 ## Base branch note

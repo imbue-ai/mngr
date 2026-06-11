@@ -9,8 +9,9 @@ The numbers are **human-curated**, mirrored from litellm's
 matching the established posture in ``apps/modal_litellm/app.py`` (inline pricing
 so cost stays correct even on a litellm version whose bundled map predates a
 model). The Anthropic entries below are byte-for-byte the modal_litellm values,
-which a live pi session independently confirmed to the digit; a follow-up drift
-test keeps the two in sync.
+which a live pi session independently confirmed to the digit;
+``apps/modal_litellm/mngr_usage_pricing_drift_test.py`` enforces that they stay
+in sync (changing a price on either side without the other fails that test).
 
 Cost is ``input*p_in + cache_read*p_cr + cache_creation*p_cw + output*p_out``,
 relying on ``TokenSnapshot``'s non-overlapping buckets (see its docstring). An
