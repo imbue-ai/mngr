@@ -57,8 +57,9 @@
   }
 
   function buildSettingsBtn(agentId) {
-    // Smaller than the open-in-new arrow (Figma node 560-5111): the gear
-    // renders ~10-11px inside the 16px button rather than full-bleed.
+    // Smaller glyph than the open-in-new arrow (Figma node 560-5111): a
+    // w-3.5 (14px) gear vs the arrow's default w-4 (16px), both centered in
+    // the shared 24x24 button, so the gear reads as a lighter secondary action.
     return buildIconButton('Workspace settings', SETTINGS_PATH, 'data-open-settings', agentId, 'w-3.5 h-3.5');
   }
 
