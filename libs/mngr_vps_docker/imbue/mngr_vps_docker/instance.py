@@ -110,6 +110,7 @@ from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_out
 from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
@@ -1255,6 +1256,13 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
                 start_container(outer, host_record.config.container_name)
+            # sshd is launched via ``docker exec`` (see start_container_sshd), not
+            # the container's entrypoint, so it does NOT survive the docker
+            # stop/start above -- nor a host VM reboot that takes the container
+            # down with it (e.g. an AWS instance stop/start). Restart it before
+            # waiting for it, or _wait_for_container_sshd would time out.
+            with log_span("Restarting sshd in container"):
+                start_container_sshd(outer, host_record.config.container_name)
 
         # Wait for sshd in container
         with log_span("Waiting for container SSH"):
