@@ -63,14 +63,17 @@ IMDS — no separate endpoint needed.
 5. **Offline metadata = EC2 tags only** (host-level) for now. Paused hosts list with correct
    name/state/idle info; their agents reappear only after resume. S3-backed full parity (agents
    listable while paused, like Modal) is noted as a possible follow-up, not built now.
-6. **All changes contained in `mngr_aws`; no base behavior change.** `AwsProvider` already holds
-   its own concretely-typed `aws_client: AwsVpsClient` (separate from the base's
+6. **Changes contained in `mngr_aws`, with one additive default-false base seam.** `AwsProvider`
+   already holds its own concretely-typed `aws_client: AwsVpsClient` (separate from the base's
    `vps_client: VpsClientInterface`), so `stop_instance`/`start_instance` live entirely on
-   `AwsVpsClient` and are called from `AwsProvider` — `VpsClientInterface` and the base are
-   untouched. `AwsProvider` **overrides** `stop_host`/`start_host` and delegates the container
-   work to `super()`, so the base bodies are unchanged and Vultr/OVH/imbue_cloud behavior is
-   byte-for-byte identical. Only additive, no-op-by-default seams are added to the base if strictly
-   required (currently none anticipated).
+   `AwsVpsClient` and are called from `AwsProvider` — `VpsClientInterface` and the
+   `VpsDockerProvider` lifecycle bodies are untouched. `AwsProvider` **overrides**
+   `stop_host`/`start_host` and delegates the container work to `super()`, so the base bodies are
+   unchanged and Vultr/OVH/imbue_cloud behavior is byte-for-byte identical. The **one** anticipated
+   base touchpoint is in core `mngr` (not `VpsDockerProvider`): Phase 3 adds a default-false
+   `should_gc_stop_instead_of_destroy` capability hook consulted at the single `destroy_host` call
+   site in `gc.py`. It is additive and matches the existing `supports_*` property pattern; every
+   provider that doesn't opt in keeps today's behavior.
 7. **IP handling = accept-and-update.** A stopped instance loses its public IP; on resume we read
    the new IP and update the host record + known_hosts. Elastic IP allocation is a fallback only
    if accept-and-update proves messy in practice.
