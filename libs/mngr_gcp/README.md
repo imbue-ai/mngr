@@ -112,6 +112,8 @@ mngr destroy my-agent
 
 Note: GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. The chosen zone must belong to the provider's `default_region`.
 
+> **`mngr stop` / `mngr start` are container-level, not VM-level (current limitation).** They stop and start the agent's Docker *container* over SSH; the underlying GCE VM keeps running and billing while an agent is stopped. Pausing the GCE instance itself to stop compute billing (a Modal-like idle-paused-but-resumable lifecycle) is **not yet implemented** for GCP. See [Future improvements](#future-improvements).
+
 ## GCP-specific configuration
 
 These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
@@ -173,6 +175,7 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host`; run `mngr gcp cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists in the project).
 - Auto-delete: when `auto_shutdown_minutes` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, this provider does not snapshot GCE instances automatically. `GcpVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented (boot-disk snapshots); you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created`.
+- **Stop/start operate on the container, not the GCE VM**: `mngr stop` / `mngr start` stop and start the agent's Docker container (Docker over SSH), not the GCE instance itself, so the instance keeps running and `compute.instances.stop` / `compute.instances.start` are not needed (they are intentionally absent from the IAM list above). This is the current shared `mngr_vps_docker` behavior across all VPS providers. VM-level stop/start is future work -- see below.
 
 ## Release tests and cost
 
@@ -193,7 +196,8 @@ Production code enforces this: `GcpProvider._validate_provider_args_for_create` 
 
 ## Future improvements
 
+- **VM-level stop/start (known limitation).** Today `mngr stop` / `mngr start` only stop/start the agent's Docker container; the GCE VM keeps running and billing. True VM-level stop/start -- GCE `instances.stop` / `instances.start`, releasing and rebinding the ephemeral external IP on resume, plus offline (label-based) discovery so stopped instances stay visible to `mngr list` / `mngr start` -- would give a Modal-like idle-paused-but-resumable lifecycle that actually stops compute billing. The AWS provider is gaining this on a separate branch (`mngr/aws-stop`), implemented entirely within `mngr_aws` (it overrides `stop_host` / `start_host` and adds `stop_instance` / `start_instance` to its client; the shared `mngr_vps_docker` base is left untouched). GCP needs its own parallel implementation in `mngr_gcp` -- it is **not** covered by `mngr/aws-stop`.
 - `--vps-image=<image>` build-arg for per-host image override.
 - Spot / preemptible VMs via `scheduling.provisioning_model`.
 - GPU instances with accelerator configs.
-- Stable external addressing via reserved static IPs across stops/starts.
+- Stable external addressing via reserved static IPs (needed once VM-level stop/start lands, since a stopped GCE VM releases its ephemeral external IP).
