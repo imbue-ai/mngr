@@ -88,6 +88,14 @@ _POOL_MGMT_PRIVATE_KEY_VAULT_FIELD: Final[str] = "POOL_SSH_PRIVATE_KEY"
 _SSH_KEYGEN_DERIVE_TIMEOUT_SECONDS: Final[float] = 10.0
 # Vault field (under ``<vault_prefix>/neon``) holding the pooled host_pool DSN.
 _POOL_DSN_VAULT_FIELD: Final[str] = "DATABASE_URL"
+# Shared ``--database-url`` help text for the create / list / destroy commands.
+# Hoisted to one constant so the three subcommands' ``--help`` output can't drift.
+_DATABASE_URL_HELP: Final[str] = (
+    "Neon PostgreSQL connection string for the pool DB. Optional: for "
+    "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
+    "for dev/ci it auto-resolves from the activated env's secrets.toml. "
+    "Pass explicitly only when overriding."
+)
 
 
 def build_create_admin_args(
@@ -477,12 +485,7 @@ def pool() -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL connection string for the pool DB. Optional: for "
-        "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
-        "for dev/ci it auto-resolves from the activated env's secrets.toml. "
-        "Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option(
     "--mngr-source",
@@ -556,12 +559,7 @@ def pool_create(
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL connection string for the pool DB. Optional: for "
-        "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
-        "for dev/ci it auto-resolves from the activated env's secrets.toml. "
-        "Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 def pool_list(database_url: str | None) -> None:
     """List pool_hosts rows (forwards to ``mngr imbue_cloud admin pool list``)."""
@@ -582,12 +580,7 @@ def pool_list(database_url: str | None) -> None:
     required=False,
     default=None,
     type=str,
-    help=(
-        "Neon PostgreSQL connection string for the pool DB. Optional: for "
-        "staging/production it is read from Vault (secrets/minds/<tier>/neon); "
-        "for dev/ci it auto-resolves from the activated env's secrets.toml. "
-        "Pass explicitly only when overriding."
-    ),
+    help=_DATABASE_URL_HELP,
 )
 @click.option("--force", is_flag=True, help="Drop the row even if status != 'released'")
 @click.option(
