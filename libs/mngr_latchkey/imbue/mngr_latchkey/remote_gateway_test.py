@@ -357,13 +357,18 @@ def test_ports_are_integers() -> None:
     assert isinstance(OUTER_PORT, int)
 
 
+def _gateway_script(outer: OuterHostInterface) -> str:
+    """Return the single recorded command that launches the gateway."""
+    scripts = [r.command for r in _stub(outer).recorded if "nohup latchkey gateway" in r.command]
+    assert len(scripts) == 1, scripts
+    return scripts[0]
+
+
 def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    assert len(_stub(outer).recorded) == 1
-    command = _stub(outer).recorded[0].command
-    # Gateway binds OUTER_PORT on loopback, with counting disabled, and the
-    # encryption key injected so it can decrypt the synced credentials.
+    command = _gateway_script(outer)
+    # Gateway binds OUTER_PORT on loopback, with counting disabled.
     assert f"LATCHKEY_GATEWAY_PORT={OUTER_PORT}" in command
     assert "LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1" in command
     assert "LATCHKEY_DISABLE_COUNTING=1" in command
@@ -371,10 +376,16 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     # user's OAuth token: it runs on a synced copy and the desktop-side
     # latchkey remains the single owner of credential refresh.
     assert "LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1" in command
-    assert "LATCHKEY_ENCRYPTION_KEY=" in command
-    # The desktop-derived shared password is injected so the VPS gateway
-    # accepts the same agent traffic the local gateway does.
-    assert "LATCHKEY_GATEWAY_LISTEN_PASSWORD=shared-password" in command
+    # The encryption key and listen password are read from 0600 temp files into
+    # the environment (not interpolated), then the files are deleted, then the
+    # now-redundant cleanup trap is dropped.
+    assert 'LATCHKEY_ENCRYPTION_KEY="$(cat ' in command
+    assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat ' in command
+    assert "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD" in command
+    assert "trap 'rm -f " in command
+    assert "trap - EXIT" in command
+    # The literal secret values never appear in the command string.
+    assert "shared-password" not in command
     assert "nohup latchkey gateway" in command
     # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the
     # shell running this very script). Records $! after launching.
@@ -387,11 +398,30 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     assert "</dev/null" in command
 
 
+def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_temp_files(tmp_path: Path) -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    written = _stub(outer).written
+    # Exactly the two secret files are written, both 0600, under the remote dir.
+    assert len(written) == 2
+    assert all(w.mode == "0600" for w in written)
+    assert all(w.path.startswith("/root/.latchkey/") for w in written)
+    # The password file's content is the literal secret; it is never written to
+    # a command (see the start-script test above).
+    password_files = [w for w in written if "gateway_listen_password" in w.path]
+    assert len(password_files) == 1
+    assert password_files[0].content == b"shared-password"
+    # The script reads back exactly the paths that were written.
+    command = _gateway_script(outer)
+    for w in written:
+        assert w.path in command
+
+
 def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Pin the local key (and clear any operator override) so the exact value is
-    # interpolated into LATCHKEY_ENCRYPTION_KEY.
+    # written to the encryption-key temp file (and never to a command).
     monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
     key_path = encryption_key_path(tmp_path)
     key_path.parent.mkdir(parents=True, exist_ok=True)
@@ -399,7 +429,11 @@ def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    assert "LATCHKEY_ENCRYPTION_KEY=my-test-key-abc123" in _stub(outer).recorded[0].command
+    key_files = [w for w in _stub(outer).written if "gateway_encryption_key" in w.path]
+    assert len(key_files) == 1
+    assert key_files[0].content == b"my-test-key-abc123"
+    # The key never appears in any recorded command string.
+    assert all("my-test-key-abc123" not in r.command for r in _stub(outer).recorded)
 
 
 def test_ensure_latchkey_gateway_running_raises_on_failure(tmp_path: Path) -> None:
@@ -511,6 +545,11 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "docker exec -u root" in commands
     assert "mngr-ws-1" in commands
     assert "-R 127.0.0.1:" in commands
+    # The gateway listen password is passed via a temp file, never a command.
+    assert "shared-password" not in commands
+    password_files = [w for w in _stub(outer).written if "gateway_listen_password" in w.path]
+    assert len(password_files) == 1
+    assert password_files[0].content == b"shared-password"
 
 
 def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path) -> None:
