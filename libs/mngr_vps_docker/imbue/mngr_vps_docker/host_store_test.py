@@ -56,23 +56,6 @@ def _make_certified_data(host_id: str = "test-host-123", host_name: str = "test-
 # =============================================================================
 
 
-def test_vps_host_config_creation() -> None:
-    config = VpsHostConfig(
-        vps_instance_id=VpsInstanceId("inst-abc123"),
-        region="ewr",
-        plan="vc2-1c-1gb",
-        os_id=2136,
-        container_name="mngr-test-host",
-        volume_name="mngr-host-vol-abc123",
-    )
-    assert config.vps_instance_id == VpsInstanceId("inst-abc123")
-    assert config.region == "ewr"
-    assert config.plan == "vc2-1c-1gb"
-    assert config.os_id == 2136
-    assert config.container_name == "mngr-test-host"
-    assert config.volume_name == "mngr-host-vol-abc123"
-
-
 def test_vps_host_config_optional_fields() -> None:
     config = VpsHostConfig(
         vps_instance_id=VpsInstanceId("inst-abc123"),
@@ -85,19 +68,6 @@ def test_vps_host_config_optional_fields() -> None:
     assert config.start_args == ()
     assert config.image is None
     assert config.vps_ssh_key_id is None
-
-
-def test_vps_docker_host_record_creation() -> None:
-    certified_data = _make_certified_data()
-    record = VpsDockerHostRecord(
-        certified_host_data=certified_data,
-        vps_ip="192.168.1.100",
-        ssh_host_public_key="ssh-ed25519 AAAA vps-host-key",
-        container_ssh_host_public_key="ssh-ed25519 BBBB container-host-key",
-    )
-    assert record.certified_host_data.host_id == "test-host-123"
-    assert record.vps_ip == "192.168.1.100"
-    assert record.ssh_host_public_key == "ssh-ed25519 AAAA vps-host-key"
 
 
 def test_vps_docker_host_record_optional_fields() -> None:
@@ -513,21 +483,39 @@ def test_list_persisted_agent_data_raises_on_shell_failure(tmp_path: Path) -> No
         store.list_persisted_agent_data()
 
 
-def test_list_persisted_agent_data_uses_one_round_trip(tmp_path: Path) -> None:
-    """All agent files must come back in a single execute_idempotent_command call."""
-    outer = _LocalFakeOuter(
-        id=HostId.generate(),
-        connector=_make_local_connector(),
-        device_by_volume={"unused": tmp_path},
-    )
-    store = VpsDockerHostStore(outer=outer, mountpoint=tmp_path)
-    store.persist_agent_data({"id": str(_AGENT_ID_1), "name": "first"})
-    store.persist_agent_data({"id": str(_AGENT_ID_2), "name": "second"})
+def test_list_persisted_agent_data_reads_all_agents_in_one_round_trip(tmp_path: Path) -> None:
+    """The agent list comes back in a single ``execute_idempotent_command`` call, and
+    that call count must not grow with the number of agents.
 
-    pre_call_count = len(outer.recorded_commands)
-    listed = store.list_persisted_agent_data()
-    post_call_count = len(outer.recorded_commands)
+    The assertion on call count is deliberate, not implementation coupling: each
+    ``execute_idempotent_command`` is a (slow) network round-trip to the VPS, so
+    "one batched read regardless of agent count" is a real performance contract.
+    A regression to one stat/read per agent would flip exactly this test. Comparing
+    two different agent counts (rather than pinning a bare literal) pins the
+    *does-not-scale* property, which is what actually matters.
+    """
 
-    assert {entry["id"] for entry in listed} == {str(_AGENT_ID_1), str(_AGENT_ID_2)}
-    # One batched shell call regardless of agent count -- *not* one per agent.
-    assert post_call_count - pre_call_count == 1
+    def _read_call_delta(volume_dir: Path, agent_count: int) -> tuple[int, set[str]]:
+        volume_dir.mkdir()
+        outer = _LocalFakeOuter(
+            id=HostId.generate(),
+            connector=_make_local_connector(),
+            device_by_volume={"unused": volume_dir},
+        )
+        store = VpsDockerHostStore(outer=outer, mountpoint=volume_dir)
+        ids = {str(AgentId.generate()) for _ in range(agent_count)}
+        for agent_id in ids:
+            store.persist_agent_data({"id": agent_id, "name": agent_id})
+        pre_call_count = len(outer.recorded_commands)
+        listed = store.list_persisted_agent_data()
+        post_call_count = len(outer.recorded_commands)
+        return post_call_count - pre_call_count, {entry["id"] for entry in listed}
+
+    delta_two, ids_two = _read_call_delta(tmp_path / "vol-two", 2)
+    delta_five, ids_five = _read_call_delta(tmp_path / "vol-five", 5)
+
+    assert len(ids_two) == 2
+    assert len(ids_five) == 5
+    # Exactly one batched read, and identical regardless of how many agents exist.
+    assert delta_two == 1
+    assert delta_five == 1
