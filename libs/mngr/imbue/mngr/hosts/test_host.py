@@ -2917,6 +2917,62 @@ def test_rsync_files_remote_to_remote_with_files_from(
     assert not (target_path / "exclude_me.txt").exists()
 
 
+@pytest.mark.acceptance
+@pytest.mark.timeout(60)
+def test_git_transfer_remote_to_remote(
+    ssh_host_factory: Callable[[str], Host],
+    tmp_path: Path,
+    setup_git_config: None,
+) -> None:
+    """Git transfer between two distinct remote hosts must relay through a local mirror.
+
+    Regression test: a direct ``git push`` from the remote source host would point
+    ``GIT_SSH_COMMAND`` at the target's ssh key and known_hosts, which live on the
+    orchestrator machine -- not on the source host where the push runs. That produced
+    "Identity file ... not accessible" and "Host key verification failed". The transfer
+    must instead pull a bare mirror locally using the source's credentials, then push to
+    the target using the target's, both run on the orchestrator where those files exist.
+
+    A single local sshd backs both hosts, but they are created under different provider
+    instances so they have distinct host ids and are not treated as the same machine --
+    which is exactly the condition that routes through the relay path under test.
+    """
+    source_path = tmp_path / "source_git_r2r"
+    source_path.mkdir()
+    (source_path / "tracked.txt").write_text("tracked content")
+    _init_git_repo(source_path)
+
+    target_path = tmp_path / "target_git_r2r"
+
+    source_host = ssh_host_factory("git-r2r-source")
+    target_host = ssh_host_factory("git-r2r-target")
+
+    assert not source_host.is_local
+    assert not target_host.is_local
+    # The relay path is only exercised when the hosts are distinct machines.
+    assert source_host.id != target_host.id
+
+    options = CreateAgentOptions(
+        name=AgentName("git-r2r"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
+    )
+
+    target_host._transfer_git_repo(source_host, source_path, target_path, options)
+
+    # The relay must have materialized the source commit and working tree on the target.
+    content_result = target_host.execute_idempotent_command("cat tracked.txt", cwd=target_path)
+    assert content_result.success
+    assert content_result.stdout.strip() == "tracked content"
+
+    log_result = target_host.execute_idempotent_command("git log --oneline", cwd=target_path)
+    assert log_result.success
+    assert "Initial commit" in log_result.stdout
+
+
 @pytest.mark.rsync
 def test_rsync_does_not_delete_existing_files_by_default(host_with_temp_dir: tuple[Host, Path]) -> None:
     """Test that rsync without --delete preserves existing files in target.
