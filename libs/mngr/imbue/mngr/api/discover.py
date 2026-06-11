@@ -80,9 +80,10 @@ def _discover_provider_hosts_and_agents(
         # per-provider unit should resolve: an unreachable backend is genuinely
         # an error *for this provider*. Let it propagate unwrapped so the
         # multi-provider orchestrator (_run_discovery) can decide to skip it and
-        # continue with the providers that *are* available -- mirroring how
-        # gc's _discover_hosts_for_gc and `mngr list` handle it at their own
-        # multi-provider boundaries. (We must not wrap it in
+        # continue with the providers that *are* available -- the same way other
+        # multi-provider boundaries own this decision rather than the per-provider
+        # unit (gc's _discover_hosts_for_gc skips the provider; `mngr list`
+        # records it as unavailable). (We must not wrap it in
         # ProviderDiscoveryError below, or the orchestrator could no longer
         # distinguish "unavailable -> skip" from a genuine discovery failure.)
         raise
