@@ -5,6 +5,10 @@ Claude-style `waiting_reason` listing field to the codex plugin. It is a
 follow-up to the gap recorded in `spec.md` section P and in `README.md`
 ("Not yet implemented").
 
+The central open question -- does codex's `PermissionRequest` hook fire live --
+has now been **verified** against real codex 0.139.0 (see "Live verification"
+below). Both reasons are confirmed implementable.
+
 ## Goal
 
 Surface, in `mngr list`, *why* a codex agent is WAITING -- mirroring claude's
@@ -77,21 +81,42 @@ forces `approval_policy="never"` and suppresses all dialogs
 
 No special handling needed; the marker simply never appears in auto-allow mode.
 
-## Open risk to resolve before building
+## Live verification (codex 0.139.0)
 
-`codex-investigation.md:38-43` verified `SessionStart -> UserPromptSubmit ->
-Stop` firing **live** in the TUI, but `PermissionRequest` is only confirmed to
-*exist* in the documented hook list (`:39`), not verified to fire live
-(`:174-176` calls it "feasible", not verified). This is the one real unknown.
+The one prior unknown -- `codex-investigation.md:38-43` had verified
+`SessionStart -> UserPromptSubmit -> Stop` firing live but only confirmed
+`PermissionRequest` *exists* in the hook list, not that it fires -- is now
+**resolved**. Verified against real codex 0.139.0 (ChatGPT auth), driven in
+tmux in supervised mode (`approval_policy="untrusted"`, the bundled-sandbox
+escalation path), with a throwaway `CODEX_HOME` wiring every event to a logging
+hook and `--dangerously-bypass-hook-trust`. Prompted a shell command; observed
+this exact ordering from the hook log:
 
-Required verification (do first): launch a supervised codex agent
-(`auto_allow_permissions=false`, a sandbox/approval policy that prompts), drive
-it to a tool call that triggers an approval dialog, and confirm a
-`PermissionRequest` hook fires with the event JSON on stdin. Capture the payload
-shape (does it carry `session_id`? a tool name? a call id?) -- this determines
-whether a session guard or refcounting is warranted. If `PermissionRequest`
-does **not** fire live, fall back to shipping `END_OF_TURN`-only (still strictly
-better than today) and document `PERMISSIONS` as blocked on the CLI.
+| # | Event | Marker effect | Notable payload fields |
+|---|-------|---------------|------------------------|
+| 1 | `SessionStart` | -- | `session_id`, `transcript_path`, `source` |
+| 2 | `UserPromptSubmit` | -- | `turn_id`, `prompt` |
+| 3 | `PreToolUse` | -- | `tool_name`, `tool_input`, **`tool_use_id`** |
+| 4 | `PermissionRequest` | touch `permissions_waiting` | `tool_name`, `tool_input`, `turn_id` -- **no `tool_use_id`** |
+| 5 | `PostToolUse` (after approval) | rm `permissions_waiting` | `tool_input`, `tool_response`, `tool_use_id` |
+| 6 | `Stop` | rm `permissions_waiting` (safety net) | `last_assistant_message` |
+
+Findings that shape the design:
+
+- **`PermissionRequest` fires live and blocks.** The marker was present for the
+  entire duration the approval dialog was open and cleared on `PostToolUse`.
+  The exact claude pattern works unmodified.
+- **`PostToolUseFailure` does not exist in codex** (0 occurrences in the
+  binary; claude has it, codex does not). Cleanup must use `PostToolUse` plus
+  `Stop` as the safety net -- do **not** wire `PostToolUseFailure`.
+- **`PermissionRequest` carries no `tool_use_id`** (only `PreToolUse`/
+  `PostToolUse` do). It does carry `session_id` and `turn_id`. So a refcount
+  keyed on call id is not possible from `PermissionRequest` alone; a session/
+  turn guard is, if ever needed. The simple flag (below) needs neither.
+- Every event payload includes `session_id` and `cwd`, matching the existing
+  marker scripts' assumptions.
+
+Repro lives at `/tmp/codex_hooktest/` (throwaway `CODEX_HOME` + `hook_events.log`).
 
 ## Async-subagent concurrency analysis
 
@@ -134,11 +159,13 @@ Mirror claude, adapted to codex's provisioned-script + commands/ dir pattern.
    Each existing marker script has a `_test.py`; add matching unit tests.
 
 3. **Hook wiring** (`build_codex_hooks_config`, `codex_config.py:518-525`):
-   add `PermissionRequest -> set_permissions_waiting.sh`,
-   `PostToolUse -> clear_permissions_waiting.sh`,
-   `PostToolUseFailure -> clear_permissions_waiting.sh`. Also clear the marker
-   in `clear_active_marker.sh` (Stop) as a safety net, mirroring claude, so an
-   unresolved dialog can't strand the marker across turn end.
+   add `PermissionRequest -> set_permissions_waiting.sh` and
+   `PostToolUse -> clear_permissions_waiting.sh`. (Codex has **no**
+   `PostToolUseFailure` event -- verified above -- so unlike claude there is no
+   third clear hook; `PostToolUse` fires after the approved tool runs.) Also
+   clear the marker in `clear_active_marker.sh` (Stop) as a safety net, mirroring
+   claude, so an unresolved/cancelled dialog can't strand the marker across turn
+   end. The live trace confirmed `Stop` fires reliably at turn end.
 
 4. **Provisioning** (`plugin.py:379-399`): add the two new scripts to the
    `provision_scripts_to_commands_dir` map.
@@ -158,19 +185,20 @@ Mirror claude, adapted to codex's provisioned-script + commands/ dir pattern.
 ## Testing plan
 
 - Unit (`*_test.py`): the two new marker scripts (touch/remove), and
-  `build_codex_hooks_config` now emitting the three new hook entries. Mirror
-  claude's three `_waiting_reason` cases (PERMISSIONS / END_OF_TURN / running)
-  in the codex plugin test.
+  `build_codex_hooks_config` now emitting the two new hook entries
+  (`PermissionRequest`, `PostToolUse`). Mirror claude's three `_waiting_reason`
+  cases (PERMISSIONS / END_OF_TURN / running) in the codex plugin test.
 - Acceptance/release: a release test that drives a real codex agent to a
   permission dialog and asserts `mngr list` reports
   `codex.waiting_reason == PERMISSIONS`, then resolves it and asserts the field
-  clears -- gated on the live-firing verification above. Model it on the
-  existing claude `waiting_reason` release coverage and codex's marker tests.
+  clears. The live trace above is the manual version of exactly this arc, so the
+  test is known-achievable. Model it on the existing claude `waiting_reason`
+  coverage and codex's marker tests.
 
 ## Effort estimate
 
-Small-to-medium. The pattern is established (claude) and codex's hook/marker
-infrastructure already exists; the work is ~2 short scripts, 3 hook entries, a
-provisioning line, the enum + field generator + hookimpl, and tests. The only
-schedule risk is the live `PermissionRequest` verification, which could reduce
-scope to `END_OF_TURN`-only if codex doesn't fire it.
+Small-to-medium, and now de-risked. The pattern is established (claude), codex's
+hook/marker infrastructure already exists, and the one unknown (live
+`PermissionRequest` firing) is verified. The work is ~2 short scripts, 2 hook
+entries, a one-line `Stop`-script addition, a provisioning line, the enum +
+field generator + hookimpl, and tests. No remaining blockers.

@@ -981,11 +981,15 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   (`allow`/`deny`/`ask`) and opencode **emits no permission-request event** when an `ask`
   policy blocks, so `PERMISSIONS` is **not feasible** without an upstream change. `END_OF_TURN`
   is feasible from the `active` marker.
-- **codex**: implements neither yet, but **is feasible for both reasons**. Codex has a full
-  Claude-style hooks system (stable) that fires `PermissionRequest` and `PostToolUse`, so the
-  same `permissions_waiting` marker pattern can be ported; `END_OF_TURN` follows from the
-  `active` marker (already maintained, OR of `codex_root_active` and a non-empty
-  `codex_subagents/`, recomputed under lock). See the codex scoping note below.
+- **codex**: implements neither yet, but **both reasons are verified feasible**. Codex has a
+  full Claude-style hooks system (stable); `PermissionRequest` and `PostToolUse` were
+  confirmed firing live against codex 0.139.0 (the marker is set on `PermissionRequest` while
+  the approval dialog is open and cleared on `PostToolUse`), so the same `permissions_waiting`
+  pattern ports directly. Note codex has **no** `PostToolUseFailure` event (claude does), so
+  cleanup is `PostToolUse` + `Stop` only. `END_OF_TURN` follows from the `active` marker
+  (already maintained, OR of `codex_root_active` and a non-empty `codex_subagents/`,
+  recomputed under lock). See `codex-waiting-reason-scoping.md` for the full plan and the
+  live verification trace.
 
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
 `waiting_reason` field is a plugin-specific embellishment. Surfacing *why* an agent is
