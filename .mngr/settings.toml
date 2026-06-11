@@ -60,6 +60,28 @@ extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && g
 pass_env = ["GH_TOKEN", "DEPOT_TOKEN"]
 pass_host_env = ["EDITOR"]
 
+# Run an agent on this repo on a Google Compute Engine VM (the analogue of the `modal`
+# template above). Like aws -- and unlike modal -- it builds through the shared
+# `mngr_vps_docker` backend, which resolves `--file=` inside the uploaded context, so the
+# context is `.` (the worktree) rather than modal's `.mngr/dev/build/` keyframe tarball:
+# the build flow clones + overlays uncommitted changes and the Dockerfile's
+# `COPY . /code/mngr/` consumes it. The image builds on depot's remote builders
+# (builder=DEPOT on [providers.gcp] below).
+#
+# Prerequisite: the SSH firewall rule is created once per project by an operator via
+# `mngr gcp prepare --allowed-ssh-cidr <cidr>` (privileged); `mngr create -t gcp` then only
+# resolves it read-only and errors with a pointer back to `prepare` if it is missing.
+# Requires DEPOT_TOKEN (forwarded to the remote depot build) and GH_TOKEN (git/gh in the
+# container) exported at `mngr create -t gcp` time.
+[create_templates.gcp]
+provider = "gcp"
+build_arg = ["--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
+
 [agent_types.coder]
 parent_type = "claude"
 cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}]}}'"""
@@ -81,6 +103,25 @@ default_sandbox_timeout = 7200
 # no depot.json on the VM) before creating an azure agent. Drop this block to
 # fall back to a plain native `docker build`.
 [providers.azure]
+builder = "DEPOT"
+
+# Shared GCP config consumed by the `gcp` create-template above. The per-developer
+# allowed_ssh_cidrs is intentionally absent here: it lives in the gitignored
+# .mngr/settings.local.toml, and the firewall rule itself is created once per project by
+# `mngr gcp prepare --allowed-ssh-cidr <cidr>` (the hot create path only resolves it
+# read-only). project_id is likewise omitted -- it falls back to the gcloud/ADC default;
+# pin it here if you have access to several projects.
+[providers.gcp]
+backend = "gcp"
+default_region = "us-west1"
+# GCE VMs are zonal; the chosen zone must lie in default_region.
+default_zone = "us-west1-a"
+# 2 vCPU / 8 GB. The image build runs on depot's remote builders (builder below), so the
+# instance only needs to comfortably run the agent -- but the e2-small default's 2 GB is
+# too tight for that, so bump to e2-standard-2 (the parity of aws's t3.large).
+default_machine_type = "e2-standard-2"
+# Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
+# in the repo supplies the project id.
 builder = "DEPOT"
 
 [plugins.forward]
