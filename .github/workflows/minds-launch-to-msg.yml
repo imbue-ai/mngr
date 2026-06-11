@@ -1021,3 +1021,68 @@ jobs:
             echo ""
             echo "Branch-scoped UI (eyeball-scroll only): ${{ github.server_url }}/${{ github.repository }}/actions/caches?ref=${{ github.ref }}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # Post a status summary to Slack for every run (cron + dispatch). No-ops
+  # when SLACK_LAUNCH_TO_MSG_WEBHOOK isn't configured. Uses the curl-the-
+  # webhook approach directly so we don't pull in a third-party action.
+  notify_slack:
+    needs: [check_should_run, build, launch_to_msg, macos_launch, update_marker]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: post status to slack
+        env:
+          WEBHOOK: ${{ secrets.SLACK_LAUNCH_TO_MSG_WEBHOOK }}
+          DECISION: ${{ needs.check_should_run.outputs.should_run == 'true' && 'ran' || 'skipped (pair unchanged from last green)' }}
+          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          BUILD_RESULT:        ${{ needs.build.result }}
+          LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
+          MACOS_LAUNCH_RESULT: ${{ needs.macos_launch.result }}
+          UPDATE_MARKER_RESULT: ${{ needs.update_marker.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$WEBHOOK" ]]; then
+            echo "::warning::SLACK_LAUNCH_TO_MSG_WEBHOOK not set -- skipping slack notification"
+            exit 0
+          fi
+          # Render an emoji from a job result. Skipped is intentionally a
+          # neutral marker because the whole point of the skip path is that
+          # work was correctly elided.
+          emoji() {
+            case "$1" in
+              success)  echo ":white_check_mark:" ;;
+              failure)  echo ":x:" ;;
+              cancelled) echo ":no_entry_sign:" ;;
+              skipped)  echo ":fast_forward:" ;;
+              *)        echo ":grey_question:" ;;
+            esac
+          }
+          # Pick an overall headline emoji: red if any required job failed
+          # outright; green if everything we needed succeeded or skipped;
+          # yellow otherwise (e.g. cancellation).
+          overall=":white_check_mark:"
+          for r in "$BUILD_RESULT" "$LAUNCH_TO_MSG_RESULT" "$MACOS_LAUNCH_RESULT" "$UPDATE_MARKER_RESULT"; do
+            if [[ "$r" == "failure" ]]; then overall=":x:"; break; fi
+            if [[ "$r" == "cancelled" ]]; then overall=":warning:"; fi
+          done
+          MNGR_SHORT="${MNGR_SHA:0:12}"
+          FCT_SHORT="${FCT_SHA:0:12}"
+          # printf with literal \n keeps the message single-statement so
+          # YAML's `run: |` literal-block-scalar indentation is preserved.
+          text=$(printf '%s *launch-to-msg* | trigger: `%s` | decision: %s\n\nmngr=`%s`  fct=`%s`\n\n%s build           `%s`\n%s launch_to_msg   `%s`\n%s macos_launch    `%s`\n%s update_marker   `%s`\n\n<%s|run logs>' \
+            "$overall" "$TRIGGER" "$DECISION" \
+            "$MNGR_SHORT" "$FCT_SHORT" \
+            "$(emoji "$BUILD_RESULT")" "$BUILD_RESULT" \
+            "$(emoji "$LAUNCH_TO_MSG_RESULT")" "$LAUNCH_TO_MSG_RESULT" \
+            "$(emoji "$MACOS_LAUNCH_RESULT")" "$MACOS_LAUNCH_RESULT" \
+            "$(emoji "$UPDATE_MARKER_RESULT")" "$UPDATE_MARKER_RESULT" \
+            "$RUN_URL")
+          # jq -Rs '.' wraps the text safely as a JSON string, escaping
+          # newlines and any embedded quotes.
+          payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "$payload" "$WEBHOOK"
