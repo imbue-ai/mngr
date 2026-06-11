@@ -31,7 +31,7 @@ def test_post_attach_sigwinch_delivers_to_pane_process(mngr_test_prefix: str, tm
     # Background sleep + wait allows bash to process traps when SIGWINCH
     # interrupts the wait builtin (plain sleep ignores SIGWINCH). The sleep
     # is one long-running child rather than a respawn loop so the child is
-    # reliably alive when the resize script's pgrep-then-kill runs against
+    # reliably alive when the post-attach script's pgrep-then-kill runs against
     # it -- mirroring real agent processes (e.g., `claude`) which are
     # long-lived, not a corpse that died between pgrep and kill.
     catcher_cmd = f"trap 'echo received > {marker_file}' WINCH; sleep 60 & wait"
