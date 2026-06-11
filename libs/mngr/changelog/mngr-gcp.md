@@ -2,3 +2,5 @@
 
 - `mngr create` CLI markdown docs regenerated to include the new `gcp` provider's build-args help (`--gcp-zone`, `--gcp-machine-type`, `--git-depth`), and the `mngr gcp` operator command group docs added (`docs/commands/secondary/gcp.md`), covering both `mngr gcp prepare` and `mngr gcp cleanup`.
 - `gcp` added to `_REMOTE_BACKEND_NAMES` in `providers/registry.py` (alongside `aws`/`vultr`/`modal`/`imbue_cloud`). The GCP backend resolves Application Default Credentials at build time, and `google.auth.default()` probes the GCE metadata server as its last fallback, which blocks for seconds in non-GCE environments without credentials. Marking it remote means `load_local_backend_only` (the test default) skips it, so provider-enumerating tests no longer build a default GCP provider and hang on that probe.
+
+- `ProviderEmptyError` now exposes its constructor's `reason` as a `.reason` attribute (the bare cause, distinct from the composed `str(error)` that adds the provider name and "has no state yet" framing). The GCP and AWS backends' discovery-skip warnings interpolate `e.reason` so the rendered line no longer double-prints the provider name.

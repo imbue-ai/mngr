@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
+import boto3
 import click
 from botocore.exceptions import BotoCoreError
 from loguru import logger
@@ -32,6 +33,36 @@ from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
+
+
+def _resolve_session_and_ami_or_empty(
+    name: ProviderInstanceName, config: AwsProviderConfig
+) -> tuple[boto3.Session, str]:
+    """Resolve AWS credentials + the default-region AMI, raising ``ProviderEmptyError`` on any failure.
+
+    Two independent failure modes are funneled through a single exit type so
+    callers do not need to discriminate: ``config.get_session()`` fails when
+    no credential source resolves (no env vars, no profile, no IMDS, etc.);
+    ``config.get_ami_id_for_region()`` fails when neither ``default_ami_id``
+    nor a matching ``default_ami_by_region`` entry is set. Either surfaces
+    here as ``ProviderEmptyError`` so the provider is treated as unreachable
+    rather than half-constructed.
+
+    Shared by ``build_provider_instance`` (the read-path entry) and
+    ``bootstrap_for_host_creation`` (the create-path entry) so both fail
+    identically. Deliberately does NOT log: each caller decides whether to
+    warn (read paths, where the skip would otherwise be silent) or let the
+    error surface directly to the user (the create path).
+    """
+    try:
+        session = config.get_session()
+    except (ValueError, BotoCoreError) as e:
+        raise ProviderEmptyError(name, str(e)) from e
+    try:
+        ami_id = config.get_ami_id_for_region(config.default_region)
+    except ValueError as e:
+        raise ProviderEmptyError(name, str(e)) from e
+    return session, ami_id
 
 
 class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
@@ -246,32 +277,26 @@ class AwsProviderBackend(ProviderBackendInterface):
             raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
 
         try:
-            session = config.get_session()
-        except (ValueError, BotoCoreError) as e:
-            # Match the Modal pattern in mngr_modal.backend.build_provider_instance:
-            # when the provider cannot be reached (here: no resolvable AWS credentials),
-            # raise ProviderEmptyError so read paths (mngr list / mngr gc / discovery)
-            # skip the AWS provider entirely instead of constructing a half-working
-            # placeholder. Host-creation paths surface this same error to the user.
-            # Warn before raising so the silent ``logger.debug`` swallow at
-            # ``mngr.api.list._construct_and_discover_for_provider`` does not hide
-            # the skip -- mirrors Vultr's read-path warning shape, see
-            # ``mngr_vultr.backend.VultrProvider._list_provider_vps_hostnames``.
-            # The exception's ``str(e)`` already contains the actionable how-to-fix
-            # (env vars / profile / instance role).
-            logger.warning("AWS provider {!r}: {} -- skipping discovery", name, str(e))
-            raise ProviderEmptyError(name, str(e)) from e
-
-        try:
-            ami_id = config.get_ami_id_for_region(config.default_region)
-        except ValueError as e:
-            # No usable AMI configured -- analogous to the missing-creds case
-            # above. Surfaces clearly on `mngr create --provider aws` while
-            # letting `mngr list` skip the provider. Warn for the same reason
-            # as the credentials case: the shared discovery path swallows
-            # ProviderEmptyError at ``logger.debug``.
-            logger.warning("AWS provider {!r}: {} -- skipping discovery", name, str(e))
-            raise ProviderEmptyError(name, str(e)) from e
+            session, ami_id = _resolve_session_and_ami_or_empty(name, config)
+        except ProviderEmptyError as e:
+            # Read paths (mngr list / connect / gc / discovery) reach this. The
+            # shared discovery loop swallows ProviderEmptyError at logger.debug
+            # (mngr.api.list._construct_and_discover_for_provider), so without
+            # this warning a misconfigured AWS provider would silently vanish
+            # from those listings with no user-visible reason. Warn once per
+            # skip, naming the provider and the actionable cause. Use e.reason
+            # (the bare env vars / profile / instance role / default_ami_id
+            # guidance) rather than str(e), which would double the provider name
+            # and the "has no state yet" framing already in the wrapped message.
+            # Mirrors Vultr's read-path warning shape (mngr_vultr.backend.
+            # VultrProvider._list_provider_vps_hostnames).
+            #
+            # The create path never reaches this warning: bootstrap_for_host_
+            # creation resolves the same credentials + AMI first and lets the
+            # error surface directly, so `mngr create --provider aws` shows the
+            # failure without a misleading "skipping discovery" line.
+            logger.warning("AWS provider {!r}: {} -- skipping discovery", name, e.reason)
+            raise
 
         aws_client = AwsVpsClient(
             session=session,
@@ -297,6 +322,40 @@ class AwsProviderBackend(ProviderBackendInterface):
             aws_client=aws_client,
             aws_config=config,
         )
+
+    @staticmethod
+    def bootstrap_for_host_creation(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> None:
+        """Fail fast on the create path when AWS credentials or AMI are unresolvable.
+
+        The create-host flow calls this exactly once, before
+        ``build_provider_instance`` -- and it is the only call path that does
+        (see ``ProviderBackendInterface.bootstrap_for_host_creation``). Resolving
+        credentials + AMI here serves two purposes:
+
+        1. A misconfigured ``mngr create --provider aws`` surfaces the actionable
+           ``ProviderEmptyError`` (carrying the env vars / profile / instance role
+           / ``default_ami_id`` guidance) directly, as the create command's
+           top-level error.
+        2. Because this raises before ``build_provider_instance`` runs, that
+           method's read-path "skipping discovery" warning is never reached on
+           the create path. So an explicit create never emits a misleading
+           discovery warning -- the warning is reserved for the read paths that
+           would otherwise drop the provider silently.
+
+        Idempotent and cheap (the subsequent ``build_provider_instance`` resolves
+        the same credentials and AMI again to construct the client). Unlike
+        Modal's / Docker's overrides, this creates no backend-side resources --
+        AWS's one-time resource (the per-region security group) is provisioned
+        out of band by ``mngr aws prepare``, not here.
+        """
+        del mngr_ctx
+        if not isinstance(config, AwsProviderConfig):
+            raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
+        _resolve_session_and_ami_or_empty(name, config)
 
 
 @hookimpl

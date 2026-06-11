@@ -20,6 +20,13 @@ including PR number, state (open/closed/merged), and CI check status.
 The display auto-refreshes every 10 minutes. Press 'r' to refresh manually,
 or 'q' to quit.
 
+Pass `--format json` (or `jsonl`) to skip the TUI and print a single board
+snapshot for programmatic use instead. JSON emits one object with the ordered
+columns, agents grouped into sections, and any fetch errors; JSONL emits one
+agent record per line (in board order) followed by any error lines. Each agent
+carries both the pre-rendered cells and the structured field values (PR number,
+CI status, etc.).
+
 Supports CEL filtering via --include/--exclude plus alias flags (--running,
 --stopped, --archived, --active, --local, --remote, --project, --label,
 --host-label). See `mngr list --help` for the full filter reference; the same
@@ -94,4 +101,10 @@ $ mngr kanpan --running
 
 ```bash
 $ mngr kanpan --stopped --label env=prod
+```
+
+**Print the board as JSON for scripting**
+
+```bash
+$ mngr kanpan --format json
 ```
