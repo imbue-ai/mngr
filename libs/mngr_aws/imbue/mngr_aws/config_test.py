@@ -1,12 +1,12 @@
 """Tests for AWS provider configuration."""
 
-import os
 from pathlib import Path
 
 import pytest
 
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.conftest import clear_aws_env
 
 
 def write_default_credentials_file(directory: Path) -> Path:
@@ -20,18 +20,6 @@ def write_default_credentials_file(directory: Path) -> Path:
         encoding="utf-8",
     )
     return creds_path
-
-
-def _clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Strip every AWS_* env var so credential-chain probes start clean.
-
-    boto3's chain inspects a dozen-plus env vars; clearing only those each
-    test cares about by name leaks knowledge of the chain into tests. Wipe
-    them all and let the test re-set only what it wants.
-    """
-    for key in list(os.environ.keys()):
-        if key.startswith("AWS_"):
-            monkeypatch.delenv(key, raising=False)
 
 
 def test_default_config_values() -> None:
@@ -56,7 +44,7 @@ def test_backend_name_defaults_to_aws() -> None:
 
 
 def test_get_session_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_aws_env(monkeypatch)
+    clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
@@ -66,7 +54,7 @@ def test_get_session_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_get_session_returns_session_with_region(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_aws_env(monkeypatch)
+    clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     config = AwsProviderConfig(default_region="us-west-2")
