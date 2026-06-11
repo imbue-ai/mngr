@@ -1250,13 +1250,13 @@ class VpsDockerProvider(BaseProviderInstance):
         if vps_ip is not None:
             try:
                 remove_host_from_known_hosts(self._vps_known_hosts_path(), vps_ip, 22)
-            except (FileNotFoundError, OSError) as e:
+            except (OSError, UnicodeDecodeError) as e:
                 logger.trace("Failed to clean up VPS known_hosts: {}", e)
             try:
                 remove_host_from_known_hosts(
                     self._container_known_hosts_path(), vps_ip, self.config.container_ssh_port
                 )
-            except (FileNotFoundError, OSError) as e:
+            except (OSError, UnicodeDecodeError) as e:
                 logger.trace("Failed to clean up container known_hosts: {}", e)
 
         logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
