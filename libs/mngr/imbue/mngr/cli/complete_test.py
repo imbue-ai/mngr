@@ -1557,17 +1557,17 @@ def test_get_completions_setting_key_phase_valued(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """`mngr create -S head<TAB>` expands a valued key to KEY=VALUE candidates.
+    """`mngr create -S head<TAB>` completes a valued key to ``KEY=`` and defers the values.
 
-    The shared ``headless=`` prefix is what lets zsh insert ``KEY=`` with no
-    trailing space and then list the values on the next TAB.
+    The values are not listed until the key is fully completed (the next TAB, once
+    the word contains ``=``), mirroring the ``.`` segment drill-down.
     """
     _write_command_cache(completion_cache_dir, _setting_cache())
     set_comp_env("mngr create -S head", "3")
 
     result = _get_completions()
 
-    assert result == ["headless=true", "headless=false"]
+    assert result == ["headless="]
 
 
 def test_get_completions_setting_key_phase_valueless(
@@ -1587,19 +1587,19 @@ def test_get_completions_setting_key_phase_mixed(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """`mngr create -S <TAB>` offers top-level segments: expanded valued leaves, bare leaves, and branches.
+    """`mngr create -S <TAB>` offers top-level segments: ``KEY=`` for valued leaves, bare leaves, and branches.
 
-    Dotted keys are collapsed to the next segment, so ``logging.console_level``
-    appears as the ``logging.`` branch (drilled into on the next TAB), not as a
-    fully-qualified ``logging.console_level=...`` candidate.
+    Dotted keys are collapsed to the next segment (``logging.console_level`` ->
+    the ``logging.`` branch), and a valued leaf is offered as ``KEY=`` with its
+    values deferred to the next TAB -- not expanded up front.
     """
     _write_command_cache(completion_cache_dir, _setting_cache())
     set_comp_env("mngr create -S ", "3")
 
     result = _get_completions()
 
-    assert "headless=true" in result
-    assert "headless=false" in result
+    assert "headless=" in result
+    assert "headless=true" not in result
     assert "prefix" in result
     assert "logging." in result
     assert "logging.console_level=TRACE" not in result
@@ -1609,7 +1609,7 @@ def test_get_completions_setting_key_phase_drills_into_branch(
     completion_cache_dir: Path,
     set_comp_env: Callable[[str, str], None],
 ) -> None:
-    """`mngr create -S logging.<TAB>` drills into the branch, expanding its valued leaves."""
+    """`mngr create -S logging.<TAB>` drills into the branch, offering its leaves."""
     data = _setting_cache()._replace(
         config_keys=["headless", "prefix", "logging.console_level", "logging.file_level"],
         config_value_choices={
@@ -1622,8 +1622,8 @@ def test_get_completions_setting_key_phase_drills_into_branch(
 
     result = _get_completions()
 
-    # console_level is valued (expanded); file_level is free-form (bare).
-    assert result == ["logging.console_level=TRACE", "logging.console_level=DEBUG", "logging.file_level"]
+    # console_level is valued (offered as KEY=, values deferred); file_level is free-form (bare).
+    assert result == ["logging.console_level=", "logging.file_level"]
 
 
 def test_segment_keys_collapses_to_next_dot_segment() -> None:
@@ -1653,7 +1653,7 @@ def test_get_completions_setting_works_on_any_command(
 
     result = _get_completions()
 
-    assert result == ["headless=true", "headless=false"]
+    assert result == ["headless="]
 
 
 def test_get_completions_setting_long_form(
@@ -1666,7 +1666,7 @@ def test_get_completions_setting_long_form(
 
     result = _get_completions()
 
-    assert result == ["headless=true", "headless=false"]
+    assert result == ["headless="]
 
 
 def test_get_completions_setting_value_phase_zsh(
