@@ -345,14 +345,6 @@ def _find_instance_id_by_name_tag(client: AwsVpsClient, name: str) -> str | None
     return None
 
 
-@pytest.mark.skip(
-    reason="Resume-by-name needs a stopped host to be discoverable: a stopped EC2 instance has no "
-    "public IP and so drops out of AwsProvider discovery, making `mngr start <name>` unable to "
-    "resolve it. Pending the tag-based offline-discovery + agent-persistence work (spec Phase 4). "
-    "The stop/start mechanism itself (AwsVpsClient.stop_instance/start_instance, AwsProvider "
-    "stop_host/start_host) is covered by unit tests; this end-to-end test is kept as the target "
-    "behavior and will be un-skipped once stopped hosts resolve by name."
-)
 @pytest.mark.rsync
 def test_provider_stop_host_stops_ec2_instance_and_start_resumes(
     aws_test_settings_dir: Path,

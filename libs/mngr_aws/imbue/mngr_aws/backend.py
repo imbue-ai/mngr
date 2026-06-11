@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -13,6 +14,7 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -21,10 +23,18 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
@@ -48,6 +58,16 @@ from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
+
+# Per-agent metadata is persisted as one EC2 tag per agent, keyed
+# ``mngr-agent-<agent_id>``, so a *stopped* instance (no public IP, SSH
+# unreachable) still surfaces its agents in discovery and resolves by name.
+# The value is a compact JSON record kept under EC2's 256-char tag-value limit.
+AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
+_MAX_TAG_VALUE_LEN: Final[int] = 256
+# The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
+# recover the host name when reconstructing a stopped host from tags.
+_HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 
 
 def _resolve_session_and_ami_or_empty(
@@ -339,7 +359,7 @@ class AwsProvider(VpsDockerProvider):
         filters out terminated instances, so a destroyed host returns ``None``.
         """
         wanted_tag = f"mngr-host-id={host_id}"
-        for instance in self._fetch_provider_instances():
+        for instance in self._list_instances_cached():
             if wanted_tag in instance.get("tags", ()):
                 return instance
         return None
@@ -391,6 +411,189 @@ class AwsProvider(VpsDockerProvider):
                 port=self.config.container_ssh_port,
                 public_key=record.container_ssh_host_public_key,
             )
+
+    # =========================================================================
+    # Offline metadata via EC2 tags (so STOPPED hosts list + resolve by name)
+    # =========================================================================
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        """Mirror an agent's record into an EC2 tag so it survives an instance stop.
+
+        A stopped instance's volume (where agent records normally live) is
+        unreadable, so without this a paused host would list with no agents and
+        ``mngr start <agent>`` could not resolve. Stores a compact record (id,
+        name, type) under ``mngr-agent-<agent_id>``; called on agent create and
+        on every ``data.json`` update, so it is an idempotent upsert.
+        """
+        value = self._compact_agent_tag_value(agent_data)
+        if value is None:
+            logger.warning("Cannot persist agent data without id+name for host {}", host_id)
+            return
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            logger.warning("No EC2 instance found for host {}; cannot persist agent tag", host_id)
+            return
+        agent_id = agent_data["id"]
+        self.aws_client.add_tags(VpsInstanceId(instance["id"]), {f"{AGENT_TAG_PREFIX}{agent_id}": value})
+
+    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
+        """Delete the ``mngr-agent-<agent_id>`` tag when an agent is destroyed."""
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return
+        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), [f"{AGENT_TAG_PREFIX}{agent_id}"])
+
+    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
+        """Return the per-agent records persisted in the instance's EC2 tags.
+
+        Works while the instance is stopped (tags are returned by
+        ``DescribeInstances`` regardless of state), which is the whole point.
+        """
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            return []
+        return self._persisted_agent_dicts_from_instance(instance)
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        """Add STOPPED instances (which the SSH-based base discovery misses) from tags.
+
+        The base discovery reaches hosts over SSH via their public IP, so a
+        stopped instance (no IP) is invisible. Here we reconstruct those hosts
+        and their agents from EC2 tags so they still appear in ``mngr list`` and
+        resolve for ``mngr start``.
+        """
+        result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
+        online_host_ids = {ref.host_id for ref in result}
+        for instance in self._list_instances_cached():
+            if instance.get("main_ip") or instance.get("state") != "stopped":
+                continue
+            host_ref = self._discovered_host_from_tags(instance)
+            if host_ref is None or host_ref.host_id in online_host_ids:
+                continue
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_data in self._persisted_agent_dicts_from_instance(instance):
+                ref = validate_and_create_discovered_agent(agent_data, host_ref.host_id, self.name)
+                if ref is not None:
+                    agent_refs.append(ref)
+            result[host_ref] = agent_refs
+        return result
+
+    def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
+        """Return [] for a stopped host instead of raising.
+
+        ``OfflineHost.get_state`` calls ``get_snapshots`` (-> ``list_snapshots``)
+        while deriving state. The base reads the snapshot list from the on-volume
+        host record, which is unreadable while the instance is stopped, so it
+        raises ``HostNotFoundError``. AWS has no EBS-snapshot lifecycle and a
+        stopped host's docker-commit snapshots (if any) live on that unreadable
+        volume, so a stopped host simply has no visible snapshots.
+        """
+        try:
+            return super().list_snapshots(host)
+        except HostNotFoundError:
+            return []
+
+    def to_offline_host(self, host_id: HostId) -> OfflineHost:
+        """Return an offline host, reconstructing a STOPPED instance's record from tags.
+
+        Falls back to the base (SSH/volume-backed) path first; if that can't find
+        the host (because it is stopped and unreachable), rebuild a minimal
+        ``CertifiedHostData`` from EC2 tags so the offline host is still usable.
+        """
+        try:
+            return super().to_offline_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                raise
+            return self._offline_host_from_tags(host_id, instance)
+
+    def _compact_agent_tag_value(self, agent_data: Mapping[str, object]) -> str | None:
+        """Build a compact JSON tag value (id/name[/type]) kept under the 256-char tag limit.
+
+        Returns ``None`` when the required ``id``/``name`` are missing. Drops the
+        optional ``type`` if including it would exceed the limit, so the
+        required-minimum (id + name, enough to resolve by name) always fits.
+        """
+        agent_id = agent_data.get("id")
+        agent_name = agent_data.get("name")
+        if agent_id is None or agent_name is None:
+            return None
+        minimal: dict[str, object] = {"id": agent_id, "name": agent_name}
+        full = dict(minimal)
+        agent_type = agent_data.get("type")
+        if agent_type is not None:
+            full["type"] = agent_type
+        value = json.dumps(full, separators=(",", ":"))
+        if len(value) > _MAX_TAG_VALUE_LEN:
+            value = json.dumps(minimal, separators=(",", ":"))
+        return value
+
+    def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
+        """Parse the ``mngr-agent-*`` tags off a normalized instance dict into agent records."""
+        agents: list[dict] = []
+        for kv in instance.get("tags", ()):
+            key, sep, value = kv.partition("=")
+            if not sep or not key.startswith(AGENT_TAG_PREFIX):
+                continue
+            try:
+                agents.append(json.loads(value))
+            except json.JSONDecodeError:
+                logger.warning("Skipping unparseable persisted-agent tag {!r}", key)
+        return agents
+
+    def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
+        """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
+        tags: dict[str, str] = {}
+        for kv in instance.get("tags", ()):
+            key, sep, value = kv.partition("=")
+            if sep:
+                tags[key] = value
+        return tags
+
+    def _host_name_from_tags(self, tags: Mapping[str, str]) -> HostName:
+        """Recover the host name from the ``Name=mngr-<host_name>`` tag (fallback: host_id)."""
+        name_tag = tags.get("Name", "")
+        if name_tag.startswith(_HOST_NAME_TAG_PREFIX):
+            return HostName(name_tag[len(_HOST_NAME_TAG_PREFIX) :])
+        if name_tag:
+            return HostName(name_tag)
+        return HostName(tags.get("mngr-host-id", "unknown"))
+
+    def _discovered_host_from_tags(self, instance: Mapping[str, Any]) -> DiscoveredHost | None:
+        """Build a STOPPED-state DiscoveredHost from an instance's tags, or None if not a mngr host."""
+        tags = self._tag_dict_from_normalized(instance)
+        host_id_str = tags.get("mngr-host-id")
+        if host_id_str is None:
+            return None
+        return DiscoveredHost(
+            host_id=HostId(host_id_str),
+            host_name=self._host_name_from_tags(tags),
+            provider_name=self.name,
+            host_state=HostState.STOPPED,
+        )
+
+    def _offline_host_from_tags(self, host_id: HostId, instance: Mapping[str, Any]) -> OfflineHost:
+        """Reconstruct a minimal offline host (STOPPED) for a stopped instance from its tags."""
+        tags = self._tag_dict_from_normalized(instance)
+        created_at_raw = tags.get("mngr-created-at")
+        now = datetime.now(timezone.utc)
+        try:
+            created_at = datetime.fromisoformat(created_at_raw) if created_at_raw else now
+        except ValueError:
+            created_at = now
+        certified = CertifiedHostData(
+            host_id=str(host_id),
+            host_name=str(self._host_name_from_tags(tags)),
+            created_at=created_at,
+            updated_at=now,
+            stop_reason=HostState.STOPPED.value,
+        )
+        return self._create_offline_host(VpsDockerHostRecord(certified_host_data=certified))
 
 
 class AwsProviderBackend(ProviderBackendInterface):

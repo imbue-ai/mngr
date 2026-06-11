@@ -134,6 +134,7 @@ For `mngr create --provider aws` (per-host path):
 ```
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
 ec2:StopInstances, ec2:StartInstances,
+ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
@@ -152,7 +153,7 @@ For `mngr aws cleanup` (teardown; in addition to the per-host path's `DescribeIn
 ec2:DeleteSecurityGroup
 ```
 
-Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separate `CreateTags` call. EBS volumes are tagged the same way (no extra permission needed). `mngr stop --stop-host` stops the EC2 **instance** itself (`ec2:StopInstances`) after stopping the inner container, so a paused agent costs only EBS storage; `mngr start` resumes it (`ec2:StartInstances`), preserving the root EBS volume and all on-disk state. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. After launch, `ec2:CreateTags`/`ec2:DeleteTags` are used to mirror per-agent metadata onto the instance (tags keyed `mngr-agent-<id>`) so a stopped host still lists its agents and resolves by name (see the offline-discovery note below). `mngr stop --stop-host` stops the EC2 **instance** itself (`ec2:StopInstances`) after stopping the inner container, so a paused agent costs only EBS storage; `mngr start` resumes it (`ec2:StartInstances`), preserving the root EBS volume and all on-disk state. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 
@@ -162,6 +163,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance (e.g. via `auto_shutdown_minutes`) is garbage-collected automatically. This is independent of `mngr stop --stop-host`, which uses the `StopInstances` API (not an OS halt) and so leaves the instance recoverable.
 - **Stop/resume** (`mngr stop --stop-host` / `mngr start`): the provider overrides `stop_host`/`start_host` to stop and start the EC2 instance via the API, preserving the root EBS volume across the stop. A stopped instance loses its public IPv4, so `start_host` reads the fresh IP, rewrites `vps_ip` in the host record, and re-points known_hosts before restarting the container. For a stable address across stops, see the Elastic IP item under "Future improvements".
+- **Offline discovery of stopped hosts**: a stopped instance has no public IP, so it falls out of the SSH-based discovery the base provider uses. To keep paused hosts visible in `mngr list` and resolvable for `mngr start`, agent records are mirrored into EC2 tags (`mngr-agent-<id>`, written via `persist_agent_data`) and `AwsProvider` reconstructs stopped hosts + their agents from tags in `discover_hosts_and_agents` / `to_offline_host`. Per-agent tags are capped by EC2's 50-tag / 256-char limits, so this comfortably covers few-agent hosts; an S3-backed store for many-agent hosts is a possible future addition.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.

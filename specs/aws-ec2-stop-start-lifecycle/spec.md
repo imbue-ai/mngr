@@ -1,11 +1,14 @@
 # AWS EC2 stop/start lifecycle (idle-pause + resume)
 
-Status: **Phase 1 implemented; Phases 2-5 pending.** Captures the design agreed while planning how
-to give AWS agents a Modal-like "idle-paused but resumable" lifecycle. Branch: `mngr/aws-stop`.
-Phase 1 (native EC2 stop/start via `AwsVpsClient.stop_instance`/`start_instance` + the
-`AwsProvider.stop_host`/`start_host` overrides, with the `mngr stop --stop-host` path) is landed
-and covered by unit tests plus a release test; the self-stopping idle watcher, GC changes, and
-EC2-tag offline listing remain.
+Status: **Phases 1 and 4 implemented; Phases 2, 3, 5 pending.** Captures the design agreed while
+planning how to give AWS agents a Modal-like "idle-paused but resumable" lifecycle. Branch:
+`mngr/aws-stop`. Landed: native EC2 stop/start (`AwsVpsClient.stop_instance`/`start_instance` + the
+`AwsProvider.stop_host`/`start_host` overrides, `mngr stop --stop-host`), and EC2-tag offline
+discovery so a stopped host still lists its agents and resolves by name (Phase 4 — required for
+Phase 1 to be usable). Covered by unit tests plus a `mngr stop --stop-host` -> `start` release
+test. Pending: the self-stopping idle watcher + IAM (Phase 2), the GC stop-instead-of-destroy +
+age-gated terminate (Phase 3), and an S3-backed agent store for many-agent hosts (Phase 5 / Phase-4
+follow-up).
 
 ## Goal
 
