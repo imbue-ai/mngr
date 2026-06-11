@@ -47,9 +47,10 @@ def _build_operator_client(
     effective_sg = AutoCreateSecurityGroup(name=sg_name) if sg_name else AutoCreateSecurityGroup()
     effective_vpc_id = vpc_id if vpc_id is not None else base.vpc_id
     session = base.get_session()
-    # ``ami_id`` is unused by ensure_security_group, but the AwsVpsClient
-    # constructor requires it; a placeholder is fine because the prepare
-    # path never calls create_instance.
+    # ``ami_id`` is unused by the SG-management methods (ensure / delete) and
+    # by ``list_mngr_managed_instances``, but the AwsVpsClient constructor
+    # requires it; a placeholder is fine because no operator path
+    # (``prepare`` / ``cleanup``) calls ``create_instance``.
     return AwsVpsClient(
         session=session,
         region=effective_region,
