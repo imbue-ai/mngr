@@ -71,7 +71,7 @@ def test_clone_build_context_drops_worktree_admin_from_primary_checkout(
 ) -> None:
     """A primary checkout with linked worktrees clones to a self-contained .git.
 
-    Regression test for the AWS dogfood template: when ``mngr create`` is run
+    Regression test for the AWS create-template: when ``mngr create`` is run
     from a primary checkout that has per-branch linked worktrees, the raw
     ``.git/worktrees/`` admin would otherwise be baked into the image. There it
     marks the operator's other branches as checked out, which makes the
