@@ -91,7 +91,7 @@ Common-transcript mapping (mirrors the old JSONL converter's source/type mapping
 |---|---|---|
 | `USER_INPUT` (14) | `user_message` | `user_input.query` or `user_input.user_response` |
 | `PLANNER_RESPONSE` (15) | `assistant_message` | `planner_response.response` (+ `thinking`, `tool_calls`) |
-| `CODE_ACTION` (5) | `tool_result` | `code_action.action_result` |
+| `CODE_ACTION` (5) | `tool_result` | none decoded yet (the converter emits the paired `tool_result` with empty output; agy records command output in step types the decoder does not map, and file-edit CODE_ACTION steps do not occur in practice -- a follow-up if needed) |
 | `CONVERSATION_HISTORY` (98) | dropped | -- |
 
 ## Decoding a conversation (`decode_agy_conversation_db.py`, in the appendix)
