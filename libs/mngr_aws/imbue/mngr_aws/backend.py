@@ -686,9 +686,10 @@ class AwsProvider(VpsDockerProvider):
 
         A stopped instance's volume (where agent records normally live) is
         unreadable, so without this a paused host would list with no agents and
-        ``mngr start <agent>`` could not resolve. Stores a compact record (id,
-        name, type) under ``mngr-agent-<agent_id>``; called on agent create and
-        on every ``data.json`` update, so it is an idempotent upsert.
+        ``mngr start <agent>`` could not resolve. Stores a compact record
+        (id, name, type, and labels when they fit the tag limit) under
+        ``mngr-agent-<agent_id>``; called on agent create and on every
+        ``data.json`` update, so it is an idempotent upsert.
         """
         value = self._compact_agent_tag_value(agent_data)
         if value is None:
