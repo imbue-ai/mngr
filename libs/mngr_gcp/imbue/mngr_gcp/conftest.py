@@ -86,7 +86,11 @@ _TEST_LEAK_TTL: Final[timedelta] = timedelta(minutes=GCP_TEST_INSTANCE_AUTO_SHUT
 def _force_delete_instances(instances_client: Any, project: str, zone: str, instance_names: list[str]) -> None:
     for instance_name in instance_names:
         try:
-            instances_client.delete(project=project, zone=zone, instance=instance_name)
+            # GCE delete() returns an async operation; await it (like production
+            # destroy_instance) so a server-side failure is caught here rather
+            # than silently dropped after a fire-and-forget call.
+            operation = instances_client.delete(project=project, zone=zone, instance=instance_name)
+            operation.result()
         except google_api_exceptions.GoogleAPICallError as e:
             logger.warning("Failed to delete leaked GCE instance {}: {}", instance_name, e)
 
