@@ -409,10 +409,10 @@ def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_temp_files(tmp_p
     assert all(w.mode == "0600" for w in written)
     assert all(w.path.startswith("/root/.latchkey/") for w in written)
     # The password file's content is the literal secret; it is never written to
-    # a command (see the start-script test above).
-    password_files = [w for w in written if "gateway_listen_password" in w.path]
+    # a command (see the start-script test above). The temp files have random,
+    # non-descriptive names, so identify it by content rather than filename.
+    password_files = [w for w in written if w.content == b"shared-password"]
     assert len(password_files) == 1
-    assert password_files[0].content == b"shared-password"
     # The script reads back exactly the paths that were written.
     command = _gateway_script(outer)
     for w in written:
@@ -431,9 +431,10 @@ def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
     _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
-    key_files = [w for w in _stub(outer).written if "gateway_encryption_key" in w.path]
+    # The temp files have random, non-descriptive names, so identify the
+    # encryption-key file by content rather than filename.
+    key_files = [w for w in _stub(outer).written if w.content == b"my-test-key-abc123"]
     assert len(key_files) == 1
-    assert key_files[0].content == b"my-test-key-abc123"
     # The key never appears in any recorded command string.
     assert all("my-test-key-abc123" not in r.command for r in _stub(outer).recorded)
 
@@ -549,9 +550,9 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "-R 127.0.0.1:" in commands
     # The gateway listen password is passed via a temp file, never a command.
     assert "shared-password" not in commands
-    password_files = [w for w in _stub(outer).written if "gateway_listen_password" in w.path]
+    # Temp files have random names; identify the password file by content.
+    password_files = [w for w in _stub(outer).written if w.content == b"shared-password"]
     assert len(password_files) == 1
-    assert password_files[0].content == b"shared-password"
 
 
 def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path) -> None:

@@ -94,15 +94,6 @@ _REMOTE_GATEWAY_PID_FILENAME: Final[str] = "gateway.pid"
 _REMOTE_TUNNEL_LOG_FILENAME: Final[str] = "tunnel.log"
 _REMOTE_TUNNEL_PID_FILENAME: Final[str] = "tunnel.pid"
 
-# Basenames for the short-lived 0600 files the encryption key and the gateway
-# listen password are written to (under the remote ``$HOME/.latchkey``
-# directory) just before the gateway starts. The gateway start script reads
-# them into its environment and deletes them immediately, so neither secret is
-# ever interpolated into a command string (and thus never reaches a process
-# listing or a log) nor left to linger on the VPS disk.
-_GATEWAY_KEY_TMP_BASENAME: Final[str] = "gateway_encryption_key"
-_GATEWAY_PASSWORD_TMP_BASENAME: Final[str] = "gateway_listen_password"
-
 # Filename of the ad-hoc private key generated on the VPS for the
 # outer-host -> container SSH used by the reverse tunnel. Lives under the
 # remote ``$HOME/.latchkey`` directory; the matching ``.pub`` sits beside it.
@@ -486,11 +477,14 @@ def _ensure_latchkey_gateway_running(
     except LatchkeyEncryptionKeyPermissionError as e:
         raise RemoteGatewayError(str(e)) from e
     remote_dir = _resolve_remote_latchkey_directory(host)
-    # A random token per launch avoids collisions between concurrent provisions
-    # and keeps the temp filenames unpredictable.
-    token = secrets.token_hex(16)
-    key_file_path = remote_dir / f"{_GATEWAY_KEY_TMP_BASENAME}.{token}.tmp"
-    password_file_path = remote_dir / f"{_GATEWAY_PASSWORD_TMP_BASENAME}.{token}.tmp"
+    # Random, non-descriptive basenames per launch: they avoid collisions
+    # between concurrent provisions, keep the names unpredictable, and -- unlike
+    # descriptive names -- do not advertise which secret each file holds to
+    # anyone who can merely list the directory. The start script is handed the
+    # exact paths, so the names need not be meaningful; the files are 0600, read
+    # into the gateway's environment, and deleted immediately.
+    key_file_path = remote_dir / f"{secrets.token_hex(16)}.tmp"
+    password_file_path = remote_dir / f"{secrets.token_hex(16)}.tmp"
     host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)
     host.write_file(password_file_path, gateway_password.encode("utf-8"), mode=_REMOTE_FILE_MODE)
     script = _build_gateway_start_script(OUTER_PORT, key_file_path, password_file_path)
