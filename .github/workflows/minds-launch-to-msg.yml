@@ -415,6 +415,16 @@ jobs:
       launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
       w1_create:       ${{ steps.timings.outputs.w1_create }}
       w2_create:       ${{ steps.timings.outputs.w2_create }}
+      # FCT SHA re-resolved right before the e2e launches the .app
+      # (see the existing `fct_sha` step in this job's steps list).
+      # check_should_run's `fct_sha` was resolved at workflow-start
+      # time -- which can drift if FCT main moves during the build's
+      # 20-25 min run. This output reflects the SHA that the .app's
+      # `git clone` is about to use (assuming MINDS_WORKSPACE_BRANCH
+      # is set to a moving ref like `main`). update_marker keys the
+      # marker on this value; notify_slack reports it. Both are then
+      # truthful about what was actually tested.
+      tested_fct_sha:  ${{ steps.fct_sha.outputs.sha }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
@@ -1009,13 +1019,17 @@ jobs:
     steps:
       - name: write marker file
         env:
-          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          # Prefer the SHA the e2e actually exercised (re-resolved at e2e
+          # start time, output by launch_to_msg) over the one
+          # check_should_run computed at workflow-start time. They match
+          # in steady state but can drift when FCT main moves during the
+          # 20-25 min ToDesktop build, in which case the e2e's clone uses
+          # the newer SHA while check_should_run's value is stale.
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
         run: |
           set -euo pipefail
           {
-            echo "pair_key: $PAIR_KEY"
             echo "mngr: $MNGR_SHA"
             echo "fct:  $FCT_SHA"
             echo "saved_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1025,14 +1039,17 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
       - name: emit summary
+        env:
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
         run: |
           {
             echo "## Marker updated"
-            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}\`"
-            echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
-            echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${MNGR_SHA}-fct-${FCT_SHA}\`"
+            echo "- mngr: \`${MNGR_SHA}\`"
+            echo "- FCT:  \`${FCT_SHA}\`"
             echo ""
             echo "**To inspect the latest green pair manually:**"
             echo ""
@@ -1061,7 +1078,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          # Prefer launch_to_msg's re-resolved FCT SHA (truthful to what
+          # was tested) over check_should_run's start-time value when
+          # available. Skip path / failed-before-e2e leaves the start-time
+          # value, which is the right fallback in those cases.
+          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
           BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
           MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
