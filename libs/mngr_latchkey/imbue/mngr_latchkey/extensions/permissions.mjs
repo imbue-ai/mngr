@@ -13,25 +13,18 @@
  *       Return the full permissions.json that the gateway applied to
  *       the caller for this request (from the extension context's
  *       ``permissionsConfigPath``). Takes no query parameters.
- *   GET    /permissions/available
- *       Return the full permission catalog as a JSON object keyed by
- *       raw service name. Each value is an array of scope entries (a
- *       single service may expose more than one Detent scope). Each
- *       entry has four fields: ``scope`` (the Detent scope schema name
- *       as a string), ``display_name`` (a human-readable label),
+ *   GET    /permissions/available/<service_name>
+ *       Return the permission catalog entries for ``<service_name>``
+ *       (e.g. ``slack``, ``google-gmail``) as an array. Each entry has
+ *       four fields: ``scope`` (the Detent scope schema name as a
+ *       string), ``display_name`` (a human-readable label),
  *       ``description`` (the scope's plain-English summary, from
  *       Detent's ``$comment``), and ``permissions`` (an array of
  *       ``{name, description}`` objects -- the Detent permission-schema
  *       name plus its own plain-English summary -- that may be granted
- *       under the scope).
- *   GET    /permissions/available/<service_name>
- *       Return the permission catalog entries for ``<service_name>``
- *       (e.g. ``slack``, ``google-gmail``) as an array, using the same
- *       value shape as the collection endpoint (including the scope and
- *       per-permission ``description`` fields). Returns 404 when the
- *       service is unknown. Both endpoints are backed by the
- *       ``services.json`` file that ships alongside this extension,
- *       which is keyed by raw service name.
+ *       under the scope). Returns 404 when the service is unknown.
+ *       Backed by the ``services.json`` file that ships alongside this
+ *       extension, which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -74,7 +67,6 @@ import { fileURLToPath } from 'node:url';
 
 const COLLECTION_PATH = '/permissions';
 const SELF_PATH = '/permissions/self';
-const AVAILABLE_COLLECTION_PATH = '/permissions/available';
 const AVAILABLE_ITEM_PATH_PREFIX = '/permissions/available/';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
@@ -340,13 +332,11 @@ function parseRoute(requestUrl) {
   if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
     return { kind: 'self' };
   }
-  // The collection check must run before the item-prefix check so a
-  // trailing-slash request to ``/permissions/available/`` is routed to
-  // the collection handler instead of being rejected as an empty
-  // service-name segment.
-  if (pathOnly === AVAILABLE_COLLECTION_PATH || pathOnly === `${AVAILABLE_COLLECTION_PATH}/`) {
-    return { kind: 'available-collection' };
-  }
+  // Only the per-service item endpoint (``/permissions/available/<service>``)
+  // is served; the bare collection (``/permissions/available[/]``) is
+  // deliberately unhandled (an empty or slash-containing remainder), so
+  // a request for the whole catalog falls through rather than enumerating
+  // every service.
   if (pathOnly.startsWith(AVAILABLE_ITEM_PATH_PREFIX)) {
     const remainder = pathOnly.slice(AVAILABLE_ITEM_PATH_PREFIX.length);
     if (remainder.length === 0 || remainder.includes('/')) {
@@ -511,10 +501,6 @@ function readAvailableServices() {
   return parsed;
 }
 
-function handleGetAvailableCollection(response) {
-  sendJson(response, 200, readAvailableServices());
-}
-
 function handleGetAvailableForService(response, rawServiceName) {
   if (
     typeof rawServiceName !== 'string' ||
@@ -601,10 +587,6 @@ export default async function permissionsExtension(request, response, context) {
     }
     if (route.kind === 'self' && method === 'GET') {
       handleGetSelf(response, context);
-      return true;
-    }
-    if (route.kind === 'available-collection' && method === 'GET') {
-      handleGetAvailableCollection(response);
       return true;
     }
     if (route.kind === 'available-item' && method === 'GET') {

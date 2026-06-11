@@ -39,6 +39,7 @@ from imbue.mngr_schedule.data_types import ModalScheduleCreationRecord
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import VerifyMode
 from imbue.mngr_schedule.errors import ScheduleDeployError
+from imbue.mngr_schedule.errors import UploadSpecError
 from imbue.mngr_schedule.git import ensure_current_branch_is_pushed
 from imbue.mngr_schedule.git import get_current_mngr_git_hash
 from imbue.mngr_schedule.git import resolve_git_ref
@@ -384,13 +385,13 @@ def parse_upload_spec(spec: str) -> tuple[Path, str]:
     Raises ValueError if the spec is malformed or the source does not exist.
     """
     if ":" not in spec:
-        raise ValueError(f"Upload spec must be in SOURCE:DEST format, got: {spec}")
+        raise UploadSpecError(f"Upload spec must be in SOURCE:DEST format, got: {spec}")
     source_str, dest = spec.split(":", 1)
     source_path = Path(source_str)
     if not source_path.exists():
-        raise ValueError(f"Upload source does not exist: {source_str}")
+        raise UploadSpecError(f"Upload source does not exist: {source_str}")
     if dest.startswith("/"):
-        raise ValueError(f"Upload destination must be relative or start with '~', got: {dest}")
+        raise UploadSpecError(f"Upload destination must be relative or start with '~', got: {dest}")
     return source_path, dest
 
 
