@@ -87,7 +87,7 @@ def azure_cli_group() -> None:
     "--subscription-id",
     "subscription_id",
     default=None,
-    help="Azure subscription ID. Defaults to the provider config / AZURE_SUBSCRIPTION_ID env var.",
+    help="Azure subscription ID. Defaults to the provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription.",
 )
 @click.option(
     "--region",
@@ -145,7 +145,7 @@ def prepare(
     "--subscription-id",
     "subscription_id",
     default=None,
-    help="Azure subscription ID. Defaults to the provider config / AZURE_SUBSCRIPTION_ID env var.",
+    help="Azure subscription ID. Defaults to the provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription.",
 )
 @click.option(
     "--region",

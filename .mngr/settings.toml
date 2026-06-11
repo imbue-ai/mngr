@@ -49,6 +49,14 @@ pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
+# `mngr create <name> -t azure` -> launch on Azure with a VM size that has
+# capacity in westus (B-series is currently NotAvailableForSubscription there).
+# The subscription auto-resolves from `az` (no config needed); switch the size
+# back to Standard_B2s once B-series frees up.
+[create_templates.azure]
+provider = "azure"
+build_arg = ["--azure-vm-size=Standard_D2s_v3"]
+
 [agent_types.coder]
 parent_type = "claude"
 cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "read INPUT; SID=$(echo \\"$INPUT\\" | jq -r \\".session_id // empty\\"); [ -n \\"$SID\\" ] && [ -n \\"${CLAUDE_ENV_FILE:-}\\" ] && echo \\"export MNGR_CLAUDE_SESSION_ID=$SID\\" >> \\"$CLAUDE_ENV_FILE\\" || true"}]}]}}'"""

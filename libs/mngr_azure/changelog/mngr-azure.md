@@ -2,7 +2,8 @@
 
 - New `azure` provider backend (`mngr_azure`) that runs agents in Docker containers on Azure Virtual Machines. A thin adapter over the shared `mngr_vps_docker` base, like `mngr_aws` / `mngr_gcp` / `mngr_vultr`.
 
-- Credentials are resolved exclusively via Azure's `DefaultAzureCredential` (an `az login` session, a service principal via `AZURE_*` env vars, or a managed identity) — `[providers.azure]` config has no credential fields, matching the Modal / AWS / GCP convention. Only `subscription_id` is required (a plain identifier; falls back to the `AZURE_SUBSCRIPTION_ID` env var).
+- Credentials are resolved exclusively via Azure's `DefaultAzureCredential` (an `az login` session, a service principal via `AZURE_*` env vars, or a managed identity) — `[providers.azure]` config has no credential fields, matching the Modal / AWS / GCP convention.
+- The subscription is resolved automatically (config `subscription_id` > `AZURE_SUBSCRIPTION_ID` env > the Azure CLI's active subscription, read from `azureProfile.json`), so `--provider azure` works with no config after `az login` — the same way the GCP provider uses the active gcloud project. A `[providers.azure]` block is optional.
 
 - New `mngr azure prepare` CLI command (registered via `register_cli_commands` hookimpl) does the one-time privileged setup: it registers the `Microsoft.Compute` / `Microsoft.Network` / `Microsoft.Storage` resource providers (new subscriptions start unregistered) and creates the mngr-owned resource group + vnet + subnet + NSG (the NSG is attached to the subnet, opening tcp/22 and the container SSH port to `allowed_ssh_cidrs`). Fail-closed: empty `allowed_ssh_cidrs` makes prepare refuse rather than create a wide-open NSG. The hot path in `AzureVpsClient.create_instance` is lookup-only (`resolve_subnet_id`), so `mngr create --provider azure` runs with a restricted role; a missing subnet points the user at `mngr azure prepare`.
 

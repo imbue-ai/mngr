@@ -1,7 +1,16 @@
+import json
+from pathlib import Path
+
 import pytest
 from azure.identity import DefaultAzureCredential
 
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.config import read_az_cli_default_subscription
+
+
+def _write_az_profile(config_dir: Path, subscriptions: list[dict[str, object]]) -> None:
+    # az writes azureProfile.json with a UTF-8 BOM, which read_az_cli_default_subscription decodes.
+    (config_dir / "azureProfile.json").write_text(json.dumps({"subscriptions": subscriptions}), encoding="utf-8-sig")
 
 
 def test_default_config_values() -> None:
@@ -35,16 +44,64 @@ def test_get_subscription_id_prefers_config() -> None:
     assert config.get_subscription_id() == "sub-from-config"
 
 
-def test_get_subscription_id_falls_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_subscription_id_falls_back_to_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AZURE_SUBSCRIPTION_ID", "sub-from-env")
+    # Point AZURE_CONFIG_DIR at an empty dir so the env var (not a real az profile) is what resolves.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
     config = AzureProviderConfig()
     assert config.get_subscription_id() == "sub-from-env"
 
 
-def test_get_subscription_id_raises_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_subscription_id_falls_back_to_az_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    _write_az_profile(
+        tmp_path,
+        [
+            {"id": "other-sub", "isDefault": False, "state": "Enabled"},
+            {"id": "active-sub", "isDefault": True, "state": "Enabled"},
+        ],
+    )
     config = AzureProviderConfig()
-    with pytest.raises(ValueError, match="No Azure subscription_id configured"):
+    assert config.get_subscription_id() == "active-sub"
+
+
+def test_config_subscription_id_beats_az_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    _write_az_profile(tmp_path, [{"id": "az-default", "isDefault": True, "state": "Enabled"}])
+    config = AzureProviderConfig(subscription_id="explicit")
+    assert config.get_subscription_id() == "explicit"
+
+
+def test_read_az_cli_default_subscription_ignores_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    _write_az_profile(tmp_path, [{"id": "disabled-default", "isDefault": True, "state": "Disabled"}])
+    assert read_az_cli_default_subscription() is None
+
+
+def test_read_az_cli_default_subscription_none_when_no_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    assert read_az_cli_default_subscription() is None
+
+
+def test_read_az_cli_default_subscription_none_on_undecodable_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A corrupt / non-UTF-8 azureProfile.json must resolve to None (the file is
+    # "unreadable") rather than raising UnicodeDecodeError on the mngr hot path.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "azureProfile.json").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    assert read_az_cli_default_subscription() is None
+
+
+def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    # Empty AZURE_CONFIG_DIR -> no az profile -> nothing resolves.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    config = AzureProviderConfig()
+    with pytest.raises(ValueError, match="No Azure subscription resolved"):
         config.get_subscription_id()
 
 

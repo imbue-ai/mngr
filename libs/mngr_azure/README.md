@@ -16,13 +16,20 @@ provider convention). Any of the following works:
 - Service principal env vars: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET` (CI)
 - A managed identity (when running on an Azure VM / Container App)
 
-Only the subscription id is required (a plain identifier, not a credential):
+The subscription is resolved automatically from your `az` login — after `az login`
+(and optionally `az account set --subscription <id>`), `--provider azure` works
+with **no config at all**, the same way the GCP provider uses your active gcloud
+project. Resolution order: `providers.azure.subscription_id` in config >
+`AZURE_SUBSCRIPTION_ID` env var > the Azure CLI's active subscription.
+
+So a `[providers.azure]` block is entirely optional. Configure one only to pin a
+non-default subscription or override defaults:
 
 ```toml
 [providers.azure]
 backend = "azure"
 
-subscription_id = "00000000-0000-0000-0000-000000000000"  # or set AZURE_SUBSCRIPTION_ID
+subscription_id = "00000000-0000-0000-0000-000000000000"  # optional; defaults to your `az` active subscription
 default_region = "westus"
 default_vm_size = "Standard_B2s"            # 2 vCPU / 4GB; B-series is quota-friendly on new subs
 
