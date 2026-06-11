@@ -1019,14 +1019,13 @@ jobs:
     steps:
       - name: write marker file
         env:
-          # Prefer the SHA the e2e actually exercised (re-resolved at e2e
-          # start time, output by launch_to_msg) over the one
-          # check_should_run computed at workflow-start time. They match
-          # in steady state but can drift when FCT main moves during the
-          # 20-25 min ToDesktop build, in which case the e2e's clone uses
-          # the newer SHA while check_should_run's value is stale.
+          # update_marker only runs when launch_to_msg succeeded (see this
+          # job's `if:`), so launch_to_msg's `fct_sha` step ran and
+          # tested_fct_sha is guaranteed populated -- the SHA we record
+          # here is the one the e2e actually exercised, not the start-
+          # time guess.
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
+          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha }}
         run: |
           set -euo pipefail
           {
@@ -1039,11 +1038,11 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.launch_to_msg.outputs.tested_fct_sha }}
       - name: emit summary
         env:
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
+          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha }}
         run: |
           {
             echo "## Marker updated"
