@@ -409,17 +409,16 @@ def _setting_key_candidates(key_prefix: str, cache: CompletionCacheData) -> list
     Dotted keys are collapsed to the next ``.`` segment (see ``_segment_keys``) so
     the user drills down one level at a time instead of seeing every descendant.
     Branch segments end in ``.`` (the shell suppresses the trailing space so the
-    next segment can be typed). Leaf keys with a constrained value set are
-    expanded to ``KEY=VALUE`` candidates so the shared ``KEY=`` prefix is inserted
-    with no trailing space (and a second TAB lists the values); free-form leaf
-    keys are emitted bare.
+    next segment can be typed). Leaf keys with a constrained value set are emitted
+    as ``KEY=`` (also a no-trailing-space boundary): the values are deferred to the
+    next TAB, mirroring the ``.`` drill-down rather than dumping every value as
+    soon as the key prefix matches. Free-form leaf keys are emitted bare.
     """
     branches, leaves = _segment_keys(cache.config_keys, key_prefix)
     candidates: list[str] = list(branches)
     for key in leaves:
-        values = cache.config_value_choices.get(key)
-        if values:
-            candidates.extend(f"{key}={value}" for value in values)
+        if cache.config_value_choices.get(key):
+            candidates.append(f"{key}=")
         else:
             candidates.append(key)
     return candidates
@@ -565,12 +564,12 @@ def generate_zsh_script() -> str:
     ``write_managed_completion_scripts``); the user's rc only holds the small shim
     from ``generate_zsh_shim`` that sources it.
 
-    Candidates ending in ``.`` are "branch" completions (a dotted config key
-    drilled one segment at a time); they are added with an empty suffix
-    (``-S ''``) so no trailing space is inserted and the next segment can be
-    typed immediately. All other candidates are added normally. The completer is
-    invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell an up-to-date
-    install from an out-of-date one.
+    Candidates ending in ``.`` or ``=`` are "branch" completions (a dotted config
+    key drilled one segment at a time, or a ``KEY=`` whose values come next); they
+    are added with an empty suffix (``-S ''``) so no trailing space is inserted and
+    the next segment/value can be typed immediately. All other candidates are added
+    normally. The completer is invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it
+    can tell an up-to-date install from an out-of-date one.
     """
     python_path = sys.executable
     return f"""_mngr_complete() {{
@@ -579,7 +578,7 @@ def generate_zsh_script() -> str:
     completions=(${{(@f)"$(COMP_WORDS="${{words[*]}}" COMP_CWORD=$((CURRENT-1)) {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete)"}})
     local c
     for c in $completions; do
-        if [[ $c == *. ]]; then branches+=$c; else leaves+=$c; fi
+        if [[ $c == *. || $c == *= ]]; then branches+=$c; else leaves+=$c; fi
     done
     compadd -U -S '' -V unsorted -a branches
     compadd -U -V unsorted -a leaves
@@ -594,17 +593,18 @@ def generate_bash_script() -> str:
     ``generate_bash_shim`` that sources it.
 
     When the sole completion is a "branch" (a dotted config key segment ending in
-    ``.``), suppress the trailing space so the next segment can be typed
-    immediately. With multiple matches bash already inserts only the common
-    prefix (no trailing space), so this is only needed for the unique-match case.
-    The completer is invoked with ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell
-    an up-to-date install from an out-of-date one.
+    ``.``, or a ``KEY=`` whose values come next), suppress the trailing space so the
+    next segment/value can be typed immediately. With multiple matches bash already
+    inserts only the common prefix (no trailing space), so this is only needed for
+    the unique-match case. The completer is invoked with
+    ``MNGR_COMPLETION_SHIM_VERSION`` so it can tell an up-to-date install from an
+    out-of-date one.
     """
     python_path = sys.executable
     return f"""_mngr_complete() {{
     local IFS=$'\\n'
     COMPREPLY=($(COMP_WORDS="${{COMP_WORDS[*]}}" COMP_CWORD="$COMP_CWORD" {_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION} {python_path} -m imbue.mngr.cli.complete))
-    if [[ ${{#COMPREPLY[@]}} -eq 1 && ${{COMPREPLY[0]}} == *. ]]; then
+    if [[ ${{#COMPREPLY[@]}} -eq 1 && ( ${{COMPREPLY[0]}} == *. || ${{COMPREPLY[0]}} == *= ) ]]; then
         compopt -o nospace
     fi
 }}
