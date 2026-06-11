@@ -8,7 +8,13 @@ test-results = "COPY"
 "CLAUDE.local.md" = "COPY"
 
 [pre_command_scripts]
-create = ["""bash -c './scripts/make_tar_of_repo.sh `cat .mngr/image_commit_hash` .mngr/dev/build'"""]
+create = [
+    """bash -c './scripts/make_tar_of_repo.sh `cat .mngr/image_commit_hash` .mngr/dev/build'""",
+    # Assemble a self-contained build context for the remote `azure` build (Dockerfile
+    # at the context root next to the keyframe tarball). No-op-ish for docker/modal
+    # creates, which use `.mngr/dev/build/` directly. See the script for why.
+    """bash -c './scripts/stage_azure_build_context.sh .mngr/dev/build/current.tar.gz .mngr/dev/azure-build libs/mngr/imbue/mngr/resources/Dockerfile'""",
+]
 
 [create_templates.docker]
 provider = "docker"
@@ -35,9 +41,24 @@ target_path = "/code/mngr"
 # capacity in westus (B-series is currently NotAvailableForSubscription there).
 # The subscription auto-resolves from `az` (no config needed); switch the size
 # back to Standard_B2s once B-series frees up.
+#
+# Builds the project Dockerfile on the VM (so the agent gets gh + the full mngr
+# toolchain, matching docker/modal) from the self-contained context staged by
+# pre_command_scripts above. target_path mirrors the Dockerfile's WORKDIR.
+# GH_TOKEN authenticates gh (the github_setup window runs `gh auth setup-git`);
+# DEPOT_TOKEN is forwarded for in-agent azure builds (the create-time build reads
+# it from the shell you run `mngr create` in -- see [providers.azure] builder).
 [create_templates.azure]
 provider = "azure"
-build_arg = ["--azure-vm-size=Standard_D2s_v3"]
+build_arg = [
+    "--azure-vm-size=Standard_D2s_v3",
+    "--file=Dockerfile",
+    ".mngr/dev/azure-build/",
+]
+target_path = "/code/mngr"
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+pass_env = ["GH_TOKEN", "DEPOT_TOKEN"]
+pass_host_env = ["EDITOR"]
 
 [agent_types.coder]
 parent_type = "claude"
@@ -52,6 +73,15 @@ default_cpu = 4
 default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
+
+# Build the agent image on the VM with depot's remote build cache, so creates
+# after the first reuse cached layers instead of building cold every time. The
+# create-time build reads DEPOT_TOKEN from the environment you run `mngr create`
+# in (NOT from pass_env), so export DEPOT_TOKEN (and DEPOT_PROJECT_ID if there's
+# no depot.json on the VM) before creating an azure agent. Drop this block to
+# fall back to a plain native `docker build`.
+[providers.azure]
+builder = "DEPOT"
 
 [plugins.forward]
 enabled = true
