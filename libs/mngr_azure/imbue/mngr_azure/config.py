@@ -51,6 +51,9 @@ def read_az_cli_default_subscription() -> str | None:
         raw = profile_path.read_text(encoding="utf-8-sig")
     except OSError:
         return None
+    except UnicodeDecodeError as e:
+        logger.debug("Could not decode az profile {} for default subscription: {}", profile_path, e)
+        return None
     try:
         subscriptions = json.loads(raw).get("subscriptions", [])
     except (ValueError, AttributeError) as e:

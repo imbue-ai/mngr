@@ -86,6 +86,16 @@ def test_read_az_cli_default_subscription_none_when_no_profile(
     assert read_az_cli_default_subscription() is None
 
 
+def test_read_az_cli_default_subscription_none_on_undecodable_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A corrupt / non-UTF-8 azureProfile.json must resolve to None (the file is
+    # "unreadable") rather than raising UnicodeDecodeError on the mngr hot path.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "azureProfile.json").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    assert read_az_cli_default_subscription() is None
+
+
 def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     # Empty AZURE_CONFIG_DIR -> no az profile -> nothing resolves.
