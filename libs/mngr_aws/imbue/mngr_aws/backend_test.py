@@ -13,7 +13,7 @@ from imbue.mngr_aws.backend import AwsProviderBackend
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
-from imbue.mngr_aws.conftest import clear_aws_env
+from imbue.mngr_aws.testing import clear_aws_env
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
