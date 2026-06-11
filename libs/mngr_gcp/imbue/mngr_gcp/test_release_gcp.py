@@ -23,10 +23,19 @@ this package for the full picture):
    the VM self-deletes even if pytest itself is killed. The production
    GcpProvider refuses to create instances under pytest without this set.
 
-Run manually:
+Run manually (release tests do not run in CI):
 
-    MNGR_GCP_RELEASE_TESTS=1 \\
-        just test libs/mngr_gcp/imbue/mngr_gcp/test_release_gcp.py
+    MNGR_GCP_RELEASE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=1800 \\
+        uv run pytest --no-cov -n 0 -m release \\
+        libs/mngr_gcp/imbue/mngr_gcp/test_release_gcp.py
+
+The ``PYTEST_MAX_DURATION_SECONDS=1800`` is important: the two lifecycle tests
+each boot a real GCE VM serially (``-n 0``), which exceeds the default ~600s
+budget. That env var sets the pytest global-lock deadline -- once it passes, a
+concurrent pytest run reclaims (kills) this one -- so a too-low value SIGTERMs
+the suite mid-test and can leak a VM. Invoke ``uv run pytest`` directly (not
+``just test``, whose recipe hardcodes the 600s budget). Other long real-resource
+release tests follow the same convention (e.g. ``test_adopt_session`` at 1500).
 """
 
 import os
