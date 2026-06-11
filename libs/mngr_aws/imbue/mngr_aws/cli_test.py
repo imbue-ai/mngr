@@ -18,15 +18,24 @@ from datetime import timezone
 
 import boto3
 import click
+import pluggy
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 from click.testing import CliRunner
 
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.config import LocalProviderConfig
+from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.cli import _perform_cleanup
+from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 
 _ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
@@ -278,6 +287,7 @@ def test_cleanup_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["cleanup", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
 
@@ -290,18 +300,25 @@ def test_ami_command_is_future_stub() -> None:
     assert "not yet implemented" in result.output.lower()
 
 
-def test_prepare_command_fails_clearly_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_command_fails_clearly_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
     """When AWS creds aren't resolvable, the click command surfaces a clean error.
 
     This is the only test that goes through ``CliRunner`` against the real
     ``prepare`` callback, because the credential-missing path is the
     user-facing error message and worth exercising at the CLI boundary.
+    Passes ``obj=plugin_manager`` because ``prepare`` now runs through
+    ``setup_command_context`` (so it can read ``[providers.NAME]`` from the
+    user's settings.toml as defaults), and ``setup_command_context`` reads
+    the plugin manager off ``ctx.obj``.
     """
     for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    runner = CliRunner()
-    result = runner.invoke(aws_cli_group, ["prepare"])
+    result = cli_runner.invoke(aws_cli_group, ["prepare"], obj=plugin_manager)
     assert result.exit_code != 0
     assert "credentials not configured" in result.output.lower()
 
@@ -311,6 +328,81 @@ def test_prepare_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["prepare", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
     assert "--allowed-ssh-cidr" in result.output
+
+
+# =============================================================================
+# Provider-config resolution (the bug-fix surface for `mngr aws prepare`)
+# =============================================================================
+#
+# Earlier versions of ``_build_operator_client`` used ``AwsProviderConfig()``
+# class defaults unconditionally, so a user with a non-default ``default_region``
+# in ``[providers.aws]`` running ``mngr aws prepare`` without ``--region``
+# would land the SG in ``us-east-1`` while the runtime create path looked in
+# whatever region their settings.toml specified. ``_resolve_provider_config``
+# fixes this by reading the user's resolved provider config off the
+# ``MngrContext``; these tests pin that behavior.
+
+
+def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: ProviderInstanceConfig) -> MngrContext:
+    """Return ``temp_mngr_ctx`` with ``config`` registered under ``name`` in ``providers``."""
+    provider_name = ProviderInstanceName(name)
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: config})
+    )
+    return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+
+def test_resolve_provider_config_uses_user_provider_block(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    user_config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_region="us-west-2", vpc_id="vpc-user")
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws-prod", user_config)
+
+    resolved = _resolve_provider_config(ctx_with_provider, "aws-prod")
+
+    assert resolved.default_region == "us-west-2"
+    assert resolved.vpc_id == "vpc-user"
+
+
+def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """When the named provider block doesn't exist, class defaults are used silently.
+
+    Operator commands must work for first-run users who haven't yet pinned a
+    ``[providers.aws]`` block, so the fallback is a feature not a bug -- and
+    no warning is emitted because this is the expected shape (distinct from
+    the wrong-type case, which does warn).
+    """
+    resolved = _resolve_provider_config(temp_mngr_ctx, "aws-does-not-exist")
+
+    assert resolved == AwsProviderConfig()
+    assert log_warnings == [], f"missing-block fallback must be silent, got {log_warnings!r}"
+
+
+def test_resolve_provider_config_falls_back_when_named_block_is_non_aws(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back and warn.
+
+    The operator CLI still works against the class defaults plus whatever the
+    user passes on the command line; refusing here would block a legitimate
+    out-of-band run. But the user's ``--provider`` selection did not have the
+    intended effect, so a warning is emitted to make the silent-fallback
+    visible (distinct from the missing-block case, which is silent because it
+    is the expected first-run shape).
+    """
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws", LocalProviderConfig())
+
+    resolved = _resolve_provider_config(ctx_with_provider, "aws")
+
+    assert resolved == AwsProviderConfig()
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "'aws'" in log_warnings[0]
+    assert "LocalProviderConfig" in log_warnings[0]
