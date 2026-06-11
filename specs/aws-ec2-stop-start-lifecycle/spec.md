@@ -59,32 +59,34 @@ IMDS — no separate endpoint needed.
 5. **Offline metadata = EC2 tags only** (host-level) for now. Paused hosts list with correct
    name/state/idle info; their agents reappear only after resume. S3-backed full parity (agents
    listable while paused, like Modal) is noted as a possible follow-up, not built now.
-6. **Capability-gated base extension, not a wholesale override.** The generic stop/start-instance
-   mechanism lives in `VpsDockerProvider` behind a `supports_instance_stop` flag so Vultr/OVH/
-   imbue_cloud are unaffected (their clients don't implement it → today's behavior). AWS-specific
-   pieces (the EC2 API calls, the IAM watcher, the tag-based offline reads) live in `mngr_aws`.
+6. **All changes contained in `mngr_aws`; no base behavior change.** `AwsProvider` already holds
+   its own concretely-typed `aws_client: AwsVpsClient` (separate from the base's
+   `vps_client: VpsClientInterface`), so `stop_instance`/`start_instance` live entirely on
+   `AwsVpsClient` and are called from `AwsProvider` — `VpsClientInterface` and the base are
+   untouched. `AwsProvider` **overrides** `stop_host`/`start_host` and delegates the container
+   work to `super()`, so the base bodies are unchanged and Vultr/OVH/imbue_cloud behavior is
+   byte-for-byte identical. Only additive, no-op-by-default seams are added to the base if strictly
+   required (currently none anticipated).
 7. **IP handling = accept-and-update.** A stopped instance loses its public IP; on resume we read
    the new IP and update the host record + known_hosts. Elastic IP allocation is a fallback only
    if accept-and-update proves messy in practice.
 
 ## Architecture
 
-### Phase 1 — Instance stop/start (capability-gated base extension)
+### Phase 1 — Instance stop/start (contained in `mngr_aws`)
 
-- `VpsClientInterface` (`libs/mngr_vps_docker/imbue/mngr_vps_docker/vps_client.py`): add
-  `stop_instance(instance_id)` and `start_instance(instance_id) -> new_ip` with a default that
-  raises a "not supported" error, plus a `supports_instance_stop` capability (default False).
-  `ExternallyManagedVpsClient` keeps the unsupported default.
-- `AwsVpsClient` (`libs/mngr_aws/imbue/mngr_aws/client.py`): implement `stop_instance`
-  (`ec2 stop-instances`, wait for `stopped`) and `start_instance` (`ec2 start-instances`, wait
-  for `running`, return the new public IP). Set `supports_instance_stop = True`.
-- `VpsDockerProvider.stop_host` / `start_host`
-  (`libs/mngr_vps_docker/imbue/mngr_vps_docker/instance.py:1203` / `:1243`): when the client
-  supports instance stop, after stopping the container also `stop_instance`; on start,
-  `start_instance` first, refresh `vps_ip`/known_hosts in the record, then reconnect and start
-  the container. Skip the now-redundant docker-commit snapshot on this path (the whole filesystem
-  persists on the stopped volume). Set `stop_reason` (`PAUSED` vs `STOPPED`) on the record before
-  stopping. Other providers (flag False) keep the exact current container-only behavior.
+- `AwsVpsClient` (`libs/mngr_aws/imbue/mngr_aws/client.py`): add `stop_instance(instance_id)`
+  (`ec2 stop-instances`, wait for `stopped`) and `start_instance(instance_id) -> new_ip`
+  (`ec2 start-instances`, wait for `running`, return the new public IP). These are AWS-only
+  methods; `VpsClientInterface` is **not** modified (AwsProvider calls `self.aws_client.…`).
+- `AwsProvider.stop_host` (override): call `super().stop_host(host, create_snapshot=False)` to
+  stop the container and update the record (no docker-commit — the filesystem persists on the
+  stopped volume), set `stop_reason` (`PAUSED` vs `STOPPED`), then `self.aws_client.stop_instance(...)`.
+- `AwsProvider.start_host` (override): `self.aws_client.start_instance(...)` first (instance must
+  be running before we can SSH), persist the new `vps_ip` into the host record + refresh
+  known_hosts, then call `super().start_host(...)` to start the container against the refreshed IP.
+- The base `VpsDockerProvider.stop_host`/`start_host` bodies are unchanged; other providers are
+  unaffected.
 - New IAM permissions for the per-host path: `ec2:StopInstances`, `ec2:StartInstances`.
 
 ### Phase 2 — Self-stopping idle watcher + IAM (Modal analog)
@@ -106,13 +108,30 @@ IMDS — no separate endpoint needed.
 
 ### Phase 3 — Backstop = stop, never auto-terminate
 
-- Ensure GC/idle never terminates an AWS host. Concretely: the idle path stops (Phase 2) before
-  GC would act, and the AWS provider's GC-destroy decision is disabled (e.g.
-  `get_min_online_host_age_seconds` returns infinity / the provider opts out of GC-driven
-  destroy). Manual `mngr destroy` remains the only path that terminates the instance and deletes
-  the volume.
-- Keep the `auto_shutdown_minutes` + `InstanceInitiatedShutdownBehavior=terminate` mechanism
-  exactly as-is — it is independent of the API-driven stop and is the release-test leak backstop.
+Context: the **GC-driven destroy** (`libs/mngr/imbue/mngr/api/gc.py`, `_gc_single_host`) **is** the
+"destructive backstop" the user flagged. Today, when an AWS agent exits, the container stops but
+the EC2 instance stays online with no agents; after `get_min_online_host_age_seconds` of quiet, GC
+calls `destroy_host` → `terminate_instances` → the volume is deleted with no snapshot. Decision #4
+requires this to stop happening for AWS. Note GC is invocation-driven (`mngr gc`, post-destroy/
+cleanup) and skips any host it cannot reach (a stopped instance), so the only window where GC could
+terminate is between an agent exiting and the idle watcher stopping the instance.
+
+Two candidate mechanisms (decision pending):
+
+- **(i) AWS-local opt-out (zero core change).** `AwsProvider` overrides
+  `get_min_online_host_age_seconds` to effectively never let GC destroy a reachable AWS host.
+  Simplest and keeps all changes in `mngr_aws`. Tradeoff: GC also stops reaping genuinely-dead
+  AWS hosts (FAILED/CRASHED), which would then require manual `mngr destroy`.
+- **(ii) GC stops instead of destroys for stoppable providers (small gated core change).** At the
+  one `provider.destroy_host(host)` call site in `_gc_single_host`, if the provider opts in (a new
+  default-False `should_gc_stop_instead_of_destroy`), call `stop_host` instead. More robust (idle/
+  orphaned hosts get stopped — cost-safe and resumable — rather than terminated) but touches core
+  `mngr`. Other providers keep destroying.
+
+Manual `mngr destroy` remains the only path that terminates the instance and deletes the volume in
+either case. Keep the `auto_shutdown_minutes` + `InstanceInitiatedShutdownBehavior=terminate`
+mechanism exactly as-is — it is independent of the API-driven stop and is the release-test leak
+backstop.
 
 ### Phase 4 — Offline metadata via EC2 tags
 
