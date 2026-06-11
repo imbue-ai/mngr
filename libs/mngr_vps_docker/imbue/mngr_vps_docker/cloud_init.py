@@ -66,8 +66,9 @@ def generate_cloud_init_user_data(
         )
     root_key_block = ""
     if authorized_user_public_key is not None:
-        # Append directly to root's authorized_keys (created by the mkdir below),
-        # quoting the key so its embedded spaces/comment survive the shell.
+        # Append directly to root's authorized_keys (the /root/.ssh dir is made
+        # by the mkdir runcmd entry rendered just above this block), quoting the
+        # key so its embedded spaces/comment survive the shell.
         root_key_block = (
             f"  - printf '%s\\n' {shlex.quote(authorized_user_public_key)} >> /root/.ssh/authorized_keys\n"
         )
