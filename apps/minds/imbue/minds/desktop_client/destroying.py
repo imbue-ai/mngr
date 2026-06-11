@@ -223,6 +223,7 @@ def start_destroy(
     paths: WorkspacePaths,
     host_id: str | None,
     env: dict[str, str] | None = None,
+    mngr_binary: str = MNGR_BINARY,
 ) -> DestroyingRecord:
     """Spawn the detached destroy subprocess.
 
@@ -237,6 +238,11 @@ def start_destroy(
     Idempotent: if a destroy is already running for this agent
     (``pid`` exists and is alive), we return the existing record
     without spawning a second process.
+
+    ``mngr_binary`` defaults to the absolute path resolved at import time
+    (so the packaged app finds mngr in its venv even when Electron's PATH
+    doesn't include the venv bin dir). Tests override this with ``"mngr"``
+    so a PATH-prepended fake mngr binary can be picked up.
     """
     existing = read_destroying(agent_id, paths, agent_in_resolver=True)
     if existing is not None and existing.status == DestroyingStatus.RUNNING:
@@ -251,7 +257,7 @@ def start_destroy(
     # Truncate the log file so a Retry doesn't show the previous run's output.
     log_path.write_bytes(b"")
 
-    command = _build_destroy_command(agent_id, host_id)
+    command = _build_destroy_command(agent_id, host_id, mngr_binary=mngr_binary)
     log_handle = log_path.open("ab")
     try:
         process_env = dict(os.environ) if env is None else dict(env)

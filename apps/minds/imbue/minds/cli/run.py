@@ -53,6 +53,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
+from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
@@ -83,9 +84,15 @@ from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 # How long `minds run` waits for the spawned `mngr forward` plugin to report
 # its bound port via a `listening` envelope before treating startup as failed.
-# The plugin emits this from its FastAPI lifespan startup, so the wait only
-# needs to cover the subprocess's own interpreter start and imports.
-_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 5.0
+# The plugin emits this from its FastAPI lifespan startup, so on a warm
+# install the wait only needs to cover the subprocess's own interpreter
+# start and imports. On a cold install (vanilla Mac, no `~/.minds/.venv`),
+# uv has to download the python toolchain + install the venv + load
+# plugins first; that can take 30-60s on a fresh machine. A 5s budget was
+# tight enough to deterministically fail every first-time-user launch on
+# a clean Mac (proven via Tart VM). Give it 120s to comfortably cover
+# cold-install while still surfacing a real wedge before the user gives up.
+_MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
@@ -272,6 +279,13 @@ def run(
     # are needed here.
     mngr_host_dir_str = os.environ.get("MNGR_HOST_DIR")
     mngr_host_dir = Path(mngr_host_dir_str).expanduser() if mngr_host_dir_str else (Path.home() / ".mngr")
+    # `mngr forward` and every other laptop-side mngr invocation (including the
+    # bundled mngr CLI when run from a Terminal under this MNGR_HOST_DIR) starts
+    # with cwd=$HOME, so the FCT workspace's `[agent_types.main]` block in
+    # `/code/.mngr/settings.toml` inside the lima VM is invisible to them.
+    # Seed the mapping into user-scope settings.toml here so subsequent mngr
+    # subprocesses resolve `type=main` -> ClaudeAgent without depending on cwd.
+    seed_laptop_agent_types_for_minds(mngr_host_dir)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
     )

@@ -23,6 +23,7 @@ dependencies = [
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
+    "psycopg2-binary>=2.9",
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "tenacity",
