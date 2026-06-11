@@ -547,6 +547,15 @@ def get_managed_settings_path(agent_state_dir: Path) -> Path:
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
 SESSION_GUARD: Final[str] = '[ -z "$MAIN_CLAUDE_SESSION_ID" ] && exit 0; '
 
+# Shell snippet that marks the agent idle: removes the 'active' and
+# 'permissions_waiting' marker files (so get_lifecycle_state reports WAITING
+# rather than RUNNING) and emits an activity event so `mngr observe` promptly
+# re-fetches the agent's state. Shared by the Notification idle_prompt hook and
+# the SessionStart startup/resume hook so the two stay byte-identical.
+_CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT: Final[str] = (
+    """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl"""
+)
+
 
 @pure
 def build_readiness_hooks_config() -> dict[str, Any]:
@@ -563,6 +572,13 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       without this signal ``mngr message agent -m /clear`` would time out at
       ``enter_submission_timeout_seconds`` even though /clear actually executed.
       Filtering on source ensures normal startup/resume don't fire stale signals.
+      Finally, on ``startup``/``resume`` it clears the 'active' and
+      'permissions_waiting' markers (see below): a fresh Claude process is not
+      mid-turn, so any marker left over from a turn that was abandoned by an
+      abnormal exit (container restart, OOM, crash -- where the Stop hook never
+      ran) is stale and must be reset, otherwise the agent reports RUNNING
+      forever. ``compact`` is excluded because auto-compaction fires mid-turn
+      while Claude is genuinely active.
     - UserPromptSubmit: creates 'active' file, removes 'permissions_waiting', signals tmux wait-for
     - PermissionRequest: creates 'permissions_waiting' file (Claude is waiting for permission approval)
     - PostToolUse: removes 'permissions_waiting' file (tool completed, permission resolved)
@@ -582,6 +598,11 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       format: "session_id source" where source comes from the hook payload)
     - active: Claude is processing user input (RUNNING lifecycle state, WAITING otherwise)
     - permissions_waiting: Claude is blocked on a permission dialog (always WAITING when present)
+    - claude_process_started: touched on every startup/resume SessionStart (a
+      fresh, not-mid-turn Claude process). Its mtime is the restart boundary:
+      a transcript event older than it belongs to a turn the current process
+      did not run, so consumers can treat such a tail as idle rather than
+      "still working". Deliberately NOT touched on compact (mid-turn).
 
     The tmux wait-for signal on UserPromptSubmit allows instant detection of
     message submission without polling.
@@ -630,6 +651,32 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                                 ' case "$_MNGR_SOURCE" in clear|compact)'
                                 " tmux wait-for -S \"mngr-submit-$(tmux display-message -p '#S')\" 2>/dev/null || true ;;"
                                 " esac"
+                            ),
+                        },
+                        {
+                            # A fresh Claude process (startup/resume) is never
+                            # mid-turn, so record the process-start time and reset
+                            # the activity markers. This heals the case where a
+                            # turn was abandoned by an abnormal exit (container
+                            # restart, OOM, crash): the Stop hook never ran to
+                            # clear 'active', so without this the agent would
+                            # report RUNNING forever after restart. The
+                            # 'claude_process_started' marker's mtime gives
+                            # consumers (e.g. the system interface activity
+                            # indicator) a restart boundary to compare transcript
+                            # timestamps against -- any transcript event older
+                            # than it belongs to a turn this process did not run.
+                            # Gated to startup|resume; compact is excluded because
+                            # auto-compaction fires mid-turn while Claude is active
+                            # (so it must NOT move the process-start boundary).
+                            "type": "command",
+                            "command": (
+                                SESSION_GUARD + "_MNGR_HOOK_INPUT=$(cat);"
+                                ' _MNGR_SOURCE=$(echo "$_MNGR_HOOK_INPUT" | jq -r ".source // empty");'
+                                ' case "$_MNGR_SOURCE" in startup|resume)'
+                                ' touch "$MNGR_AGENT_STATE_DIR/claude_process_started" && '
+                                + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT
+                                + " ;; esac"
                             ),
                         },
                     ]
@@ -687,8 +734,7 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": SESSION_GUARD
-                            + """rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting" && mkdir -p $MNGR_HOST_DIR/events/mngr/activity && echo '{"source": "mngr/activity", "type": "activity", "event_id": "'"evt-$(head -c 16 /dev/urandom | xxd -p)"'", "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%S.000000000Z")"'"}' >> $MNGR_HOST_DIR/events/mngr/activity/events.jsonl""",
+                            "command": SESSION_GUARD + _CLEAR_ACTIVE_MARKERS_AND_EMIT_ACTIVITY_EVENT,
                         },
                     ],
                 }

@@ -9,6 +9,7 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
+@pytest.mark.timeout(300)
 def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     # Capture the initial plugin list so we can assert the roundtrip restores it
     list_before = e2e.run(
@@ -63,6 +64,7 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
+@pytest.mark.timeout(60)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     # Disable the claude plugin so its agent type should be unavailable
     expect(e2e.run("mngr plugin disable claude", comment="Disable claude plugin")).to_succeed()

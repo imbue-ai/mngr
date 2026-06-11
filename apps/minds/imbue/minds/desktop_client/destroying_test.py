@@ -100,7 +100,7 @@ def test_start_destroy_writes_pid_file_and_log(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="destroyed agent\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
 
     pid_file = tmp_path / "destroying" / str(agent_id) / "pid"
     log_file = tmp_path / "destroying" / str(agent_id) / "output.log"
@@ -117,7 +117,7 @@ def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
     sleeper.parent.mkdir(exist_ok=True)
     sleeper.write_text("#!/bin/bash\nsleep 2\n")
     sleeper.chmod(0o755)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
     try:
         seen = read_destroying(agent_id, paths, agent_in_resolver=True)
         assert seen is not None
@@ -136,7 +136,7 @@ def test_read_destroying_status_done_when_pid_dead_and_agent_gone(tmp_path: Path
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
     assert _wait_for_pid_exit(record.pid)
     seen = read_destroying(agent_id, paths, agent_in_resolver=False)
     assert seen is not None
@@ -148,7 +148,7 @@ def test_read_destroying_status_failed_when_pid_dead_but_agent_still_present(tmp
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=1, stderr="boom\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
     assert _wait_for_pid_exit(record.pid)
     seen = read_destroying(agent_id, paths, agent_in_resolver=True)
     assert seen is not None
@@ -167,9 +167,9 @@ def test_start_destroy_is_idempotent_while_running(tmp_path: Path) -> None:
     sleeper.parent.mkdir(exist_ok=True)
     sleeper.write_text("#!/bin/bash\nsleep 2\n")
     sleeper.chmod(0o755)
-    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
     try:
-        second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+        second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
         assert second.pid == first.pid
         assert second.status == DestroyingStatus.RUNNING
     finally:
@@ -185,8 +185,8 @@ def test_list_destroying_walks_dir_and_picks_up_each_agent(tmp_path: Path) -> No
     agent_a = AgentId.generate()
     agent_b = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record_a = start_destroy(agent_a, paths, host_id=None, env=_path_with_fake_mngr(fake))
-    record_b = start_destroy(agent_b, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record_a = start_destroy(agent_a, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
+    record_b = start_destroy(agent_b, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
     assert _wait_for_pid_exit(record_a.pid)
     assert _wait_for_pid_exit(record_b.pid)
     listing = list_destroying(paths, frozenset({agent_a}))
@@ -201,7 +201,7 @@ def test_delete_destroying_is_idempotent(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
     assert _wait_for_pid_exit(record.pid)
     assert delete_destroying(agent_id, paths) is True
     assert delete_destroying(agent_id, paths) is False
@@ -212,7 +212,7 @@ def test_read_log_chunk_returns_tail_from_offset(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="hello world\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
     assert _wait_for_pid_exit(record.pid)
     content, next_offset = read_log_chunk(agent_id, paths, offset=0)
     assert content == b"hello world\n"
@@ -234,13 +234,13 @@ def test_idempotent_after_failure_overwrites_log(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     failing = _make_fake_mngr(tmp_path, exit_code=1, stderr="first run boom\n")
-    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(failing))
+    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(failing), mngr_binary="mngr")
     assert _wait_for_pid_exit(first.pid)
     log_path = tmp_path / "destroying" / str(agent_id) / "output.log"
     assert b"first run boom" in log_path.read_bytes()
 
     succeeding = _make_fake_mngr(tmp_path, exit_code=0, stdout="second run ok\n")
-    second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(succeeding))
+    second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(succeeding), mngr_binary="mngr")
     assert _wait_for_pid_exit(second.pid)
     after = log_path.read_bytes()
     assert b"first run boom" not in after

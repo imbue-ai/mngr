@@ -6,8 +6,8 @@ from typing import TypeVar
 
 from pydantic import Field
 
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
-from imbue.mngr.interfaces.data_types import VolumeFileType
 from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.modal_proxy.data_types import FileEntry as ProxyFileEntry
@@ -40,13 +40,13 @@ def _translate_transient_proxy_errors(func: Callable[_P, _R]) -> Callable[_P, _R
     return wrapper
 
 
-def _proxy_file_entry_type_to_volume_file_type(proxy_type: ProxyFileEntryType) -> VolumeFileType:
-    """Convert a modal_proxy FileEntryType to our VolumeFileType."""
+def _proxy_file_entry_type_to_volume_file_type(proxy_type: ProxyFileEntryType) -> FileType:
+    """Convert a modal_proxy FileEntryType to our FileType."""
     match proxy_type:
         case ProxyFileEntryType.DIRECTORY:
-            return VolumeFileType.DIRECTORY
+            return FileType.DIRECTORY
         case _:
-            return VolumeFileType.FILE
+            return FileType.FILE
 
 
 def _proxy_file_entry_to_volume_file(entry: ProxyFileEntry) -> VolumeFile:
