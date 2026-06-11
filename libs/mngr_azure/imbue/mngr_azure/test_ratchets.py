@@ -30,10 +30,13 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # 1 production sleep (the bounded resource-provider-registration poll in
-    # client.py -- Azure's providers.register is async with no LRO poller, so it
-    # must be polled) + 2 post-destroy cleanup waits in test_release_azure.py.
-    rc.check_time_sleep(_DIR, snapshot(3))
+    # 2 production sleeps: the bounded resource-provider-registration poll in
+    # client.py (Azure's providers.register is async with no LRO poller, so it
+    # must be polled) + the bounded retry on a torn azureProfile.json read in
+    # config.py (the az CLI rewrites that file non-atomically; a short sleep lets
+    # the concurrent writer finish). Plus 2 post-destroy cleanup waits in
+    # test_release_azure.py.
+    rc.check_time_sleep(_DIR, snapshot(4))
 
 
 def test_prevent_global_keyword() -> None:
