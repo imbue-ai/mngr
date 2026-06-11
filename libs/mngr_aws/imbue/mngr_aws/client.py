@@ -1,5 +1,4 @@
 import os
-import time
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -18,6 +17,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
@@ -503,6 +503,17 @@ class AwsVpsClient(VpsClientInterface):
         logger.info("Starting EC2 instance {}", instance_id)
         return self.wait_for_instance_active(instance_id, timeout_seconds=timeout_seconds)
 
+    def _instance_state_name(self, instance_id: VpsInstanceId) -> str:
+        """Return the raw EC2 state name (e.g. ``running`` / ``stopped``), or ``''`` if gone.
+
+        Unlike ``get_instance_status``, this preserves the raw EC2 state name
+        rather than collapsing ``stopping`` / ``stopped`` into a single
+        ``HALTED`` status, so callers can distinguish "still stopping" from
+        "fully stopped".
+        """
+        instance = self._describe_instance(instance_id)
+        return instance.get("State", {}).get("Name", "") if instance is not None else ""
+
     def _wait_for_instance_state(
         self,
         instance_id: VpsInstanceId,
@@ -512,20 +523,21 @@ class AwsVpsClient(VpsClientInterface):
         """Poll ``describe_instances`` every 5s until the instance reaches ``target_state``.
 
         Used by ``stop_instance`` to wait for the terminal ``stopped`` state.
-        ``get_instance_status`` collapses ``stopping`` and ``stopped`` into one
-        ``HALTED`` status, so this checks the raw EC2 state name directly to
-        distinguish "still stopping" from "fully stopped".
+        Polls via the shared ``wait_for`` helper (not a raw ``time.sleep`` loop)
+        and re-raises its ``TimeoutError`` as ``VpsProvisioningError`` to match
+        the rest of this client's error contract.
         """
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            instance = self._describe_instance(instance_id)
-            state = instance.get("State", {}).get("Name", "") if instance is not None else ""
-            if state == target_state:
-                return
-            time.sleep(5.0)
-        raise VpsProvisioningError(
-            f"EC2 instance {instance_id} did not reach state {target_state!r} within {timeout_seconds}s"
-        )
+        try:
+            wait_for(
+                lambda: self._instance_state_name(instance_id) == target_state,
+                timeout=timeout_seconds,
+                poll_interval=5.0,
+                error_message=(
+                    f"EC2 instance {instance_id} did not reach state {target_state!r} within {timeout_seconds}s"
+                ),
+            )
+        except TimeoutError as e:
+            raise VpsProvisioningError(str(e)) from e
 
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():

@@ -328,11 +328,21 @@ def test_stop_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
 
 
 def test_stop_instance_times_out_if_not_stopped(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """A zero timeout means the wait loop never observes 'stopped' and raises."""
+    """A zero timeout means the wait never observes 'stopped' and raises.
+
+    ``wait_for`` makes one final condition check after the (already-expired)
+    timeout, so a single ``describe_instances`` (returning the still-stopping
+    state) is consumed before the VpsProvisioningError is raised.
+    """
     client, stubber = stubbed_client
     stubber.add_response(
         "stop_instances",
         {"StoppingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopping"}}]}]},
         expected_params={"InstanceIds": ["i-abc"]},
     )
     with pytest.raises(VpsProvisioningError, match="did not reach state 'stopped'"):
