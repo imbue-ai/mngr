@@ -91,6 +91,14 @@ class AwsVpsClient(VpsClientInterface):
     root_volume_size_gb: int = Field(default=30, description="Root EBS volume size in GB")
     root_volume_type: str = Field(default="gp3", description="Root EBS volume type")
     iam_instance_profile: str | None = Field(default=None, description="IAM instance profile name to attach")
+    attach_self_stop_role: bool = Field(
+        default=True,
+        description=(
+            "Attach the mngr-aws self-stop IAM instance profile (from `mngr aws prepare`) to "
+            "launched instances by default, degrading gracefully when iam:PassRole is missing. "
+            "Ignored when iam_instance_profile is set explicitly (that takes precedence)."
+        ),
+    )
     container_ssh_port: int = Field(
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
@@ -618,8 +626,20 @@ class AwsVpsClient(VpsClientInterface):
         }
         if ssh_key_ids:
             run_kwargs["KeyName"] = ssh_key_ids[0]
+        # Decide which IAM instance profile (if any) to attach, and whether it is
+        # the default mngr-aws self-stop profile (which degrades gracefully) or an
+        # explicit operator override (which must not be silently dropped on error).
         if self.iam_instance_profile is not None:
-            run_kwargs["IamInstanceProfile"] = {"Name": self.iam_instance_profile}
+            effective_instance_profile: str | None = self.iam_instance_profile
+            is_default_profile = False
+        elif self.attach_self_stop_role:
+            effective_instance_profile = MNGR_AWS_IAM_ROLE_NAME
+            is_default_profile = True
+        else:
+            effective_instance_profile = None
+            is_default_profile = False
+        if effective_instance_profile is not None:
+            run_kwargs["IamInstanceProfile"] = {"Name": effective_instance_profile}
         if spot:
             # Default spot config: AWS sets max price to the on-demand price
             # automatically; no need to specify SpotInstanceType or
@@ -631,8 +651,7 @@ class AwsVpsClient(VpsClientInterface):
             # safety net still fires the same way.
             run_kwargs["InstanceMarketOptions"] = {"MarketType": "spot"}
 
-        with self._translate_aws_errors():
-            result = self._ec2().run_instances(**run_kwargs)
+        result = self._run_instances_with_self_stop_fallback(run_kwargs, is_default_profile)
         instances = result.get("Instances", [])
         if not instances:
             raise VpsProvisioningError("RunInstances returned no instances")
@@ -646,6 +665,72 @@ class AwsVpsClient(VpsClientInterface):
             effective_ami_id,
         )
         return VpsInstanceId(instance_id)
+
+    def _run_instances(self, run_kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Call ``RunInstances`` with the assembled kwargs, raising the raw ``ClientError``.
+
+        A thin wrapper (a method, not a nested ``def``, so the no-nested-function
+        ratchet is satisfied) so the self-stop fallback in ``create_instance`` can
+        inspect a ``ClientError`` from the first attempt and retry without the IAM
+        instance profile. Deliberately does NOT translate the error -- the caller
+        decides whether to fall back (default self-stop profile) or surface it.
+        """
+        return self._ec2().run_instances(**run_kwargs)
+
+    def _run_instances_with_self_stop_fallback(
+        self, run_kwargs: dict[str, Any], is_default_profile: bool
+    ) -> dict[str, Any]:
+        """Run instances, retrying without the default self-stop profile on a PassRole-style denial.
+
+        When the IAM instance profile being attached is the default mngr-aws
+        self-stop profile (``is_default_profile``), a permission failure (typically
+        a missing ``iam:PassRole``, or ``mngr aws prepare`` never having been run)
+        must not block the create: we log a warning, drop ``IamInstanceProfile``,
+        and retry once. The retry is not itself wrapped in the fallback, so a
+        second failure surfaces. Any non-fallback error -- an explicit
+        operator-supplied profile failing, or an unrelated ``ClientError`` -- is
+        re-raised so ``_translate_aws_errors`` converts it to ``VpsApiError``.
+        """
+        with self._translate_aws_errors():
+            try:
+                return self._run_instances(run_kwargs)
+            except ClientError as e:
+                err = e.response.get("Error", {})
+                code = err.get("Code", "")
+                message = err.get("Message", "")
+                if not (is_default_profile and self._is_instance_profile_permission_error(code, message)):
+                    raise
+                logger.warning(
+                    "Could not attach the mngr-aws self-stop IAM instance profile to the new "
+                    "instance (AWS {}: {}). This usually means the launching credentials lack "
+                    "iam:PassRole for the mngr-aws role, or `mngr aws prepare` has not been run. "
+                    "Launching WITHOUT the profile, so the agent will not self-stop on idle "
+                    "(you can still `mngr stop --stop-host`). To enable self-stop, run "
+                    "`mngr aws prepare` and grant iam:PassRole, or set attach_self_stop_role = "
+                    "false to silence this warning.",
+                    code,
+                    message,
+                )
+                run_kwargs.pop("IamInstanceProfile", None)
+                return self._run_instances(run_kwargs)
+
+    @staticmethod
+    def _is_instance_profile_permission_error(code: str, message: str) -> bool:
+        """Return True for the AWS error shapes that mean "couldn't attach the IAM instance profile".
+
+        Covers the two ways RunInstances reports a PassRole / instance-profile
+        denial: a direct ``UnauthorizedOperation`` / ``AccessDenied`` (the IAM
+        policy simulator outcome for a missing ``iam:PassRole``), and the
+        ``InvalidParameterValue`` AWS returns when the instance profile cannot be
+        used (e.g. it does not exist because ``mngr aws prepare`` was never run) --
+        which is only treated as a profile error when its message mentions the
+        instance profile / IAM, so unrelated InvalidParameterValue errors still
+        surface.
+        """
+        if code in {"UnauthorizedOperation", "AccessDenied"}:
+            return True
+        lowered = message.lower()
+        return code == "InvalidParameterValue" and ("instance profile" in lowered or "iam" in lowered)
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
         with self._translate_aws_errors():

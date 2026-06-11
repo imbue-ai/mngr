@@ -678,6 +678,7 @@ class AwsProviderBackend(ProviderBackendInterface):
             root_volume_size_gb=config.root_volume_size_gb,
             root_volume_type=config.root_volume_type,
             iam_instance_profile=config.iam_instance_profile,
+            attach_self_stop_role=config.attach_self_stop_role,
             container_ssh_port=config.container_ssh_port,
         )
 

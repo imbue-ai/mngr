@@ -96,7 +96,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `associate_public_ip` | `True` | Assign a public IPv4 to instances. |
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
-| `iam_instance_profile` | `None` | IAM instance profile name. |
+| `iam_instance_profile` | `None` | IAM instance profile name. When set, it takes precedence over `attach_self_stop_role`. |
+| `attach_self_stop_role` | `true` | Attach the `mngr-aws` self-stop IAM instance profile (provisioned by `mngr aws prepare`) to launched instances so the idle watcher can stop the instance. Requires `iam:PassRole` for the `mngr-aws` role; if that permission is absent (or `prepare` was never run), `mngr create` still succeeds but launches the instance **without** the profile (no self-stop) and logs a warning. Set `false` to opt out (and silence the warning). Ignored when `iam_instance_profile` is set explicitly. |
 | `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## One-time setup: `mngr aws prepare`
@@ -144,6 +145,15 @@ ec2:DescribeSecurityGroups,
 ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
 ```
+
+Because `attach_self_stop_role` defaults to `true`, `mngr create` additionally
+needs `iam:PassRole` (scoped to the `mngr-aws` role) to attach the self-stop
+instance profile to the launched instance. This is graceful, not required: if
+`iam:PassRole` is absent (or `mngr aws prepare` was never run, so the profile
+does not exist), `mngr create` still succeeds — it launches the instance
+**without** the self-stop profile (so the idle watcher cannot stop it; you can
+still `mngr stop --stop-host`) and logs a warning. Set `attach_self_stop_role =
+false` on the provider config to opt out and silence the warning.
 
 For `mngr aws prepare` (one-time admin setup; in addition to the above for convenience):
 

@@ -296,6 +296,9 @@ def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
             "KeyName": "key-1",
+            # attach_self_stop_role defaults to True, so the mngr-aws self-stop
+            # instance profile is attached by default.
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     instance_id = client.create_instance(
@@ -327,6 +330,7 @@ def test_create_instance_uses_ami_id_override(stubbed_client: tuple[AwsVpsClient
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     instance_id = client.create_instance(
@@ -359,6 +363,7 @@ def test_create_instance_uses_default_ami_when_override_none(stubbed_client: tup
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     assert client.create_instance(
@@ -388,6 +393,7 @@ def test_create_instance_spot_sets_instance_market_options(stubbed_client: tuple
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
             "InstanceMarketOptions": {"MarketType": "spot"},
         },
     )
@@ -426,6 +432,7 @@ def test_create_instance_no_spot_omits_instance_market_options(
             "InstanceInitiatedShutdownBehavior": "terminate",
             "MetadataOptions": ANY,
             "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
         },
     )
     assert client.create_instance(
@@ -436,6 +443,166 @@ def test_create_instance_no_spot_omits_instance_market_options(
         ssh_key_ids=[],
         tags={},
     ) == VpsInstanceId("i-ondemand")
+
+
+def test_create_instance_attaches_self_stop_profile_by_default(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """With attach_self_stop_role defaulting to True, RunInstances carries IamInstanceProfile=mngr-aws."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-self-stop"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+            "IamInstanceProfile": {"Name": "mngr-aws"},
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-self-stop")
+
+
+def test_create_instance_falls_back_without_profile_on_passrole_error(
+    stubbed_client: tuple[AwsVpsClient, Stubber],
+    log_warnings: list[str],
+) -> None:
+    """A PassRole denial on the default self-stop profile logs a warning and retries without it."""
+    client, stubber = stubbed_client
+    # First attempt: RunInstances *with* the IAM instance profile is rejected for
+    # lack of iam:PassRole.
+    stubber.add_client_error(
+        "run_instances",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform: iam:PassRole on the mngr-aws role",
+        http_status_code=403,
+    )
+    # Second attempt: RunInstances *without* IamInstanceProfile succeeds.
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-no-profile"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    assert client.create_instance(
+        label="mngr-test-aws-host",
+        region="us-east-1",
+        plan="t3.small",
+        user_data="test-user-data",
+        ssh_key_ids=[],
+        tags={},
+    ) == VpsInstanceId("i-no-profile")
+    assert any("self-stop" in msg for msg in log_warnings)
+
+
+def test_create_instance_does_not_attach_when_disabled() -> None:
+    """attach_self_stop_role=False (and no explicit profile) launches with no IamInstanceProfile."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        attach_self_stop_role=False,
+        stubbed_ec2_client=ec2,
+    )
+    stubber.add_response(
+        "run_instances",
+        {"Instances": [{"InstanceId": "i-bare"}]},
+        expected_params={
+            "ImageId": "ami-test12345",
+            "InstanceType": "t3.small",
+            "MinCount": 1,
+            "MaxCount": 1,
+            "UserData": "test-user-data",
+            "BlockDeviceMappings": ANY,
+            "NetworkInterfaces": ANY,
+            "InstanceInitiatedShutdownBehavior": "terminate",
+            "MetadataOptions": ANY,
+            "TagSpecifications": ANY,
+        },
+    )
+    stubber.activate()
+    try:
+        assert client.create_instance(
+            label="mngr-test-aws-host",
+            region="us-east-1",
+            plan="t3.small",
+            user_data="test-user-data",
+            ssh_key_ids=[],
+            tags={},
+        ) == VpsInstanceId("i-bare")
+    finally:
+        stubber.deactivate()
+
+
+def test_create_instance_explicit_profile_failure_is_not_swallowed() -> None:
+    """An explicit iam_instance_profile failing RunInstances raises (no silent fallback)."""
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        iam_instance_profile="custom-profile",
+        stubbed_ec2_client=ec2,
+    )
+    # Only ONE run_instances error is queued: if create_instance retried (it must
+    # not, for an explicit profile), the Stubber would raise StubAssertionError
+    # for an unstubbed second call rather than VpsApiError.
+    stubber.add_client_error(
+        "run_instances",
+        service_error_code="UnauthorizedOperation",
+        service_message="You are not authorized to perform: iam:PassRole",
+        http_status_code=403,
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(VpsApiError, match="UnauthorizedOperation"):
+            client.create_instance(
+                label="mngr-test-aws-host",
+                region="us-east-1",
+                plan="t3.small",
+                user_data="test-user-data",
+                ssh_key_ids=[],
+                tags={},
+            )
+    finally:
+        stubber.deactivate()
 
 
 def test_create_instance_no_instances_raises(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
