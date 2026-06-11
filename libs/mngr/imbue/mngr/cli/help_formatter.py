@@ -147,7 +147,9 @@ def get_terminal_width() -> int:
     return terminal_size.columns
 
 
-def render_markdown(markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None, indent: int = 0) -> str:
+def render_markdown(
+    markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None, indent: int = 0
+) -> str:
     """Render a markdown block for terminal display.
 
     When ``use_ansi`` is True, render via rich (tables, bold, code, links,
