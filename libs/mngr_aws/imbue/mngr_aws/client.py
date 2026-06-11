@@ -504,7 +504,11 @@ class AwsVpsClient(VpsClientInterface):
         return self.wait_for_instance_active(instance_id, timeout_seconds=timeout_seconds)
 
     def _instance_state_name(self, instance_id: VpsInstanceId) -> str:
-        """Return the raw EC2 state name (e.g. ``running`` / ``stopped``), or ``''`` if gone.
+        """Return the raw EC2 state name (e.g. ``running`` / ``stopped``), or ``''`` if absent.
+
+        ``''`` is returned only when the describe response contains no instance
+        record; a truly-nonexistent instance id instead makes ``_describe_instance``
+        raise ``VpsApiError`` (``InvalidInstanceID.NotFound``).
 
         Unlike ``get_instance_status``, this preserves the raw EC2 state name
         rather than collapsing ``stopping`` / ``stopped`` into a single

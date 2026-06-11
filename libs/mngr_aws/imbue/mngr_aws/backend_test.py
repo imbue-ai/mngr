@@ -2,10 +2,12 @@
 
 import boto3
 import pytest
+from botocore.stub import Stubber
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
@@ -14,6 +16,7 @@ from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.conftest import clear_aws_env
+from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -58,6 +61,99 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
         aws_client=client,
         aws_config=config,
     )
+
+
+def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]:
+    """Build an AwsProvider whose EC2 client is a botocore Stubber.
+
+    Used by the ``_find_instance_for_host`` tests, which need to script a
+    ``describe_instances`` response (the tag-based lookup that resolves a
+    stopped instance) without any real AWS call.
+    """
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_minutes=60)
+    session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-x",
+        security_group=ExistingSecurityGroup(id="sg-x"),
+        stubbed_ec2_client=ec2,
+    )
+    provider = AwsProvider(
+        name=ProviderInstanceName("aws-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=mngr_ctx,
+        config=config,
+        vps_client=client,
+        aws_client=client,
+        aws_config=config,
+    )
+    return provider, stubber
+
+
+def _describe_instances_response(instances: list[dict]) -> dict:
+    return {"Reservations": [{"Instances": instances}]}
+
+
+def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id tag, no SSH."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                {
+                    "InstanceId": "i-match",
+                    "State": {"Name": "stopped"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(host_id)},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+                {
+                    "InstanceId": "i-other",
+                    "State": {"Name": "running"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(HostId.generate())},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert found is not None
+    assert found["id"] == "i-match"
+
+
+def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: MngrContext) -> None:
+    """A host with no matching instance tag (e.g. terminated and gone) resolves to None."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                {
+                    "InstanceId": "i-other",
+                    "State": {"Name": "running"},
+                    "Tags": [{"Key": "mngr-host-id", "Value": str(HostId.generate())}],
+                },
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(HostId.generate())
+    finally:
+        stubber.deactivate()
+    assert found is None
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(

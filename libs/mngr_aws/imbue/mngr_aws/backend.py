@@ -1,6 +1,8 @@
 import os
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from typing import Any
 from typing import Final
 
@@ -11,18 +13,31 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_vps_docker.container_setup import host_volume_name_for
+from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
@@ -228,6 +243,154 @@ class AwsProvider(VpsDockerProvider):
             if main_ip:
                 vps_ips.append(main_ip)
         return vps_ips
+
+    # =========================================================================
+    # Native EC2 stop/start (idle-pause + resume)
+    # =========================================================================
+
+    def stop_host(
+        self,
+        host: HostInterface | HostId,
+        create_snapshot: bool = True,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        """Stop the agent container *and* the EC2 instance, preserving the EBS volume.
+
+        The base ``VpsDockerProvider.stop_host`` only stops the inner Docker
+        container, leaving the EC2 instance running and billing. This override
+        additionally calls ``ec2 stop-instances`` so a paused AWS agent costs
+        only EBS storage; the root volume (and all on-disk state) survives, so
+        ``start_host`` can resume it.
+
+        ``create_snapshot`` is intentionally ignored -- native EC2 stop preserves
+        the whole filesystem, so the base's docker-commit snapshot would be
+        redundant. The base container-stop + record-write is reused via
+        ``super()``; we then record ``stop_reason=STOPPED`` so the offline-state
+        derivation reports STOPPED (not CRASHED) while the instance is down, and
+        finally stop the instance. The ``stop_reason`` write must happen *before*
+        the instance stops, since the volume is unreachable once it does.
+        """
+        del create_snapshot
+        host_id = host.id if isinstance(host, HostInterface) else host
+        host_record = self._find_host_record(host_id)
+        if host_record is None or host_record.config is None or host_record.vps_ip is None:
+            raise HostNotFoundError(self.name, host_id)
+        super().stop_host(host, create_snapshot=False, timeout_seconds=timeout_seconds)
+        self._record_stop_reason(host_id, host_record, HostState.STOPPED)
+        with log_span("Stopping EC2 instance"):
+            self.aws_client.stop_instance(host_record.config.vps_instance_id)
+
+    def start_host(
+        self,
+        host: HostInterface | HostId,
+        snapshot_id: SnapshotId | None = None,
+    ) -> OnlineHostInterface:
+        """Resume a stopped AWS agent: start the EC2 instance, then its container.
+
+        A stopped EC2 instance is not SSH-reachable and has no public IP, so it
+        is located by its ``mngr-host-id`` tag (not the SSH-based host-record
+        lookup), started, and its fresh public IP read back. The instance keeps
+        its SSH host keys across a stop/start (they live on the EBS volume), so
+        we re-point known_hosts at the new IP and rewrite the persisted record's
+        ``vps_ip`` before delegating the container start to ``super()`` (whose
+        ``_find_host_record`` reads our refreshed cache entry, so no stale
+        rediscovery is needed).
+        """
+        host_id = host.id if isinstance(host, HostInterface) else host
+        instance = self._find_instance_for_host(host_id)
+        if instance is None:
+            raise HostNotFoundError(self.name, host_id)
+        instance_id = VpsInstanceId(instance["id"])
+        with log_span("Starting EC2 instance"):
+            new_ip = self.aws_client.start_instance(instance_id)
+        # The cached instance list predates the start (stale state / no public
+        # IP); drop it so any later discovery sees the running instance + new IP.
+        self._instances_cache = None
+        with log_span("Waiting for VPS SSH after start"):
+            self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
+        with self._make_outer_for_vps_ip(new_ip) as outer:
+            host_store = open_host_store(outer, host_volume_name_for(host_id))
+            record = host_store.read_host_record()
+            if record is None or record.config is None:
+                raise HostNotFoundError(self.name, host_id)
+            self._rebind_known_hosts(record, new_ip)
+            certified = record.certified_host_data
+            updated_data = certified.model_copy_update(
+                to_update(certified.field_ref().stop_reason, None),
+                to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+            )
+            updated_record = record.model_copy_update(
+                to_update(record.field_ref().vps_ip, new_ip),
+                to_update(record.field_ref().certified_host_data, updated_data),
+            )
+            host_store.write_host_record(updated_record)
+        # Drop any cached Host bound to the old IP, then seed the record cache so
+        # super().start_host()'s _find_host_record returns the rebound record.
+        self._evict_cached_host(host_id)
+        self._host_record_cache[host_id] = updated_record
+        return super().start_host(host_id, snapshot_id)
+
+    def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
+        """Locate this host's EC2 instance by its ``mngr-host-id`` tag (works while stopped).
+
+        Unlike ``_find_host_record`` (which SSHes into the VPS), this reads only
+        EC2 ``DescribeInstances`` tags, so it resolves an instance that is
+        stopped and therefore unreachable over SSH. ``list_instances`` already
+        filters out terminated instances, so a destroyed host returns ``None``.
+        """
+        wanted_tag = f"mngr-host-id={host_id}"
+        for instance in self._fetch_provider_instances():
+            if wanted_tag in instance.get("tags", ()):
+                return instance
+        return None
+
+    def _record_stop_reason(
+        self,
+        host_id: HostId,
+        host_record: VpsDockerHostRecord,
+        state: HostState,
+    ) -> None:
+        """Persist ``stop_reason`` on the host record while the instance is still reachable."""
+        if host_record.config is None or host_record.vps_ip is None:
+            raise HostNotFoundError(self.name, host_id)
+        certified = host_record.certified_host_data
+        updated_data = certified.model_copy_update(
+            to_update(certified.field_ref().stop_reason, state.value),
+            to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
+        )
+        updated_record = host_record.model_copy_update(
+            to_update(host_record.field_ref().certified_host_data, updated_data)
+        )
+        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
+            host_store = open_host_store(outer, host_record.config.volume_name)
+            host_store.write_host_record(updated_record)
+        self._host_record_cache[host_id] = updated_record
+
+    def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
+        """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
+
+        EC2 stop/start keeps the instance's SSH host keys, so only the IP
+        changes. Drop any stale entries for the old IP, then add the new IP with
+        the recorded VPS (port 22) and container host keys.
+        """
+        old_ip = record.vps_ip
+        if old_ip is not None and old_ip != new_ip:
+            remove_host_from_known_hosts(self._vps_known_hosts_path(), old_ip, 22)
+            remove_host_from_known_hosts(self._container_known_hosts_path(), old_ip, self.config.container_ssh_port)
+        if record.ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._vps_known_hosts_path(),
+                hostname=new_ip,
+                port=22,
+                public_key=record.ssh_host_public_key,
+            )
+        if record.container_ssh_host_public_key is not None:
+            add_host_to_known_hosts(
+                known_hosts_path=self._container_known_hosts_path(),
+                hostname=new_ip,
+                port=self.config.container_ssh_port,
+                public_key=record.container_ssh_host_public_key,
+            )
 
 
 class AwsProviderBackend(ProviderBackendInterface):
