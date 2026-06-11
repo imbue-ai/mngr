@@ -389,7 +389,7 @@ _PLANNER_TOOL_CALLS = 7
 # CortexStepType values we surface in a transcript (others are tool/browser steps).
 _TYPE_USER_INPUT = 14
 _TYPE_PLANNER_RESPONSE = 15
-_TYPE_ERROR_MESSAGE = 24
+_TYPE_ERROR_MESSAGE = 17
 _TYPE_CONVERSATION_HISTORY = 98  # bookkeeping replay of prior turns; dropped
 
 _TYPE_LABELS = {
