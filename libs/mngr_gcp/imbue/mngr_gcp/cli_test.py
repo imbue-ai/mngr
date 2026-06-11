@@ -124,9 +124,11 @@ def test_cleanup_command_help_is_reachable() -> None:
 def test_prepare_command_fails_clearly_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     """When ADC isn't resolvable, the click command surfaces a clean error.
 
-    Forcing no-ADC: point GOOGLE_APPLICATION_CREDENTIALS at a nonexistent file
-    so ``google.auth.default()`` raises immediately, and pin CLOUDSDK_CONFIG to
-    an empty temp dir so the well-known ADC file can't be found either.
+    Forcing no-ADC: point GOOGLE_APPLICATION_CREDENTIALS at a nonexistent file.
+    ``google.auth.default()`` checks that env var first and raises
+    ``DefaultCredentialsError`` immediately when it names a missing file, so the
+    well-known ADC file is never consulted and the test is hermetic regardless of
+    the host's gcloud state.
     """
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json")
     runner = CliRunner()
