@@ -31,6 +31,7 @@ members = [
     "imbue-mngr-modal",
     "imbue-mngr-notifications",
     "imbue-mngr-opencode",
+    "imbue-mngr-opencode-usage",
     "imbue-mngr-ovh",
     "imbue-mngr-pair",
     "imbue-mngr-pi-coding",
@@ -2074,6 +2075,23 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+
+[[package]]
+name = "imbue-mngr-opencode-usage"
+version = "0.1.1"
+source = { editable = "libs/mngr_opencode_usage" }
+dependencies = [
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-opencode" },
+    { name = "imbue-mngr-usage" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-opencode", editable = "libs/mngr_opencode" },
+    { name = "imbue-mngr-usage", editable = "libs/mngr_usage" },
+]
 
 [[package]]
 name = "imbue-mngr-ovh"
