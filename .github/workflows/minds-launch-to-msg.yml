@@ -1073,6 +1073,10 @@ jobs:
           LAUNCH_TO_READY_S: ${{ needs.launch_to_msg.outputs.launch_to_ready }}
           W1_CREATE_S: ${{ needs.launch_to_msg.outputs.w1_create }}
           W2_CREATE_S: ${{ needs.launch_to_msg.outputs.w2_create }}
+          # ToDesktop .zip download URL emitted by the build job. Empty
+          # when build was skipped (cache-hit short-circuits don't apply
+          # here; build always runs when should_run=true).
+          APP_ZIP_URL: ${{ needs.build.outputs.app_zip_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
         run: |
@@ -1097,14 +1101,8 @@ jobs:
           }
           duration=$(fmt_duration "$total_s")
           # Classify the outcome.
-          # - skipped: check_should_run decided not to run; all downstream skipped
-          # - failed: some required downstream returned failure
-          # - cancelled: any required downstream was cancelled (no failures)
-          # - ran: everything that needed to run succeeded
           failed_jobs=""
           cancelled_jobs=""
-          # If check_should_run itself failed, surface that. Otherwise iterate
-          # the downstream jobs.
           if [[ "$CHECK_SHOULD_RUN_RESULT" == "failure" ]]; then
             failed_jobs="check_should_run"
           else
@@ -1120,64 +1118,76 @@ jobs:
               esac
             done
           fi
+          if [[ -n "$failed_jobs" ]]; then
+            emoji=":x:"
+            verdict_word="failed"
+            detail=" (failed:$failed_jobs)"
+          elif [[ -n "$cancelled_jobs" ]]; then
+            emoji=":warning:"
+            verdict_word="cancelled"
+            detail=" (cancelled:$cancelled_jobs)"
+          elif [[ "$SHOULD_RUN" != "true" ]]; then
+            emoji=":fast_forward:"
+            verdict_word="skipped"
+            detail=""
+          else
+            emoji=":white_check_mark:"
+            verdict_word="succeeded"
+            detail=""
+          fi
           MNGR_SHORT="${MNGR_SHA:0:12}"
           FCT_SHORT="${FCT_SHA:0:12}"
-          # Slack mrkdwn hyperlink syntax: <URL|display>. Wrap the short
-          # SHAs so each is a clickable link to the corresponding github
-          # commit page -- one click in Slack jumps you to the source.
-          MNGR_LINK="<https://github.com/imbue-ai/mngr/commit/$MNGR_SHA|$MNGR_SHORT>"
-          FCT_LINK="<https://github.com/imbue-ai/forever-claude-template/commit/$FCT_SHA|$FCT_SHORT>"
           # Format the e2e per-run metrics line. Each metric is the raw
           # float in seconds; only include the ones we actually got, so a
           # mid-W2 failure still shows launch->ready and w1.
           fmt_float_s() {
-            # Strip the decimal, then route through fmt_duration for the
-            # ms/s/m formatting used everywhere else in this message.
             local f=$1
             [[ -z "$f" ]] && return
             local s=${f%%.*}
             fmt_duration "$s"
           }
-          metrics_line=""
-          have_any=""
-          for kv in "launch->ready:$LAUNCH_TO_READY_S" "w1:$W1_CREATE_S" "w2:$W2_CREATE_S"; do
-            label="${kv%%:*}"
-            v="${kv##*:}"
+          # Build metrics line: `[_label:_ *value* | _label:_ *value* | ...]`
+          metrics_inner=""
+          sep=""
+          for kv in "_launch to ready:_|$LAUNCH_TO_READY_S" \
+                    "_w1 create:_|$W1_CREATE_S" \
+                    "_w2 create:_|$W2_CREATE_S"; do
+            label="${kv%%|*}"
+            v="${kv##*|}"
             [[ -z "$v" ]] && continue
-            metrics_line+="${have_any:+  }${label}=$(fmt_float_s "$v")"
-            have_any=1
+            metrics_inner+="${sep}${label} *$(fmt_float_s "$v")*"
+            sep=" | "
           done
-          if [[ -n "$failed_jobs" ]]; then
-            emoji=":x:"
-            verdict="failed in $duration"
-            detail=" | failed:$failed_jobs"
-          elif [[ -n "$cancelled_jobs" ]]; then
-            emoji=":warning:"
-            verdict="cancelled in $duration"
-            detail=" | cancelled:$cancelled_jobs"
-          elif [[ "$SHOULD_RUN" != "true" ]]; then
-            emoji=":fast_forward:"
-            verdict="skipped in $duration (free Linux only)"
-            detail=""
-          else
-            emoji=":white_check_mark:"
-            verdict="ran in $duration"
-            detail=""
+          metrics_line=""
+          [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
+          # Build links line: `[<binary> | <run logs> | <mngr commit> | <fct commit>]`.
+          # Derive the ToDesktop dashboard URL from the build's app_zip_url:
+          # https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64
+          dashboard_url=""
+          if [[ -n "$APP_ZIP_URL" && "$APP_ZIP_URL" =~ dl\.todesktop\.com/([^/]+)/builds/([^/]+)/ ]]; then
+            dashboard_url="https://app.todesktop.com/apps/${BASH_REMATCH[1]}/builds/${BASH_REMATCH[2]}"
           fi
-          # Two-line vs three-line body depending on whether we have
-          # per-run metrics. The skipped path has no metrics; ran/failed
-          # may have any prefix of the three.
+          links_inner=""
+          sep=""
+          if [[ -n "$dashboard_url" ]]; then
+            links_inner+="<${dashboard_url}|binary>"
+            sep=" | "
+          fi
+          links_inner+="${sep}<${RUN_URL}|run logs>"
+          links_inner+=" | <https://github.com/imbue-ai/mngr/commit/${MNGR_SHA}|mngr commit>"
+          links_inner+=" | <https://github.com/imbue-ai/forever-claude-template/commit/${FCT_SHA}|fct commit>"
+          links_line="[${links_inner}]"
+          # Assemble the final message. Line 1 is always present. Line 2
+          # (SHAs) is always present. Line 3 (metrics) is omitted when we
+          # have no values. Line 4 (links) is always present, though
+          # `binary` falls out when build didn't produce one.
+          line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
+            "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
+          line2="[_mngr_ \`${MNGR_SHORT}\` | _FCT_ \`${FCT_SHORT}\`]"
           if [[ -n "$metrics_line" ]]; then
-            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=%s  fct=%s  trigger=`%s`\n%s\n<%s|run logs>' \
-              "$emoji" "$verdict" "$detail" \
-              "$MNGR_LINK" "$FCT_LINK" "$TRIGGER" \
-              "$metrics_line" \
-              "$RUN_URL")
+            text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
           else
-            text=$(printf '%s *launch-to-msg* | %s%s\nmngr=%s  fct=%s  trigger=`%s`\n<%s|run logs>' \
-              "$emoji" "$verdict" "$detail" \
-              "$MNGR_LINK" "$FCT_LINK" "$TRIGGER" \
-              "$RUN_URL")
+            text=$(printf '%s\n%s\n%s' "$line1" "$line2" "$links_line")
           fi
           payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
           curl -sS -X POST -H 'Content-type: application/json' \
