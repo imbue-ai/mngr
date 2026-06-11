@@ -49,6 +49,8 @@ from imbue.mngr_kanpan.data_types import KanpanCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import MarkableBuiltinCommand
 from imbue.mngr_kanpan.data_types import MarkableBuiltinRole
+from imbue.mngr_kanpan.data_types import SECTION_PREFIX
+from imbue.mngr_kanpan.data_types import SECTION_SUFFIX
 from imbue.mngr_kanpan.data_types import STALENESS_FRACTION_OF_REFRESH_INTERVAL
 from imbue.mngr_kanpan.fetcher import FetchResult
 from imbue.mngr_kanpan.fetcher import collect_data_sources
@@ -124,27 +126,9 @@ BOARD_SECTION_ORDER: tuple[BoardSection, ...] = (
     BoardSection.MUTED,
 )
 
-# Section labels split into colored prefix and plain suffix
-_SECTION_PREFIX: dict[BoardSection, str] = {
-    BoardSection.PR_MERGED: "Done",
-    BoardSection.PR_CLOSED: "Cancelled",
-    BoardSection.PR_BEING_REVIEWED: "In review",
-    BoardSection.PR_DRAFT: "In progress",
-    BoardSection.STILL_COOKING: "In progress",
-    BoardSection.PRS_FAILED: "In progress",
-    BoardSection.MUTED: "Muted",
-}
-
-_SECTION_SUFFIX: dict[BoardSection, str] = {
-    BoardSection.PR_MERGED: "PR merged",
-    BoardSection.PR_CLOSED: "PR closed",
-    BoardSection.PR_BEING_REVIEWED: "PR pending",
-    BoardSection.PR_DRAFT: "draft PR",
-    BoardSection.STILL_COOKING: "no PR yet",
-    BoardSection.PRS_FAILED: "PRs not loaded",
-    BoardSection.MUTED: "",
-}
-
+# Section heading prefix/suffix text lives in data_types (SECTION_PREFIX /
+# SECTION_SUFFIX) so the TUI and the JSON output path share one source of truth.
+# Only the urwid color attribute is display-specific and stays here.
 _SECTION_ATTR: dict[BoardSection, str] = {
     BoardSection.PR_MERGED: "section_done",
     BoardSection.PR_CLOSED: "section_cancelled",
@@ -1289,6 +1273,28 @@ def _resolve_section_order(
 
 
 @pure
+def resolve_board_layout(
+    data_sources: Sequence[KanpanDataSource],
+    plugin_config: KanpanPluginConfig,
+) -> tuple[tuple[tuple[str, str], ...], tuple[BoardSection, ...]]:
+    """Resolve the board's column and section layout for non-TUI consumers.
+
+    Returns ``(columns, section_order)`` where ``columns`` is an ordered tuple
+    of ``(field_key, header)`` pairs (headers stripped of the display padding the
+    TUI adds) in the same order the TUI would render them. Built from the same
+    primitives ``run_kanpan`` uses (``_assemble_column_defs`` /
+    ``_resolve_section_order``) so the JSON layout matches the board; ``run_kanpan``
+    keeps the full ``_ColumnDef`` objects (with render closures) it needs for urwid,
+    so it does not call this wrapper directly.
+    """
+    source_col_defs = _build_data_source_column_defs(data_sources)
+    column_defs = _assemble_column_defs(_BUILTIN_COLUMN_DEFS, source_col_defs, plugin_config.column_order)
+    columns = tuple((defn.name, defn.header.strip()) for defn in column_defs)
+    section_order = _resolve_section_order(plugin_config.section_order)
+    return columns, section_order
+
+
+@pure
 def _build_field_color_palette(
     snapshot: BoardSnapshot | None,
 ) -> tuple[list[tuple[str, str, str]], tuple[str, ...]]:
@@ -1397,8 +1403,8 @@ def _build_agent_row(
 
 def _format_section_heading(section: BoardSection, count: int) -> list[str | tuple[Hashable, str]]:
     """Build urwid text markup for a section heading."""
-    prefix = _SECTION_PREFIX[section]
-    suffix = _SECTION_SUFFIX[section]
+    prefix = SECTION_PREFIX[section]
+    suffix = SECTION_SUFFIX[section]
     attr = _SECTION_ATTR[section]
     if suffix:
         return [(attr, prefix), f" - {suffix} ({count})"]
