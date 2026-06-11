@@ -121,18 +121,20 @@ def _bucketize_mixed_identifiers(
 
 
 def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
-    """Discover all hosts; on provider errors, log and return an empty list."""
-    try:
-        agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=None,
-            include_destroyed=False,
-            reset_caches=False,
-        )
-    except MngrError as e:
-        logger.warning("Failed to discover hosts: {}", e)
-        return []
+    """Discover all hosts across every provider.
+
+    Does not swallow an unreachable provider: snapshotting "all hosts" while
+    silently skipping a down provider would quietly omit those hosts from the
+    operation, so a ``ProviderUnavailableError`` is allowed to propagate and
+    fail the command loudly instead.
+    """
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=None,
+        agent_identifiers=None,
+        include_destroyed=False,
+        reset_caches=False,
+    )
     return list(agents_by_host.keys())
 
 

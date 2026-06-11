@@ -1322,12 +1322,11 @@ def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
 ) -> None:
     """The per-provider worker propagates ProviderUnavailableError unwrapped.
 
-    Availability is a multi-provider policy decision, so this per-provider unit
-    does not swallow the error -- it lets it propagate (and, crucially, does NOT
-    wrap it in ProviderDiscoveryError) so the orchestrator can distinguish
-    "unavailable -> skip" from a genuine discovery failure. The skip-and-continue
-    behavior itself is covered at the orchestrator level by
-    test_discover_hosts_and_agents_skips_unavailable_provider_and_continues.
+    Discovery does not swallow an unreachable provider, and the worker does NOT
+    wrap the error in ProviderDiscoveryError -- so it reaches the caller as a
+    clear "provider is not available" failure. The end-to-end propagation out of
+    discover_hosts_and_agents is covered by
+    test_discover_hosts_and_agents_propagates_unavailable_provider.
     """
     provider = _UnavailableDiscoveryProviderInstance(
         name=ProviderInstanceName("offline-provider"),
@@ -1348,10 +1347,10 @@ def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
 def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """A non-availability discovery failure still raises ProviderDiscoveryError.
+    """A non-availability discovery failure is wrapped in ProviderDiscoveryError.
 
-    Only ProviderUnavailableError is treated as "skip this provider"; any other
-    failure must still surface (wrapped for per-provider attribution).
+    ProviderUnavailableError propagates unwrapped (clear "unavailable" message);
+    any other failure is wrapped for per-provider attribution. Both propagate.
     """
     provider = _RaisingDiscoveryProviderInstance(
         name=ProviderInstanceName("raising-provider"),
@@ -1384,34 +1383,31 @@ def _make_unavailable_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrCon
     )
 
 
-@pytest.mark.allow_warnings(match=r"Skipping provider .* during discovery \(unavailable\)")
-def test_discover_hosts_and_agents_skips_unavailable_provider_and_continues(
+def test_discover_hosts_and_agents_propagates_unavailable_provider(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """An unreachable provider is skipped and discovery continues with the rest.
+    """An unreachable provider fails a full (enumerate-all) discovery loudly.
 
-    Regression test for the volume-data-loss fix: when one provider's backend is
-    down (e.g. a Docker daemon), the multi-provider orchestrator must skip just
-    that provider and still return the hosts of the providers that *are*
-    available, so commands like `mngr rsync <local-agent>` keep working. No
-    exception escapes, and the offline provider contributes no hosts.
+    Discovery is deliberately dumb: it does not swallow an unreachable provider.
+    For an enumerate-all call (provider_names=None), a down provider could hold a
+    target, so the error propagates and the command fails rather than silently
+    omitting that provider's agents. Targeted commands avoid this by scoping
+    discovery (see discovery_scope_for_host_location), so an unrelated down
+    provider is never queried.
     """
     _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
     _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
     try:
         mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
 
-        agents_by_host, _ = discover_hosts_and_agents(
-            mngr_ctx,
-            provider_names=None,
-            agent_identifiers=None,
-            include_destroyed=True,
-            reset_caches=False,
-        )
-
-        provider_names = {host_ref.provider_name for host_ref in agents_by_host}
-        assert ProviderInstanceName("offline-provider") not in provider_names
-        assert ProviderInstanceName("local") in provider_names
+        with pytest.raises(ProviderUnavailableError):
+            discover_hosts_and_agents(
+                mngr_ctx,
+                provider_names=None,
+                agent_identifiers=None,
+                include_destroyed=True,
+                reset_caches=False,
+            )
     finally:
         del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
         del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]

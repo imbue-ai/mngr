@@ -5,6 +5,7 @@ import click
 from click_option_group import optgroup
 
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import discovery_scope_for_host_location
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.providers import get_provider_instance
@@ -69,10 +70,11 @@ def _resolve_endpoint(
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
 
+    provider_names, agent_identifiers = discovery_scope_for_host_location(parsed)
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
         include_destroyed=False,
         reset_caches=False,
     )

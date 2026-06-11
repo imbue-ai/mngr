@@ -76,16 +76,16 @@ def _discover_provider_hosts_and_agents(
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
     except ProviderUnavailableError:
-        # Availability is a multi-provider policy decision, not something this
-        # per-provider unit should resolve: an unreachable backend is genuinely
-        # an error *for this provider*. Let it propagate unwrapped so the
-        # multi-provider orchestrator (_run_discovery) can decide to skip it and
-        # continue with the providers that *are* available -- the same way other
-        # multi-provider boundaries own this decision rather than the per-provider
-        # unit (gc's _discover_hosts_for_gc skips the provider; `mngr list`
-        # records it as unavailable). (We must not wrap it in
-        # ProviderDiscoveryError below, or the orchestrator could no longer
-        # distinguish "unavailable -> skip" from a genuine discovery failure.)
+        # Propagate unwrapped (do NOT turn it into a ProviderDiscoveryError). An
+        # unreachable backend is a real failure, and discovery deliberately does
+        # not paper over it: a provider that might hold a target must not be
+        # silently dropped, or e.g. `mngr message my-agent` could miss an
+        # instance on a down provider without telling the user. Surfacing it as
+        # ProviderUnavailableError keeps the clear "provider is not available"
+        # message (and its "start the backend, or disable the provider" help).
+        # Whether that is fatal is the caller's call -- most commands let it
+        # abort; gc (`_discover_hosts_for_gc`) and `mngr list` have their own
+        # per-provider handling.
         raise
     except Exception as exc:
         raise ProviderDiscoveryError(provider.name, exc) from exc
@@ -130,18 +130,15 @@ def _run_discovery(
                 )
             )
 
-    # Collect results, skipping any provider whose backend is unreachable.
-    # This is the multi-provider boundary that owns the ProviderUnavailableError
-    # contract: a single offline backend must not block discovery for every
-    # other provider, so e.g. `mngr rsync <local-agent>` still works when an
-    # unrelated Docker daemon happens to be down. Genuine discovery failures
-    # arrive wrapped as ProviderDiscoveryError and still propagate (aborting the
-    # command, with per-provider attribution).
+    # Re-raise any thread exception. Discovery is deliberately "dumb": it does
+    # not swallow an unreachable provider, so ProviderUnavailableError (and any
+    # ProviderDiscoveryError) propagates to the caller, which decides whether an
+    # unavailable provider is fatal. Targeted commands (rsync, git, ...) scope
+    # discovery to the relevant provider(s), so an *unrelated* down provider is
+    # never queried; an enumerate-all command (message, limit, ...) fails loudly
+    # rather than silently miss agents on the down provider.
     for future in futures:
-        try:
-            future.result()
-        except ProviderUnavailableError as exc:
-            logger.warning("Skipping provider {} during discovery (unavailable): {}", exc.provider_name, exc)
+        future.result()
 
     # Warn if any host names are duplicated within the same provider
     warn_on_duplicate_host_names(agents_by_host)

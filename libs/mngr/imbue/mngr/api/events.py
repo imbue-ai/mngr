@@ -201,9 +201,16 @@ def _resolve_agent_events_target(address: AgentAddress, mngr_ctx: MngrContext) -
 
 
 def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> EventsTarget:
+    # Scope discovery to the qualified provider when the address carries one
+    # (``HOST.PROVIDER``), so a target on an available provider isn't failed by
+    # an unrelated provider being down -- discovery now propagates
+    # ProviderUnavailableError rather than swallowing it. A bare ``HOST`` has no
+    # provider to scope to, so it still searches every provider (and fails if
+    # any potential match's provider is unavailable).
+    provider_names = (str(address.provider),) if address.provider is not None else None
     host_agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
+        provider_names=provider_names,
         agent_identifiers=None,
         include_destroyed=False,
         reset_caches=False,

@@ -12,6 +12,7 @@ from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _filter_one_agent
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
 from imbue.mngr.api.find import determine_resolved_path
+from imbue.mngr.api.find import discovery_scope_for_host_location
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
 from imbue.mngr.api.find import filter_one_host
@@ -112,6 +113,34 @@ def test_parse_host_location_address_bare_name_is_agent_not_path() -> None:
     parsed = parse_host_location_address("foo")
 
     assert parsed == HostLocationAddress(agent=AgentName("foo"))
+
+
+def test_discovery_scope_for_host_location_derives_hints() -> None:
+    """The scope helper turns an address into the right discovery hints.
+
+    This is what lets rsync/git query only the provider(s) that could hold the
+    target instead of every provider -- so an unrelated unavailable provider is
+    never touched. A provider qualifier scopes by provider; an agent scopes by
+    identifier (resolved via the event stream); a bare host name resolves to
+    (None, None), which still needs a full scan.
+    """
+    # Bare agent name -> scope by agent identifier only.
+    assert discovery_scope_for_host_location(HostLocationAddress(agent=AgentName("a"))) == (None, ("a",))
+
+    # Agent on an explicitly qualified host -> scope by both.
+    assert discovery_scope_for_host_location(
+        HostLocationAddress(
+            agent=AgentName("a"), host=HostAddress(host=HostName("h"), provider=ProviderInstanceName("modal"))
+        )
+    ) == (("modal",), ("a",))
+
+    # Qualified host, no agent -> scope by provider only.
+    assert discovery_scope_for_host_location(
+        HostLocationAddress(host=HostAddress(host=HostName("h"), provider=ProviderInstanceName("modal")))
+    ) == (("modal",), None)
+
+    # Bare host name (no provider, no agent) -> nothing to scope by; full scan.
+    assert discovery_scope_for_host_location(HostLocationAddress(host=HostAddress(host=HostName("h")))) == (None, None)
 
 
 def test_parse_host_location_address_colon_prefix_is_local_path() -> None:
