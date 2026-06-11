@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -475,7 +476,7 @@ def test_claude_agent_assemble_command_strips_user_settings(
         tmp_path,
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(
-            cli_args='--settings \'{"model": "opus"}\' --verbose', check_installation=False
+            cli_args=split_cli_args_string('--settings \'{"model": "opus"}\' --verbose'), check_installation=False
         ),
     )
 
@@ -1531,7 +1532,9 @@ def test_configure_agent_hooks_merges_user_settings_from_cli_args(
 
     user_hook_command = "echo user-session-start"
     user_settings_json = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}})
-    config = ClaudeAgentConfig(cli_args=f"--settings '{user_settings_json}'", check_installation=False)
+    config = ClaudeAgentConfig(
+        cli_args=split_cli_args_string(f"--settings '{user_settings_json}'"), check_installation=False
+    )
     agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
 
     agent._configure_agent_hooks(host)
@@ -1591,7 +1594,9 @@ def test_configure_agent_hooks_preserves_user_non_hook_settings(
     work_dir.mkdir()
 
     user_settings_json = json.dumps({"model": "opus"})
-    config = ClaudeAgentConfig(cli_args=f"--settings '{user_settings_json}'", check_installation=False)
+    config = ClaudeAgentConfig(
+        cli_args=split_cli_args_string(f"--settings '{user_settings_json}'"), check_installation=False
+    )
     agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
 
     agent._configure_agent_hooks(host)
@@ -1610,7 +1615,9 @@ def test_configure_agent_hooks_rejects_invalid_user_settings_json(
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    config = ClaudeAgentConfig(cli_args="--settings '{not valid json}'", check_installation=False)
+    config = ClaudeAgentConfig(
+        cli_args=split_cli_args_string("--settings '{not valid json}'"), check_installation=False
+    )
     agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
 
     with pytest.raises(UserInputError):
