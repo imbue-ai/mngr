@@ -1010,6 +1010,6 @@ jobs:
             echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
             echo ""
             echo "**To inspect the latest green pair manually:**"
-            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches?key=launch-to-msg-green-mngr-"
+            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches?query=launch-to-msg-green-mngr-"
             echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green-mngr- --limit 5\`"
           } >> "$GITHUB_STEP_SUMMARY"
