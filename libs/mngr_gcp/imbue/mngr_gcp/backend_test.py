@@ -1,13 +1,8 @@
 """Tests for GCP provider backend registration."""
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any
-
 import pytest
 from google.auth.credentials import AnonymousCredentials
 from google.auth.credentials import Credentials
-from loguru import logger
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
@@ -36,28 +31,6 @@ class _StubAdcConfig(GcpProviderConfig):
         if not self.stub_has_credentials:
             raise ValueError("GCP Application Default Credentials not configured (stub).")
         return AnonymousCredentials(), self.stub_resolved_project
-
-
-@contextmanager
-def _capture_warnings() -> Iterator[list[str]]:
-    """Capture loguru WARNING-level messages emitted inside the ``with`` block.
-
-    Yields a list the caller inspects after the block exits. Uses a local sink
-    (mirrors the pattern in ``mngr_aws.backend_test``); pytest's ``caplog`` only
-    sees stdlib ``logging`` and misses loguru emissions.
-    """
-    messages: list[str] = []
-
-    def sink(message: Any) -> None:
-        record = message.record
-        if record["level"].name == "WARNING":
-            messages.append(record["message"])
-
-    handler_id = logger.add(sink, level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        logger.remove(handler_id)
 
 
 def test_backend_name_and_config_class() -> None:
@@ -283,37 +256,38 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 
 def test_build_provider_instance_warns_and_raises_when_credentials_missing(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     config = _StubAdcConfig(stub_has_credentials=False)
     name = ProviderInstanceName("gcp-test")
 
-    with _capture_warnings() as warnings:
-        with pytest.raises(ProviderEmptyError):
-            GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
 
-    assert len(warnings) == 1, f"expected exactly one warning, got {warnings!r}"
-    assert "gcp-test" in warnings[0]
-    assert "skipping discovery" in warnings[0]
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "gcp-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
 
 
 def test_build_provider_instance_warns_and_raises_when_no_project_anywhere(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     """Credentials resolve but no project does -- the second raise site still warns."""
     config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project=None)
     name = ProviderInstanceName("gcp-test")
 
-    with _capture_warnings() as warnings:
-        with pytest.raises(ProviderEmptyError):
-            GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
 
-    assert len(warnings) == 1, f"expected exactly one warning, got {warnings!r}"
-    assert "gcp-test" in warnings[0]
-    assert "skipping discovery" in warnings[0]
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "gcp-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
 
 
 def test_bootstrap_for_host_creation_raises_provider_empty_without_warning(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     """The create path surfaces the error directly and emits no discovery warning.
 
@@ -325,22 +299,21 @@ def test_bootstrap_for_host_creation_raises_provider_empty_without_warning(
     config = _StubAdcConfig(stub_has_credentials=False)
     name = ProviderInstanceName("gcp-test")
 
-    with _capture_warnings() as warnings:
-        with pytest.raises(ProviderEmptyError):
-            GcpProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
 
-    assert warnings == [], f"create path must not emit a discovery warning, got {warnings!r}"
+    assert log_warnings == [], f"create path must not emit a discovery warning, got {log_warnings!r}"
 
 
 def test_bootstrap_for_host_creation_succeeds_quietly_when_credentials_resolve(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
     """When credentials + project resolve, bootstrap is a quiet no-op (no raise, no warn)."""
     config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project="adc-resolved-project")
 
-    with _capture_warnings() as warnings:
-        GcpProviderBackend.bootstrap_for_host_creation(
-            name=ProviderInstanceName("gcp-test"), config=config, mngr_ctx=temp_mngr_ctx
-        )
+    GcpProviderBackend.bootstrap_for_host_creation(
+        name=ProviderInstanceName("gcp-test"), config=config, mngr_ctx=temp_mngr_ctx
+    )
 
-    assert warnings == []
+    assert log_warnings == []
