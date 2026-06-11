@@ -6,9 +6,7 @@ and wraps it in a stubber so each test can declaratively queue expected
 requests and canned responses.
 """
 
-from collections.abc import Generator
 from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 
@@ -16,7 +14,6 @@ import boto3
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
-from loguru import logger
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
@@ -28,20 +25,6 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
-
-
-@contextmanager
-def _captured_loguru_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru WARNING messages for in-test assertions."""
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 @pytest.fixture()
@@ -311,6 +294,90 @@ def test_destroy_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client.destroy_instance(VpsInstanceId("i-abc"))
 
 
+def test_stop_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """stop_instance issues StopInstances and waits for the terminal 'stopped' state."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "stop_instances",
+        {"StoppingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    client.stop_instance(VpsInstanceId("i-abc"))
+
+
+def test_stop_instance_times_out_if_not_stopped(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A zero timeout means the wait never observes 'stopped' and raises.
+
+    ``wait_for`` makes one final condition check after the (already-expired)
+    timeout, so a single ``describe_instances`` (returning the still-stopping
+    state) is consumed before the VpsProvisioningError is raised.
+    """
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "stop_instances",
+        {"StoppingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopping"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    with pytest.raises(VpsProvisioningError, match="did not reach state 'stopped'"):
+        client.stop_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
+def test_start_instance_returns_new_public_ip(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """start_instance issues StartInstances and returns the (fresh) public IP once running."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # wait_for_instance_active polls get_instance_status (running) then get_instance_ip.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {
+                    "Instances": [
+                        {
+                            "InstanceId": "i-abc",
+                            "State": {"Name": "running"},
+                            "PublicIpAddress": "5.6.7.8",
+                        }
+                    ]
+                }
+            ]
+        },
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    assert client.start_instance(VpsInstanceId("i-abc")) == "5.6.7.8"
+
+
+def test_start_instance_times_out_if_not_active(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A zero timeout means the activeness wait never succeeds and raises."""
+    client, stubber = stubbed_client
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    with pytest.raises(VpsProvisioningError, match="did not become active"):
+        client.start_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
 def test_get_instance_status_running(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client, stubber = stubbed_client
     stubber.add_response(
@@ -564,7 +631,7 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     assert client.ensure_security_group() == "sg-test"
 
 
-def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
+def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: list[str]) -> None:
     """Empty allowed_ssh_cidrs creates/reuses the SG with no ingress and logs a warning.
 
     Mirrors how Vultr/OVH provisioning behaves in this monorepo (no provider-managed firewall);
@@ -598,14 +665,13 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
     )
     stubber.activate()
     try:
-        with _captured_loguru_warnings() as warnings:
-            assert client.ensure_security_group() == "sg-empty"
+        assert client.ensure_security_group() == "sg-empty"
     finally:
         stubber.deactivate()
-    assert any("allowed_ssh_cidrs is empty" in msg for msg in warnings)
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
 
 
-def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None:
+def test_ensure_security_group_auto_create_warns_when_open_to_internet(log_warnings: list[str]) -> None:
     """0.0.0.0/0 is the default but should still produce a visible warning at provision time."""
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
@@ -631,11 +697,10 @@ def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        with _captured_loguru_warnings() as warnings:
-            assert client.ensure_security_group() == "sg-open"
+        assert client.ensure_security_group() == "sg-open"
     finally:
         stubber.deactivate()
-    assert any("0.0.0.0/0" in msg for msg in warnings)
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_security_group_reuses_existing_sg_when_found(
