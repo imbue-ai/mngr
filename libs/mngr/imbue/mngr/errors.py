@@ -317,6 +317,30 @@ class DockerBuildTimeoutError(HostCreationError):
         )
 
 
+class DockerRuntimeNotRegisteredError(HostCreationError):
+    """Raised when the configured `docker_runtime` is not registered with the Docker daemon.
+
+    Surfaces Docker's native "unknown or invalid runtime name" failure as a
+    clean, actionable message instead of a raw `ProcessError` traceback that
+    buries the cause inside the full `docker run` command line.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' is not registered with the Docker daemon "
+            f"for provider '{provider_name}'.",
+        )
+        self.user_help_text = (
+            f"Install and register the '{runtime_name}' runtime with Docker (e.g. gVisor's "
+            f"runsc), or select the default runtime by setting docker_runtime to 'runc':\n"
+            f"  mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"or per-invocation:\n"
+            f"  MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc"
+        )
+
+
 class HostNameConflictError(ProviderError):
     """A host with this name already exists."""
 
