@@ -194,9 +194,13 @@ class ProviderError(MngrError):
 class ProviderUnavailableError(ProviderError):
     """Provider backend is not reachable (e.g. Docker daemon not running).
 
-    Commands that query multiple providers catch this and continue with
-    the providers that *are* available, so a single offline backend does
-    not block the entire operation.
+    The backend's state is *unknown* (we couldn't reach it, agents may still
+    exist), so silently skipping it risks hiding real data. Multi-provider
+    discovery therefore propagates this error rather than swallowing it: an
+    enumerate-all command fails loudly instead of quietly omitting a down
+    provider's agents. A few commands with their own per-provider handling
+    (``mngr gc``, ``mngr list``) instead catch it at their own boundary and
+    continue with the providers that *are* available.
     """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
