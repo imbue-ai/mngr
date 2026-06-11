@@ -53,8 +53,15 @@ def vultr_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
     yield tmp_path
 
 
-def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    """Run a mngr command with the test settings.toml in scope."""
+def _run_mngr(project_config_dir: Path, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
+    """Run a mngr command with the test settings.toml in scope.
+
+    The default timeout is generous because ``create`` provisions a real VPS:
+    Vultr provisioning alone can take ~90s, and on a slow run the full
+    create (provision + cloud-init + Docker build + rsync) intermittently
+    exceeded a tighter 300s budget, failing the test with a spurious
+    ``subprocess.TimeoutExpired`` rather than a real defect.
+    """
     env = os.environ.copy()
     env["MNGR_PROJECT_CONFIG_DIR"] = str(project_config_dir)
     cmd = ["uv", "run", "mngr", *args]
