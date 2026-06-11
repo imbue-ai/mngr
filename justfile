@@ -786,6 +786,80 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
+# === minds pool hosts (OVH-backed, leased mode) ===
+#
+# Canonical wrappers around `minds pool {create,list}` -- the env-aware layer
+# that derives the management SSH key + OVH AK/AS/CK from the activated tier's
+# Vault entries automatically (so you never export them or generate a key by
+# hand). Activate a minds env first:
+#   eval "$(uv run minds env activate <name>)"
+#
+# staging / production keep no local secrets.toml, so these recipes read the
+# host_pool DSN from Vault (secrets/minds/<tier>/neon.DATABASE_URL) and pass it
+# through; dev / ci envs let `minds pool` auto-resolve it from the per-env
+# secrets.toml. VAULT_ADDR / VAULT_NAMESPACE default to the imbue HCP cluster
+# (matching apps/minds/.../envs/vault_reader.py) when unset, so a plain
+# `vault login` is enough.
+
+# Shared DSN resolver: echoes `--database-url <dsn>` for staging/production
+# (read from Vault), or nothing for dev/ci (auto-resolved downstream). Private;
+# used by bake-pool-host / list-pool-hosts. Requires an activated minds env.
+[private]
+_pool-dsn-args:
+    #!/bin/bash
+    set -ueo pipefail
+    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
+        echo "error: no minds env activated in this shell." >&2
+        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first." >&2
+        exit 2
+    fi
+    case "$MINDS_ROOT_NAME" in
+        minds)         tier=production ;;
+        minds-staging) tier=staging ;;
+        *)             tier="" ;;   # dev / ci: minds pool auto-resolves the DSN
+    esac
+    if [ -n "$tier" ]; then
+        export VAULT_ADDR="${VAULT_ADDR:-https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200}"
+        export VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
+        dsn=$(vault kv get -mount=secrets -field=DATABASE_URL "minds/$tier/neon")
+        printf -- '--database-url\n%s\n' "$dsn"
+    fi
+
+# Bake one or more pre-provisioned pool hosts for the activated minds env.
+#
+# The baked version comes entirely from <workspace_dir> (a forever-claude-template
+# checkout) -- check it out at the branch/tag you want baked first. <attributes>
+# is only the lease-match label the desktop client sends (e.g. repo_branch_or_tag);
+# it does NOT select the baked version. Extra flags forward to `minds pool create`
+# (e.g. --no-recycle, --mngr-source <monorepo-root>).
+#
+# Usage:
+#   eval "$(uv run minds env activate staging)"
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-EAST-VA ~/project/forever-claude-template 2
+bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    #!/bin/bash
+    set -ueo pipefail
+    # Portable array read (works on stock macOS bash 3.2; no mapfile). The
+    # ${arr[@]+"..."} guard avoids the empty-array "unbound variable" trap
+    # under `set -u` on bash <4.4.
+    dsn_args=()
+    while IFS= read -r line; do dsn_args+=("$line"); done < <(just _pool-dsn-args)
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --attributes '{{attributes}}' \
+        --workspace-dir "{{workspace_dir}}" \
+        ${dsn_args[@]+"${dsn_args[@]}"} {{extra_args}}
+
+# List pool_hosts rows for the activated minds env (read-only).
+list-pool-hosts:
+    #!/bin/bash
+    set -ueo pipefail
+    dsn_args=()
+    while IFS= read -r line; do dsn_args+=("$line"); done < <(just _pool-dsn-args)
+    uv run minds pool list ${dsn_args[@]+"${dsn_args[@]}"}
+
 # Destroy and remove every host in the pool with status='released'.
 # Sources .minds/<env>/neon.sh for DATABASE_URL.
 cleanup-pool-hosts env="production":
