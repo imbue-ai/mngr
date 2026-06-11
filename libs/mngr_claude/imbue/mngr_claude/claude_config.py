@@ -857,6 +857,7 @@ def partition_settings_args(tokens: Sequence[str]) -> tuple[tuple[str, ...], tup
     A trailing ``--settings`` with no following value is dropped. The values are
     returned exactly as they appear in ``tokens`` (no unquoting).
     """
+    inline_prefix = f"{_SETTINGS_FLAG}="
     settings_values: list[str] = []
     remaining: list[str] = []
     index = 0
@@ -869,7 +870,6 @@ def partition_settings_args(tokens: Sequence[str]) -> tuple[tuple[str, ...], tup
             else:
                 index += 1
             continue
-        inline_prefix = f"{_SETTINGS_FLAG}="
         if token.startswith(inline_prefix):
             settings_values.append(token[len(inline_prefix) :])
             index += 1
