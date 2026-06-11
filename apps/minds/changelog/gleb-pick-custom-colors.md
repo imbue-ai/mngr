@@ -1,6 +1,6 @@
 Replace the SHA-derived per-workspace accent with a user-pickable palette + custom hex.
 
-- Workspaces now ship with one of 12 named palette colors (`indifference`, `confusion`, `courage`, `envy`, `peace`, `belonging`, `energy`, `strength`, `comfort`, `inspiration`, `clarity`, `white`) or an arbitrary `#rrggbb` hex chosen by the user. The previous SHA-from-agent-id OKLCH hue is gone.
+- Workspaces now ship with one of 12 named palette colors (in picker order: `confusion`, `courage`, `envy`, `peace`, `belonging`, `energy`, `strength`, `comfort`, `inspiration`, `clarity`, then the two neutrals `indifference` and `white`) or an arbitrary `#rrggbb` hex chosen by the user. The previous SHA-from-agent-id OKLCH hue is gone.
 
 - A palette-only picker is added to the **Create** form at the top, above the launch / AI provider configuration. The selected color is written as an mngr `color=<hex>` label on the new primary agent at create time -- no follow-up write.
 
