@@ -46,12 +46,10 @@ def test_prepend_env_exports_none_or_empty_is_unchanged() -> None:
 def test_prepend_env_exports_uses_export_so_var_survives_compound_command() -> None:
     """Env vars must be ``export``ed, not bare ``KEY=VAL`` prefixed.
 
-    Regression: a bare ``KEY=VAL command`` prefix only applies to the single
-    simple command it precedes, so for a compound command like
-    ``install && depot build`` the var is gone by the time ``depot build`` runs.
-    Using ``export KEY=VAL &&`` sets it in the shell environment for the whole
-    chain. This is the bug that made remote ``depot build`` fail with
-    "missing API token" even though DEPOT_TOKEN was passed via env.
+    A bare ``KEY=VAL command`` prefix only applies to the single simple command
+    it precedes, so for a compound command like ``install && depot build`` the
+    var would be gone by the time ``depot build`` runs. ``export KEY=VAL &&``
+    sets it in the shell environment for the whole chain.
     """
     compound = "test -x /root/.depot/bin/depot || curl x | sh && /root/.depot/bin/depot build"
     result = _prepend_env_exports(compound, {"DEPOT_TOKEN": "depot_secret"})
@@ -59,7 +57,7 @@ def test_prepend_env_exports_uses_export_so_var_survives_compound_command() -> N
     # the var is in scope for the trailing ``depot build`` after the ``&&``/``||``.
     # (shlex.quote leaves the safe KEY=VAL unquoted.)
     assert result == "export DEPOT_TOKEN=depot_secret && " + compound
-    # Guard against regressing to the broken bare-assignment prefix.
+    # Must not use a bare ``KEY=VAL`` assignment prefix.
     assert not result.startswith("DEPOT_TOKEN=")
 
 

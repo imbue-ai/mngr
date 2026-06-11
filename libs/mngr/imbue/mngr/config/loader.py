@@ -622,18 +622,13 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
-        # _drop_unknown_fields raises (strict) or returns the config with unknown
-        # keys removed (non-strict), leaving only known fields for model_validate
-        # to coerce to their declared types. model_validate (rather than
-        # model_construct) is what coerces raw TOML scalars and nested tables to
-        # their declared field types: an enum like ``builder = "DEPOT"`` to
-        # ``DockerBuilder.DEPOT`` (whose ``is``-identity check would otherwise
-        # silently fail on the raw string), ``allowed_ssh_cidrs = [...]`` to a
-        # tuple, and a nested-model table like ``SSHProviderConfig.hosts`` to
-        # ``SSHHostConfig`` (which would otherwise stay a raw dict and crash with
+        # Drop unknown fields (raising in strict mode), leaving only known fields
+        # for model_validate to coerce. Coercion matters because an uncoerced enum
+        # like ``builder = "DEPOT"`` fails its ``is``-identity check against
+        # ``DockerBuilder.DEPOT``, and an uncoerced nested table like
+        # ``SSHProviderConfig.hosts`` stays a raw dict and crashes with
         # ``AttributeError: 'dict' object has no attribute ...`` the moment the
-        # backend touched it). Only the keys present in the block land in
-        # ``model_fields_set``, so per-field config-layer merging is unaffected.
+        # backend touches it.
         cleaned_config = _drop_unknown_fields(
             raw_config, config_class, f"providers.{name}", strict=strict, silent=silent
         )
