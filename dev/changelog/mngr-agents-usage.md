@@ -2,5 +2,8 @@ Added `specs/agent-usage-plugins/spec.md`: a design spec for extending `mngr usa
 per-harness data exposure was verified against the locally installed harnesses
 (OpenCode 1.16.2, Codex 0.138.0, pi 0.79.1): OpenCode reports cost+tokens
 directly; Codex's `token_count` events expose cumulative tokens plus rate-limit
-windows (so Codex subscription agents get Claude-style windows as a bonus); pi
-reports per-message tokens with a separate provider field.
+windows (so Codex subscription agents get Claude-style windows as a bonus). A
+live two-turn `pi-coding` agent confirmed pi reports cost natively
+(`usage.cost.total`, matching the canonical Anthropic prices exactly) with
+non-overlapping cache-exclusive token buckets, so pi is reported-cost (estimate
+only as a fallback), leaving Codex as the only purely token-derived harness.

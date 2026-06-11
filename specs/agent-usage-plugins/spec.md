@@ -109,8 +109,9 @@ both Claude-specific and must be generalized (see below).
 ## Design principles
 
 1. **Writers emit only what their tool natively exposes.** Do not synthesize a
-   dollar figure on the agent host. OpenCode reports cost; pi and Codex report
-   tokens; each writer emits its native shape.
+   dollar figure on the agent host. OpenCode and pi report cost (pi falls back to
+   tokens where it has none); Codex reports tokens; each writer emits its native
+   shape.
 2. **The reader normalizes to dollars.** Cost derivation from tokens happens in
    one place — the reader — which runs where `mngr usage` is invoked (full
    Python env), not on remote agent hosts.
@@ -294,26 +295,31 @@ is what usage data the tool exposes.
   `cache.read → cache_read`, `cache.write → cache_creation`, fold `reasoning`
   into `output`. `cost_mode = API_KEY`.
 
-### pi (moderate: token-derived cost, multi-provider)
+### pi (easy: reports cost natively; estimate as fallback)
 
 - **Injection:** the existing TypeScript lifecycle extension
   (`libs/mngr_pi_coding/imbue/mngr_pi_coding/resources/mngr_pi_lifecycle.ts`)
   already extracts `usage.{input,output,cacheRead,cacheWrite}` per assistant
   message (lifecycle.ts ~line 401).
-- **Data (verified, pi 0.79.1):** no reported cost → reader estimates,
-  provenance `ESTIMATED`. The model is a **bare name** (`claude-opus-4-8`) with
-  `provider` as a **separate** field (`anthropic`); providers are
-  anthropic/openai/gemini/groq/openrouter. `usage` is **per-message**
-  `{input, output, cacheRead, cacheWrite}` → accumulate per session. Auth mode
-  comes from `auth.json[provider].type` (`"api_key"` → `API_KEY`; an oauth-style
-  type → `SUBSCRIPTION`).
-- **Added logic:** the canonical pricing key is `provider/model`, so the writer
-  must emit **both** `provider` and `model` — `mngr_pi_lifecycle.ts` currently
-  emits only `model`, so it needs `provider` added. Map pi's
-  `cacheRead`/`cacheWrite` to `cache_read`/`cache_creation`.
-- **Residual (pin at impl time):** whether pi's `usage.input` is inclusive or
-  exclusive of `cacheRead` — decides the cache-subtraction in the writer per the
-  [wire convention](#wire-schema-additions). Confirm against a real pi session.
+- **Data (verified live, pi 0.79.1 — see [Verified harness facts](#verified-harness-facts)):**
+  pi's native `assistant.usage` **includes a `cost` object** —
+  `{input, output, cacheRead, cacheWrite, total}` — that pi computes
+  client-side, with `total` matching the canonical Anthropic per-token prices to
+  the digit. So pi is **reported-cost** (provenance `REPORTED`), not estimated:
+  the writer emits `cost.total_cost_usd = usage.cost.total`. `lifecycle.ts`
+  currently drops this — it must surface `usage.cost.total`. Token buckets are
+  **non-overlapping** (`totalTokens = input + output + cacheRead + cacheWrite`),
+  so `input` is already cache-exclusive — no subtraction needed (unlike Codex).
+  Map `cacheRead → cache_read`, `cacheWrite → cache_creation`; emit `tokens` for
+  auditability. The model is a **bare name** (`claude-opus-4-8`) with `provider`
+  a **separate** field (`anthropic`); auth mode is `auth.json[provider].type`
+  (`"api_key"` → `API_KEY`; oauth-style → `SUBSCRIPTION`).
+- **Fallback logic:** for a provider/model where pi does *not* compute a cost
+  (`usage.cost` absent — possible for some of openai/gemini/groq/openrouter), the
+  writer omits `cost` and the reader estimates from `tokens` + `provider/model`.
+  Only that path needs the pricing table, so the writer must emit **both**
+  `provider` and `model` (`lifecycle.ts` emits only `model` today — add
+  `provider`) to form the canonical `provider/model` key.
 
 ### Codex (moderate: token-derived cost, awkward injection)
 
@@ -345,9 +351,9 @@ is what usage data the tool exposes.
 
 | Harness   | Injection point (exists)        | Native data            | Cost path  | Windows | Difficulty |
 | --------- | ------------------------------- | ---------------------- | ---------- | ------- | ---------- |
-| OpenCode  | in-process TS plugin            | cost + tokens          | reported   | no      | Easy       |
-| pi        | in-process TS extension         | tokens (multi-prov)    | estimated  | no      | Moderate   |
-| Codex     | rollout transcript streamer     | tokens + rate_limits   | estimated  | yes (sub) | Moderate |
+| OpenCode  | in-process TS plugin            | cost + tokens          | reported            | no        | Easy     |
+| pi        | in-process TS extension         | cost + tokens          | reported (est. fallback) | no   | Easy     |
+| Codex     | rollout transcript streamer     | tokens + rate_limits   | estimated           | yes (sub) | Moderate |
 
 ## Edge cases and failure modes
 
@@ -408,12 +414,19 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
    `total_tokens` (`input` is inclusive of cached; `total = input + output`), and
    **also carry `rate_limits`** (`primary` 5h, `secondary` 7d) in subscription
    mode — so Codex gets Claude-style windows as a bonus.
-3. **pi — confirmed, one residual.** Model is a bare name with a separate
-   `provider` field (canonical key `provider/model`); `auth.json[provider].type`
-   gives the mode (`"api_key"` here → `API_KEY`); per-message
-   `{input, output, cacheRead, cacheWrite}` usage. **Residual:** whether
-   `usage.input` is inclusive of `cacheRead` — pin against a live pi session when
-   building the writer (only affects the estimate's accuracy, not feasibility).
+3. **pi — confirmed via a live mngr session (better than assumed).** Drove a
+   two-turn `pi-coding` agent and read the raw session + common transcript. pi's
+   native `assistant.usage` **includes a `cost` object**
+   (`{input, output, cacheRead, cacheWrite, total}`) it computes client-side, so
+   pi is **reported-cost**, not estimated. The residual is resolved: token
+   buckets are non-overlapping (`totalTokens = input + output + cacheRead +
+   cacheWrite`, verified `2+7+9133+21 = 9163`), so `input` is cache-exclusive —
+   no subtraction. Independently, pi's per-component cost matched the canonical
+   Anthropic per-token prices exactly (e.g. `9133 × 5e-7 = 0.0045665` cache-read),
+   a second-source validation of the pricing table. Model is a bare name with a
+   separate `provider` field (key `provider/model`); `auth.json[provider].type`
+   gives the mode (`"api_key"` → `API_KEY`). `lifecycle.ts` must surface
+   `usage.cost.total` and `provider` (it currently drops both).
 
 ## Out of scope and deferred work
 
@@ -436,8 +449,10 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
    canonical pricing table module (Layer 2 table only).
 2. **OpenCode writer** — proves the non-Claude path end-to-end with no new cost
    logic (reported cost).
-3. **pi writer** — first token-derived harness; exercises normalization.
-4. **Codex writer** — token-derived via the rollout streamer.
+3. **pi writer** — reported cost (`usage.cost.total`); exercises the
+   estimate-from-tokens fallback and `provider/model` normalization.
+4. **Codex writer** — first purely token-derived harness, via the rollout
+   streamer; also populates `rate_limits`.
 5. **modal_litellm cross-drift test** — separate PR; does not block the above.
 6. **Antigravity spike** — separate investigation; build-vs-defer decision.
 
