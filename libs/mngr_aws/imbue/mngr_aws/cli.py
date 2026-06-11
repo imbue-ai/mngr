@@ -273,10 +273,13 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created security group (name taken from
-    the resolved `[providers.<--provider>]` block, or overridden by `--sg-name`;
-    default `mngr-aws`). Idempotent: a no-op (exit 0) when the security group
-    is already gone.
+    instances present, deletes the auto-created security group. The name comes
+    from `--sg-name` if supplied; otherwise from the resolved
+    `[providers.<--provider>]` block's `security_group.name` when that block
+    configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
+    or configured with an `ExistingSecurityGroup` -- which carries an `id`
+    rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
+    (exit 0) when the security group is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
