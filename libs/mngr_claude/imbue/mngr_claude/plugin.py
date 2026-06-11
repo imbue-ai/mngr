@@ -49,10 +49,10 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
-from imbue.mngr.hosts.host import get_agent_state_dir_path
-from imbue.mngr.hosts.host import get_agents_root_dir
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -2573,7 +2573,7 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     - active file absent -> END_OF_TURN (idle, turn complete)
     - otherwise -> None (agent is actively running)
     """
-    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     if _host_file_exists(host, agent_dir / "permissions_waiting"):
         return WaitingReason.PERMISSIONS
     if not _host_file_exists(host, agent_dir / "active"):

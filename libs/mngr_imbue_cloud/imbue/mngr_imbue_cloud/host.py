@@ -38,6 +38,7 @@ from pydantic import Field
 
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -111,7 +112,7 @@ class ImbueCloudHost(Host):
         """
         if self.pre_baked_agent_id is None:
             return None
-        data_path = self.host_dir / "agents" / str(self.pre_baked_agent_id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, self.pre_baked_agent_id) / "data.json"
         try:
             return _json.loads(self.read_text_file(data_path))
         except FileNotFoundError:
@@ -243,7 +244,7 @@ class ImbueCloudHost(Host):
         if created_branch_name is not None:
             patched["created_branch_name"] = created_branch_name
 
-        data_path = self.host_dir / "agents" / str(self.pre_baked_agent_id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, self.pre_baked_agent_id) / "data.json"
         self.write_text_file(data_path, _json.dumps(patched, indent=2))
         return agent
 

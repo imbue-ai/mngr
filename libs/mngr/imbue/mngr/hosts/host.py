@@ -58,6 +58,8 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
@@ -193,23 +195,6 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     if client is not None:
         return client.get_transport()
     return None
-
-
-@pure
-def get_agents_root_dir(host_dir: Path) -> Path:
-    """Return the directory under which all agents' state directories live.
-
-    This is the single source of truth for where agent state lives on disk, so
-    code that needs to enumerate agents (rather than address a single one) can do
-    so without duplicating the path structure.
-    """
-    return host_dir / "agents"
-
-
-@pure
-def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
-    """Compute the state directory path for an agent given the host directory and agent ID."""
-    return get_agents_root_dir(host_dir) / str(agent_id)
 
 
 def install_packaged_script_on_host(
