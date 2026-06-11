@@ -70,3 +70,16 @@ carries no outer positioning -- spacing is the parent container's flex
 gap -- so it composes cleanly wherever it's dropped in. The styleguide's
 "Sidebar items" sample renders through that same builder, so the catalog
 can't drift from the live menu.
+
+The workspace menu is now 280px wide (was 244px).
+
+Each workspace row's action icons -- the settings gear and (in Electron)
+the "open in new window" arrow -- are now always visible rather than
+revealed on hover. The open-in-new icon is the lucide arrow-up-right
+diagonal arrow (matching the Figma "Space switcher menu"), replacing the
+older external-link box glyph.
+
+The landing page's workspace rows gain the same "open in new window"
+arrow, placed just left of the settings gear. In the desktop app it
+opens (or focuses) a dedicated window for that workspace; in a plain
+browser it opens the workspace in a new tab.

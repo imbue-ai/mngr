@@ -97,11 +97,6 @@
     handleRowClick(e.target);
   });
 
-  // Reveal a non-current row's action icons (open-in-new + settings gear)
-  // on hover; the current row shows them at all times. Shared handler so
-  // both menus behave identically.
-  window.mindsSidebarRow.wireHoverReveal();
-
   document.addEventListener('contextmenu', function (e) {
     var row = e.target.closest('.sidebar-item');
     if (!row) return;

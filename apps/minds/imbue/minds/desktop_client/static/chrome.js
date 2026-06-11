@@ -432,11 +432,6 @@
   // -- SSE-driven sidebar (browser mode only) -------------------------------
   var lastWorkspaces = [];
 
-  // Reveal a non-current row's settings gear on hover (browser mode has no
-  // open-in-new button). Shared handler so the inline menu matches the
-  // Electron menu's hover behavior.
-  window.mindsSidebarRow.wireHoverReveal();
-
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
     if (!container) return;

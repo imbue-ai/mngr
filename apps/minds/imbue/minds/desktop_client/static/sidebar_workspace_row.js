@@ -14,18 +14,17 @@
 // Usage:
 //   var row = window.mindsSidebarRow.buildRow(workspace,
 //               { isCurrent: bool, withOpenNew: bool });
-//   window.mindsSidebarRow.wireHoverReveal();  // once per page
 //   var btn = window.mindsSidebarRow.buildSettingsBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildOpenNewBtn(agentId);
 //   var btn = window.mindsSidebarRow.buildIconButton(title, pathSvg,
 //                                                    dataAttr, agentId);
 //
 // ``workspace`` is { id, name, accent?, is_stale? }. ``withOpenNew`` adds
-// the hover-revealed "open in new window" button (Electron only -- browser
-// mode has no multi-window concept and passes false). ``isCurrent`` marks
-// the row selected (bg + the settings gear, and the open-new icon shown
-// rather than hover-revealed). Event wiring (click / hover / context-menu)
-// is the caller's job -- this builds DOM only.
+// the "open in new window" arrow (Electron only -- browser mode has no
+// multi-window concept and passes false). Both action icons are always
+// visible. ``isCurrent`` marks the row selected (highlighted background).
+// Event wiring (click / context-menu) is the caller's job -- this builds
+// DOM only.
 (function () {
   function buildIconButton(title, pathSvg, dataAttr, agentId) {
     var btn = document.createElement('button');
@@ -40,9 +39,11 @@
     return btn;
   }
 
+  // lucide ``arrow-up-right`` (Figma "Space switcher menu", node 238-8163):
+  // a bare diagonal arrow, not the old external-link box. Drawn in the
+  // builder's 16px viewBox at lucide's standard 29.17% inset (span 4.67-11.33).
   var OPEN_NEW_PATH =
-    '<path d="M9.33 2.67h4v4"/><path d="M6.67 9.33L13.33 2.67"/>'
-    + '<path d="M13.33 9.33v3.33a1.33 1.33 0 0 1-1.33 1.33H3.33a1.33 1.33 0 0 1-1.33-1.33V4a1.33 1.33 0 0 1 1.33-1.33h3.33"/>';
+    '<path d="M11.33 11.33V4.67H4.67"/><path d="M11.33 4.67L4.67 11.33"/>';
 
   var SETTINGS_PATH =
     '<circle cx="8" cy="8" r="2"/>'
@@ -88,14 +89,11 @@
       row.appendChild(staleDot);
     }
 
-    // Row action icons. Both are hidden by default and revealed on row
-    // hover (by the delegated wireHoverReveal handler below); the current
-    // row shows them immediately (Figma "selected row" treatment). The
-    // settings gear is on every row in both modes; the open-in-new button
-    // is Electron-only (withOpenNew) since the browser has no multi-window.
+    // Row action icons, always visible (no hover-reveal). The settings gear
+    // is on every row in both modes; the open-in-new arrow is Electron-only
+    // (withOpenNew) since the browser has no multi-window concept.
     function addActionIcon(btn) {
-      if (isCurrent) btn.classList.add('inline-flex');
-      else btn.classList.add('hidden');
+      btn.classList.add('inline-flex');
       row.appendChild(btn);
     }
     if (withOpenNew) addActionIcon(buildOpenNewBtn(workspace.id));
@@ -116,45 +114,10 @@
     return row;
   }
 
-  // Reveal the action icons (open-in-new + settings gear) when a
-  // non-current row is hovered, and re-hide them on leave. Delegated on
-  // ``document`` so it covers rows added later. The current row keeps its
-  // icons shown at all times, so it's skipped. Both menus (sidebar.js and
-  // chrome.js) call this once; keeping it here means the row's hover
-  // behavior lives with the row's markup.
-  function setRowIconsHidden(row, hidden) {
-    var icons = row.querySelectorAll('.sidebar-row-icon');
-    for (var i = 0; i < icons.length; i += 1) {
-      if (hidden) {
-        icons[i].classList.add('hidden');
-        icons[i].classList.remove('inline-flex');
-      } else {
-        icons[i].classList.remove('hidden');
-        icons[i].classList.add('inline-flex');
-      }
-    }
-  }
-
-  function wireHoverReveal() {
-    document.addEventListener('mouseover', function (e) {
-      var row = e.target.closest('.sidebar-item');
-      if (!row || row.classList.contains('is-current')) return;
-      setRowIconsHidden(row, false);
-    });
-    document.addEventListener('mouseout', function (e) {
-      var row = e.target.closest('.sidebar-item');
-      if (!row || row.classList.contains('is-current')) return;
-      // Ignore moves between children of the same row.
-      if (e.relatedTarget && row.contains(e.relatedTarget)) return;
-      setRowIconsHidden(row, true);
-    });
-  }
-
   window.mindsSidebarRow = {
     buildIconButton: buildIconButton,
     buildOpenNewBtn: buildOpenNewBtn,
     buildSettingsBtn: buildSettingsBtn,
     buildRow: buildRow,
-    wireHoverReveal: wireHoverReveal,
   };
 })();

@@ -54,6 +54,18 @@ def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
     assert "{{" not in html
 
 
+def test_render_landing_page_has_open_in_new_window_button_before_settings() -> None:
+    # Each workspace row carries an "open in new window" arrow to the LEFT of
+    # the settings gear. It calls window.landingOpenInNewWindow, which relays
+    # to the main process in Electron (or opens a new tab in a browser).
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert "window.landingOpenInNewWindow(this)" in html
+    # The lucide arrow-up-right diagonal shaft is the open-in-new glyph.
+    assert '<path d="M7 17L17 7"/>' in html
+    # It sits before the settings button within the row.
+    assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
+
+
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
@@ -504,6 +516,12 @@ def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
     html_default = render_sidebar_page()
     assert "left:-2px" in html_default
     assert "top:40px" in html_default
+
+
+def test_render_sidebar_page_menu_width_is_280px() -> None:
+    html = render_sidebar_page()
+    assert "w-[280px]" in html
+    assert "w-[244px]" not in html
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
@@ -1282,6 +1300,15 @@ def test_icon24_size_axis() -> None:
     for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
         html = CATALOG.render("Icon24", name="home", size=size)
         assert css_class in html
+
+
+def test_icon24_renders_arrow_up_right() -> None:
+    # The lucide ``arrow-up-right`` glyph backs the "open in new window"
+    # affordance on workspace rows (landing page + sidebar).
+    html = CATALOG.render("Icon24", name="arrow-up-right")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<path d="M7 7h10v10"/>' in html
+    assert '<path d="M7 17L17 7"/>' in html
 
 
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:
