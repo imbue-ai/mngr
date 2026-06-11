@@ -22,6 +22,7 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
 from imbue.mngr.cli.complete import generate_completion_shim
+from imbue.mngr.cli.complete import get_managed_completion_script_path
 from imbue.mngr.cli.complete import strip_legacy_completion_block
 from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -184,6 +185,12 @@ def _install_completion(
         write_human_line("Replaced the old completion block with the managed shim in {}", rc_path)
     else:
         write_human_line("Shell completion enabled in {}", rc_path)
+    # A child process can't load completion into the parent shell, so tell the user
+    # how to activate it now without opening a new shell.
+    write_human_line(
+        "To use it in this shell now, run:  source {}  (new shells pick it up automatically)",
+        get_managed_completion_script_path(shell_type),
+    )
     return True
 
 
