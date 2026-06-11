@@ -175,9 +175,11 @@ def convert():
                 if event_id in existing_ids:
                     continue
                 text = _extract_user_text(raw.get("content"), conv_id, step_index)
-                # _extract_user_text already returned None and logged when the
-                # envelope is missing or content is not a string; an empty
-                # USER_REQUEST body is also dropped as it carries no signal.
+                # _extract_user_text returns the typed text (the inner
+                # <USER_REQUEST> body when the envelope is present, otherwise the
+                # content as-is), or None (already logged) when content is not a
+                # string. Empty results -- a None, an empty USER_REQUEST body, or
+                # otherwise empty content -- are dropped here as they carry no signal.
                 if not text:
                     continue
                 new_events.append((timestamp, {
