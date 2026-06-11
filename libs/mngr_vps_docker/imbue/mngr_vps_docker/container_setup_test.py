@@ -5,21 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps_docker.container_setup import _build_start_container_script
 from imbue.mngr_vps_docker.container_setup import _clone_build_context_for_self_contained_git
 from imbue.mngr_vps_docker.container_setup import _remote_sh_command
-
-
-def _git(repo: Path, *args: str) -> str:
-    """Run a git command in ``repo``, returning stdout."""
-    result = subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout
 
 
 def test_build_start_container_script_shell_quotes_name() -> None:
@@ -66,9 +55,7 @@ def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) ->
 
 
 @pytest.mark.rsync
-def test_clone_build_context_drops_worktree_admin_from_primary_checkout(
-    tmp_path: Path, setup_git_config: None
-) -> None:
+def test_clone_build_context_drops_worktree_admin_from_primary_checkout(temp_git_repo: Path) -> None:
     """A primary checkout with linked worktrees clones to a self-contained .git.
 
     Regression test for the AWS create-template: when ``mngr create`` is run
@@ -81,17 +68,13 @@ def test_clone_build_context_drops_worktree_admin_from_primary_checkout(
     structural property asserted here -- so the seed can update every branch.
     The clone must still carry the operator's uncommitted edits.
     """
-    # Primary checkout with two extra branches checked out in linked worktrees
-    # (mirrors an operator who keeps a worktree per branch -- the bug repro).
-    primary = tmp_path / "primary"
-    primary.mkdir()
-    _git(primary, "init", "-b", "main")
-    (primary / "f.txt").write_text("base\n")
-    _git(primary, "add", "f.txt")
-    _git(primary, "commit", "-m", "base")
+    # temp_git_repo is a primary checkout on `main` with an initial commit. Give
+    # it two extra branches checked out in linked worktrees, mirroring an
+    # operator who keeps a worktree per branch (the bug repro).
+    primary = temp_git_repo
     for branch in ("mngr/feat-a", "mngr/feat-b"):
-        _git(primary, "branch", branch)
-        _git(primary, "worktree", "add", str(tmp_path / f"wt-{branch.replace('/', '-')}"), branch)
+        run_git_command(primary, "branch", branch)
+        run_git_command(primary, "worktree", "add", str(primary.parent / f"wt-{branch.replace('/', '-')}"), branch)
     # An uncommitted edit that must survive into the build context.
     (primary / "dirty.txt").write_text("in-flight\n")
     # Precondition: the raw checkout carries the worktree admin that breaks the seed.
@@ -104,7 +87,7 @@ def test_clone_build_context_drops_worktree_admin_from_primary_checkout(
         # is held checked-out by a worktree the seed push can't release.
         assert (clone / ".git").is_dir()
         assert not (clone / ".git" / "worktrees").exists()
-        assert _git(clone, "worktree", "list").strip().count("\n") == 0
+        assert run_git_command(clone, "worktree", "list").stdout.strip().count("\n") == 0
         # ...and it still carries the operator's uncommitted edit.
         assert (clone / "dirty.txt").read_text() == "in-flight\n"
     finally:
