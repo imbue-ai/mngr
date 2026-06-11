@@ -300,6 +300,20 @@ def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:
     )
 
 
+def _aggregate_tokens(records: tuple[SessionCostRecord, ...]) -> TokenSnapshot:
+    """Sum each token field across ``records``'s ``tokens`` (a None record contributes nothing).
+
+    All-None ``TokenSnapshot`` when no record carries tokens -- e.g. a cost-only
+    source like Claude -- so the JSON / CEL surface stays shape-stable.
+    """
+    return TokenSnapshot(
+        input=_sum_optional([s.tokens.input if s.tokens is not None else None for s in records]),
+        output=_sum_optional([s.tokens.output if s.tokens is not None else None for s in records]),
+        cache_read=_sum_optional([s.tokens.cache_read if s.tokens is not None else None for s in records]),
+        cache_creation=_sum_optional([s.tokens.cache_creation if s.tokens is not None else None for s in records]),
+    )
+
+
 class UsageSnapshot(FrozenModel):
     """A complete usage snapshot derived from one writer's source.
 
@@ -387,6 +401,26 @@ class UsageSnapshot(FrozenModel):
         and real costs. All-None when there are no api_key sessions.
         """
         return _aggregate_cost(self.api_sessions)
+
+    @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across subscription-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.subscription_sessions)
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across api_key-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.api_sessions)
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        """True if any subscription session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.subscription_sessions)
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        """True if any api_key session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.api_sessions)
 
     @property
     def session_count(self) -> int:

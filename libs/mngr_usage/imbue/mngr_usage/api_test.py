@@ -22,8 +22,10 @@ from imbue.mngr_usage.api import derive_elapsed
 from imbue.mngr_usage.api import wait_for_usage
 from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostMode
+from imbue.mngr_usage.data_types import CostProvenance
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 
@@ -400,3 +402,83 @@ def test_wait_for_usage_elapsed_percentage_predicate() -> None:
     )
     assert result.is_matched is True
     assert result.matched_source == "claude"
+
+
+# =============================================================================
+# Token aggregates + estimated-cost flag surface (mirror-cost-split)
+# =============================================================================
+
+
+def _api_session(
+    session_id: str,
+    *,
+    total_cost_usd: float,
+    tokens: TokenSnapshot,
+    provenance: CostProvenance,
+    last_event_at: int,
+) -> SessionCostRecord:
+    return SessionCostRecord(
+        session_id=session_id,
+        cost=CostSnapshot(total_cost_usd=total_cost_usd),
+        cost_mode=CostMode.API_KEY,
+        tokens=tokens,
+        model="anthropic/claude-opus-4-8",
+        cost_provenance=provenance,
+        first_event_at=last_event_at,
+        last_event_at=last_event_at,
+    )
+
+
+def test_cel_context_exposes_token_aggregates_and_estimated_flag() -> None:
+    reported = _api_session(
+        "r",
+        total_cost_usd=1.0,
+        tokens=TokenSnapshot(input=100, output=50),
+        provenance=CostProvenance.REPORTED,
+        last_event_at=1000,
+    )
+    estimated = _api_session(
+        "e",
+        total_cost_usd=2.0,
+        tokens=TokenSnapshot(input=200, output=100),
+        provenance=CostProvenance.ESTIMATED,
+        last_event_at=1001,
+    )
+    snapshot = UsageSnapshot(source_name="codex", updated_at=1001, sessions=(estimated, reported))
+    ctx = build_source_cel_context(snapshot, now=2000)
+
+    assert ctx["api_cost"]["total_cost_usd"] == 3.0
+    # Any estimated session in the mode flags the whole aggregate as estimated.
+    assert ctx["api_cost"]["is_estimated"] is True
+    assert ctx["api_tokens"]["input"] == 300 and ctx["api_tokens"]["output"] == 150
+    # Newest-first; the estimated session is the fresher one.
+    assert ctx["sessions"][0]["cost_provenance"] == CostProvenance.ESTIMATED
+    assert ctx["sessions"][0]["tokens"]["input"] == 200
+    assert ctx["sessions"][0]["model"] == "anthropic/claude-opus-4-8"
+
+
+def test_all_reported_sessions_are_not_flagged_estimated() -> None:
+    reported = _api_session(
+        "r",
+        total_cost_usd=5.0,
+        tokens=TokenSnapshot(input=10, output=10),
+        provenance=CostProvenance.REPORTED,
+        last_event_at=1000,
+    )
+    snapshot = UsageSnapshot(source_name="opencode", updated_at=1000, sessions=(reported,))
+    assert snapshot.is_api_cost_estimated is False
+    assert build_source_cel_context(snapshot, now=2000)["api_cost"]["is_estimated"] is False
+
+
+def test_cost_only_source_has_all_none_token_aggregate() -> None:
+    # A Claude-style cost-only session (no tokens) -> token aggregate is all-None.
+    cost_only = SessionCostRecord(
+        session_id="c",
+        cost=CostSnapshot(total_cost_usd=1.0),
+        cost_mode=CostMode.API_KEY,
+        first_event_at=1000,
+        last_event_at=1000,
+    )
+    snapshot = UsageSnapshot(source_name="claude", updated_at=1000, sessions=(cost_only,))
+    assert snapshot.api_tokens.input is None
+    assert build_source_cel_context(snapshot, now=2000)["api_tokens"]["input"] is None

@@ -1067,6 +1067,9 @@ def session_render_dict(session: SessionCostRecord, now: int) -> dict[str, Any]:
         "session_id": session.session_id,
         "cost": session.cost.model_dump(),
         "cost_mode": session.cost_mode,
+        "cost_provenance": session.cost_provenance,
+        "model": session.model,
+        "tokens": session.tokens.model_dump() if session.tokens is not None else None,
         "first_event_at": session.first_event_at,
         "last_event_at": session.last_event_at,
         "age_seconds": max(0, now - session.last_event_at),
@@ -1098,9 +1101,19 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
         "source": snapshot.source_name,
         "updated_at": snapshot.updated_at,
         "since_seconds": snapshot.since_seconds,
-        "subscription_cost": snapshot.subscription_cost.model_dump(),
+        # ``is_estimated`` rides inside each cost block: true when any contributing
+        # session's dollars were reader-derived from tokens (vs harness-reported).
+        "subscription_cost": {
+            **snapshot.subscription_cost.model_dump(),
+            "is_estimated": snapshot.is_subscription_cost_estimated,
+        },
+        "subscription_tokens": snapshot.subscription_tokens.model_dump(),
         "subscription_session_count": snapshot.subscription_session_count,
-        "api_cost": snapshot.api_cost.model_dump(),
+        "api_cost": {
+            **snapshot.api_cost.model_dump(),
+            "is_estimated": snapshot.is_api_cost_estimated,
+        },
+        "api_tokens": snapshot.api_tokens.model_dump(),
         "api_session_count": snapshot.api_session_count,
         "session_count": snapshot.session_count,
         "sessions": [session_render_dict(s, now) for s in snapshot.sessions],
