@@ -1755,7 +1755,9 @@ async def _handle_set_workspace_color_api(
 
     try:
         body = await request.json()
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, ValueError) as exc:
+        # ValueError also covers UnicodeDecodeError on a non-UTF-8 body
+        # (matches the other request.json() call sites in this file).
         # External (HTTP) input: log at warning level rather than silently
         # swallowing so a buggy / hostile client's bad bodies are visible.
         logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
