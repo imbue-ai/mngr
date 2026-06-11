@@ -220,6 +220,19 @@ Provider: aws
   Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: azure
+  Azure-specific args (consumed by provider, not passed to docker):
+    --azure-region=REGION       Azure region / location (default: westus)
+    --azure-vm-size=SIZE        Azure VM size (default: Standard_B2s)
+    --azure-spot                Run on Azure Spot capacity (presence-only flag).
+                                Azure may reclaim on capacity pressure; the host is
+                                deleted, not stopped, on eviction. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the VM.
+  Example: -b --azure-vm-size=Standard_D2s_v5 -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
