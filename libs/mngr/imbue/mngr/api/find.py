@@ -181,36 +181,6 @@ class ResolvedHostLocationAddress(FrozenModel):
     agent: DiscoveredAgent | None = Field(default=None, description="The resolved agent, if the location named one")
 
 
-@pure
-def discovery_scope_for_host_location(
-    parsed: HostLocationAddress,
-) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
-    """Derive ``(provider_names, agent_identifiers)`` discovery hints from a ``HostLocationAddress``.
-
-    Lets a command scope discovery to only the provider(s) that could hold the
-    target -- via the explicit ``.PROVIDER`` qualifier and/or the agent name --
-    instead of a blind multi-provider scan. The point is correctness, not just
-    speed: with discovery now propagating ``ProviderUnavailableError`` rather
-    than swallowing it, scoping keeps an *unrelated* unavailable provider from
-    failing the command.
-
-    The two hints differ in strength. A ``.PROVIDER`` qualifier is an exact
-    scope -- only that provider is ever queried. An agent identifier is resolved
-    by :func:`discover_hosts_and_agents` through the discovery event stream and
-    so is best-effort: on a warm cache it queries only the provider(s) that
-    recently held the agent, but a cold or stale cache falls back to a full scan
-    (which can still hit -- and fail on -- an unrelated unavailable provider).
-
-    Returns ``(None, None)`` for a bare host reference (no agent, no provider
-    qualifier), which genuinely needs a full scan to locate.
-    """
-    provider_names = (
-        (str(parsed.host.provider),) if parsed.host is not None and parsed.host.provider is not None else None
-    )
-    agent_identifiers = (str(parsed.agent),) if parsed.agent is not None else None
-    return provider_names, agent_identifiers
-
-
 @log_call
 def resolve_host_location_address(
     parsed: HostLocationAddress,

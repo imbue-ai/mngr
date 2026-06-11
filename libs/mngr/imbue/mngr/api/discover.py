@@ -14,6 +14,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentNameOrId
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
@@ -212,6 +213,33 @@ def discover_hosts_and_agents(
         return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
 
 
+@pure
+def discovery_scope_for_agent_and_host(
+    agent: AgentNameOrId | None,
+    host: HostAddress | None,
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
+    """Derive ``(provider_names, agent_identifiers)`` discovery hints from an agent/host reference.
+
+    Lets a command scope discovery to only the provider(s) that could hold the
+    target instead of a blind multi-provider scan. The two hints differ in
+    strength: a ``.PROVIDER`` qualifier on ``host`` is an exact scope -- only
+    that provider is ever queried -- while an ``agent`` identifier is
+    best-effort: :func:`discover_hosts_and_agents` resolves it through the
+    discovery event stream and falls back to a full scan on a cold/stale cache
+    (which can still hit -- and fail on -- an unrelated unavailable provider).
+    The point is correctness, not just speed: with discovery now propagating
+    ``ProviderUnavailableError`` rather than swallowing it, scoping keeps an
+    unrelated unavailable provider from failing the command.
+
+    Returns ``(None, None)`` when there is nothing to scope by (no agent and no
+    provider qualifier), which genuinely needs a full scan to locate.
+    """
+    provider = host.provider if host is not None else None
+    provider_names = (str(provider),) if provider is not None else None
+    agent_identifiers = (str(agent),) if agent is not None else None
+    return provider_names, agent_identifiers
+
+
 def discover_by_address(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -225,14 +253,11 @@ def discover_by_address(
     optimization. After discovery, results are filtered by the address's full
     host/provider constraint.
     """
-    provider_names: tuple[str, ...] | None = None
-    if address.host is not None and address.host.provider is not None:
-        provider_names = (str(address.host.provider),)
-
+    provider_names, agent_identifiers = discovery_scope_for_agent_and_host(address.agent, address.host)
     agents_by_host, providers = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
-        agent_identifiers=(str(address.agent),),
+        agent_identifiers=agent_identifiers,
         include_destroyed=include_destroyed,
         reset_caches=reset_caches,
     )

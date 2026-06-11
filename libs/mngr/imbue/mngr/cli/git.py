@@ -5,7 +5,7 @@ import click
 from click_option_group import optgroup
 
 from imbue.mngr.api.discover import discover_hosts_and_agents
-from imbue.mngr.api.find import discovery_scope_for_host_location
+from imbue.mngr.api.discover import discovery_scope_for_agent_and_host
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.git import git_pull
 from imbue.mngr.api.git import git_push
@@ -71,7 +71,7 @@ def _resolve_remote_endpoint(
             "for local-only operations"
         )
 
-    provider_names, agent_identifiers = discovery_scope_for_host_location(parsed)
+    provider_names, agent_identifiers = discovery_scope_for_agent_and_host(parsed.agent, parsed.host)
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
