@@ -498,13 +498,22 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
    a thin hookimpl calling `aggregate_process_cumulative` — proving the hook
    end-to-end with zero behavior change for Claude (existing tests must stay
    green).
-2. **OpenCode writer** — proves the non-Claude path end-to-end with no new cost
-   logic (reported cost).
-3. **pi writer** — reported cost (`usage.cost.total`); exercises the
-   estimate-from-tokens fallback and `provider/model` normalization.
-4. **Codex writer** — first purely token-derived harness, via the rollout
-   streamer; also populates `rate_limits`.
+2. **OpenCode writer** — done; `mngr_opencode_usage`, reported per-message cost
+   (session-incremental). Verified live.
+3. **pi writer** — done; writer in mngr_pi_coding's lifecycle extension (gated),
+   `mngr_pi_coding_usage` owns the reader + gate. Reported cost. Verified live.
+4. **Codex writer** — done; `mngr_codex_usage` ships `codex_usage.sh` (rollout
+   `token_count` → cost_snapshot, launched by the harness supervisor when
+   present) and a session-cumulative reader. Token-estimated cost + 5h/7d
+   windows. OpenAI prices pinned to litellm directly. Verified live.
+
+   **Field note (retroactive pricing):** because the writer stores tokens and the
+   reader prices them at read time, a model newer than the pricing table (seen
+   live: `gpt-5.5`, not yet in litellm) is captured with cost left `None` + a
+   WARNING (never `$0`); once its price is added, historical events price
+   retroactively. So a brand-new model degrades gracefully rather than blocking.
 5. **modal_litellm cross-drift test** — done (landed alongside the pricing table).
+   OpenAI prices have a separate `litellm_pricing_test` pinning them to litellm.
 6. **Antigravity spike** — separate investigation; build-vs-defer decision.
 
 ## Base branch note
