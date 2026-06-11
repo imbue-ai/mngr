@@ -174,14 +174,14 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 # Read-path discovery skip is user-visible
 # =============================================================================
 #
-# When ``build_provider_instance`` raises ``ProviderEmptyError``, the shared
-# discovery code in ``mngr.api.list._construct_and_discover_for_provider``
-# swallows it with ``logger.debug`` -- so a misconfigured AWS provider used to
-# disappear from ``mngr list`` / ``mngr connect`` with no surface output and
-# no way for the user to tell why. The backend now emits a ``logger.warning``
-# at each raise site so that swallow is no longer silent. These tests lock in
-# the warning content and the continued ProviderEmptyError raise (the warning
-# is additive, not a behavior-replacement).
+# ``build_provider_instance`` raises ``ProviderEmptyError`` when AWS credentials
+# or AMIs cannot be resolved. The shared discovery code in
+# ``mngr.api.list._construct_and_discover_for_provider`` swallows that
+# exception at ``logger.debug``, so the backend must emit a ``logger.warning``
+# at each raise site for misconfigured providers to remain visible in
+# ``mngr list`` / ``mngr connect``. The tests below pin both halves of the
+# contract: ``ProviderEmptyError`` still raises, AND exactly one warning is
+# emitted naming the provider.
 
 
 def test_build_provider_instance_warns_and_raises_when_credentials_missing(
