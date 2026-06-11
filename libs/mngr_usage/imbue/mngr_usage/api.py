@@ -720,16 +720,214 @@ def aggregate_session_cumulative(
     since_seconds: int,
     now: int,
 ) -> UsageSnapshot | None:
-    """Aggregate a **session-cumulative** source (Codex, OpenCode, pi) into a UsageSnapshot.
+    """Aggregate a **session-cumulative** source (Codex) into a UsageSnapshot.
 
-    Each ``session_id`` is its own counter, so the freshest reading per session
-    is its whole contribution -- no process partitioning, no cross-session delta.
-    Cost is preferred from the harness and otherwise estimated from tokens. Same
-    outer combine, recency filter, and window handling as the process-cumulative
+    Each ``session_id`` is its own counter and each event carries the session's
+    cumulative-to-date reading, so the freshest reading per session is its whole
+    contribution -- no process partitioning, no cross-session delta. Cost is
+    preferred from the harness and otherwise estimated from tokens. Same outer
+    combine, recency filter, and window handling as the process-cumulative
     strategy.
     """
     return _combine_agent_walks(
         source_name, agents_events, _walk_agent_events_session_cumulative, since_seconds=since_seconds, now=now
+    )
+
+
+def _add_optional_int(left: int | None, right: int | None) -> int | None:
+    """Add two optional ints, treating None as 'missing' (None + None stays None)."""
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
+def _sum_token_snapshots(left: TokenSnapshot | None, right: TokenSnapshot | None) -> TokenSnapshot | None:
+    """Field-wise sum of two optional TokenSnapshots; None when both are None."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return TokenSnapshot(
+        input=_add_optional_int(left.input, right.input),
+        output=_add_optional_int(left.output, right.output),
+        cache_read=_add_optional_int(left.cache_read, right.cache_read),
+        cache_creation=_add_optional_int(left.cache_creation, right.cache_creation),
+    )
+
+
+def _message_key_from_event(event: dict[str, Any]) -> str | None:
+    """Dedup key for one message within a session: ``message_id``, else ``event_id``.
+
+    A session-incremental writer emits one event per message update carrying a
+    ``message_id``; the reader keeps the freshest event per message so re-fires of
+    a streaming message (growing cost) collapse to its final reading. Falling back
+    to ``event_id`` makes each event its own message when no ``message_id`` is set.
+    """
+    message_id = event.get("message_id")
+    if isinstance(message_id, str) and message_id:
+        return message_id
+    event_id = event.get("event_id")
+    return event_id if isinstance(event_id, str) and event_id else None
+
+
+class _IncrementalSessionAccumulator(MutableModel):
+    """Per-session scratchpad for session-incremental aggregation.
+
+    Each ``session_id`` accumulates **per-message** contributions: the freshest
+    event per message key is kept (so streaming re-fires collapse), and the
+    session total is the sum across messages.
+    """
+
+    session_id: str
+    # message key -> the freshest (timestamp, event) seen for that message
+    freshest_event_by_message: dict[str, tuple[int, dict[str, Any]]]
+    model: str | None
+    model_timestamp: int
+    cost_mode_hint: CostMode | None
+    has_rate_limits: bool
+    first_event_at: int
+    last_event_at: int
+
+
+def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+    """Walk one agent's events summing **per-message** contributions within each session.
+
+    For harnesses that report cost/tokens per assistant message (OpenCode, pi):
+    each ``session_id``'s total is the sum over its messages, where each message's
+    contribution is the freshest event seen for that message key (collapsing
+    streaming re-fires). Per-message cost is preferred-reported / else
+    token-estimated; the session is ``ESTIMATED`` if any message was estimated.
+    Windows and max timestamp are tracked as in the other strategies.
+    """
+    timed: list[tuple[int, dict[str, Any]]] = []
+    for event in events:
+        timestamp = _parse_iso_timestamp(event.get("timestamp"))
+        if timestamp is None:
+            continue
+        timed.append((timestamp, event))
+    timed.sort(key=lambda pair: pair[0])
+
+    max_timestamp = -1
+    freshest_windows_timestamp = -1
+    freshest_windows: dict[str, WindowSnapshot] = {}
+    accumulator_by_session: dict[str, _IncrementalSessionAccumulator] = {}
+    session_order: list[str] = []
+
+    for timestamp, event in timed:
+        session_id = _session_id_from_event(event)
+        if session_id is None:
+            logger.warning(
+                "Dropping event without session_id from source {} (event_id={})",
+                source_name,
+                event.get("event_id"),
+            )
+            continue
+        message_key = _message_key_from_event(event)
+        if message_key is None:
+            continue
+
+        if timestamp > max_timestamp:
+            max_timestamp = timestamp
+        windows = _windows_from_event(event)
+        if windows and timestamp > freshest_windows_timestamp:
+            freshest_windows_timestamp = timestamp
+            freshest_windows = windows
+
+        model = _model_from_event(event)
+        hint = _cost_mode_hint_from_event(event)
+
+        accumulator = accumulator_by_session.get(session_id)
+        if accumulator is None:
+            accumulator = _IncrementalSessionAccumulator(
+                session_id=session_id,
+                freshest_event_by_message={},
+                model=None,
+                model_timestamp=-1,
+                cost_mode_hint=None,
+                has_rate_limits=False,
+                first_event_at=timestamp,
+                last_event_at=timestamp,
+            )
+            accumulator_by_session[session_id] = accumulator
+            session_order.append(session_id)
+
+        existing = accumulator.freshest_event_by_message.get(message_key)
+        if existing is None or timestamp >= existing[0]:
+            accumulator.freshest_event_by_message[message_key] = (timestamp, event)
+        accumulator.first_event_at = min(accumulator.first_event_at, timestamp)
+        accumulator.last_event_at = max(accumulator.last_event_at, timestamp)
+        if windows:
+            accumulator.has_rate_limits = True
+        if hint is not None:
+            accumulator.cost_mode_hint = hint
+        if model is not None and timestamp >= accumulator.model_timestamp:
+            accumulator.model = model
+            accumulator.model_timestamp = timestamp
+
+    records: list[SessionCostRecord] = []
+    for session_id in session_order:
+        accumulator = accumulator_by_session[session_id]
+        total_cost_usd: float | None = None
+        summed_tokens: TokenSnapshot | None = None
+        is_any_estimated = False
+        for _timestamp, event in accumulator.freshest_event_by_message.values():
+            cost = _cost_from_event(event)
+            tokens = _tokens_from_event(event)
+            model = _model_from_event(event)
+            resolved_cost, provenance = _resolve_session_cost_and_provenance(
+                cost, tokens, model, source_name=source_name, session_id=session_id
+            )
+            if resolved_cost.total_cost_usd is not None:
+                total_cost_usd = (total_cost_usd or 0.0) + resolved_cost.total_cost_usd
+            if tokens is not None and provenance == CostProvenance.ESTIMATED:
+                is_any_estimated = True
+            summed_tokens = _sum_token_snapshots(summed_tokens, tokens)
+
+        if total_cost_usd is None and summed_tokens is None:
+            # Every message for this session was windows-only (no cost, no tokens);
+            # its windows + timestamps were already folded in -- emit no record.
+            continue
+        records.append(
+            SessionCostRecord(
+                session_id=session_id,
+                cost=CostSnapshot(total_cost_usd=total_cost_usd),
+                cost_mode=(
+                    accumulator.cost_mode_hint
+                    if accumulator.cost_mode_hint is not None
+                    else (CostMode.SUBSCRIPTION if accumulator.has_rate_limits else CostMode.API_KEY)
+                ),
+                tokens=summed_tokens,
+                model=accumulator.model,
+                cost_provenance=(CostProvenance.ESTIMATED if is_any_estimated else CostProvenance.REPORTED),
+                first_event_at=accumulator.first_event_at,
+                last_event_at=accumulator.last_event_at,
+            )
+        )
+
+    return _AgentWalkResult(
+        max_timestamp=max_timestamp,
+        freshest_windows_timestamp=freshest_windows_timestamp,
+        freshest_windows=freshest_windows,
+        session_records=tuple(records),
+    )
+
+
+def aggregate_session_incremental(
+    source_name: str,
+    agents_events: dict[str, list[dict[str, Any]]],
+    *,
+    since_seconds: int,
+    now: int,
+) -> UsageSnapshot | None:
+    """Aggregate a **session-incremental** source (OpenCode, pi) into a UsageSnapshot.
+
+    Each event reports one message's own cost/tokens (not a cumulative total), so
+    a session's contribution is the sum over its messages -- the freshest event
+    per message key, summed. Restart-proof: events are append-only and
+    self-contained, so the reader recomputes the total from the log each time.
+    """
+    return _combine_agent_walks(
+        source_name, agents_events, _walk_agent_events_session_incremental, since_seconds=since_seconds, now=now
     )
 
 
