@@ -233,3 +233,93 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
     with pytest.raises(MngrError, match="no longer supported"):
         provider._parse_build_args(["--vps-region=us-west1-a"])
+
+
+# =============================================================================
+# Read-path discovery skip is user-visible, but the create path stays quiet
+# =============================================================================
+#
+# When ``build_provider_instance`` raises ``ProviderEmptyError``, the shared
+# discovery code in ``mngr.api.list._construct_and_discover_for_provider``
+# swallows it with ``logger.debug`` -- so a misconfigured GCP provider would
+# disappear from ``mngr list`` / ``mngr connect`` / ``mngr gc`` with no
+# user-visible reason. ``build_provider_instance`` now emits a ``logger.warning``
+# at the raise site to make that swallow non-silent (the warning is additive --
+# the ProviderEmptyError is still raised).
+#
+# The create path must NOT emit that warning: ``mngr create`` resolves the same
+# credentials first via ``bootstrap_for_host_creation``, which surfaces the error
+# directly, so build's warning is never reached. These tests lock in both halves:
+# read paths warn exactly once; the create path raises the same error with no
+# misleading "skipping discovery" line.
+
+
+def test_build_provider_instance_warns_and_raises_when_credentials_missing(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    config = _StubAdcConfig(stub_has_credentials=False)
+    name = ProviderInstanceName("gcp-test")
+
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "gcp-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
+    # Warn with the bare reason, not str(ProviderEmptyError): the wrapped message
+    # would double the provider name and add "has no state yet" framing.
+    assert "has no state yet" not in log_warnings[0]
+
+
+def test_build_provider_instance_warns_and_raises_when_no_project_anywhere(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """Credentials resolve but no project does -- the second raise site still warns."""
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project=None)
+    name = ProviderInstanceName("gcp-test")
+
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.build_provider_instance(name, config, temp_mngr_ctx)
+
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "gcp-test" in log_warnings[0]
+    assert "skipping discovery" in log_warnings[0]
+    # Warn with the bare reason, not str(ProviderEmptyError): the wrapped message
+    # would double the provider name and add "has no state yet" framing.
+    assert "has no state yet" not in log_warnings[0]
+
+
+def test_bootstrap_for_host_creation_raises_provider_empty_without_warning(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """The create path surfaces the error directly and emits no discovery warning.
+
+    This is the differentiator from the read paths above: ``mngr create`` calls
+    ``bootstrap_for_host_creation`` before ``build_provider_instance``, so the
+    error is raised here (cleanly, as the create command's top-level failure) and
+    build's read-path warning is never reached.
+    """
+    config = _StubAdcConfig(stub_has_credentials=False)
+    name = ProviderInstanceName("gcp-test")
+
+    with pytest.raises(ProviderEmptyError):
+        GcpProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+
+    assert log_warnings == [], f"create path must not emit a discovery warning, got {log_warnings!r}"
+
+
+def test_bootstrap_for_host_creation_succeeds_quietly_when_credentials_resolve(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """When credentials + project resolve, bootstrap is a quiet no-op (no raise, no warn)."""
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project="adc-resolved-project")
+
+    GcpProviderBackend.bootstrap_for_host_creation(
+        name=ProviderInstanceName("gcp-test"), config=config, mngr_ctx=temp_mngr_ctx
+    )
+
+    assert log_warnings == []

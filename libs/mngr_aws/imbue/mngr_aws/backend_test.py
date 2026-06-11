@@ -207,6 +207,9 @@ def test_build_provider_instance_warns_and_raises_when_credentials_missing(
     assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
     assert "aws-test" in log_warnings[0]
     assert "skipping discovery" in log_warnings[0]
+    # Warn with the bare reason, not str(ProviderEmptyError): the wrapped message
+    # would double the provider name and add "has no state yet" framing.
+    assert "has no state yet" not in log_warnings[0]
 
 
 def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
@@ -231,6 +234,9 @@ def test_build_provider_instance_warns_and_raises_when_no_ami_configured(
     assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
     assert "aws-test" in log_warnings[0]
     assert "skipping discovery" in log_warnings[0]
+    # Warn with the bare reason, not str(ProviderEmptyError): the wrapped message
+    # would double the provider name and add "has no state yet" framing.
+    assert "has no state yet" not in log_warnings[0]
 
 
 def test_bootstrap_for_host_creation_raises_provider_empty_without_warning_when_credentials_missing(

@@ -21,6 +21,7 @@ from imbue.mngr.errors import ImageNotFoundError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
+from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderNotAuthorizedError
@@ -150,6 +151,21 @@ def test_provider_instance_not_found_error_sets_provider_name() -> None:
     error = ProviderInstanceNotFoundError(provider_name)
     assert error.provider_name == provider_name
     assert "test-provider" in str(error)
+
+
+def test_provider_empty_error_exposes_bare_reason() -> None:
+    """ProviderEmptyError stores the bare reason so callers can render just the cause.
+
+    The composed ``str(error)`` keeps the provider name + "has no state yet"
+    framing, but ``error.reason`` is the raw cause -- this is what discovery-skip
+    warnings interpolate to avoid double-rendering the provider name.
+    """
+    provider_name = ProviderInstanceName("test-provider")
+    error = ProviderEmptyError(provider_name, "credentials not configured")
+    assert error.provider_name == provider_name
+    assert error.reason == "credentials not configured"
+    assert "has no state yet" in str(error)
+    assert "has no state yet" not in error.reason
 
 
 def test_mngr_error_has_user_help_text_attribute() -> None:
