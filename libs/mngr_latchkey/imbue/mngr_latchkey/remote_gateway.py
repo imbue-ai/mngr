@@ -311,11 +311,11 @@ def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: Host
             _remove_remote_credentials(host, remote_path)
         return
     with tempfile.TemporaryDirectory(prefix="mngr-latchkey-creds-") as tmpdir:
-        subset_path = Path(tmpdir) / _CREDENTIALS_FILENAME
         try:
-            latchkey.export_credentials_subset(subset_path, service_names)
+            latchkey.export_credentials_subset(Path(tmpdir), service_names)
         except LatchkeyError as e:
             raise RemoteGatewayError(f"Failed to export filtered latchkey credentials for host {host_id}: {e}") from e
+        subset_path = Path(tmpdir) / _CREDENTIALS_FILENAME
         try:
             content = subset_path.read_bytes()
         except OSError as e:
