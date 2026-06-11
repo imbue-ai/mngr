@@ -20,11 +20,11 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
-from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
-from imbue.mngr.cli.complete import generate_completion_shim
-from imbue.mngr.cli.complete import get_managed_completion_script_path
-from imbue.mngr.cli.complete import strip_legacy_completion_block
-from imbue.mngr.cli.complete import write_managed_completion_scripts
+from imbue.mngr.cli.completion_install import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.completion_install import generate_completion_shim
+from imbue.mngr.cli.completion_install import get_managed_completion_script_path
+from imbue.mngr.cli.completion_install import strip_legacy_completion_block
+from imbue.mngr.cli.completion_install import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError

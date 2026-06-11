@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
-from imbue.mngr.cli.complete import get_managed_completion_script_path
+from imbue.mngr.cli.completion_install import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.completion_install import get_managed_completion_script_path
 from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell

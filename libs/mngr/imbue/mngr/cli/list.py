@@ -24,7 +24,7 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.complete import write_managed_completion_scripts
+from imbue.mngr.cli.completion_install import write_managed_completion_scripts
 from imbue.mngr.cli.field_catalog import FieldContext
 from imbue.mngr.cli.field_catalog import build_list_field_catalog
 from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
