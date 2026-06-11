@@ -1,0 +1,1 @@
+The codex background-tasks supervisor now also launches an optional usage writer (`codex_usage.sh`) when it's present in the agent's `commands/` dir -- installed by the new `imbue-mngr-codex-usage` package -- and restarts it if it dies, alongside the existing raw/common transcript watchers. No change for agents without the usage plugin installed.
