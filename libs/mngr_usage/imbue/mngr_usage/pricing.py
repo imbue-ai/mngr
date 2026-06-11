@@ -76,9 +76,53 @@ _HAIKU_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 
 # Canonical pricing key is "<provider>/<model>" (the provider qualifier
 # disambiguates multi-provider harnesses like pi, where the same model name can
-# route through different providers). Seeded with the Anthropic set; OpenAI /
-# Gemini / etc. entries are added when their harnesses (Codex, pi fallback) are
-# wired, each guarded by the accuracy + drift tests.
+# OpenAI per-token pricing, mirrored verbatim from litellm's
+# model_prices_and_context_window map (the ultimate source). OpenAI has no
+# cache-*write* surcharge -- caching is automatic, only reads are discounted --
+# so cache_creation_input_token_cost is 0 for every entry. Codex reports tokens
+# (not dollars), so these drive its estimated cost; mngr_usage's
+# litellm_pricing_test enforces that they stay in sync with litellm.
+_GPT5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00000125,
+    output_cost_per_token=0.00001,
+    cache_read_input_token_cost=0.000000125,
+    cache_creation_input_token_cost=0.0,
+)
+_GPT52_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00000175,
+    output_cost_per_token=0.000014,
+    cache_read_input_token_cost=0.000000175,
+    cache_creation_input_token_cost=0.0,
+)
+_GPT5_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.00000025,
+    output_cost_per_token=0.000002,
+    cache_read_input_token_cost=0.000000025,
+    cache_creation_input_token_cost=0.0,
+)
+_CODEX_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.0000015,
+    output_cost_per_token=0.000006,
+    cache_read_input_token_cost=0.000000375,
+    cache_creation_input_token_cost=0.0,
+)
+_O3_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.000002,
+    output_cost_per_token=0.000008,
+    cache_read_input_token_cost=0.0000005,
+    cache_creation_input_token_cost=0.0,
+)
+_O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.0000011,
+    output_cost_per_token=0.0000044,
+    cache_read_input_token_cost=0.000000275,
+    cache_creation_input_token_cost=0.0,
+)
+
+# Canonical pricing key is "<provider>/<model>" (the provider qualifier
+# disambiguates multi-provider harnesses like pi). Anthropic stays in sync with
+# apps/modal_litellm (drift test); OpenAI stays in sync with litellm directly
+# (litellm_pricing_test).
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-opus-4-8": _OPUS_PRICES,
     "anthropic/claude-opus-4-7": _OPUS_PRICES,
@@ -91,6 +135,20 @@ MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-sonnet-4-20250514": _SONNET_PRICES,
     "anthropic/claude-haiku-4-5": _HAIKU_PRICES,
     "anthropic/claude-haiku-4-5-20251001": _HAIKU_PRICES,
+    # OpenAI / Codex models (codex reports model ids like "gpt-5.2-codex").
+    "openai/gpt-5": _GPT5_PRICES,
+    "openai/gpt-5.1": _GPT5_PRICES,
+    "openai/gpt-5-codex": _GPT5_PRICES,
+    "openai/gpt-5.1-codex": _GPT5_PRICES,
+    "openai/gpt-5.1-codex-max": _GPT5_PRICES,
+    "openai/gpt-5.2": _GPT52_PRICES,
+    "openai/gpt-5.2-codex": _GPT52_PRICES,
+    "openai/gpt-5.3-codex": _GPT52_PRICES,
+    "openai/gpt-5-mini": _GPT5_MINI_PRICES,
+    "openai/gpt-5.1-codex-mini": _GPT5_MINI_PRICES,
+    "openai/codex-mini-latest": _CODEX_MINI_PRICES,
+    "openai/o3": _O3_PRICES,
+    "openai/o4-mini": _O4_MINI_PRICES,
 }
 
 
