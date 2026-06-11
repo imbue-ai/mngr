@@ -161,11 +161,15 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
 
     Accepts either:
     - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
-    - A session ID string, searched (in priority order) in:
+    - A session ID string, searched across (all of):
       * the current config dir's ``projects/`` ($CLAUDE_CONFIG_DIR or ~/.claude)
       * the user-scope ``~/.claude/projects/``
       * every live local mngr agent's per-agent ``projects/`` dir
       * every preserved agent's ``projects/`` dir (preserve_sessions_on_destroy)
+
+      All of these dirs are searched; a session ID matching in more than one is
+      rejected as ambiguous (the user must pass the full ``.jsonl`` path). The dir
+      order above is the order used when listing dirs in error messages.
 
     Returns (session_id, source_project_dir).
     """
@@ -175,17 +179,18 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
             raise UserInputError(f"Session file not found: {session_file}")
         return session_file.stem, session_file.parent
 
-    # Search the current config dir first, then fall back to the user-scope dir,
-    # then to every live local mngr agent and preserved agent. Inside an mngr
-    # agent CLAUDE_CONFIG_DIR points to the agent's isolated config dir while the
-    # user's sessions live in the user-scope dir.
+    # Search the current config dir, the user-scope dir, and every live local
+    # mngr agent and preserved agent (all of them -- a session ID matching in
+    # multiple dirs is treated as ambiguous below, not resolved by order).
+    # Inside an mngr agent CLAUDE_CONFIG_DIR points to the agent's isolated
+    # config dir while the user's sessions live in the user-scope dir.
     current_config_dir = get_claude_config_dir()
     user_config_dir = get_user_claude_config_dir()
 
     candidate_dirs = [current_config_dir / "projects", user_config_dir / "projects"]
     candidate_dirs.extend(_mngr_session_projects_dirs(mngr_ctx))
 
-    # Deduplicate by resolved path while preserving priority order.
+    # Deduplicate by resolved path while preserving the candidate ordering.
     search_dirs: list[Path] = []
     seen_resolved_dirs: set[Path] = set()
     for candidate in candidate_dirs:
