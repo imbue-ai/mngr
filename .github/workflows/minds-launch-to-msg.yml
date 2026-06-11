@@ -119,7 +119,9 @@ jobs:
           # Path is required by the action even with lookup-only; the
           # file never has to exist locally because we're not restoring.
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-${{ steps.compute.outputs.pair_key }}
+          # Embed both SHAs directly in the key so `gh cache list`
+          # reveals the green pair without having to download the cache.
+          key: launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}
           lookup-only: true
       - name: decide
         id: decide
@@ -129,7 +131,7 @@ jobs:
             echo "## Pair-key fingerprint"
             echo "- mngr: \`${{ steps.compute.outputs.mngr_sha }}\`"
             echo "- FCT:  \`${{ steps.compute.outputs.fct_sha }}\`"
-            echo "- pair_key: \`${{ steps.compute.outputs.pair_key }}\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}\`"
             echo "- marker cache-hit: \`${{ steps.marker.outputs.cache-hit }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
           # Skip when the marker cache hit (pair already verified green)
@@ -998,18 +1000,16 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-${{ needs.check_should_run.outputs.pair_key }}
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
       - name: emit summary
-        env:
-          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
         run: |
           {
             echo "## Marker updated"
-            echo "- cache key: \`launch-to-msg-green-$PAIR_KEY\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}\`"
             echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
             echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
             echo ""
             echo "**To inspect the latest green pair manually:**"
-            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches"
-            echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green- --limit 5\`"
+            echo "- Web UI: ${{ github.server_url }}/${{ github.repository }}/actions/caches?key=launch-to-msg-green-mngr-"
+            echo "- CLI: \`gh cache list --repo ${{ github.repository }} --key launch-to-msg-green-mngr- --limit 5\`"
           } >> "$GITHUB_STEP_SUMMARY"
