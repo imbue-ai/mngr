@@ -17,6 +17,11 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
+from imbue.mngr_aws.backend import IDLE_SENTINEL_FILENAME
+from imbue.mngr_aws.backend import IDLE_WATCHER_UNIT_NAME
+from imbue.mngr_aws.backend import _build_idle_watcher_path_unit
+from imbue.mngr_aws.backend import _build_idle_watcher_service_unit
+from imbue.mngr_aws.backend import _build_sentinel_shutdown_script
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -546,3 +551,48 @@ def test_bootstrap_for_host_creation_succeeds_quietly_when_credentials_and_ami_r
     )
 
     assert log_warnings == []
+
+
+def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
+    """The in-container shutdown script signals idle by touching the given sentinel file.
+
+    The sentinel path is the only contract that ties the in-container write to
+    the host-side path unit's ``PathExists``, so it must appear verbatim (quoted
+    against spaces) and the script must ``touch`` it rather than kill pid 1.
+    """
+    sentinel = f"/mngr-vol/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
+    script = _build_sentinel_shutdown_script(sentinel)
+    assert script.startswith("#!/bin/bash\n")
+    assert f'touch "{sentinel}"' in script
+    assert "kill -TERM 1" not in script, "AWS shutdown must NOT kill the container; it signals via a sentinel"
+
+
+def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
+    """The systemd .path unit fires the watcher service when the sentinel appears.
+
+    ``PathExists`` must point at the outer-filesystem sentinel location and
+    ``Unit`` must name the paired ``.service`` so the trigger is wired correctly.
+    """
+    sentinel = f"/mngr-btrfs/abc123/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
+    unit = _build_idle_watcher_path_unit(sentinel)
+    assert f"PathExists={sentinel}" in unit
+    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_build_idle_watcher_service_unit_stops_this_instance_in_this_region() -> None:
+    """The oneshot .service removes the sentinel, then ``aws ec2 stop-instances`` for this host.
+
+    The instance id and region must appear in the ExecStart so the watcher stops
+    the correct instance via its IAM role; the sentinel ``rm -f`` must run BEFORE
+    the stop so a later resume isn't immediately re-stopped by the path unit.
+    """
+    sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
+    unit = _build_idle_watcher_service_unit("i-0123456789abcdef0", "us-west-2", sentinel)
+    assert "Type=oneshot" in unit
+    assert "stop-instances" in unit
+    assert "--instance-ids i-0123456789abcdef0" in unit
+    assert "--region us-west-2" in unit
+    assert f"rm -f {sentinel}" in unit
+    # rm must precede the stop so resume gets a clean slate.
+    assert unit.index("rm -f") < unit.index("stop-instances")

@@ -1,14 +1,14 @@
 # AWS EC2 stop/start lifecycle (idle-pause + resume)
 
-Status: **Phases 1 and 4 implemented; Phases 2, 3, 5 pending.** Captures the design agreed while
+Status: **Phases 1, 2, and 4 implemented; Phases 3, 5 pending.** Captures the design agreed while
 planning how to give AWS agents a Modal-like "idle-paused but resumable" lifecycle. Branch:
 `mngr/aws-stop`. Landed: native EC2 stop/start (`AwsVpsClient.stop_instance`/`start_instance` + the
-`AwsProvider.stop_host`/`start_host` overrides, `mngr stop --stop-host`), and EC2-tag offline
+`AwsProvider.stop_host`/`start_host` overrides, `mngr stop --stop-host`); EC2-tag offline
 discovery so a stopped host still lists its agents and resolves by name (Phase 4 — required for
-Phase 1 to be usable). Covered by unit tests plus a `mngr stop --stop-host` -> `start` release
-test. Pending: the self-stopping idle watcher + IAM (Phase 2), the GC stop-instead-of-destroy +
-age-gated terminate (Phase 3), and an S3-backed agent store for many-agent hosts (Phase 5 / Phase-4
-follow-up).
+Phase 1 to be usable); and the self-stopping idle watcher (Phase 2 — sentinel + host-side systemd
+path unit). Covered by unit tests plus a `mngr stop --stop-host` -> `start` release test. Pending:
+the GC stop-instead-of-destroy + age-gated terminate (Phase 3), and an S3-backed agent store for
+many-agent hosts (Phase 5 / Phase-4 follow-up).
 
 ## Goal
 
@@ -101,22 +101,37 @@ IMDS — no separate endpoint needed.
   unaffected.
 - New IAM permissions for the per-host path: `ec2:StopInstances`, `ec2:StartInstances`.
 
-### Phase 2 — Self-stopping idle watcher + IAM (Modal analog)
+### Phase 2 — Self-stopping idle watcher + IAM (Modal analog) — IMPLEMENTED
 
-- Install an **outer-host** idle watcher via cloud-init (a systemd unit/timer), reusing
-  `activity_watcher.sh` logic, pointed at a `shutdown.sh` that runs
-  `aws ec2 stop-instances --instance-ids <self-id-from-IMDS>` using the instance role. It reads
-  the same activity files from the btrfs subvolume path on the host (`/mngr-btrfs/<host>/...`),
-  not from inside the container.
-- `mngr aws prepare` provisions a `mngr-aws` IAM role + instance profile with a self-scoped
-  `ec2:StopInstances` policy (condition on `ec2:ResourceTag/mngr-host-id` matching, so a box can
-  only stop mngr-managed instances). `create_host` attaches it by default (config still allows an
-  override via `iam_instance_profile`). New `prepare`/admin IAM perms: `iam:CreateRole`,
-  `iam:PutRolePolicy`, `iam:CreateInstanceProfile`, `iam:AddRoleToInstanceProfile`,
-  `iam:PassRole` (and the delete equivalents for `mngr aws cleanup`).
-- **Security:** set the instance metadata hop limit to 1 (`MetadataOptions.HttpPutResponseHopLimit
+Implemented as a **sentinel + host-side systemd path unit** rather than the originally-sketched
+cloud-init watcher. Because the IMDS hop limit is 1, the container cannot use the self-stop role
+directly, so the in-container watcher only *signals* idle and the outer host does the stop:
+
+- `AwsProvider._create_shutdown_script` overrides the base (which runs `kill -TERM 1`) to write an
+  in-container `shutdown.sh` that **touches a sentinel file** (`stop-instance-requested`) under
+  `host_dir/commands/` on the shared volume instead of stopping the container. The existing
+  in-container `activity_watcher.sh` invokes this `shutdown.sh` on idle unchanged.
+- `AwsProvider._on_host_finalized` installs the host-side watcher (after the host record is durably
+  written): it ensures awscli is present on the outer host (apt-get install if missing) and writes a
+  systemd `mngr-aws-idle-watcher.path` unit whose `PathExists=` points at the **outer-filesystem**
+  location of that sentinel (`<btrfs_mount_path>/<host_id_hex>/host_dir/commands/
+  stop-instance-requested`). When the sentinel appears, the paired oneshot
+  `mngr-aws-idle-watcher.service` runs `aws ec2 stop-instances --instance-ids <id> --region <r>`
+  using the instance role (awscli resolves the role creds via IMDS automatically). Generators for
+  the three unit/script bodies are pure module functions (`_build_sentinel_shutdown_script`,
+  `_build_idle_watcher_path_unit`, `_build_idle_watcher_service_unit`) covered by unit tests. The
+  whole install is best-effort and **must not raise** (per the base hook contract): any failure logs
+  a warning and the host comes up with no auto-stop (manual `mngr stop --stop-host` still works).
+- `mngr aws prepare` provisions the `mngr-aws` IAM role + instance profile with a self-scoped
+  `ec2:StopInstances` policy (scoped to `mngr-provider`-tagged instances). `create_instance`
+  attaches it by default (config field `attach_self_stop_role`, default true; still overridable via
+  `iam_instance_profile`). Admin IAM perms for `prepare`: `iam:CreateRole`, `iam:PutRolePolicy`,
+  `iam:CreateInstanceProfile`, `iam:AddRoleToInstanceProfile`, `iam:PassRole` (plus delete
+  equivalents for `mngr aws cleanup`).
+- **Security:** the instance metadata hop limit is set to 1 (`MetadataOptions.HttpPutResponseHopLimit
   = 1`) so the container cannot reach IMDS and grab the role credentials. Only the trusted outer
-  host (and thus the watcher) can.
+  host (and thus the watcher) can — which is exactly why the signal-via-sentinel indirection is
+  required.
 
 ### Phase 3 — Backstop = stop, never auto-terminate
 
