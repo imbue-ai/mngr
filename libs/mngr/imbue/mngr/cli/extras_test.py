@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.complete import get_managed_completion_script_path
 from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
@@ -22,6 +23,20 @@ from imbue.mngr.cli.extras import _plugins_status
 from imbue.mngr.cli.extras import _print_extras_status
 from imbue.mngr.cli.extras import _read_current_default_agent_type
 from imbue.mngr.cli.extras import extras
+
+# A byte-identical copy of an old self-contained zsh completion function mngr generated
+# before the managed-shim model (any baked python path). strip_legacy_completion_block
+# removes such a block, so installing migrates it to the shim.
+_OLD_SELF_CONTAINED_ZSH_BLOCK = (
+    "_mngr_complete() {\n"
+    "    local -a completions\n"
+    "    (( ! $+commands[mngr] )) && return 1\n"
+    '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
+    ' /some/python -m imbue.mngr.cli.complete)"})\n'
+    "    compadd -U -V unsorted -a completions\n"
+    "}\n"
+    "compdef _mngr_complete mngr"
+)
 
 
 def test_detect_shell_returns_zsh_or_bash() -> None:
@@ -121,7 +136,7 @@ def test_completion_status_returns_tuple() -> None:
 
 
 def test_install_completion_auto_writes_shim_and_managed_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """_install_completion writes the rc shim + managed files when auto=True; idempotent once present."""
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
@@ -136,6 +151,12 @@ def test_install_completion_auto_writes_shim_and_managed_files(
     assert COMPLETION_SHIM_MARKER in rc.read_text()
     assert (tmp_path / "completions" / "mngr.zsh").is_file()
 
+    # The success path prints how to activate completion in the current shell,
+    # pointing at the managed completion file (no new shell needed).
+    install_out = capsys.readouterr().out
+    assert "source" in install_out
+    assert str(get_managed_completion_script_path("zsh")) in install_out
+
     # Second call: now configured -> returns True without appending the shim again
     assert _install_completion(auto=False, status_fn=_status) is True
     assert rc.read_text().count(COMPLETION_SHIM_MARKER) == 1
@@ -149,17 +170,7 @@ def test_install_completion_replaces_old_self_contained_block(tmp_path: Path, mo
     """
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".zshrc"
-    old_block = (
-        "_mngr_complete() {\n"
-        "    local -a completions\n"
-        "    (( ! $+commands[mngr] )) && return 1\n"
-        '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
-        ' /some/python -m imbue.mngr.cli.complete)"})\n'
-        "    compadd -U -V unsorted -a completions\n"
-        "}\n"
-        "compdef _mngr_complete mngr"
-    )
-    rc.write_text(f"# config\n{old_block}\n")
+    rc.write_text(f"# config\n{_OLD_SELF_CONTAINED_ZSH_BLOCK}\n")
 
     def _status() -> tuple[bool, str, Path]:
         return (COMPLETION_SHIM_MARKER in rc.read_text(), "zsh", rc)
@@ -217,17 +228,7 @@ def test_install_completion_confirm_prompt_signals_replacement(
     """When an old block is present, the confirm prompt is told it's a replacement (will_replace=True)."""
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
     rc = tmp_path / ".zshrc"
-    old_block = (
-        "_mngr_complete() {\n"
-        "    local -a completions\n"
-        "    (( ! $+commands[mngr] )) && return 1\n"
-        '    completions=(${(@f)"$(COMP_WORDS="${words[*]}" COMP_CWORD=$((CURRENT-1))'
-        ' /some/python -m imbue.mngr.cli.complete)"})\n'
-        "    compadd -U -V unsorted -a completions\n"
-        "}\n"
-        "compdef _mngr_complete mngr"
-    )
-    rc.write_text(f"# config\n{old_block}\n")
+    rc.write_text(f"# config\n{_OLD_SELF_CONTAINED_ZSH_BLOCK}\n")
     captured: dict[str, bool] = {}
 
     def _confirm(_rc: Path, will_replace: bool) -> bool:

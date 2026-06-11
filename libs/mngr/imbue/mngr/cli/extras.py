@@ -22,6 +22,7 @@ from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
 from imbue.mngr.cli.complete import generate_completion_shim
+from imbue.mngr.cli.complete import get_managed_completion_script_path
 from imbue.mngr.cli.complete import strip_legacy_completion_block
 from imbue.mngr.cli.complete import write_managed_completion_scripts
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -37,6 +38,7 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value
@@ -155,7 +157,7 @@ def _install_completion(
         # The managed shim is already installed; just tidy up an old self-contained
         # block if one is left over (and byte-matches a form we generated).
         if removed_legacy:
-            rc_path.write_text(cleaned_text)
+            atomic_write(rc_path, cleaned_text)
             write_human_line("Removed the old completion block from {} (managed shim already present)", rc_path)
         else:
             write_human_line("Shell completion already configured in {} (refreshed completion files)", rc_path)
@@ -177,12 +179,18 @@ def _install_completion(
     shim = _generate_completion_script(shell_type)
     if cleaned_text and not cleaned_text.endswith("\n"):
         cleaned_text += "\n"
-    rc_path.write_text(f"{cleaned_text}\n{shim}\n")
+    atomic_write(rc_path, f"{cleaned_text}\n{shim}\n")
 
     if removed_legacy:
         write_human_line("Replaced the old completion block with the managed shim in {}", rc_path)
     else:
         write_human_line("Shell completion enabled in {}", rc_path)
+    # A child process can't load completion into the parent shell, so tell the user
+    # how to activate it now without opening a new shell.
+    write_human_line(
+        "To use it in this shell now, run:  source {}  (new shells pick it up automatically)",
+        get_managed_completion_script_path(shell_type),
+    )
     return True
 
 
