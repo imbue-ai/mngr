@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 88% to 90% to match the coverage CI already measures (~95%), and removed the now-obsolete comment about per-package offload coverage drift (the offload bug that caused that drift has since been fixed, so coverage is deterministic).
+
 ## 2026-06-04
 
 Ratchet file scans no longer crash on a tracked symlink that resolves to a directory. The file walker (`_get_all_files_with_extension`) now filters on `is_file()` instead of `exists()`, so a symlink-to-directory (which git lists as a blob but cannot be read as a file) is skipped instead of raising `FileReadError`.

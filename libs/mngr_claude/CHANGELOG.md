@@ -13,6 +13,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Claude session preservation rewritten onto core mngr's shared `preserve_agent_data` machinery, working against either an online host or a volume-backed offline host. Sessions, the raw and common transcripts, and the session-id history are still preserved before the agent state directory is deleted, but preserved files now mirror the agent state directory verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/` instead of the old `preserved_sessions` location — a switch-forward change (previously preserved sessions are left in place).
+- Changed: `ClaudeAgent` now supplies its own "message accepted" probe (a shell command that reads the latest `enqueue` event from the Claude transcript event log and prints its ISO-8601 timestamp) to mngr's shared submission-confirm path. This is the Claude-specific knowledge that previously lived hardcoded in the shared `tui_utils` module; moving it into the plugin keeps `tui_utils` agent-neutral while preserving the fast-confirm-on-enqueue behavior for Claude agents.
 
 ### Fixed
 
