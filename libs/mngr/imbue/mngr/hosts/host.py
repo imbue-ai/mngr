@@ -292,7 +292,7 @@ _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 # rather than hanging or being silently swallowed. These commands normally return
 # near-instantly; the bound is generous headroom (including for slower remote hosts)
 # before declaring a command wedged.
-_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 30.0
+_STOP_AGENT_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Lowercased stderr substrings that mark a *benign* stop-command failure: the target
 # resource was already gone, so nothing is left behind. A non-empty stderr line that
