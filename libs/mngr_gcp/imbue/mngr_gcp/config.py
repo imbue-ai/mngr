@@ -144,11 +144,13 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         Raises ``ValueError`` when ADC resolves no credentials (no
         ``GOOGLE_APPLICATION_CREDENTIALS``, no ``gcloud auth
         application-default login`` file, no attached service account). The
-        backend wraps this in ``ProviderEmptyError`` so read paths (mngr list /
-        mngr gc / discovery) skip the GCP provider instead of constructing a
-        half-working placeholder. The resolved project may be ``None`` even when
-        credentials succeed (e.g. a bare service-account key with no project and
-        no ``GOOGLE_CLOUD_PROJECT``).
+        backend wraps this in ``ProviderUnavailableError`` (state *unknown* --
+        we never reached GCP, so there may be hosts we cannot see) so read paths
+        (mngr list / mngr connect / discovery) surface it to the user instead of
+        silently dropping the provider, and ``mngr gc`` skips it rather than
+        treating an unreachable provider's hosts as garbage. The resolved
+        project may be ``None`` even when credentials succeed (e.g. a bare
+        service-account key with no project and no ``GOOGLE_CLOUD_PROJECT``).
         """
         try:
             credentials, resolved_project = google.auth.default()
@@ -169,8 +171,10 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         the ambient environment (see ``get_credentials_and_resolved_project``),
         which is the same default a user gets from ``gcloud config set project``
         or ``GOOGLE_CLOUD_PROJECT``. Raising here surfaces clearly on
-        ``mngr create --provider gcp`` while letting read paths skip the
-        provider (the backend wraps this in ``ProviderEmptyError``).
+        ``mngr create --provider gcp``; on read paths the backend wraps this in
+        ``ProviderUnavailableError`` (state unknown -- without a project we
+        cannot enumerate the provider's hosts), which is surfaced to the user
+        and skipped by ``mngr gc`` rather than silently dropped.
 
         ``adc_fallback_project`` is injected by the caller (from the single
         ``google.auth.default()`` call shared with credential resolution) so

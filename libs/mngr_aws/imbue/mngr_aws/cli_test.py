@@ -26,6 +26,7 @@ from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
@@ -344,15 +345,20 @@ def test_prepare_command_help_is_reachable() -> None:
 # ``MngrContext``; these tests pin that behavior.
 
 
+def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: ProviderInstanceConfig) -> MngrContext:
+    """Return ``temp_mngr_ctx`` with ``config`` registered under ``name`` in ``providers``."""
+    provider_name = ProviderInstanceName(name)
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: config})
+    )
+    return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+
 def test_resolve_provider_config_uses_user_provider_block(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     user_config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_region="us-west-2", vpc_id="vpc-user")
-    name = ProviderInstanceName("aws-prod")
-    new_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().providers, {name: user_config})
-    )
-    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws-prod", user_config)
 
     resolved = _resolve_provider_config(ctx_with_provider, "aws-prod")
 
@@ -382,12 +388,7 @@ def test_resolve_provider_config_falls_back_when_named_block_is_non_aws(
     user passes on the command line; refusing here would block a legitimate
     out-of-band run.
     """
-    non_aws = LocalProviderConfig()
-    name = ProviderInstanceName("aws")
-    new_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().providers, {name: non_aws})
-    )
-    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws", LocalProviderConfig())
 
     resolved = _resolve_provider_config(ctx_with_provider, "aws")
 
