@@ -194,6 +194,7 @@ def test_cleanup_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["cleanup", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
 
