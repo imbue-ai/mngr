@@ -884,9 +884,12 @@ _WORKSPACE_ACCENT_JS_PATH = Path(_templates_module.__file__).resolve().parent / 
 
 
 def test_workspace_palette_matches_expected_entries() -> None:
-    # Pinning the exact entries here so a stray edit to workspace_color.py
-    # (rename / typo / dropped entry) fails loudly.
-    assert dict(WORKSPACE_PALETTE) == _EXPECTED_PALETTE
+    # Pinning the exact entries *and their order* here so a stray edit to
+    # workspace_color.py (rename / typo / dropped entry / reorder) fails
+    # loudly -- order drives both the picker's render order and
+    # pick_unused_create_color's preference walk, so an order-insensitive
+    # dict comparison would let a reorder slip through.
+    assert list(WORKSPACE_PALETTE.items()) == list(_EXPECTED_PALETTE.items())
 
 
 def test_workspace_palette_groups_neutrals_last() -> None:
