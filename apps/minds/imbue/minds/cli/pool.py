@@ -116,9 +116,11 @@ def build_create_admin_args(
     user-supplied flag verbatim. Split out from the click command so
     tests can exercise the wiring without faking a subprocess.
 
-    ``--database-url`` is forwarded only when explicitly supplied. When
-    omitted, the admin CLI auto-resolves the DSN from the activated
-    minds env's ``secrets.toml`` (which the deploy wrote).
+    ``--database-url`` is forwarded only when ``database_url`` is non-None.
+    The caller (``pool_create`` via :func:`resolve_host_pool_dsn`) supplies a
+    Vault-resolved DSN for staging / production and None for dev / ci; when
+    None is passed through here the admin CLI auto-resolves the DSN from the
+    activated minds env's ``secrets.toml`` (which the deploy wrote).
 
     When ``is_recycle_enabled`` is False, forwards ``--no-recycle`` so the
     OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
