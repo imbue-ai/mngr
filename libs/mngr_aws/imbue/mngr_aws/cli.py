@@ -182,7 +182,8 @@ def cleanup(
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
-    created and deleted by the create/destroy lifecycle, not by `prepare`.
+    created and deleted by the create/destroy lifecycle, not by `prepare`
+    or `cleanup`.
     """
     try:
         client = _build_operator_client(region, sg_name, vpc_id, ())
