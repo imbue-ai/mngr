@@ -49,6 +49,7 @@ root of `templates/`. Auth-flow components live under `templates/auth/`.
 | `Select` | `<select>`. Children are `<option>` elements. `width="w-full"` default; pass `w-48` for compact selects beside a label. |
 | `Textarea` | `<textarea>`. `rows`, `value`, `width`, `extra`. |
 | `FormLabel` | `<label for="...">`. `inline=False` (default) puts the label above the input (`block mb-1.5`); `inline=True` is for labels beside a control in a flex row. Prop is `target=` not `for=` because `for` is a Python keyword (JinjaX parses `{#def #}` as a Python signature). |
+| `ColorSwatch` | Circular `role="radio"` button for the workspace color pickers (settings + create form). `hex` / `name` (aria-label) / `selected` (aria-checked) / `size` (`"md"` 34px settings, `"sm"` 24px create) / `disabled`. Owns the markup contract the picker JS selects on (`.color-swatch`, `aria-checked`, `data-color`); the rim + selection-ring styles live in `tokens.css`. |
 
 ### Feedback
 
@@ -87,7 +88,7 @@ in sync:
 | Source | Contents |
 |---|---|
 | `templates.py` | `BTN_BASE` / `BTN_SIZES` / `BTN_VARIANTS` (button shell), `INPUT_BASE` (form-control shell), `ICONS_24` / `ICONS_12` (SVG path data). Exposed as JinjaX Catalog globals. |
-| `static/tokens.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.sidebar-item`, `.accent-swatch`, `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` / `.titlebar-account`, `--shadow-seam`, `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` (set via inline style on the document root by chrome.js). |
+| `static/tokens.css` | `.minds-card`, `.spinner` + `.spinner-accent`, `.code-pill`, `.accent-spine`, `.sidebar-item`, `.accent-swatch`, `.color-swatch` / `.color-hex-pill` (workspace color picker rim + selection-ring / hex-input pill), `.titlebar-title` / `.titlebar-btn` / `.titlebar-btn-danger` / `.titlebar-account`, `--shadow-seam`, `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` (set via inline style on the document root by chrome.js). |
 | `templates/pages/DevStyleguide.jinja` | The live visual catalog. Mount at `/_dev/styleguide` in a running app. Tells you what exists and what each variant looks like. |
 
 The type ramp (h1/h2/body/caption sizes), the text-color ramp (the 5
