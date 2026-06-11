@@ -6,3 +6,7 @@
 
 - `generate_cloud_init_user_data` gains an optional `authorized_user_public_key` parameter. When set, the key is written straight into root's `authorized_keys` by cloud-init, independent of the existing copy-from-default-user (`admin` / `ec2-user` / `ubuntu` / `debian` / ...) step.
 - `VpsDockerProvider._provision_vps` now always passes the VPS SSH public key through this parameter. This removes any reliance on a cloud image's default-user key landing in root. It is the deciding fix for GCE, where the google guest agent provisions the `ssh-keys` metadata into the `debian` user asynchronously and races the cloud-init `runcmd` copy, intermittently leaving root without the key. Additive and idempotent for the AWS / Vultr / OVH backends (the key also lands in root via the default-user copy, so the extra line is a no-op duplicate).
+
+## create_host: pre-create validation runs before any provider write
+
+- `VpsDockerProvider.create_host` now calls the `_validate_provider_args_for_create` hook before the first provider API write (the SSH key upload), instead of partway through `_provision_vps`. This means a provider-specific pre-create precondition that fails -- e.g. GCP's missing-firewall check -- aborts cleanly with no instance created, no SSH key uploaded, and no `Host creation failed, attempting cleanup...` path. The hook's docstring now reflects this contract (cheap, local or single read-only check, before any write). Behaviorally a no-op for providers whose hook is the default no-op or a cheap local guard (AWS's pytest auto-shutdown check).

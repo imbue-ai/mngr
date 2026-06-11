@@ -44,22 +44,30 @@ class GcpProvider(VpsDockerProvider):
         return self.gcp_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Pre-create hook: announce an inferred project, then enforce the pytest safety net.
+        """Pre-create hook: announce an inferred project, enforce the pytest safety net, require the firewall.
 
-        First, when ``project_id`` was not pinned in the config (so it was
-        inferred from ADC), log which project we are about to create billable
-        instances in. This fires only at create time -- not on every
-        ``mngr list`` discovery pass -- so a stray ``gcloud config`` default is
-        never used silently.
+        Called by ``create_host`` before the first provider write, so every
+        check here fails cleanly with no leaked resources.
 
-        Then mirror the AWS guard (``mngr_aws.backend.AwsProvider``): when
-        ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible for
-        configuring the safety net that prevents leaked cost if pytest itself is
-        killed. For GCP, that net is ``scheduling.max_run_duration`` +
-        ``instance_termination_action=DELETE`` (both rely on
-        ``auto_shutdown_minutes`` being set on the provider config). If it
-        isn't, fail closed at the pre-create hook rather than silently leak an
-        instance.
+        1. When ``project_id`` was not pinned in the config (so it was inferred
+           from ADC), log which project we are about to create billable
+           instances in. This fires only at create time -- not on every
+           ``mngr list`` discovery pass -- so a stray ``gcloud config`` default
+           is never used silently.
+
+        2. Mirror the AWS guard (``mngr_aws.backend.AwsProvider``): when
+           ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible for
+           the safety net that prevents leaked cost if pytest itself is killed.
+           For GCP that net is ``scheduling.max_run_duration`` +
+           ``instance_termination_action=DELETE`` (both rely on
+           ``auto_shutdown_minutes`` being set). If it isn't, fail closed.
+
+        3. Require the SSH firewall rule (created once via ``mngr gcp prepare``)
+           to already exist. Checking it read-only here -- before create_host
+           uploads the SSH key or creates the instance -- means a first-time
+           user who hasn't run ``prepare`` gets the clean "run mngr gcp prepare"
+           message immediately, instead of it surfacing mid-create under a
+           "Host creation failed, attempting cleanup..." line.
         """
         if not self.gcp_config.project_id:
             logger.info(
@@ -68,18 +76,22 @@ class GcpProvider(VpsDockerProvider):
                 "'mngr config set providers.gcp.project_id <your-project>' to pin it explicitly.",
                 self.gcp_client.project_id,
             )
-        if "PYTEST_CURRENT_TEST" not in os.environ:
-            return
-        minutes = self._get_effective_auto_shutdown_minutes()
-        if not (minutes and minutes > 0):
-            raise MngrError(
-                "Refusing to create GCE instance during pytest without "
-                "auto_shutdown_minutes set on the GCP provider config. "
-                "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
-                "the project settings.toml so the instance launches with "
-                "scheduling.max_run_duration + instance_termination_action=DELETE "
-                "and self-deletes even if pytest is killed."
-            )
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            minutes = self._get_effective_auto_shutdown_minutes()
+            if not (minutes and minutes > 0):
+                raise MngrError(
+                    "Refusing to create GCE instance during pytest without "
+                    "auto_shutdown_minutes set on the GCP provider config. "
+                    "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
+                    "the project settings.toml so the instance launches with "
+                    "scheduling.max_run_duration + instance_termination_action=DELETE "
+                    "and self-deletes even if pytest is killed."
+                )
+        # Read-only firewall pre-flight. ``resolve_firewall`` raises a MngrError
+        # pointing at ``mngr gcp prepare`` when the rule is missing. The hot
+        # ``create_instance`` path resolves it again to get the target tag; this
+        # extra GET is cheap and is what lets the failure happen early and clean.
+        self.gcp_client.resolve_firewall()
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse GCP-prefixed build args.

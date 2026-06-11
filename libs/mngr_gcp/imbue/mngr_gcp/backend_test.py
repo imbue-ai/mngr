@@ -103,24 +103,47 @@ def test_build_provider_instance_prefers_configured_project_over_adc(
     assert provider.gcp_client.project_id == "explicit-project"
 
 
-def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None) -> GcpProvider:
-    """Construct a GcpProvider with the given auto-shutdown setting.
+class _FirewallStubClient(GcpVpsClient):
+    """GcpVpsClient with firewall resolution stubbed, for hermetic create-hook tests.
 
-    Uses anonymous credentials and a placeholder project: this helper is only
-    used by tests that exercise the pytest-detection guard, which fires before
-    any GCE API call, so the credentials/project are never touched.
+    The real ``resolve_firewall`` makes a GCE API call. The pre-create hook now
+    invokes it, so tests that exercise the hook stub it: ``resolve_firewall``
+    returns the target tag, or (when ``stub_firewall_missing``) raises the same
+    ``mngr gcp prepare`` MngrError the real method raises on a 404.
+    """
+
+    stub_firewall_missing: bool = False
+
+    def resolve_firewall(self) -> str:
+        if self.stub_firewall_missing:
+            raise MngrError(
+                f"GCP firewall rule {self.firewall_name!r} does not exist in project "
+                f"{self.project_id!r}. Run `mngr gcp prepare --project {self.project_id}` once to create it."
+            )
+        return self.firewall_target_tag
+
+
+def _build_provider(
+    mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None, firewall_missing: bool = False
+) -> GcpProvider:
+    """Construct a GcpProvider with the given auto-shutdown and firewall settings.
+
+    Uses anonymous credentials, a placeholder project, and a firewall-stubbed
+    client: the create-hook and build-args tests that use this helper never make
+    a real GCE API call.
     """
     config = GcpProviderConfig(
         backend=GCP_BACKEND_NAME,
         project_id="test-project",
         auto_shutdown_minutes=auto_shutdown_minutes,
     )
-    client = GcpVpsClient(
+    client = _FirewallStubClient(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone=config.default_zone,
         image=config.default_source_image,
         auto_shutdown_minutes=auto_shutdown_minutes,
+        stub_firewall_missing=firewall_missing,
     )
     return GcpProvider(
         name=ProviderInstanceName("gcp-test"),
@@ -146,13 +169,25 @@ def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: Mn
 
 def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
-    # No exception raised.
+    # No exception raised (auto_shutdown set, firewall present).
     provider._validate_provider_args_for_create()
 
 
 def test_validate_provider_args_under_pytest_raises_when_zero(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=0)
     with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+        provider._validate_provider_args_for_create()
+
+
+def test_validate_provider_args_requires_firewall_rule(temp_mngr_ctx: MngrContext) -> None:
+    """The pre-create hook fails fast with the `mngr gcp prepare` pointer when the rule is missing.
+
+    This is the onboarding path: a first-time user who has not run prepare must
+    get the actionable message before any provider write, not buried under a
+    "Host creation failed, attempting cleanup..." line mid-create.
+    """
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60, firewall_missing=True)
+    with pytest.raises(MngrError, match="mngr gcp prepare"):
         provider._validate_provider_args_for_create()
 
 

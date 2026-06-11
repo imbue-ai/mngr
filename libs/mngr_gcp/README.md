@@ -34,6 +34,25 @@ fail-closed (refuses to run without at least one `--allowed-ssh-cidr`). After
 this, `mngr create --provider gcp` resolves the rule read-only and errors with a
 pointer back to `prepare` if it is missing.
 
+### Teardown: `mngr gcp cleanup`
+
+`mngr gcp cleanup` is the inverse of `prepare`: it deletes the `mngr-gcp-ssh`
+firewall rule so the project returns to its pre-`prepare` state (useful when
+retiring a provider or testing the first-run experience).
+
+```bash
+mngr gcp cleanup --project my-gcp-project
+```
+
+It is **safe by design**: it refuses (non-zero exit, deletes nothing) if any
+mngr-managed instance still exists anywhere in the project (checked across all
+zones, because the firewall rule is network-global), so it can never strand a
+running agent's SSH access. Destroy those first with `mngr destroy <agent>`,
+then re-run. It is idempotent -- a no-op when the rule is already gone. It needs
+`compute.instances.list` (aggregated), `compute.firewalls.get`, and
+`compute.firewalls.delete`. It does **not** delete per-host SSH keys: those live
+only in per-instance metadata and die with the VM, not with `prepare`.
+
 ```toml
 [providers.gcp]
 backend = "gcp"
@@ -126,6 +145,12 @@ so developers can run with a reduced role:
 compute.firewalls.get, compute.firewalls.create
 ```
 
+`mngr gcp cleanup` (operator, teardown; in addition to `compute.firewalls.get`):
+
+```
+compute.instances.list, compute.firewalls.delete
+```
+
 `mngr create --provider gcp` (developer, per host):
 
 ```
@@ -145,7 +170,7 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - SSH key auth: there is no per-key GCE resource (unlike an EC2 KeyPair). The client holds the per-host public key in memory and writes it into the instance's `ssh-keys` metadata as `ubuntu:<pub>` at create time. The key lives only in per-instance metadata and dies with the VM. OS Login and project-wide SSH keys are disabled per instance (`enable-oslogin=FALSE`, `block-project-ssh-keys=TRUE`).
 - cloud-init is delivered via the `user-data` metadata key. The GCE Ubuntu LTS images run cloud-init with the GCE datasource; the stock GCE Debian images do **not** run cloud-init (the guest agent ignores `user-data`), which is why Ubuntu is the default image. The shared cloud-init writes the provider key straight into root's authorized_keys (and also copies the `ubuntu` user's), so mngr's root SSH works regardless of guest-agent timing.
 - Discovery: `instances.list` filtered by the `mngr-provider` label, then SSH to each VPS to read host records from the state volume.
-- Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host` — clean up manually when retiring a provider.
+- Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host`; run `mngr gcp cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists in the project).
 - Auto-delete: when `auto_shutdown_minutes` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, this provider does not snapshot GCE instances automatically. `GcpVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented (boot-disk snapshots); you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created`.
 

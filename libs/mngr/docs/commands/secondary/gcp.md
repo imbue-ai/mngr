@@ -29,3 +29,20 @@ mngr gcp prepare [OPTIONS]
 | `--firewall-target-tag` | text | Network tag the rule targets (every instance is tagged with it). Defaults to 'mngr-ssh'. | None |
 | `--network` | text | VPC network the rule applies to. Defaults to 'default'. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Required (fail-closed): with none supplied, prepare refuses to create a wide-open rule. | None |
+
+## mngr gcp cleanup
+
+**Usage:**
+
+```text
+mngr gcp cleanup [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--project` | text | GCP project ID. Defaults to the provider config's project_id (or the gcloud/ADC default). | None |
+| `--firewall-name` | text | Firewall rule name to delete. Defaults to 'mngr-gcp-ssh'. | None |
+| `--network` | text | VPC network the rule applies to (part of its identity). Defaults to 'default'. | None |
