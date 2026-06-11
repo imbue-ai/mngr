@@ -4,7 +4,7 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.backend import AzureProviderBackend
@@ -38,15 +38,19 @@ def test_backend_build_args_help_mentions_azure_specific_args() -> None:
     assert "--azure-spot" in help_text
 
 
-def test_build_provider_instance_raises_provider_empty_without_subscription(
+def test_build_provider_instance_raises_provider_unavailable_without_subscription(
     temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # An unresolvable subscription means Azure was never reached, so its state is
+    # unknown: the backend must raise ProviderUnavailableError (warned by read
+    # paths), NOT ProviderEmptyError (silently skipped) -- otherwise a transient
+    # read failure would silently drop azure agents from `mngr list`.
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     # Isolate AZURE_CONFIG_DIR (the conftest autouse fixture pins it at the real
     # ~/.azure) so the az-default-subscription fallback resolves nothing here.
     monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
     config = AzureProviderConfig()
-    with pytest.raises(ProviderEmptyError):
+    with pytest.raises(ProviderUnavailableError):
         AzureProviderBackend.build_provider_instance(
             name=ProviderInstanceName("azure"), config=config, mngr_ctx=temp_mngr_ctx
         )

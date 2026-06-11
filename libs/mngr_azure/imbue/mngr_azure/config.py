@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -29,6 +30,15 @@ DEFAULT_IMAGE_SKU: Final[str] = "server"
 DEFAULT_IMAGE_VERSION: Final[str] = "latest"
 
 
+# The az CLI rewrites azureProfile.json in place (open-truncate-write, not an
+# atomic rename) on token refresh and on most ``az`` commands, so a read that
+# races a write can momentarily see a truncated file that fails to decode/parse.
+# Retry a few times -- spaced by a short sleep so the (concurrent) writer can
+# finish -- before giving up. The window is sub-second, so this stays small.
+_AZ_PROFILE_READ_ATTEMPTS: Final[int] = 3
+_AZ_PROFILE_READ_RETRY_SECONDS: Final[float] = 0.05
+
+
 def read_az_cli_default_subscription() -> str | None:
     """Return the Azure CLI's active (default) subscription id, or None.
 
@@ -44,26 +54,43 @@ def read_az_cli_default_subscription() -> str | None:
     on PATH. Returns None when the file is absent / unreadable / has no enabled
     default subscription, so callers fall through to the "no subscription" error.
     azureProfile.json is written with a UTF-8 BOM, hence ``utf-8-sig``.
+
+    A truncated/partial read (the az CLI rewriting the file under us) is treated
+    as transient and retried; only a *persistently* unreadable file -- or a
+    genuinely absent one -- resolves to None. This matters because None here
+    surfaces upstream as ``ProviderUnavailableError``, which would drop azure
+    agents from ``mngr list`` if a momentary mid-write read were taken as final.
     """
     config_dir = os.environ.get("AZURE_CONFIG_DIR") or str(Path.home() / ".azure")
     profile_path = Path(config_dir) / "azureProfile.json"
-    try:
-        raw = profile_path.read_text(encoding="utf-8-sig")
-    except OSError:
+    last_error: Exception | None = None
+    for attempt in range(_AZ_PROFILE_READ_ATTEMPTS):
+        try:
+            # UnicodeDecodeError (bad bytes) and json's ValueError (bad JSON) are
+            # both ValueError; a non-dict top level makes ``.get`` raise AttributeError.
+            raw = profile_path.read_text(encoding="utf-8-sig")
+            subscriptions = json.loads(raw).get("subscriptions", [])
+        except FileNotFoundError:
+            # Genuinely absent (azure never set up) -- not a transient mid-write
+            # state, so don't waste retries waiting for a file that won't appear.
+            return None
+        except (OSError, ValueError, AttributeError) as e:
+            last_error = e
+            if attempt < _AZ_PROFILE_READ_ATTEMPTS - 1:
+                time.sleep(_AZ_PROFILE_READ_RETRY_SECONDS)
+            continue
+        for subscription in subscriptions:
+            if subscription.get("isDefault") and subscription.get("state", "Enabled") == "Enabled":
+                subscription_id = subscription.get("id")
+                if subscription_id:
+                    return str(subscription_id)
         return None
-    except UnicodeDecodeError as e:
-        logger.debug("Could not decode az profile {} for default subscription: {}", profile_path, e)
-        return None
-    try:
-        subscriptions = json.loads(raw).get("subscriptions", [])
-    except (ValueError, AttributeError) as e:
-        logger.debug("Could not parse az profile {} for default subscription: {}", profile_path, e)
-        return None
-    for subscription in subscriptions:
-        if subscription.get("isDefault") and subscription.get("state", "Enabled") == "Enabled":
-            subscription_id = subscription.get("id")
-            if subscription_id:
-                return str(subscription_id)
+    logger.debug(
+        "Could not read az profile {} for default subscription after {} attempts: {}",
+        profile_path,
+        _AZ_PROFILE_READ_ATTEMPTS,
+        last_error,
+    )
     return None
 
 
@@ -181,8 +208,9 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         see ``read_az_cli_default_subscription``). The az-CLI fallback mirrors the
         GCP provider using the active gcloud project, so ``--provider azure`` works
         with no config after ``az login``. Raising here surfaces clearly on
-        ``mngr create --provider azure`` while letting ``mngr list`` skip the
-        provider (the backend wraps this in ``ProviderEmptyError``).
+        ``mngr create --provider azure`` while letting ``mngr list`` warn-and-skip
+        the provider (the backend wraps this in ``ProviderUnavailableError``: Azure
+        was unreachable, so its state -- and any agents on it -- is unknown).
         """
         if self.subscription_id:
             return self.subscription_id

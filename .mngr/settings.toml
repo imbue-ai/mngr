@@ -50,12 +50,26 @@ pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
 # `mngr create <name> -t azure` -> launch on Azure with a VM size that has
-# capacity in westus (B-series is currently NotAvailableForSubscription there).
-# The subscription auto-resolves from `az` (no config needed); switch the size
-# back to Standard_B2s once B-series frees up.
+# capacity in westus (B-series is currently NotAvailableForSubscription there);
+# switch back to Standard_B2s once B-series frees up. The subscription auto-resolves
+# from `az` (no config needed).
+#
+# Like `gcp` below (and unlike modal), azure builds the project Dockerfile through the
+# shared `mngr_vps_docker` backend, which resolves `--file=` inside the uploaded context,
+# so the context is `.` (the worktree -- the build flow clones + overlays uncommitted
+# changes and the Dockerfile's `COPY . /code/mngr/` consumes it) rather than modal's
+# `.mngr/dev/build/` keyframe tarball. This is what gets gh + the full mngr toolchain onto
+# the agent. The image builds on depot's remote builders (builder=DEPOT on
+# [providers.azure] below). Requires DEPOT_TOKEN (forwarded to the remote depot build) and
+# GH_TOKEN (git/gh in the container) exported at `mngr create -t azure` time.
 [create_templates.azure]
 provider = "azure"
-build_arg = ["--azure-vm-size=Standard_D2s_v3"]
+build_arg = ["--azure-vm-size=Standard_D2s_v3", "--file=libs/mngr/imbue/mngr/resources/Dockerfile", "."]
+extra_window = ["github_setup='ssh-keyscan github.com >> ~/.ssh/known_hosts && git remote set-url origin https://github.com/imbue-ai/mngr.git && gh auth setup-git'"]
+agent_args = ["--dangerously-skip-permissions"]
+pass_env__extend = ["GH_TOKEN"]
+pass_host_env = ["EDITOR"]
+target_path = "/code/mngr"
 
 # Run an agent on this repo on a Google Compute Engine VM (the analogue of the `modal`
 # template above). Like aws -- and unlike modal -- it builds through the shared
@@ -108,6 +122,13 @@ default_instance_type = "t3.large"
 auto_shutdown_minutes = 120
 # Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
 # in the repo supplies the project id.
+builder = "DEPOT"
+
+# Build the agent image on depot's cached remote builders (like gcp), so creates after
+# the first reuse cached layers instead of building cold. Requires DEPOT_TOKEN at create
+# time (read from the create shell, not pass_env); depot.json in the repo supplies the
+# project id. Drop this block to fall back to a plain native `docker build` on the VM.
+[providers.azure]
 builder = "DEPOT"
 
 # Shared GCP config consumed by the `gcp` create-template above. The per-developer

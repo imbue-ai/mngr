@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -89,11 +90,36 @@ def test_read_az_cli_default_subscription_none_when_no_profile(
 def test_read_az_cli_default_subscription_none_on_undecodable_profile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # A corrupt / non-UTF-8 azureProfile.json must resolve to None (the file is
-    # "unreadable") rather than raising UnicodeDecodeError on the mngr hot path.
+    # A *persistently* corrupt / non-UTF-8 azureProfile.json must resolve to None
+    # (the file is "unreadable") rather than raising UnicodeDecodeError on the
+    # mngr hot path. The bounded retry exhausts and still returns None.
     monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
     (tmp_path / "azureProfile.json").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
     assert read_az_cli_default_subscription() is None
+
+
+def test_read_az_cli_default_subscription_retries_torn_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A read that races the az CLI's in-place rewrite can momentarily see a
+    # truncated file. Such a torn read must be retried -- not taken as "no
+    # subscription" -- so the resolved id still comes back once the write lands.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
+    profile_path = tmp_path / "azureProfile.json"
+    # Start mid-write: a valid prefix that is truncated, so json.loads fails.
+    profile_path.write_text('{"subscriptions": [{"id": "sub-rec', encoding="utf-8-sig")
+    valid = json.dumps({"subscriptions": [{"id": "sub-recovered", "isDefault": True, "state": "Enabled"}]})
+
+    # Complete the file from another thread. The reader's first attempt runs
+    # synchronously here while the freshly-spawned thread is still starting up,
+    # so it reliably hits the torn file; the completed write then lands well
+    # within the reader's retry budget (~0.1s), so a later attempt succeeds. No
+    # sleep is needed on either side for this ordering, and correct code always
+    # ends up reading the completed file, so the test does not flake.
+    writer = threading.Thread(target=lambda: profile_path.write_text(valid, encoding="utf-8-sig"))
+    writer.start()
+    try:
+        assert read_az_cli_default_subscription() == "sub-recovered"
+    finally:
+        writer.join()
 
 
 def test_get_subscription_id_raises_when_unresolvable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
