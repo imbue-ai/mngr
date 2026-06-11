@@ -878,8 +878,10 @@ class VpsDockerProvider(BaseProviderInstance):
         Returns (vps_instance_id, vps_ip).
         """
         # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
-        # have auto_shutdown_minutes set" guard). Runs before any API call so
-        # a failed check leaves no leaked resources.
+        # have auto_shutdown_minutes set" guard). Runs before the VPS-create
+        # API call so a failed check never leaves a billable VPS behind; the
+        # SSH key uploaded by ``create_host`` above is cleaned up by that
+        # function's except block on raise.
         self._validate_provider_args_for_create()
 
         vps_host_private_key = vps_host_key_path.read_text()
