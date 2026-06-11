@@ -276,6 +276,30 @@ def test_resolve_firewall_raises_prepare_hint_when_missing() -> None:
         client.resolve_firewall()
 
 
+def test_delete_firewall_deletes_when_present() -> None:
+    """An existing rule is deleted and its name returned (the cleanup happy path)."""
+    firewalls = _present_firewalls()
+    client = _make_client(firewalls=firewalls)
+    assert client.delete_firewall() == "mngr-gcp-ssh"
+    assert firewalls.deleted == ["mngr-gcp-ssh"]
+
+
+def test_delete_firewall_noop_when_missing() -> None:
+    """When the rule is already gone, delete is skipped and None is returned (idempotent)."""
+    firewalls = FakeFirewallsClient()
+    client = _make_client(firewalls=firewalls)
+    assert client.delete_firewall() is None
+    assert firewalls.deleted == []
+
+
+def test_delete_firewall_tolerates_concurrent_delete() -> None:
+    """A 404 on the delete (another cleanup won the race) is idempotent success."""
+    firewalls = _present_firewalls()
+    firewalls.delete_error = google_api_exceptions.NotFound("firewall already gone")
+    client = _make_client(firewalls=firewalls)
+    assert client.delete_firewall() == "mngr-gcp-ssh"
+
+
 # =============================================================================
 # destroy / status / ip / list
 # =============================================================================
@@ -371,6 +395,47 @@ def test_list_instances_translates_api_error() -> None:
     client = _make_client(instances)
     with pytest.raises(VpsApiError, match="not authorized"):
         client.list_instances(provider_tag="gcp")
+
+
+def test_list_mngr_managed_instances_spans_zones_and_filters_by_label() -> None:
+    """Aggregated across zones; only instances carrying the mngr-provider label count."""
+    managed_west = compute_v1.Instance(name="mngr-host-west", status="RUNNING", labels={"mngr-provider": "gcp"})
+    managed_central = compute_v1.Instance(
+        name="mngr-host-central", status="TERMINATED", labels={"mngr-provider": "gcp-central"}
+    )
+    unmanaged = compute_v1.Instance(name="someone-elses-vm", status="RUNNING", labels={"team": "data"})
+    instances = FakeInstancesClient()
+    instances.aggregated_result = [
+        ("zones/us-west1-a", [managed_west, unmanaged]),
+        ("zones/us-central1-b", [managed_central]),
+    ]
+    client = _make_client(instances)
+
+    result = client.list_mngr_managed_instances()
+
+    # The unlabeled VM is excluded; both mngr-managed instances are returned with
+    # their zone (prefix stripped) regardless of which zone they live in.
+    assert result == [
+        {"id": "mngr-host-west", "state": "RUNNING", "zone": "us-west1-a"},
+        {"id": "mngr-host-central", "state": "TERMINATED", "zone": "us-central1-b"},
+    ]
+
+
+def test_list_mngr_managed_instances_empty_when_none_managed() -> None:
+    instances = FakeInstancesClient()
+    instances.aggregated_result = [
+        ("zones/us-west1-a", [compute_v1.Instance(name="other", status="RUNNING", labels={})]),
+    ]
+    client = _make_client(instances)
+    assert client.list_mngr_managed_instances() == []
+
+
+def test_list_mngr_managed_instances_translates_api_error() -> None:
+    instances = FakeInstancesClient()
+    instances.aggregated_list_error = google_api_exceptions.Forbidden("not authorized")
+    client = _make_client(instances)
+    with pytest.raises(VpsApiError, match="not authorized"):
+        client.list_mngr_managed_instances()
 
 
 # =============================================================================

@@ -7,6 +7,7 @@ Mirrors ``libs/mngr_aws/imbue/mngr_aws/testing.py``.
 """
 
 import os
+from collections.abc import Iterator
 from typing import Any
 from typing import Final
 
@@ -108,6 +109,9 @@ class FakeInstancesClient:
         self.insert_error: Exception | None = None
         self.delete_error: Exception | None = None
         self.list_error: Exception | None = None
+        # (zone_scope, instances) pairs returned by ``aggregated_list``.
+        self.aggregated_result: list[tuple[str, list[compute_v1.Instance]]] = []
+        self.aggregated_list_error: Exception | None = None
 
     def insert(self, *, project: str, zone: str, instance_resource: compute_v1.Instance) -> FakeOperation:
         self.inserted.append(instance_resource)
@@ -134,6 +138,17 @@ class FakeInstancesClient:
         self.last_list_filter = request.filter or None
         return self.list_result
 
+    def aggregated_list(
+        self, *, request: compute_v1.AggregatedListInstancesRequest
+    ) -> Iterator[tuple[str, compute_v1.InstancesScopedList]]:
+        # Mirror the real pager shape: iterating yields ``(zone_scope, scoped_list)``
+        # pairs, where ``scoped_list.instances`` is the per-zone instance list.
+        # ``aggregated_result`` is keyed by the scope string (e.g. ``zones/us-west1-a``).
+        if self.aggregated_list_error is not None:
+            raise self.aggregated_list_error
+        for scope, scoped_instances in self.aggregated_result:
+            yield scope, compute_v1.InstancesScopedList(instances=scoped_instances)
+
 
 class FakeFirewallsClient:
     """Fake FirewallsClient: ``get`` raises NotFound unless a rule is preset; records inserts."""
@@ -142,6 +157,8 @@ class FakeFirewallsClient:
         self.existing: compute_v1.Firewall | None = None
         self.inserted: list[compute_v1.Firewall] = []
         self.insert_error: Exception | None = None
+        self.deleted: list[str] = []
+        self.delete_error: Exception | None = None
 
     def get(self, *, project: str, firewall: str) -> compute_v1.Firewall:
         if self.existing is None:
@@ -151,6 +168,10 @@ class FakeFirewallsClient:
     def insert(self, *, project: str, firewall_resource: compute_v1.Firewall) -> FakeOperation:
         self.inserted.append(firewall_resource)
         return FakeOperation(error=self.insert_error)
+
+    def delete(self, *, project: str, firewall: str) -> FakeOperation:
+        self.deleted.append(firewall)
+        return FakeOperation(error=self.delete_error)
 
 
 class FakeSnapshotsClient:
