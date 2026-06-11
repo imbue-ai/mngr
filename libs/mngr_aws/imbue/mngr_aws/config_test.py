@@ -111,7 +111,7 @@ def test_allowed_ssh_cidrs_parses_to_scalar_tuple() -> None:
     default as a ``ScalarTuple``.
 
     The marker is what lets the settings-narrowing guard treat the field as
-    replace-by-default (see the regression test below).
+    replace-by-default (see ``test_local_layer_tightening_allowed_ssh_cidrs_does_not_narrow``).
     """
     explicit = AwsProviderConfig.model_validate({"allowed_ssh_cidrs": ["203.0.113.4/32"]})
     assert explicit.allowed_ssh_cidrs == ("203.0.113.4/32",)
@@ -121,9 +121,9 @@ def test_allowed_ssh_cidrs_parses_to_scalar_tuple() -> None:
 
 
 def test_local_layer_tightening_allowed_ssh_cidrs_does_not_narrow() -> None:
-    """Regression: a developer's settings.local.toml narrowing ``allowed_ssh_cidrs``
-    to their own IP must replace the committed default, not trip the
-    settings-narrowing guard.
+    """A developer's settings.local.toml narrowing ``allowed_ssh_cidrs`` to their
+    own IP must replace the committed default, not trip the settings-narrowing
+    guard.
 
     The committed ``[providers.aws]`` block carries the non-empty default
     ``("0.0.0.0/0",)``; a local layer overrides it with a single IP. Because the
