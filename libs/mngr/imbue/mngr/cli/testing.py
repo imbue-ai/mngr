@@ -29,9 +29,12 @@ def create_test_agent(
     agent_type: AgentTypeName | None,
     *,
     extra_data: Mapping[str, Any] | None,
-    agent_class: type[BaseAgent[AgentTypeConfig]],
+    # Any BaseAgent subclass, including those parameterized on a specific
+    # AgentTypeConfig subclass (e.g. OpenCodeAgent -> OpenCodeAgentConfig); the
+    # generic is invariant, so the base parameterization would reject those.
+    agent_class: type[BaseAgent[Any]],
     is_type_registered: bool = True,
-) -> BaseAgent[AgentTypeConfig]:
+) -> BaseAgent[Any]:
     """Create a test agent backed by a real local host filesystem.
 
     Bypasses ``host.create_agent_state`` so that ``agent_class`` can substitute
