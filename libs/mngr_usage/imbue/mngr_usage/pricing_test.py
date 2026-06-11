@@ -23,7 +23,8 @@ def test_compute_cost_sums_each_bucket_at_its_own_rate() -> None:
 def test_compute_cost_unknown_model_is_none_not_zero() -> None:
     tokens = TokenSnapshot(input=100, output=100, cache_read=0, cache_creation=0)
     assert compute_cost("openai/gpt-does-not-exist", tokens) is None
-    assert compute_cost("claude-opus-4-8", tokens) is None  # unqualified key must not resolve
+    # An unqualified (provider-less) key must not resolve against the canonical table.
+    assert compute_cost("claude-opus-4-8", tokens) is None
 
 
 def test_compute_cost_all_none_tokens_is_zero_for_known_model() -> None:
