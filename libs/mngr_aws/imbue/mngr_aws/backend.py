@@ -249,7 +249,11 @@ class AwsProviderBackend(ProviderBackendInterface):
     def get_build_args_help() -> str:
         return (
             "EC2-specific args (consumed by provider, not passed to docker):\n"
-            "  --aws-region=REGION         AWS region (default: us-east-1)\n"
+            "  --aws-region=REGION         Must match the provider config's default_region;\n"
+            "                              the client is bound to one region at construction\n"
+            "                              and refuses cross-region creates. To target multiple\n"
+            "                              regions, define one [providers.aws-<region>] block\n"
+            "                              per region (see mngr_aws README 'Multiple regions').\n"
             "  --aws-instance-type=TYPE    EC2 instance type (default: t3.small)\n"
             "  --aws-ami=AMI-ID            Override the per-host AMI for this create only\n"
             "                              (default: provider config's default_ami_id /\n"
