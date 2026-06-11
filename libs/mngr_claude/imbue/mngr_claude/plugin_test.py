@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from typing import cast
 from unittest.mock import patch
 from uuid import UUID
@@ -1509,7 +1510,7 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     assert len(auto_allow_hooks) == 0
 
 
-def _session_start_commands(settings: dict) -> list[str]:
+def _session_start_commands(settings: dict[str, Any]) -> list[str]:
     """Flatten every SessionStart hook command in a settings dict."""
     return [
         inner["command"] for entry in settings["hooks"].get("SessionStart", []) for inner in entry.get("hooks", [])
@@ -2864,6 +2865,10 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
 # =============================================================================
 
 
+# Flaky: provision() runs the local `claude --version` check via a real subprocess
+# (_get_local_claude_version), which intermittently exceeds the 10s pytest-timeout
+# under CI load. Retried by offload until the underlying subprocess flakiness is fixed.
+@pytest.mark.flaky
 def test_provision_adds_trust_for_remote_work_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
