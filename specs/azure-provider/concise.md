@@ -15,7 +15,17 @@ Azure nests every resource in a *resource group* (RG) inside a *subscription*, w
 
 * The NSG is attached to the **subnet** at prepare time (not per-NIC), so per-host create does no NSG work -- the NIC inherits subnet rules. NSG opens inbound tcp/22 and tcp/`container_ssh_port` to the configured `allowed_ssh_cidrs`, **fail-closed**: empty CIDRs => `prepare` refuses rather than create a wide-open rule (matches GCP).
 * The hot `create_instance` path is **lookup-only** (resolve the existing RG/subnet/NSG), needing no network-write permissions -- same admin/developer split as AWS/GCP. A missing RG/subnet raises a `MngrError` pointing at `mngr azure prepare`.
+* `prepare` tags the RG `managed-by=mngr` so the inverse `cleanup` command can prove ownership before deleting it (it must never delete a user's pre-existing RG).
 * Defaults: region `westus`, RG `mngr`, vnet `mngr-vnet`, subnet `mngr-subnet`, NSG `mngr-nsg`. All overridable in config.
+
+### `mngr azure cleanup`: safe inverse of prepare
+
+Mirrors the new `mngr aws cleanup` (safe inverse of prepare). It tears down the one-off infrastructure so a subscription returns to its pre-prepare state, with a guard that can never strand a running agent:
+
+* **Refuses** (non-zero exit, deletes nothing) if any mngr-managed VM still exists -- i.e. any VM in the RG carrying an `mngr-provider` tag (tag-key presence, so it spans every mngr provider config bound to this RG, not just one instance name). The user must `mngr destroy <agent>` those first. This mirrors `aws cleanup`'s `list_mngr_managed_instances` check.
+* With no mngr-managed VMs present, **deletes the whole resource group** in one `resource_groups.begin_delete(rg)` call -- cascading the vnet/subnet/NSG. This is cleaner than AWS (which deletes just the SG) because Azure's RG *is* the unit of one-off infra.
+* **Ownership guard:** only deletes an RG tagged `managed-by=mngr` (set by `prepare`). A missing tag => refuse, so a user-named-but-not-mngr-created RG is never destroyed. Idempotent: a no-op (exit 0) when the RG is already gone.
+* Does not touch per-host SSH keys (those live in the create/destroy lifecycle, not prepare).
 
 ### Per-host create: public IP + NIC + VM, with delete-options cascade
 
@@ -44,7 +54,8 @@ Azure adopts the same best-effort model, documented identically. Because Azure V
 
 ## Expected behavior
 
-* `mngr azure prepare --allowed-ssh-cidr <cidr>` registers resource providers and creates the RG / vnet / subnet / NSG once. Idempotent.
+* `mngr azure prepare --allowed-ssh-cidr <cidr>` registers resource providers and creates the RG / vnet / subnet / NSG once (RG tagged `managed-by=mngr`). Idempotent.
+* `mngr azure cleanup` deletes the mngr-owned RG (and its vnet/subnet/NSG) -- but refuses while any mngr-managed VM still exists, and only deletes an RG it owns. Idempotent.
 * `mngr create --provider azure` provisions a VM (public IP + NIC + VM), installs Docker via cloud-init, runs the agent container, and returns an online host reachable on `<vm-ip>:container_ssh_port`.
 * `mngr stop` / `start` operate on the container (inherited); `mngr destroy` deletes the VM and cascades NIC/IP/disk.
 * `mngr ls`, `mngr ssh`, `mngr exec`, host volumes, idle timeout, and container snapshots all work via inherited `VpsDockerProvider` behavior.
@@ -52,6 +63,6 @@ Azure adopts the same best-effort model, documented identically. Because Azure V
 
 ## Changes
 
-* New package `libs/mngr_azure/` with `config.py` (`AzureProviderConfig`), `client.py` (`AzureVpsClient` + `prepare`/`ensure_network` logic), `backend.py` (`AzureProvider`, `AzureProviderBackend`, `register_provider_backend` + `register_cli_commands` hooks), `cli.py` (`mngr azure prepare`), `__init__.py` (pluggy `hookimpl` marker), plus tests (`*_test.py`, `test_ratchets.py`, `test_release_azure.py`), `conftest.py`, `testing.py` (fakes + credential gating + orphan scanner), `README.md`, and `changelog/`.
+* New package `libs/mngr_azure/` with `config.py` (`AzureProviderConfig`), `client.py` (`AzureVpsClient` + `ensure_network`/`delete_managed_resource_group`/`list_mngr_managed_vms` logic), `backend.py` (`AzureProvider`, `AzureProviderBackend`, `register_provider_backend` + `register_cli_commands` hooks), `cli.py` (`mngr azure prepare` + `mngr azure cleanup`), `__init__.py` (pluggy `hookimpl` marker), plus tests (`*_test.py`, `test_ratchets.py`, `test_release_azure.py`), `conftest.py`, `testing.py` (fakes + credential gating + orphan scanner), `README.md`, and `changelog/`.
 * `pyproject.toml`: name `imbue-mngr-azure`; deps `imbue-mngr`, `imbue-mngr-vps-docker`, `azure-identity`, `azure-mgmt-compute`, `azure-mgmt-network`, `azure-mgmt-resource`; entry point `[project.entry-points.mngr] azure = "imbue.mngr_azure.backend"`. Add to the uv workspace and the CI/test matrix alongside `mngr_aws`/`mngr_gcp`.
 * Reuse, do not reimplement: `VpsDockerProvider` and all of `mngr_vps_docker`; `ssh_host_setup` / `ssh_utils` / `listing_utils` / `deploy_utils` from `imbue.mngr.providers`; `generate_cloud_init_user_data`.
