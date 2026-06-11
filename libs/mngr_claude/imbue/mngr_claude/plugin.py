@@ -122,12 +122,46 @@ depending on the build machine's home directory path.
 """
 
 
-def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
+# Per-agent Claude session JSONLs live at <agent_state_dir>/plugin/claude/anthropic/projects/.
+# Both live local mngr agents and preserved agents mirror this layout under the local
+# host dir, so --adopt-session can resolve a session ID against either.
+_AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic" / "projects"
+
+
+def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
+    """Return the per-agent Claude ``projects`` directories on the local host.
+
+    Scans both live local mngr agents (``<host_dir>/agents/<id>/...``) and
+    preserved agents (``<host_dir>/preserved/<name>--<id>/...``; see
+    ``preserve_sessions_on_destroy``), each of which stores its session JSONLs
+    at ``plugin/claude/anthropic/projects/<encoded-work-dir>/``.
+
+    Only the local host dir is scanned: an adopted session's files are copied
+    onto the destination host from a path that must already be reachable as a
+    local source, so remote agents' session dirs are not searched here.
+    """
+    local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
+    projects_dirs: list[Path] = []
+    for parent in (local_host_dir / "agents", local_host_dir / "preserved"):
+        if not parent.is_dir():
+            continue
+        for agent_dir in sorted(parent.iterdir()):
+            projects_dir = agent_dir / _AGENT_CLAUDE_PROJECTS_RELPATH
+            if projects_dir.is_dir():
+                projects_dirs.append(projects_dir)
+    return projects_dirs
+
+
+def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tuple[str, Path]:
     """Resolve an --adopt-session argument to a (session_id, project_dir) pair.
 
     Accepts either:
     - A path to a .jsonl file (e.g. ~/.claude/projects/foo/abc123.jsonl)
-    - A session ID string (searched in both $CLAUDE_CONFIG_DIR/projects/ and ~/.claude/projects/)
+    - A session ID string, searched (in priority order) in:
+      * the current config dir's ``projects/`` ($CLAUDE_CONFIG_DIR or ~/.claude)
+      * the user-scope ``~/.claude/projects/``
+      * every live local mngr agent's per-agent ``projects/`` dir
+      * every preserved agent's ``projects/`` dir (preserve_sessions_on_destroy)
 
     Returns (session_id, source_project_dir).
     """
@@ -137,22 +171,24 @@ def _resolve_adopt_session(adopt_session_arg: str) -> tuple[str, Path]:
             raise UserInputError(f"Session file not found: {session_file}")
         return session_file.stem, session_file.parent
 
-    # Search the current config dir first, then fall back to the user-scope dir.
-    # Inside an mngr agent CLAUDE_CONFIG_DIR points to the agent's isolated
-    # config dir while the user's sessions live in the user-scope dir.
+    # Search the current config dir first, then fall back to the user-scope dir,
+    # then to every live local mngr agent and preserved agent. Inside an mngr
+    # agent CLAUDE_CONFIG_DIR points to the agent's isolated config dir while the
+    # user's sessions live in the user-scope dir.
     current_config_dir = get_claude_config_dir()
     user_config_dir = get_user_claude_config_dir()
 
+    candidate_dirs = [current_config_dir / "projects", user_config_dir / "projects"]
+    candidate_dirs.extend(_mngr_session_projects_dirs(mngr_ctx))
+
+    # Deduplicate by resolved path while preserving priority order.
     search_dirs: list[Path] = []
-    resolved_dirs: list[Path] = []
-
-    current_projects_dir = current_config_dir / "projects"
-    search_dirs.append(current_projects_dir)
-    resolved_dirs.append(current_projects_dir.resolve())
-
-    user_projects_dir = user_config_dir / "projects"
-    if user_projects_dir.resolve() not in resolved_dirs:
-        search_dirs.append(user_projects_dir)
+    seen_resolved_dirs: set[Path] = set()
+    for candidate in candidate_dirs:
+        resolved = candidate.resolve()
+        if resolved not in seen_resolved_dirs:
+            seen_resolved_dirs.add(resolved)
+            search_dirs.append(candidate)
 
     matches: list[Path] = []
     searched: list[Path] = []
@@ -2197,7 +2233,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         dest_project_dir = config_dir / "projects" / dest_project_name
 
         for arg in adopt_session_args:
-            session_id, source_project_dir = _resolve_adopt_session(arg)
+            session_id, source_project_dir = _resolve_adopt_session(arg, self.mngr_ctx)
             # Deduplicate project dir copies (multiple sessions may be in the same project)
             if source_project_dir.name not in copied_project_dirs:
                 with log_span("Adopting session {}", session_id):
@@ -2574,7 +2610,10 @@ def register_cli_options(command_name: str) -> Mapping[str, list[OptionStackItem
                     param_decls=("--adopt-session",),
                     multiple=True,
                     help="Adopt an existing Claude Code session into this agent. "
-                    "Accepts a session ID or a path to a .jsonl file [repeatable].",
+                    "Accepts a session ID or a path to a .jsonl file. A session ID is "
+                    "searched in the current and user-scope Claude config dirs, every "
+                    "live local mngr agent, and preserved sessions from destroyed agents "
+                    "[repeatable].",
                 ),
             ]
         }
