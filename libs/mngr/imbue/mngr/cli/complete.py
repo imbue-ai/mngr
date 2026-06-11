@@ -26,7 +26,7 @@ from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.host_dir import read_default_host_dir
 
-# Bumped whenever the generated completion *function* changes in a way that
+# Bump this whenever the generated completion *function* changes in a way that
 # warrants users refreshing their installed completion -- in particular when the
 # function's contract with the completer changes (e.g. how candidate strings are
 # interpreted), since a stale function body paired with the current completer can
@@ -35,13 +35,7 @@ from imbue.mngr.config.host_dir import read_default_host_dir
 # the user's installed completion predates the current logic (the old
 # self-contained rc function, or a managed file written by an older mngr) and
 # should be refreshed via ``mngr extras completion``.
-#
-# History:
-#   1 -- initial managed shim.
-#   2 -- ``=``/``.`` candidates are no-trailing-space boundaries; a valued key
-#        completes to ``KEY=`` (values deferred). An older function body lacks the
-#        ``*=`` branch handling and would add a stray space after ``KEY=``.
-_COMPLETION_SHIM_VERSION: Final[int] = 2
+_COMPLETION_SHIM_VERSION: Final[int] = 1
 _SHIM_VERSION_ENV_VAR: Final[str] = "MNGR_COMPLETION_SHIM_VERSION"
 
 # How often (seconds) to re-warn about an out-of-date installed completion, so
