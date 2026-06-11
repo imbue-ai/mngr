@@ -82,13 +82,19 @@ def _build_operator_client(
 ) -> AwsVpsClient:
     """Construct an ``AwsVpsClient`` for the ``mngr aws`` operator commands.
 
-    Bridges click options into the client constructor: each option falls
-    back to the corresponding field on ``base`` (the user's resolved
-    ``AwsProviderConfig`` for the selected provider, or class defaults
-    when the user has not pinned one). The previous version of this
-    helper used class defaults unconditionally, which silently misrouted
-    the SG to ``us-east-1`` when the user's settings.toml configured a
-    different ``default_region``.
+    Bridges click options into the client constructor. ``region`` /
+    ``vpc_id`` fall back to the matching field on ``base`` (the user's
+    resolved ``AwsProviderConfig`` for the selected provider, or class
+    defaults when the user has not pinned one) so the SG lands in the
+    region/VPC the runtime create path will use.
+
+    The ``sg_name`` fallback is narrower: when ``base.security_group`` is
+    an ``AutoCreateSecurityGroup``, its ``name`` is used; when it is an
+    ``ExistingSecurityGroup`` (the user has wired in an externally-managed
+    SG), the helper substitutes ``AutoCreateSecurityGroup()`` defaults
+    (name ``mngr-aws``) because prepare/cleanup only operate on
+    auto-created SGs -- an externally-managed SG is not theirs to create
+    or delete.
 
     ``prepare`` passes the effective ingress CIDRs; ``cleanup`` passes
     ``()`` (it only deletes, never authorizes ingress, so the value is
