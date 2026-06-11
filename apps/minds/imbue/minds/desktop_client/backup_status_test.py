@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_status import BackupStatusState
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspace
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
+from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.mngr.primitives import AgentId
 
 
@@ -64,7 +65,7 @@ def _backup_a_file(repo: str, password: str, source: Path) -> None:
     env = dict(os.environ)
     env.update({"RESTIC_REPOSITORY": repo, "RESTIC_PASSWORD": password})
     result = subprocess.run(
-        ["restic", "backup", str(source)],
+        [_get_restic_binary(), "backup", str(source)],
         capture_output=True,
         text=True,
         check=False,

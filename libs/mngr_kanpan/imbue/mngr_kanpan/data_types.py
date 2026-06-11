@@ -29,9 +29,9 @@ class BoardSection(UpperCaseStrEnum):
     MUTED = auto()
 
 
-# Section labels split into a leading phrase and a clarifying suffix. Shared by
-# the TUI heading renderer (which colors the prefix) and the JSON output path
-# (which joins them into a plain human label), so the two never drift.
+# Section labels split into a leading phrase and a clarifying suffix. The TUI
+# heading renderer colors the prefix; the JSON output path joins them into a
+# plain human label.
 SECTION_PREFIX: dict[BoardSection, str] = {
     BoardSection.PR_MERGED: "Done",
     BoardSection.PR_CLOSED: "Cancelled",
