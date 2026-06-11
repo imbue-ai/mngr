@@ -33,8 +33,10 @@ The design deliberately splits into a generic reader and per-harness writers:
   `<agent_state_dir>/events/<source>/usage/events.jsonl` under every agent
   (live and destroy-time-preserved), aggregates per `<source>`, and renders
   human / JSON / jsonl / format-template output. It knows nothing about any
-  specific harness. Adding a harness means adding a writer; the reader is
-  unchanged in principle.
+  specific harness. Today its aggregation is a single Claude-shaped reader; this
+  spec moves per-source aggregation behind a hook (see
+  [Reader architecture](#reader-architecture-a-hook-plus-shared-utils)), so
+  adding a harness means adding a writer plus a thin reader hookimpl.
 - **A writer is responsible for appending `cost_snapshot` events** at the
   conventional path. `mngr_claude_usage` is the reference writer: a statusline
   shim that reshapes Claude Code's statusline payload into one event per render.
@@ -127,6 +129,37 @@ both Claude-specific and must be generalized (see below).
 
 ## Layer 1: schema and reader generalization
 
+### Reader architecture: a hook plus shared utils
+
+Aggregation semantics are inherently harness-specific (Claude needs
+process-cumulative deltas; the others are session-cumulative — see
+[Cumulative scope](#cumulative-scope-process-vs-session)), so rather than let
+`mngr_usage` accrete per-harness branching, **per-source aggregation moves
+behind a reader hook**, with the reusable machinery shipped as shared utils that
+the current harnesses simply call:
+
+- **`mngr_usage` owns** the data types (below), `compute_cost` + the pricing
+  table, source **discovery / destroy-time preservation / dispatch / rendering**,
+  a **reader hookspec**, and reusable aggregation utils:
+  - `aggregate_process_cumulative(events_by_agent, ...) -> UsageSnapshot` — the
+    existing Claude delta-and-process-boundary logic, lifted verbatim into a
+    named util (no behavior change, existing tests keep covering it).
+  - `aggregate_session_cumulative(events_by_agent, ...) -> UsageSnapshot` —
+    freshest-reading-per-`session_id` (each session is its own counter), with
+    cost derived/flagged per [Reader cost resolution](#reader-cost-resolution).
+- **Each usage plugin** implements a thin `aggregate_usage_source` hookimpl that
+  claims its `source_name` and calls the matching util. `mngr_claude_usage`'s
+  hookimpl calls `aggregate_process_cumulative`; codex/opencode/pi call
+  `aggregate_session_cumulative`. A future exotic harness can write fully bespoke
+  aggregation in its own hookimpl without touching `mngr_usage`.
+- **Dispatch:** `mngr_usage` invokes the hook per discovered source (firstresult:
+  the first plugin that claims the source wins). A source no plugin claims falls
+  back to `aggregate_process_cumulative` for back-compat.
+
+`mngr_usage` thus stays source-agnostic — it dispatches and renders; it never
+hardcodes harness knowledge. The data types, `UsageSnapshot` shape, and pricing
+helper are the shared contract every reader produces and consumes.
+
 ### Wire schema additions
 
 Add two optional fields to the event line and relax the contract:
@@ -180,8 +213,9 @@ is now "imputed vs. real billable", determined by the writer-declared
 | Claude (sub)       | `SUBSCRIPTION`     | `REPORTED`               |
 | Claude (API key)   | `API_KEY`          | `REPORTED`               |
 | OpenCode           | `API_KEY`          | `REPORTED`               |
-| pi (API key)       | `API_KEY`          | `ESTIMATED`              |
+| pi (API key)       | `API_KEY`          | `REPORTED` (est. fallback) |
 | Codex (API key)    | `API_KEY`          | `ESTIMATED`              |
+| Codex (ChatGPT)    | `SUBSCRIPTION`     | `ESTIMATED`              |
 
 ### Reader cost resolution
 
@@ -198,23 +232,33 @@ When building a `SessionCostRecord` for a session, per session (freshest event):
 Tokens are always carried through (steps 1-3) when present, independent of which
 branch produced the dollar figure. Mode is resolved as described above.
 
-### Cumulative discipline
+### Cumulative scope: process vs session
 
-The reader's per-session delta machinery assumes each event is a
-**cumulative-to-date** reading for its `session_id`. To reuse it unchanged, the
-**writer contract requires cumulative-per-session readings** for both `cost` and
-`tokens`. This is naturally satisfied:
+Writers emit **cumulative-to-date** readings (cost and/or tokens), never
+per-message increments — events from the same `session_id` carry a growing
+total, and the reader takes the freshest. But there are **two cumulative
+scopes**, which is why the aggregation util differs per harness:
 
-- **Codex** `token_count` events already report cumulative session token usage.
-- **OpenCode** and **pi** writers run **in-process** and see every message, so
-  they keep a running per-session total in memory and emit the cumulative value.
-  (Emitting per-message increments and summing in the reader is the alternative;
-  it is rejected because it diverges from the existing cost path and breaks the
-  `/clear`-resilient delta logic.)
+- **Process-cumulative (Claude only).** Claude Code's cost is one counter that
+  spans multiple `session_id`s — a `/clear` rotates the session id *without*
+  resetting cost. So `aggregate_process_cumulative` partitions an agent's stream
+  into processes (via cost-drop detection) and computes each session's
+  contribution as a **delta from the prior session's reading** within the
+  process. Taking freshest-per-session and summing would double-count, because a
+  later session's reading already includes earlier ones.
+- **Session-cumulative (Codex, OpenCode, pi).** Each `session_id` is its **own**
+  counter that starts at zero; sessions do not share a running total. So
+  `aggregate_session_cumulative` simply takes the freshest reading per
+  `session_id` as that session's whole contribution — **no cross-session delta**.
+  Applying Claude's delta logic here would be *wrong* (it would treat session 2's
+  total as a delta from session 1).
 
-**Note:** This means the cumulative-vs-incremental choice is pushed to the
-writer, where the in-process harnesses can satisfy it cheaply, keeping the
-reader's aggregation identical across all harnesses.
+  - **Codex** `token_count.info.total_token_usage` is cumulative for the session.
+  - **OpenCode** and **pi** writers run **in-process**, see every message, and
+    keep a running per-session total, emitting the cumulative value each event.
+
+This distinction is the whole reason aggregation is a per-plugin util choice
+rather than central logic: a plugin picks the scope that matches its harness.
 
 ## Layer 2: canonical pricing table
 
@@ -444,9 +488,14 @@ their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
 
 ## Implementation order
 
-1. **Layer 1** — schema + reader generalization (tokens, derive-and-flag cost,
-   provenance, cumulative discipline, generalized `cost_mode`). Land with the
-   canonical pricing table module (Layer 2 table only).
+1. **Layer 1** — schema + reader generalization: data-type additions (tokens,
+   provenance, mode-split token aggregates), `compute_cost` + pricing table
+   (Layer 2 table), the reader **hookspec + dispatch**, and the
+   `aggregate_process_cumulative` / `aggregate_session_cumulative` utils (the
+   former lifted from today's reader, unchanged). Then `mngr_claude_usage` grows
+   a thin hookimpl calling `aggregate_process_cumulative` — proving the hook
+   end-to-end with zero behavior change for Claude (existing tests must stay
+   green).
 2. **OpenCode writer** — proves the non-Claude path end-to-end with no new cost
    logic (reported cost).
 3. **pi writer** — reported cost (`usage.cost.total`); exercises the
