@@ -4,7 +4,8 @@
 
   is_mac controls macOS-specific styling (traffic-light padding, hidden window
   controls). In Electron mode, the iframe and embedded browser-mode sidebar are
-  hidden via JS; the content and sidebar are separate WebContentsViews.
+  hidden via JS; the content is a separate WebContentsView, and the sidebar
+  page is loaded into the shared modal WebContentsView when opened.
 
   mngr_forward_origin is exposed to page-level JS via a data attribute on the
   body so chrome.js can build workspace links that target the plugin's port
@@ -16,7 +17,6 @@
   html, body { height: 100%; overflow: hidden; }
   #minds-titlebar { -webkit-app-region: drag; }
   #minds-titlebar button { -webkit-app-region: no-drag; }
-  .minds-user-area { -webkit-app-region: no-drag; }
   /* When the inbox modal (or any modal hosted in the main process's
      modalView) is open, drop the titlebar's app-region: drag. macOS
      unions drag regions across all views in a window, so without this
@@ -29,6 +29,8 @@
 {% endset %}
 {% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
 {# Body background tracks --titlebar-bg so the iframe's rounded top corners
@@ -43,20 +45,15 @@
       scripts={{ _scripts }}>
   <div id="minds-titlebar"
        style="background-color: var(--titlebar-bg, #18181b);"
-       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[72px]{% endif %}">
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[76px]{% endif %}">
     <div class="flex gap-0.5">
-      <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="sidebar" /></TitlebarButton>
+      <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="menu" /></TitlebarButton>
       <TitlebarButton id="home-btn" title="Home"><Icon24 name="home" /></TitlebarButton>
       <TitlebarButton id="back-btn" title="Back"><Icon24 name="back" /></TitlebarButton>
       <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
     </div>
     <div class="flex-1 flex items-center justify-center px-2 min-w-0">
       <span id="page-title" class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
-    </div>
-    <div class="relative minds-user-area shrink-0">
-      <button id="user-btn"
-              class="titlebar-account !w-auto !h-auto !inline-block cursor-pointer px-2.5 py-1 rounded-md text-xs font-sans whitespace-nowrap"
-              title="Account">Log in</button>
     </div>
     <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
       <Icon24 name="messages" />
@@ -69,13 +66,23 @@
     </div>
   </div>
 
-  {# Browser-mode sidebar: sits under the titlebar and slides in from the
-     left when toggled. In Electron this is a separate WebContentsView and
-     the JS hides this element. #}
-  <div id="sidebar-panel"
-       class="fixed left-0 top-[38px] w-[260px] h-[calc(100%-38px)] bg-zinc-900 z-50 shadow-[4px_0_12px_rgba(0,0,0,0.3)] -translate-x-full transition-transform duration-200 ease-in-out overflow-y-auto border-r border-white/10">
-    <div id="sidebar-workspaces">
-      <div class="px-4 py-6 text-sm text-zinc-400 text-center">No projects</div>
+  {# Browser-mode floating sidebar: full-screen transparent backdrop
+     (#sidebar-backdrop) with a floating dark menu (#sidebar-menu)
+     positioned at toggle time by chrome.js using the sidebar-toggle
+     button's getBoundingClientRect + a caller-chosen offset. Clicks on
+     the backdrop and Escape close the menu (handled by chrome.js). In
+     Electron this whole block is hidden via JS; the sidebar page
+     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
+     uses the same #sidebar-backdrop / #sidebar-menu shape with the
+     /_static/sidebar.js renderer. Both modes share the position model:
+     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
+     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
+     px-2 for the hover highlight's inset. #}
+  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
+    <div id="sidebar-menu"
+         class="absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
+      <SidebarBottom />
     </div>
   </div>
 
