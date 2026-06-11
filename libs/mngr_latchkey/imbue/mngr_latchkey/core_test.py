@@ -1021,9 +1021,7 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
         manager.stop_gateway()
 
 
-def test_provisioning_coalesces_when_host_pass_already_in_flight(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
+def test_provisioning_coalesces_when_host_pass_already_in_flight(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A second agent on a host whose provisioning is already in flight is coalesced.
 
     Provisioning is host-scoped (one container, one gateway, one tunnel), so a
@@ -1048,9 +1046,7 @@ def test_provisioning_coalesces_when_host_pass_already_in_flight(
         with handler._remote_hosts_lock:
             handler._provisioning_hosts.add(str(host_id))
 
-        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
-            AgentId(), host_id, ssh_info, "imbue_cloud"
-        )
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
 
         # Coalesced: no second pass was dispatched, and the in-flight guard is
         # left intact for the pass that is already running.
@@ -1060,9 +1056,7 @@ def test_provisioning_coalesces_when_host_pass_already_in_flight(
             assert handler._provisioning_hosts == {str(host_id)}
 
 
-def test_provisioning_skips_host_already_provisioned_this_session(
-    tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
+def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A host already provisioned this supervisor lifetime is not re-provisioned.
 
     The discovery stream re-emits the full agent set every cycle; re-running the
@@ -1086,9 +1080,7 @@ def test_provisioning_skips_host_already_provisioned_this_session(
         with handler._remote_hosts_lock:
             handler._provisioned_hosts.add(str(host_id))
 
-        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
-            AgentId(), host_id, ssh_info, "imbue_cloud"
-        )
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
 
         # Skipped: no new pass dispatched and nothing marked in flight.
         assert dispatched is False
