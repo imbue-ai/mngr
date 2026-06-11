@@ -943,6 +943,8 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
         try:
             self._provisioned.append((agent_id, host_id))
         finally:
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
 
@@ -1015,6 +1017,45 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails
         # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
+
+
+def test_provisioning_coalesces_when_host_pass_already_in_flight(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A second agent on a host whose provisioning is already in flight is coalesced.
+
+    Provisioning is host-scoped (one container, one gateway, one tunnel), so a
+    concurrent second pass for another agent on the same host would be redundant
+    and race the first on the same VPS files; the per-host in-flight guard
+    coalesces it away instead.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Simulate a provisioning pass already in flight for this host.
+        with handler._remote_hosts_lock:
+            handler._provisioning_hosts.add(str(host_id))
+
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+            AgentId(), host_id, ssh_info, "imbue_cloud"
+        )
+
+        # Coalesced: no second pass was dispatched, and the in-flight guard is
+        # left intact for the pass that is already running.
+        assert dispatched is False
+        assert handler._provisioned == []
+        with handler._remote_hosts_lock:
+            assert handler._provisioning_hosts == {str(host_id)}
 
 
 class _SyncRecordingHandler(LatchkeyDiscoveryHandler):

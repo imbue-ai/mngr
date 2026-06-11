@@ -142,6 +142,12 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # host_id -> provider_name for every genuinely-remote (VPS) host we have
     # provisioned a gateway on. Drives the remote-state sync loop.
     _remote_host_provider_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
+    # host_ids with a provisioning pass currently in flight, so multiple agents
+    # sharing one outer host coalesce onto a single (host-scoped) provisioning
+    # run instead of racing concurrent passes against the same VPS/container.
+    # Guarded by ``_remote_hosts_lock``, held only for the brief check-and-set
+    # (never across the provisioning I/O).
+    _provisioning_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
@@ -267,6 +273,22 @@ class LatchkeyDiscoveryHandler(MutableModel):
         """
         if not self._host_has_outer_host(host_id, provider_name):
             return False
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            if host_id_str in self._provisioning_hosts:
+                # A provisioning pass for this host is already in flight. The
+                # work is host-scoped (one container, one gateway, one tunnel),
+                # so a second pass for another agent on the same host would be
+                # redundant and would race the first on the same VPS files;
+                # coalesce it away. A later discovery fire re-runs once the
+                # in-flight pass clears the flag.
+                logger.debug(
+                    "VPS-resident gateway provisioning already in flight for host {}; coalescing agent {}",
+                    host_id,
+                    agent_id,
+                )
+                return False
+            self._provisioning_hosts.add(host_id_str)
         try:
             self.concurrency_group.start_new_thread(
                 target=self._run_remote_gateway_provisioning,
@@ -275,6 +297,11 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 is_checked=False,
             )
         except (ConcurrencyExceptionGroup, InvalidConcurrencyGroupStateError, RuntimeError) as e:
+            # The thread that would clear the in-flight flag never started, so
+            # clear it here -- otherwise this host's provisioning would be
+            # coalesced away forever.
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(host_id_str)
             logger.warning(
                 "Failed to dispatch VPS-resident Latchkey gateway provisioning for agent {}: {}",
                 agent_id,
@@ -355,6 +382,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 sync_credentials(outer, self.latchkey, host_id)
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         finally:
+            # Release the per-host in-flight guard so a later discovery fire can
+            # re-provision this host, and clear the per-agent pending flag.
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:
                 self._pending_remote_agents.discard(str(agent_id))
 

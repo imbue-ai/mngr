@@ -1,3 +1,5 @@
 Hardened how the VPS-resident latchkey gateway receives its secrets. The encryption key and gateway listen password are no longer interpolated into the gateway start command (where they could surface in process listings or command logs). Instead they are written to short-lived 0600 files on the VPS that the start script reads into the gateway's environment and deletes immediately. This keeps the secrets out of process argv and logs, and -- importantly -- avoids leaving the encryption key on the VPS disk next to the encrypted credential store it decrypts.
 
 Decoupled per-agent latchkey gateway setup so a failure to reverse-tunnel the desktop-side gateway into an agent's container no longer prevents that agent's VPS-resident gateway from being provisioned (and vice versa). The two reachability paths are independent, so each is now attempted with its own error handling.
+
+Coalesced VPS-resident gateway provisioning per outer host: when several agents share one outer host (VPS/container), only one provisioning pass runs at a time instead of multiple agents racing concurrent, redundant passes against the same host's gateway, tunnel, and credential/permission files.
