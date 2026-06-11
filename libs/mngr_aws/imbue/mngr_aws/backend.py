@@ -20,8 +20,8 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import HostInterface
-from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
@@ -284,7 +284,7 @@ class AwsProvider(VpsDockerProvider):
         self,
         host: HostInterface | HostId,
         snapshot_id: SnapshotId | None = None,
-    ) -> OnlineHostInterface:
+    ) -> Host:
         """Resume a stopped AWS agent: start the EC2 instance, then its container.
 
         A stopped EC2 instance is not SSH-reachable and has no public IP, so it
