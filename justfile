@@ -781,43 +781,12 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 
 # === minds pool hosts (OVH-backed, leased mode) ===
 #
-# Canonical wrappers around `minds pool {create,list,destroy}` -- the env-aware layer
-# that derives the management SSH key + OVH AK/AS/CK from the activated tier's
-# Vault entries automatically (so you never export them or generate a key by
-# hand). Activate a minds env first:
-#   eval "$(uv run minds env activate <name>)"
-#
-# staging / production keep no local secrets.toml, so these recipes read the
-# host_pool DSN from Vault (secrets/minds/<tier>/neon.DATABASE_URL) and pass it
-# through; dev / ci envs let `minds pool` auto-resolve it from the per-env
-# secrets.toml. VAULT_ADDR / VAULT_NAMESPACE default to the imbue HCP cluster
-# (matching apps/minds/.../envs/vault_reader.py) when unset, so a plain
-# `vault login` is enough.
-
-# Shared DSN resolver: echoes `--database-url <dsn>` for staging/production
-# (read from Vault), or nothing for dev/ci (auto-resolved downstream). Private;
-# used by bake-pool-host / list-pool-hosts / destroy-pool-host. Requires an
-# activated minds env.
-[private]
-_pool-dsn-args:
-    #!/bin/bash
-    set -ueo pipefail
-    if [ -z "${MINDS_ROOT_NAME:-}" ]; then
-        echo "error: no minds env activated in this shell." >&2
-        echo "       Run \`eval \"\$(uv run minds env activate <name>)\"\` first." >&2
-        exit 2
-    fi
-    case "$MINDS_ROOT_NAME" in
-        minds)         tier=production ;;
-        minds-staging) tier=staging ;;
-        *)             tier="" ;;   # dev / ci: minds pool auto-resolves the DSN
-    esac
-    if [ -n "$tier" ]; then
-        export VAULT_ADDR="${VAULT_ADDR:-https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200}"
-        export VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
-        dsn=$(vault kv get -mount=secrets -field=DATABASE_URL "minds/$tier/neon")
-        printf -- '--database-url\n%s\n' "$dsn"
-    fi
+# Thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI,
+# which resolves the management SSH key, OVH AK/AS/CK, AND (for staging /
+# production) the host_pool DSN from the activated tier's Vault entries
+# automatically -- so you never export creds or pass --database-url by hand.
+# dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
+# minds env first:  eval "$(uv run minds env activate <name>)"
 
 # Bake one or more pre-provisioned pool hosts for the activated minds env.
 #
@@ -832,41 +801,21 @@ _pool-dsn-args:
 #   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
 #   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-EAST-VA ~/project/forever-claude-template 2
 bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
-    #!/bin/bash
-    set -ueo pipefail
-    # Capture the helper's stdout via command substitution (NOT process
-    # substitution): a non-zero exit from `_pool-dsn-args` -- e.g. a Vault read
-    # failure on staging/production -- then propagates through `set -e` and
-    # aborts here, instead of being silently swallowed and falling through to a
-    # bake with no --database-url. Portable array build (stock macOS bash 3.2;
-    # no mapfile); the `[ -n ... ]` guard drops the lone empty line a
-    # here-string of empty output yields, and the ${arr[@]+"..."} guard avoids
-    # the empty-array "unbound variable" trap under `set -u` on bash <4.4.
-    dsn_args_raw="$(just _pool-dsn-args)"
-    dsn_args=()
-    while IFS= read -r line; do [ -n "$line" ] && dsn_args+=("$line"); done <<< "$dsn_args_raw"
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \
         --attributes '{{attributes}}' \
         --workspace-dir "{{workspace_dir}}" \
-        ${dsn_args[@]+"${dsn_args[@]}"} {{extra_args}}
+        {{extra_args}}
 
 # List pool_hosts rows for the activated minds env (read-only).
 list-pool-hosts:
-    #!/bin/bash
-    set -ueo pipefail
-    # Command substitution (not process substitution) so a `_pool-dsn-args`
-    # failure propagates through `set -e`; see `bake-pool-host` for the rationale.
-    dsn_args_raw="$(just _pool-dsn-args)"
-    dsn_args=()
-    while IFS= read -r line; do [ -n "$line" ] && dsn_args+=("$line"); done <<< "$dsn_args_raw"
-    uv run minds pool list ${dsn_args[@]+"${dsn_args[@]}"}
+    uv run minds pool list
 
 # Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
-# Wraps `minds pool destroy`, which reads the tier's OVH creds from Vault. Find
-# the id with `just list-pool-hosts`. Extra flags forward to `minds pool destroy`
-# (e.g. --force to drop a non-released row, --skip-vps-cancel if the VPS is gone).
+# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
+# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
+# VPS is already gone).
 #
 #   just destroy-pool-host <pool-host-id>
 #
@@ -875,11 +824,4 @@ list-pool-hosts:
 # sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
 # This recipe is the manual single-host escape hatch.
 destroy-pool-host pool_host_id *extra_args:
-    #!/bin/bash
-    set -ueo pipefail
-    # Command substitution (not process substitution) so a `_pool-dsn-args`
-    # failure propagates through `set -e`; see `bake-pool-host` for the rationale.
-    dsn_args_raw="$(just _pool-dsn-args)"
-    dsn_args=()
-    while IFS= read -r line; do [ -n "$line" ] && dsn_args+=("$line"); done <<< "$dsn_args_raw"
-    uv run minds pool destroy "{{pool_host_id}}" ${dsn_args[@]+"${dsn_args[@]}"} {{extra_args}}
+    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}

@@ -1,10 +1,12 @@
 Added canonical justfile recipes for pool-host operations: `just
 bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra
-flags]`, `just list-pool-hosts`, and `just destroy-pool-host <id>`, plus a
-private `_pool-dsn-args` helper. These wrap the env-aware `minds pool
-{create,list,destroy}` so OVH creds, the management SSH key, Vault addressing,
-and the staging/production host_pool DSN are all resolved automatically -- no
-hand-exported secrets.
+flags]`, `just list-pool-hosts`, and `just destroy-pool-host <id>`. These are
+thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI, which
+resolves OVH creds, the management SSH key, and the staging/production host_pool
+DSN from the activated tier's Vault entries automatically -- no hand-exported
+secrets. (The DSN resolution lives in the `minds pool` CLI itself, not in the
+justfile, so the recipes stay one-liners and `minds pool` works the same way
+when invoked directly.)
 
 Removed the broken `cleanup-pool-hosts` recipe: it sourced the long-gone
 `.minds/<env>/neon.sh` shell files (secrets are in Vault now) and was redundant

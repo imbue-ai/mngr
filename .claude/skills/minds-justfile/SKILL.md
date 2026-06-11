@@ -27,16 +27,17 @@ a **minds deployment**, or **minds tests** --
    activated env) and usage.
 2. **Use the recipe.** Prefer `just <recipe> ...` over the underlying command.
 3. **If no recipe fits, ADD one.** Write a new, well-commented recipe that
-   wraps the canonical command (and reuses existing private helpers like
-   `_pool-dsn-args`), then use it. Do not paper over a missing recipe with a
-   one-off shell command -- the point is a named, auditable script that the
-   next person (or agent) can audit and re-run. Fix stale recipes you
-   encounter the same way.
+   wraps the canonical command, then use it. Keep the recipe thin -- push any
+   credential/secret resolution into the env-aware Python CLI rather than
+   reimplementing it in bash. Do not paper over a missing recipe with a one-off
+   shell command -- the point is a named, auditable script that the next person
+   (or agent) can audit and re-run. Fix stale recipes you encounter the same way.
 4. **Keep secrets out of argv where the wrappers already handle it.** The
-   minds env-aware CLIs read OVH creds, the pool management key, and Vault
-   addressing themselves (see `apps/minds/imbue/minds/envs/vault_reader.py`,
-   which defaults `VAULT_ADDR`/`VAULT_NAMESPACE` to the HCP cluster). Don't
-   re-export those by hand.
+   minds env-aware CLIs read OVH creds, the pool management key, and the
+   staging/production host_pool DSN from Vault themselves (Vault addressing via
+   `apps/minds/imbue/minds/envs/vault_reader.py`, which defaults
+   `VAULT_ADDR`/`VAULT_NAMESPACE` to the HCP cluster). Don't re-export those by
+   hand.
 
 ## Almost everything requires an activated minds env
 

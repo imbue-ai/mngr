@@ -6,6 +6,13 @@ The env-aware wrapper derives the management SSH key + OVH credentials from the
 activated tier's Vault entries automatically; for staging/production it also
 resolves the host_pool DSN from Vault.
 
+`minds pool {create,list,destroy}` now resolve the staging/production host_pool
+DSN from `secrets/minds/<tier>/neon.DATABASE_URL` themselves (alongside the OVH
+creds and management key they already read from Vault), so the commands work on
+those tiers without a hand-passed `--database-url` even when invoked directly.
+An explicit `--database-url` still wins, and dev/ci continue to auto-resolve the
+DSN from their per-env `secrets.toml`.
+
 Did a broader accuracy pass over the minds docs, fixing things that had drifted
 since the Vultr->OVH pool migration:
 
