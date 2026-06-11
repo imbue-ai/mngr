@@ -28,6 +28,12 @@ from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
 from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
+# Label key stamped on every mngr-managed instance (the provider-instance name
+# is the value). Discovery filters on it, and ``mngr gcp cleanup`` uses its
+# presence (any value) to find mngr-managed instances project-wide before
+# deleting the shared firewall rule.
+MNGR_PROVIDER_LABEL_KEY: Final[str] = "mngr-provider"
+
 # Label key/value that ``create_instance`` adds to every GCE instance launched
 # while ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
 # this label (not the instance name) to find leaked instances, which means
@@ -286,6 +292,34 @@ class GcpVpsClient(VpsClientInterface):
             f"({self.firewall_target_tag!r}); every instance is tagged with it."
         )
 
+    def delete_firewall(self) -> str | None:
+        """Delete the SSH firewall rule, undoing ``ensure_firewall`` / ``mngr gcp prepare``.
+
+        The inverse of the privileged prepare path, used by ``mngr gcp cleanup``.
+        Returns the deleted rule name, or ``None`` when no rule named
+        ``firewall_name`` exists (idempotent: cleaning an already-clean project is
+        a no-op). Needs ``compute.firewalls.get`` + ``compute.firewalls.delete``.
+
+        Unlike instances, a GCE firewall rule has no resource that blocks its
+        deletion -- removing it simply drops the SSH ingress for every tagged
+        instance in the network. That is exactly why ``mngr gcp cleanup`` checks
+        for live mngr-managed instances first (see ``list_mngr_managed_instances``),
+        so it never strands a running agent's SSH access.
+        """
+        if not self._firewall_exists():
+            return None
+        try:
+            with self._translate_gcp_errors():
+                operation = self._firewalls().delete(project=self.project_id, firewall=self.firewall_name)
+                operation.result()
+        except VpsApiError as e:
+            # A concurrent delete won the race; the rule is already gone, which
+            # is the desired end state.
+            if e.status_code != 404:
+                raise
+        logger.info("Deleted firewall rule {} in project {}", self.firewall_name, self.project_id)
+        return self.firewall_name
+
     # =========================================================================
     # Instance Operations
     # =========================================================================
@@ -455,7 +489,7 @@ class GcpVpsClient(VpsClientInterface):
         # on the request object, so build a ListInstancesRequest explicitly.
         request = compute_v1.ListInstancesRequest(project=self.project_id, zone=self.zone)
         if provider_tag is not None:
-            request.filter = f"labels.mngr-provider={to_gce_label_value(provider_tag)}"
+            request.filter = f"labels.{MNGR_PROVIDER_LABEL_KEY}={to_gce_label_value(provider_tag)}"
 
         instances: list[dict[str, Any]] = []
         with self._translate_gcp_errors():
@@ -476,6 +510,35 @@ class GcpVpsClient(VpsClientInterface):
                     }
                 )
         return instances
+
+    def list_mngr_managed_instances(self) -> list[dict[str, Any]]:
+        """List mngr-managed instances across ALL zones in the project.
+
+        Project-wide via ``aggregatedList``, not zone-bound like
+        ``list_instances``, because the firewall rule is network-global:
+        deleting it drops SSH ingress for every tagged instance in the project,
+        regardless of zone. ``mngr gcp cleanup`` uses this to refuse deleting the
+        rule while any mngr-managed agent still exists, so cleanup never strands
+        one. Matches by the ``mngr-provider`` label key (any value), spanning
+        every mngr provider config bound to the project. Instances that no longer
+        exist do not appear, so anything returned is live (a stopped/``TERMINATED``
+        VM still exists and still counts). Returns dicts with ``id``, ``state``,
+        and ``zone``.
+        """
+        request = compute_v1.AggregatedListInstancesRequest(project=self.project_id)
+        managed: list[dict[str, Any]] = []
+        with self._translate_gcp_errors():
+            for zone_scope, scoped_list in self._instances().aggregated_list(request=request):
+                for instance in scoped_list.instances:
+                    if MNGR_PROVIDER_LABEL_KEY in instance.labels:
+                        managed.append(
+                            {
+                                "id": instance.name,
+                                "state": instance.status,
+                                "zone": zone_scope.removeprefix("zones/"),
+                            }
+                        )
+        return managed
 
     # =========================================================================
     # Snapshot Operations (boot persistent disk of an instance)
