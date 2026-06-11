@@ -21,6 +21,7 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -578,46 +579,28 @@ class AwsVpsClient(VpsClientInterface):
     # Snapshot Operations (EBS root volume of an instance)
     # =========================================================================
 
-    def _get_root_volume_id(self, instance_id: VpsInstanceId) -> str:
-        instance = self._describe_instance(instance_id)
-        if instance is None:
-            raise VpsApiError(404, f"Instance {instance_id} not found")
-        for mapping in instance.get("BlockDeviceMappings", []):
-            ebs = mapping.get("Ebs", {})
-            if ebs.get("VolumeId"):
-                return ebs["VolumeId"]
-        raise VpsApiError(500, f"Instance {instance_id} has no EBS volume")
+    # EBS snapshot wiring (create / delete / list) was written speculatively
+    # to satisfy the shared ``VpsClientInterface`` abstractmethods, but the
+    # AWS provider has no host snapshot workflow today -- nothing in
+    # ``mngr_aws`` or the broader ``mngr`` CLI calls these methods. Stubbed
+    # out with the same "unavailable" shape as
+    # ``ExternallyManagedVpsClient`` so any future caller fails loudly
+    # instead of running real EBS API calls that nothing else expects.
+    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
+        return VpsDockerError(
+            f"VPS API operation '{operation}' is unavailable: EBS snapshot support "
+            "is not implemented in mngr_aws. The AWS provider currently has no host "
+            "snapshot workflow; restore from a fresh `mngr create` instead."
+        )
 
     def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        volume_id = self._get_root_volume_id(instance_id)
-        with self._translate_aws_errors():
-            result = self._ec2().create_snapshot(VolumeId=volume_id, Description=description)
-        snap_id = result.get("SnapshotId", "")
-        if not snap_id:
-            raise VpsApiError(500, "CreateSnapshot returned no SnapshotId")
-        logger.info("Created EBS snapshot {} for volume {}", snap_id, volume_id)
-        return VpsSnapshotId(snap_id)
+        raise self._snapshots_unavailable("create_snapshot")
 
     def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        with self._translate_aws_errors():
-            self._ec2().delete_snapshot(SnapshotId=str(snapshot_id))
-        logger.info("Deleted EBS snapshot {}", snapshot_id)
+        raise self._snapshots_unavailable("delete_snapshot")
 
     def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        with self._translate_aws_errors():
-            result = self._ec2().describe_snapshots(OwnerIds=["self"])
-        # boto3 returns tz-aware datetimes for EC2 timestamps; let a missing
-        # StartTime or unexpected type surface as a KeyError / TypeError
-        # rather than silently substituting "now" (which would be misleading
-        # data attached to the wrong snapshot).
-        return [
-            VpsSnapshotInfo(
-                id=VpsSnapshotId(snap["SnapshotId"]),
-                description=snap.get("Description", ""),
-                created_at=snap["StartTime"],
-            )
-            for snap in result.get("Snapshots", [])
-        ]
+        raise self._snapshots_unavailable("list_snapshots")
 
     # =========================================================================
     # SSH Key Operations (EC2 KeyPairs)

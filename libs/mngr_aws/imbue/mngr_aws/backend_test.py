@@ -10,6 +10,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
+from imbue.mngr_aws.backend import ParsedAwsBuildOptions
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -185,16 +186,13 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 # own warning.
 #
 # AMI selection is a create-only concern (read paths do not need it to
-# enumerate or reach existing instances). The read-path missing-AMI test
-# that previously lived here is removed because the read path no longer
-# touches AMI resolution at all -- a misconfigured AMI now correctly
-# leaves discovery untouched while still failing the create path up front
-# via ``bootstrap_for_host_creation``.
-#
-# The create path surfaces both failure modes directly: missing creds
-# raises ``ProviderUnavailableError`` (the same as read paths), missing AMI
-# raises a plain ``MngrError`` (a config error to be fixed, not a
-# "provider state" signal). Neither emits a discovery warning.
+# enumerate or reach existing instances). ``build_provider_instance`` never
+# touches AMI resolution; that lives in ``AwsProvider._create_vps_instance``,
+# the only call site, and a missing-AMI failure there raises ``MngrError``
+# (a config error to be fixed). Create-path missing-creds is surfaced
+# identically to read paths because the create flow calls
+# ``build_provider_instance`` first -- no ``bootstrap_for_host_creation``
+# override is needed, matching the Azure pattern.
 
 
 def test_build_provider_instance_raises_unavailable_when_credentials_missing(
@@ -238,39 +236,19 @@ def test_build_provider_instance_does_not_touch_ami_resolution(
     assert isinstance(provider, AwsProvider)
 
 
-def test_bootstrap_for_host_creation_raises_unavailable_when_credentials_missing(
+def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
     monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """The create path surfaces the missing-creds error as ProviderUnavailableError.
-
-    Same classification as the read path: state-unknown, not state-empty. The
-    create flow calls ``bootstrap_for_host_creation`` before
-    ``build_provider_instance``, so this surfaces as the create command's
-    top-level failure -- before any SSH key upload or other partial side effect.
-    """
-    clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent")
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
-    name = ProviderInstanceName("aws-test")
-
-    with pytest.raises(ProviderUnavailableError):
-        AwsProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
-
-
-def test_bootstrap_for_host_creation_raises_mngr_error_when_no_ami_configured(
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """Missing AMI is a config error (MngrError), not a state signal.
+    """Missing AMI is a create-time config error (MngrError), not a state signal.
 
     Distinct from the missing-creds case: ``ProviderUnavailableError`` would
     misclassify "I have valid creds but the operator forgot to pin a
-    ``default_ami_id``" as an unreachable backend. The right shape is a plain
-    ``MngrError`` carrying the actionable how-to-fix from
-    ``AwsProviderConfig.get_ami_id_for_region``.
+    ``default_ami_id``" as an unreachable backend. The right shape at the
+    create path is a plain ``MngrError`` carrying the actionable how-to-fix
+    from ``AwsProviderConfig.get_ami_id_for_region``. The create flow's
+    ``create_host`` except handler cleans up any SSH key uploaded before this
+    raise, so no leak.
     """
     clear_aws_env(monkeypatch)
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
@@ -281,21 +259,11 @@ def test_bootstrap_for_host_creation_raises_mngr_error_when_no_ami_configured(
         default_ami_by_region={},
     )
     name = ProviderInstanceName("aws-test")
+    provider = AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+    assert isinstance(provider, AwsProvider)
+    parsed = ParsedAwsBuildOptions(
+        region=config.default_region, plan=config.default_instance_type, docker_build_args=()
+    )
 
     with pytest.raises(MngrError, match="No AMI configured"):
-        AwsProviderBackend.bootstrap_for_host_creation(name=name, config=config, mngr_ctx=temp_mngr_ctx)
-
-
-def test_bootstrap_for_host_creation_succeeds_when_credentials_and_ami_resolve(
-    monkeypatch: pytest.MonkeyPatch,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """When credentials + AMI both resolve, bootstrap is a quiet no-op (no raise)."""
-    clear_aws_env(monkeypatch)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-deadbeef")
-
-    AwsProviderBackend.bootstrap_for_host_creation(
-        name=ProviderInstanceName("aws-test"), config=config, mngr_ctx=temp_mngr_ctx
-    )
+        provider._create_vps_instance(parsed=parsed, label="test", user_data="", ssh_key_ids=(), tags={})

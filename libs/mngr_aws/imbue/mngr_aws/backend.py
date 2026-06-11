@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
-import boto3
 import click
 from botocore.exceptions import BotoCoreError
 from pydantic import ConfigDict
@@ -32,64 +31,6 @@ from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
-
-
-def _resolve_session_or_unavailable(name: ProviderInstanceName, config: AwsProviderConfig) -> boto3.Session:
-    """Resolve AWS credentials, raising ``ProviderUnavailableError`` on failure.
-
-    Missing credentials means the backend's state is *unknown* (we couldn't
-    authenticate, so we don't know if there are agents running) -- per the
-    ``ProviderEmptyError`` vs ``ProviderUnavailableError`` contract in
-    ``mngr.errors``, "reached and definitively empty" is the wrong shape
-    here. ``ProviderUnavailableError`` is the right shape: "could not be
-    reached", agents may still exist. Discovery callers catch it and log at
-    error level so the misconfiguration is visible, while still continuing
-    with the providers that *are* available.
-
-    Used at two entry points so they fail identically:
-    - ``build_provider_instance`` (the read path) needs a working session to
-      construct an EC2 client for discovery.
-    - ``bootstrap_for_host_creation`` (the create path) checks the same thing
-      first so a misconfigured create surfaces a clean top-level error
-      rather than failing partway through provisioning.
-
-    Deliberately does NOT log: each caller is responsible for either letting
-    the framework's read-path discovery handler emit the error log, or
-    letting the create-path top-level error surface to the user.
-
-    AMI resolution deliberately does NOT happen here -- AMIs are a
-    create-only concern, and folding them into the read path would
-    misclassify a misconfigured-AMI provider as unreachable when its
-    instances are still running. Create-time AMI resolution lives in
-    ``_resolve_ami_or_raise`` and is called from
-    ``bootstrap_for_host_creation`` and ``AwsProvider._create_vps_instance``.
-    """
-    try:
-        return config.get_session()
-    except (ValueError, BotoCoreError) as e:
-        raise ProviderUnavailableError(name, str(e)) from e
-
-
-def _resolve_ami_or_raise(name: ProviderInstanceName, config: AwsProviderConfig, region: str) -> str:
-    """Resolve the AMI ID for ``region``, raising ``MngrError`` when none is configured.
-
-    AMI selection is a create-time concern: read paths (``mngr list`` /
-    ``connect`` / ``gc``) do not need to know the AMI to enumerate or reach
-    existing instances. Missing AMI is a config error to be fixed (either
-    set ``default_ami_id`` or add a ``default_ami_by_region`` entry), not a
-    "provider is unreachable" or "provider is empty" signal -- the
-    instances may still exist.
-
-    Used from ``bootstrap_for_host_creation`` (so a misconfigured create
-    fails up front, before the SSH key upload or any other API call) and
-    from ``AwsProvider._create_vps_instance`` (to resolve the AMI just in
-    time for the actual RunInstances call when no per-host ``--aws-ami=``
-    override was supplied).
-    """
-    try:
-        return config.get_ami_id_for_region(region)
-    except ValueError as e:
-        raise MngrError(f"AWS provider {name!r}: {e}") from e
 
 
 class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
@@ -216,11 +157,13 @@ class AwsProvider(VpsDockerProvider):
         than the shared ``self.vps_client`` interface so the AWS-only
         ``ami_id_override`` kwarg is statically visible. ``ami_id_override``
         comes from ``--aws-ami=<ami-id>``; when None, the default AMI for the
-        target region is resolved from the config just in time. Resolving here
-        (and in ``bootstrap_for_host_creation``) rather than in
+        target region is resolved from the config just in time. Resolving AMI
+        here (the only create-path call site) rather than in
         ``build_provider_instance`` keeps AMI selection a create-only concern
         so a misconfigured AMI does not hide already-running instances from
-        ``mngr list`` / ``connect`` / ``gc``.
+        ``mngr list`` / ``connect`` / ``gc``. The create path's ``create_host``
+        except handler reverses any SSH key upload that may have happened
+        before this raise, so the missing-AMI failure leaves no leaked state.
         """
         match parsed:
             case ParsedAwsBuildOptions(ami_id_override=ami_id_override, spot=spot):
@@ -231,7 +174,13 @@ class AwsProvider(VpsDockerProvider):
                     f"got {type(parsed).__name__}. This indicates the parser hook returned a "
                     "non-AWS shape; _parse_build_args must return ParsedAwsBuildOptions."
                 )
-        effective_ami_id = ami_id_override or _resolve_ami_or_raise(self.name, self.aws_config, parsed.region)
+        if ami_id_override:
+            effective_ami_id = ami_id_override
+        else:
+            try:
+                effective_ami_id = self.aws_config.get_ami_id_for_region(parsed.region)
+            except ValueError as e:
+                raise MngrError(f"AWS provider {self.name!r}: {e}") from e
         return self.aws_client.create_instance(
             label=label,
             region=parsed.region,
@@ -312,17 +261,23 @@ class AwsProviderBackend(ProviderBackendInterface):
         if not isinstance(config, AwsProviderConfig):
             raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
 
-        # Resolve only credentials here -- AMI is a create-only concern and is
-        # resolved just-in-time in ``AwsProvider._create_vps_instance`` (or up
-        # front in ``bootstrap_for_host_creation`` for early-failure on create).
-        # Folding AMI resolution into the read path would misclassify a
-        # provider with a misconfigured AMI as "unreachable" and hide its
-        # already-running instances from ``mngr list`` / ``connect`` / ``gc``.
-        # On a missing-creds failure, the raised ``ProviderUnavailableError``
-        # is logged at error level by ``mngr.api.list._construct_and_discover_
-        # for_provider`` (read path) and reported by ``mngr gc`` -- no
-        # backend-side warning needed.
-        session = _resolve_session_or_unavailable(name, config)
+        # A missing/unresolvable AWS session means EC2 was never reached: the
+        # state is *unknown* (agents may still exist on a configured account we
+        # transiently couldn't auth to). That is ProviderUnavailableError, NOT
+        # ProviderEmptyError -- read paths (mngr list / gc) catch it via the
+        # generic catch-all in mngr.api.list._construct_and_discover_for_provider
+        # and log at error level, so a misconfigured provider stays visible
+        # rather than silently vanishing from the listing. Host-creation paths
+        # surface this same error directly (no override -- create just calls
+        # build_provider_instance first), so we use a single exit shape for
+        # both read and create paths, matching the Azure pattern. AMI selection
+        # is a create-only concern and is deliberately NOT validated here --
+        # see AwsProvider._create_vps_instance for the just-in-time resolution
+        # and the rationale.
+        try:
+            session = config.get_session()
+        except (ValueError, BotoCoreError) as e:
+            raise ProviderUnavailableError(name, str(e)) from e
 
         aws_client = AwsVpsClient(
             session=session,
@@ -347,40 +302,6 @@ class AwsProviderBackend(ProviderBackendInterface):
             aws_client=aws_client,
             aws_config=config,
         )
-
-    @staticmethod
-    def bootstrap_for_host_creation(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> None:
-        """Fail fast on the create path when AWS credentials or AMI are unresolvable.
-
-        The create-host flow calls this exactly once, before
-        ``build_provider_instance`` -- and it is the only call path that does
-        (see ``ProviderBackendInterface.bootstrap_for_host_creation``).
-        Resolving both credentials AND the default-region AMI here means a
-        misconfigured ``mngr create --provider aws`` surfaces the actionable
-        error directly, as the create command's top-level failure -- before any
-        SSH key upload or other partial side effect.
-
-        The AMI check deliberately uses ``config.default_region`` rather than
-        the per-call ``--aws-region=`` override, because parsed build args are
-        not visible at this layer; a non-default ``--aws-region=`` would still
-        re-validate in ``_create_vps_instance`` just before the actual
-        RunInstances call. This is the standard "early sanity check" for the
-        99% case where the user creates in the default region.
-
-        Idempotent and cheap. Unlike Modal's / Docker's overrides, this creates
-        no backend-side resources -- AWS's one-time resource (the per-region
-        security group) is provisioned out of band by ``mngr aws prepare``,
-        not here.
-        """
-        del mngr_ctx
-        if not isinstance(config, AwsProviderConfig):
-            raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
-        _resolve_session_or_unavailable(name, config)
-        _resolve_ami_or_raise(name, config, config.default_region)
 
 
 @hookimpl
