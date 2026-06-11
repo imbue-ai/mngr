@@ -12,7 +12,6 @@ so neither callers nor tests have to know the templates moved from raw
 Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
-import hashlib
 import html
 import os
 from collections.abc import Mapping
@@ -27,6 +26,8 @@ from jinjax import Catalog
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -91,6 +92,8 @@ _ICONS_24: Final[Mapping[str, str]] = {
     "forward": '<polyline points="9 6 15 12 9 18"/>',
     "messages": '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     "restart": '<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/>',
+    "stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "play": '<polygon points="6 4 20 12 6 20 6 4"/>',
     "settings": (
         '<circle cx="12" cy="12" r="3"/>'
         '<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06'
@@ -152,36 +155,6 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
-# -- Per-workspace identity color --
-# See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
-# window.mindsAccent helper consumed by chrome.js and sidebar.js).
-
-# Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue. The accent fills
-# the full-width titlebar (not just a small swatch), so a light /
-# low-saturation tone is needed to read as chrome rather than a saturated
-# highlight.
-_WORKSPACE_L: Final[int] = 85
-_WORKSPACE_C: Final[float] = 0.08
-
-
-@pure
-def workspace_accent(agent_id: str) -> str:
-    """Deterministically map an agent id to a CSS OKLCH color.
-
-    Uses a fixed lightness and chroma (a light, low-saturation tone that
-    reads as a chrome surface across the full-width titlebar) so every
-    workspace accent sits at the same readable level, and only the hue
-    varies. Full 360 degree hue range means collisions are effectively
-    impossible, and OKLCH's perceptual uniformity means close hashes
-    still read as visibly different colors.
-    """
-    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[:4], "big") % 360
-    return f"oklch({_WORKSPACE_L}% {_WORKSPACE_C} {hue})"
-
-
 # -- Page renderers --
 
 
@@ -193,6 +166,9 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    agent_accents: dict[str, str] | None = None,
+    shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
+    mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -206,6 +182,11 @@ def render_landing_page(
 
     agent_names maps agent ID strings to human-readable workspace names.
 
+    agent_accents maps agent ID strings to ``#rrggbb`` workspace accent
+    hexes (the stored color label, resolved by the caller). Agents without
+    an entry -- including the whole map being None -- render their homepage
+    tile with the default workspace color.
+
     destroying_status_by_agent_id maps agent ID strings to one of
     ``"running"``/``"failed"`` for agents whose detached destroy subprocess
     is currently in flight (running) or exited without removing the agent
@@ -218,17 +199,26 @@ def render_landing_page(
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
-    agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    # Workspaces without an entry in agent_accents (caller didn't supply
+    # one, or supplied a partial map) fall back to the default workspace
+    # color so the homepage tile still paints with something readable.
+    effective_accents: dict[str, str] = {}
+    supplied = agent_accents or {}
+    for aid in accessible_agent_ids:
+        effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
+    shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
-        agent_accents=agent_accents,
+        agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
         is_discovering=is_discovering,
         agent_names=agent_names or {},
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
+        shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
+        mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
     )
 
 
@@ -237,7 +227,10 @@ def render_landing_page(
 # ``_operator_workspace_default`` for the gating rationale.
 _FALLBACK_GIT_URL: Final[str] = "https://github.com/imbue-ai/forever-claude-template.git"
 _FALLBACK_HOST_NAME: Final[str] = "assistant"
-_FALLBACK_BRANCH: Final[str] = ""
+# Pin to an annotated FCT tag so a shipped binary clones the exact FCT
+# snapshot it was verified against. Bump to a newer tag only after
+# re-verifying launch-to-msg CI against (this binary, the new tag).
+FALLBACK_BRANCH: Final[str] = "v0.3.0"
 
 # Env var (set by ``just minds-start`` and the e2e workspace runner) that opts a
 # launch into the operator's local-worktree create-form defaults. Gating on an
@@ -290,6 +283,7 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    color: str = DEFAULT_WORKSPACE_COLOR,
 ) -> str:
     """Render the agent creation form page.
 
@@ -307,12 +301,19 @@ def render_create_form(
     ``host_name`` is the value of the form's "Name" field; it drives the
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
+
+    ``color`` is the ``#rrggbb`` hex preselected in the form's palette
+    picker: the matching swatch renders checked and the hidden ``color``
+    input the form POSTs carries it. Callers pass the
+    suggested-unused-palette pick; it defaults to
+    ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care about color
+    (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_name = (
         host_name if host_name else _operator_workspace_default("MINDS_WORKSPACE_NAME", _FALLBACK_HOST_NAME)
     )
-    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", _FALLBACK_BRANCH)
+    effective_branch = branch if branch else _operator_workspace_default("MINDS_WORKSPACE_BRANCH", FALLBACK_BRANCH)
     has_account = bool(default_account_id and accounts)
     effective_launch_mode = (
         launch_mode if launch_mode is not None else (LaunchMode.IMBUE_CLOUD if has_account else LaunchMode.LIMA)
@@ -353,6 +354,8 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        color=color,
+        palette=WORKSPACE_PALETTE,
     )
 
 
@@ -1149,6 +1152,8 @@ def render_workspace_settings(
     servers: Sequence[str],
     telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
+    current_color: str = DEFAULT_WORKSPACE_COLOR,
+    is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1162,6 +1167,15 @@ def render_workspace_settings(
     Imbue Cloud; the account section then shows the bound account with a
     disabled Disassociate control and no association controls.
 
+    ``current_color`` is the workspace's stored color hex (``#rrggbb``),
+    used to pre-select a palette swatch / pre-fill the hex input.
+    Defaults to ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care
+    about color (e.g. some tests) can omit it.
+
+    ``is_stale`` reflects the workspace's provider-health flag from the
+    SSE workspace payload; when True the color picker controls are
+    disabled with a hint that the workspace is currently unreachable.
+
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
@@ -1174,6 +1188,9 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
+        palette=WORKSPACE_PALETTE,
     )
 
 

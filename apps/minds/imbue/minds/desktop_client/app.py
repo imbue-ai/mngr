@@ -6,13 +6,17 @@ import shlex
 import threading
 import time
 from collections.abc import AsyncGenerator
+from collections.abc import Collection
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
+from enum import auto
 from pathlib import Path
 from typing import Annotated
 from typing import Any
 from typing import Final
+from typing import assert_never
 from urllib.parse import urlparse
 
 import httpx
@@ -32,6 +36,7 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.bootstrap import list_disabled_provider_names
@@ -46,6 +51,7 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.api_v1 import create_api_v1_router
 from imbue.minds.desktop_client.auth import AuthStoreInterface
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_export import export_latest_snapshot_zip
@@ -70,6 +76,9 @@ from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.mind_liveness import MindLiveness
+from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
+from imbue.minds.desktop_client.mind_liveness import get_shutdown_capable_workspace_agent_ids
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
@@ -123,10 +132,15 @@ from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_welcome_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
 from imbue.minds.desktop_client.templates import status_text_for
-from imbue.minds.desktop_client.templates import workspace_accent
 from imbue.minds.desktop_client.tunnel_token_injection import clear_tunnel_token_from_agent
 from imbue.minds.desktop_client.tunnel_token_injection import inject_tunnel_token_into_agent
 from imbue.minds.desktop_client.webdav import create_webdav_app
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
+from imbue.minds.envs.docker_cleanup import DockerCleanupError
+from imbue.minds.envs.docker_cleanup import stop_active_env_state_container
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import MindsConfigError
 from imbue.minds.errors import MngrCommandError
@@ -142,7 +156,9 @@ from imbue.minds.primitives import UserDataPreference
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
 from imbue.minds.telegram.setup import TelegramSetupStatus
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
@@ -358,6 +374,65 @@ def _handle_authenticate(
     return response
 
 
+def _is_workspace_provider_errored(info: AgentDisplayInfo | None, errored_provider_names: Collection[str]) -> bool:
+    """True when the agent's provider's most recent discovery poll errored.
+
+    Such a workspace is "stale": it was retained from prior state, so its
+    host is unreachable (or at least unverified) until the provider
+    recovers. Callers build ``errored_provider_names`` once from
+    ``backend_resolver.get_provider_errors()`` -- as a set when checking
+    many agents -- and reuse it across calls.
+    """
+    return info is not None and info.provider_name is not None and info.provider_name in errored_provider_names
+
+
+def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
+    """The workspace's stored color hex, or the default for label-less workspaces.
+
+    Workspaces created before the color picker shipped have no ``color``
+    label on disk; every render surface shows them as
+    ``DEFAULT_WORKSPACE_COLOR`` until the user picks a color (which
+    persists the label). This helper is that rule's single home.
+    """
+    stored = backend_resolver.get_workspace_color(agent_id)
+    return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
+
+
+def _color_for_new_workspace(raw_color: object) -> str:
+    """Lenient parse of a create request's submitted color, with default fallback.
+
+    The create form posts the picker's hidden ``color`` input and the
+    JSON API accepts an optional ``color`` field. A missing or malformed
+    value (e.g. the browser ate the input) must not reject the whole
+    create request -- the new workspace just gets the default color.
+    A *missing* color (an absent field, or an explicit JSON ``null``) is
+    normal flow (the JSON API treats it as optional) and stays silent; a
+    non-empty value that fails to parse indicates a buggy client, so it
+    is logged before falling back.
+    """
+    stripped = str(raw_color).strip() if raw_color is not None else ""
+    normalized = normalize_workspace_color(stripped)
+    if normalized is not None:
+        return normalized
+    if stripped:
+        logger.warning("Ignoring malformed create-request color {!r}; using the default workspace color.", stripped)
+    return DEFAULT_WORKSPACE_COLOR
+
+
+def _suggested_create_color(backend_resolver: BackendResolverInterface) -> str:
+    """Pick the color to preselect in the create form.
+
+    Gathers the colors currently in use across active workspaces (a
+    label-less workspace counts as using ``DEFAULT_WORKSPACE_COLOR``,
+    since that's what it renders as) and asks
+    ``pick_unused_create_color`` for the first unused palette entry --
+    falling back to confusion when there are no workspaces yet or every
+    palette entry is taken.
+    """
+    used = {_resolved_workspace_color(backend_resolver, aid) for aid in backend_resolver.list_active_workspace_ids()}
+    return pick_unused_create_color(used)
+
+
 def _handle_welcome_page(request: Request, auth_store: AuthStoreDep) -> Response:
     """Render the welcome/splash page for first-time users."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -386,6 +461,7 @@ def _handle_landing_page(
         if telegram_orchestrator is not None:
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
+        agent_accents: dict[str, str] = {}
         for aid in all_agent_ids:
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
@@ -393,12 +469,20 @@ def _handle_landing_page(
             else:
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
+            agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
+        shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
+        mind_liveness_by_agent_id = {
+            aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
+        }
         html = render_landing_page(
             accessible_agent_ids=all_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
             destroying_status_by_agent_id=destroying_status_by_agent_id,
+            agent_accents=agent_accents,
+            shutdown_capable_agent_ids=shutdown_capable_agent_ids,
+            mind_liveness_by_agent_id=mind_liveness_by_agent_id,
         )
         return HTMLResponse(content=html)
 
@@ -432,6 +516,7 @@ def _handle_landing_page(
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        color=_suggested_create_color(backend_resolver),
     )
     return HTMLResponse(content=html)
 
@@ -882,6 +967,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         ai_provider = AIProvider.SUBSCRIPTION
     account_id = str(form.get("account_id", "")).strip()
     anthropic_api_key = str(form.get("anthropic_api_key", "")).strip()
+    color = _color_for_new_workspace(form.get("color", ""))
     try:
         backup_provider = BackupProvider(str(form.get("backup_provider", BackupProvider.CONFIGURE_LATER.value)))
     except ValueError:
@@ -923,6 +1009,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
             backup_api_key_env=backup_api_key_env,
             has_saved_backup_password=has_saved_backup_password(agent_creator.paths),
             error_message=message,
+            color=color,
         )
         return HTMLResponse(content=html_body, status_code=status)
 
@@ -1012,6 +1099,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
         anthropic_api_key=anthropic_api_key,
         on_created=on_created,
         backup_request=backup_request,
+        color=color,
     )
 
     creating_url = "/creating/{}".format(creation_id)
@@ -1021,6 +1109,7 @@ async def _handle_create_form_submit(request: Request, auth_store: AuthStoreDep)
 def _handle_create_page(
     request: Request,
     auth_store: AuthStoreDep,
+    backend_resolver: BackendResolverDep,
 ) -> Response:
     """Show the create form page (GET /create)."""
     if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
@@ -1044,6 +1133,7 @@ def _handle_create_page(
         has_saved_backup_password=is_backup_password_saved,
         region_options_by_launch_mode=region_options,
         region_selected_by_launch_mode=region_selected,
+        color=_suggested_create_color(backend_resolver),
     )
     return HTMLResponse(content=html)
 
@@ -1111,6 +1201,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
     anthropic_api_key = str(body.get("anthropic_api_key", "")).strip()
     account_id = str(body.get("account_id", "")).strip()
     submitted_region = str(body.get("region", "")).strip()
+    color = _color_for_new_workspace(body.get("color", ""))
     if not git_url:
         return Response(
             status_code=400,
@@ -1157,6 +1248,39 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         if session_store_inst is not None:
             account_email = session_store_inst.get_account_email(account_id) or ""
 
+    # FIXME: two duplicate-name footguns this 409 doesn't cover:
+    # (1) API + empty ``host_name``: a second POST with the same
+    #     ``git_url`` auto-derives the same name via
+    #     ``extract_repo_name`` and fails as a deferred ``FAILED``
+    #     status mid-creation. Fix: derive + uniquify here, or
+    #     reject the duplicate inline.
+    # (2) Form + default ``"assistant"``: the form pre-fills with
+    #     ``_FALLBACK_HOST_NAME``, but ``_handle_create_form_submit``
+    #     never runs this check, so a second Create with the
+    #     untouched default also fails as ``FAILED``. Fix: uniquify
+    #     the default at render time, or mirror this 409 on the form
+    #     path.
+    if host_name:
+        backend_resolver = request.app.state.backend_resolver
+        existing_names: set[str] = set()
+        for existing_id in backend_resolver.list_known_workspace_ids():
+            existing_name = backend_resolver.get_workspace_name(existing_id)
+            if existing_name is not None:
+                existing_names.add(existing_name)
+        if host_name in existing_names:
+            return Response(
+                status_code=409,
+                content=json.dumps(
+                    {
+                        "error": (
+                            "An agent named '{}' already exists. "
+                            "Pick a different name, or destroy the existing one first."
+                        ).format(host_name)
+                    }
+                ),
+                media_type="application/json",
+            )
+
     backup_request, backup_error = _build_backup_request_or_error(
         backup_provider=backup_provider,
         encryption_method=backup_encryption_method,
@@ -1192,6 +1316,7 @@ async def _handle_create_agent_api(request: Request, auth_store: AuthStoreDep) -
         anthropic_api_key=anthropic_api_key,
         on_created=_persist_region_on_created,
         backup_request=backup_request,
+        color=color,
     )
 
     # Apply any onboarding answers supplied inline by the API caller. Absent
@@ -1628,6 +1753,127 @@ def _handle_destroying_page(
     return HTMLResponse(content=html)
 
 
+# -- Workspace color route handler --
+
+
+async def _handle_set_workspace_color_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """POST /api/workspaces/<agent_id>/color: write the per-workspace color label.
+
+    Body: ``{"hex": "<rrggbb>"}``. Lenient: accepts ``#fff`` / ``fff`` /
+    ``#ffffff`` / ``ffffff`` in any case; normalized to ``#rrggbb`` lowercase
+    server-side.
+
+    Error responses (all JSON with an ``error`` discriminant):
+      - 400 ``invalid_hex`` -- the body's hex didn't parse.
+      - 404 ``not_primary`` -- the agent is not a primary workspace
+        (no ``workspace`` / ``is_primary`` label pair, or unknown).
+      - 409 ``stale_provider`` -- the agent's provider's last discovery
+        poll errored, so the host is unreachable and writing the label
+        would not be observable until provider recovery.
+      - 502 ``host_unreachable`` -- ``mngr label`` itself failed (timeout,
+        non-zero exit, exec failure).
+
+    On success, writes ``color=<hex>`` via ``mngr label`` (CLI merge
+    semantics, so other labels are preserved), optimistically updates
+    the resolver's snapshot so the next SSE workspaces tick reflects the
+    new color without waiting for the discovery refresh, and returns
+    ``{"agent_id": ..., "color": "#rrggbb"}``.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return Response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
+
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        # ValueError also covers UnicodeDecodeError on a non-UTF-8 body
+        # (matches the other request.json() call sites in this file).
+        # External (HTTP) input: log at warning level rather than silently
+        # swallowing so a buggy / hostile client's bad bodies are visible.
+        logger.warning("Color write for {} got malformed JSON body: {}", agent_id, exc)
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": "invalid_hex"}),
+            media_type="application/json",
+        )
+    raw_hex = body.get("hex", "") if isinstance(body, dict) else ""
+    normalized = normalize_workspace_color(str(raw_hex))
+    if normalized is None:
+        return Response(
+            status_code=400,
+            content=json.dumps({"error": "invalid_hex"}),
+            media_type="application/json",
+        )
+
+    parsed_id = AgentId(agent_id)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+
+    # The minds primary-workspace filter is the "workspace" + "is_primary"
+    # label pair (see backend_resolver.list_known_workspace_ids). Color writes
+    # only apply to primary agents; the sibling system-services agent shares
+    # the host but does not own workspace identity.
+    if parsed_id not in backend_resolver.list_known_workspace_ids():
+        return Response(
+            status_code=404,
+            content=json.dumps({"error": "not_primary"}),
+            media_type="application/json",
+        )
+
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
+    if _is_workspace_provider_errored(info, errored_provider_names):
+        return Response(
+            status_code=409,
+            content=json.dumps({"error": "stale_provider"}),
+            media_type="application/json",
+        )
+
+    mngr_binary: str = request.app.state.mngr_binary
+    mngr_host_dir: Path = request.app.state.mngr_host_dir
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        # The concurrency group is wired in production (see create_desktop_client
+        # entrypoint); only test paths that explicitly skip it can hit this.
+        logger.warning("No concurrency group available; cannot write color label for {}", parsed_id)
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "host_unreachable", "detail": "concurrency group unavailable"}),
+            media_type="application/json",
+        )
+
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    # `mngr label` (CLI) merges with existing labels; BaseAgent.set_labels at
+    # the API level would full-replace and clobber concurrent writes to other
+    # keys, so we shell out to the CLI to get the merge for free.
+    argv = [mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]
+    try:
+        # This route is async (it awaits the JSON body), so the blocking
+        # subprocess must run in the threadpool -- calling it inline would
+        # stall the event loop (SSE, proxying, every other route) for the
+        # duration of the ``mngr label`` run.
+        await asyncio.get_running_loop().run_in_executor(None, _run_mngr, concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        logger.warning("mngr label failed for {}: {}", parsed_id, exc)
+        return Response(
+            status_code=502,
+            content=json.dumps({"error": "host_unreachable", "detail": str(exc)}),
+            media_type="application/json",
+        )
+
+    if isinstance(backend_resolver, MngrCliBackendResolver):
+        backend_resolver.set_workspace_color_locally(parsed_id, normalized)
+
+    return Response(
+        status_code=200,
+        content=json.dumps({"agent_id": agent_id, "color": normalized}),
+        media_type="application/json",
+    )
+
+
 # -- Telegram setup route handlers --
 
 
@@ -1850,6 +2096,11 @@ async def _handle_chrome_events(
         if tracker is not None:
             tracker.add_on_change_callback(_on_health_change)
 
+        # Local-mind liveness is derived from discovery host state, which the
+        # resolver already wakes us on (the on-change above). A Start/Stop action
+        # sets an optimistic override on the same resolver and fires that same
+        # on-change, so an in-app action wakes this loop immediately too; each
+        # tick recomputes and diffs the per-mind states.
         try:
             # Send initial workspace list and request count
             session_store: MultiAccountSessionStore | None = request.app.state.session_store
@@ -1939,6 +2190,10 @@ async def _handle_chrome_events(
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
 
+                # Each workspace entry carries its mind liveness (derived from
+                # discovery host state + any optimistic override), so a liveness
+                # change makes ``current_data`` differ and pushes a ``workspaces``
+                # update below -- no separate liveness channel needed.
                 current_data = _build_workspace_list(backend_resolver, session_store)
                 current_destroying_ids = _destroying_agent_ids(paths, backend_resolver.list_active_workspace_ids())
                 if current_data != last_workspace_data or current_destroying_ids != last_destroying_ids:
@@ -2095,13 +2350,28 @@ def _build_workspace_list(
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
-    Each entry carries a deterministic "accent" CSS color derived from the
-    agent id so the chrome and sidebar can render a per-workspace accent
-    without running a digest in JS. Entries whose provider's latest discovery
-    poll errored carry ``is_stale="true"`` so the UI can flag them as
+    Each entry carries an ``accent`` (#rrggbb CSS color) and ``accent_fg``
+    (RGB triple for the contrasting titlebar foreground) for the chrome
+    and sidebar to render. The accent is the workspace's stored
+    ``color`` label (set at create time by the create-form picker, or via
+    the settings POST endpoint); workspaces that lack the label (i.e. they
+    were created before the picker shipped and the user hasn't repicked
+    yet) get the default workspace color. ``accent_fg`` is the
+    WCAG-contrasting foreground for the resolved hex.
+
+    Entries whose provider's latest discovery poll errored carry
+    ``is_stale="true"`` so the UI can flag them as
     retained-but-unverified (they remain fully interactive).
+
+    Shutdown-capable minds (those on a provider whose host minds can stop/start,
+    see :func:`provider_backend_supports_shutdown`) additionally carry
+    ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
+    UNKNOWN. Container liveness rides here rather than on a separate SSE channel:
+    a liveness change makes the entry differ, so the existing ``workspaces``
+    diff pushes it. Non-capable minds carry neither field.
     """
     errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
+    liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
     agent_ids = backend_resolver.list_active_workspace_ids()
     workspaces: list[dict[str, str]] = []
     for aid in agent_ids:
@@ -2109,12 +2379,22 @@ def _build_workspace_list(
         ws_name = backend_resolver.get_workspace_name(aid)
         if not ws_name:
             ws_name = info.agent_name if info else str(aid)
-        entry: dict[str, str] = {"id": str(aid), "name": ws_name, "accent": workspace_accent(str(aid))}
+        accent = _resolved_workspace_color(backend_resolver, aid)
+        entry: dict[str, str] = {
+            "id": str(aid),
+            "name": ws_name,
+            "accent": accent,
+            "accent_fg": pick_workspace_foreground(accent),
+        }
         # Mark the workspace stale when its provider's most recent discovery
         # poll errored: it was retained from prior state, so its liveness is
         # unverified rather than confirmed healthy.
-        if info is not None and info.provider_name is not None and info.provider_name in errored_provider_names:
+        if _is_workspace_provider_errored(info, errored_provider_names):
             entry["is_stale"] = "true"
+        liveness = liveness_by_agent_id.get(str(aid))
+        if liveness is not None:
+            entry["supports_shutdown"] = "true"
+            entry["liveness"] = liveness.value
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -2573,6 +2853,274 @@ def _handle_restart_host_api(
     return _dispatch_restart(request=request, auth_store=auth_store, agent_id=agent_id, is_host_restart=True)
 
 
+# -- Mind host Start / Stop --
+#
+# A "shutdown-capable mind" is a workspace on a provider whose host minds can
+# stop and start (see ``provider_backend_supports_shutdown`` -- the local docker
+# / lima backends today). Stopping one frees the user's machine while preserving
+# data and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
+# host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
+# the stopped container). Both set an optimistic host-state override on the
+# resolver so the landing page and quit prompt flip at once; the next discovery
+# snapshot then confirms (or corrects) it.
+#
+# The single-mind endpoints run the ``mngr`` command synchronously (in the
+# request's Starlette threadpool worker) and return the real outcome -- no
+# fire-and-forget dispatch. The quit-time bulk stop issues ONE
+# ``mngr stop <ids...> --stop-host``, which stops every named host concurrently
+# via mngr's own executor, rather than one subprocess per mind.
+
+
+class _MindHostAction(UpperCaseStrEnum):
+    """Which lifecycle action a Start/Stop runs on a mind's host."""
+
+    STOP = auto()
+    START = auto()
+
+
+def _resolve_host_id(backend_resolver: BackendResolverInterface, workspace_agent_id: AgentId) -> HostId | None:
+    """Return the host id of ``workspace_agent_id`` (the key the liveness override uses), or None."""
+    info = backend_resolver.get_agent_display_info(workspace_agent_id)
+    return HostId(info.host_id) if info is not None else None
+
+
+def _build_mngr_stop_hosts_argv(mngr_binary: str, agent_ids: Sequence[AgentId]) -> list[str]:
+    """Build the argv for one ``mngr stop <ids...> --stop-host`` over several hosts.
+
+    ``mngr stop`` is variadic and stops the named hosts concurrently (mngr's own
+    executor), so a single command replaces one subprocess per mind.
+    """
+    return [mngr_binary, "stop", *(str(aid) for aid in agent_ids), "--quiet", "--stop-host"]
+
+
+def _perform_mind_host_action(
+    workspace_agent_id: AgentId,
+    action: _MindHostAction,
+    backend_resolver: BackendResolverInterface,
+    mngr_binary: str,
+    mngr_host_dir: Path,
+    concurrency_group: ConcurrencyGroup,
+) -> bool:
+    """Stop or start one mind's host, running ``mngr`` to completion; return True on success.
+
+    On success sets the optimistic host-state override (so the landing page and
+    quit prompt flip immediately, reconciling on the next discovery snapshot); on
+    failure clears any override so the UI reverts to the authoritative discovery
+    state. Runs synchronously in the caller's thread, so the endpoint returns the
+    real outcome.
+    """
+    services_agent_id = backend_resolver.get_system_services_agent_id(workspace_agent_id)
+    if services_agent_id is None:
+        logger.warning(
+            "Could not locate the system-services agent for host {} on {}", action.value, workspace_agent_id
+        )
+        return False
+    host_id = _resolve_host_id(backend_resolver, workspace_agent_id)
+    env = dict(os.environ)
+    env["MNGR_HOST_DIR"] = str(mngr_host_dir)
+    match action:
+        case _MindHostAction.STOP:
+            argv = _build_mngr_stop_argv(mngr_binary, services_agent_id, is_host_restart=True)
+        case _MindHostAction.START:
+            argv = _build_mngr_start_argv(mngr_binary, services_agent_id)
+        case _ as unreachable:
+            assert_never(unreachable)
+    try:
+        _run_mngr(concurrency_group, argv, env)
+    except MngrCommandError as exc:
+        logger.warning("Host {} for {} failed: {}", action.value, workspace_agent_id, exc)
+        if host_id is not None:
+            backend_resolver.clear_host_state_override(host_id)
+        return False
+    if host_id is not None:
+        match action:
+            case _MindHostAction.STOP:
+                backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
+            case _MindHostAction.START:
+                backend_resolver.set_host_state_override(host_id, HostState.RUNNING)
+            case _ as unreachable:
+                assert_never(unreachable)
+    return True
+
+
+def _dispatch_mind_host_action(
+    request: Request,
+    auth_store: AuthStoreDep,
+    agent_id: str,
+    action: _MindHostAction,
+) -> Response:
+    """Shared body for the stop-host / start-host endpoints: validate, run synchronously, return the outcome."""
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    aid = AgentId(agent_id)
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    if concurrency_group is None:
+        return _json_error("Mind host control is unavailable in this configuration", status_code=503)
+    succeeded = _perform_mind_host_action(
+        workspace_agent_id=aid,
+        action=action,
+        backend_resolver=backend_resolver,
+        mngr_binary=request.app.state.mngr_binary,
+        mngr_host_dir=request.app.state.mngr_host_dir,
+        concurrency_group=concurrency_group,
+    )
+    if not succeeded:
+        return _json_error(f"Could not {action.value.lower()} the mind host", status_code=500)
+    return Response(content="{}", media_type="application/json")
+
+
+def _handle_stop_host_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Stop a mind's host (``mngr stop --stop-host``)."""
+    return _dispatch_mind_host_action(
+        request=request, auth_store=auth_store, agent_id=agent_id, action=_MindHostAction.STOP
+    )
+
+
+def _handle_start_host_api(
+    agent_id: str,
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Start a mind's stopped host (``mngr start``)."""
+    return _dispatch_mind_host_action(
+        request=request, auth_store=auth_store, agent_id=agent_id, action=_MindHostAction.START
+    )
+
+
+def _running_mind_entries(backend_resolver: BackendResolverInterface) -> list[dict[str, str]]:
+    """Return ``[{id, name}, ...]`` for every shutdown-capable mind currently RUNNING.
+
+    Reads liveness from the discovery snapshot (plus any optimistic override) in
+    memory -- no subprocess -- so callers (the quit prompt, the bulk-stop result)
+    are instant.
+    """
+    running: list[dict[str, str]] = []
+    for aid_str, state in compute_mind_liveness_by_agent_id(backend_resolver).items():
+        if state != MindLiveness.RUNNING:
+            continue
+        aid = AgentId(aid_str)
+        name = backend_resolver.get_workspace_name(aid)
+        if not name:
+            info = backend_resolver.get_agent_display_info(aid)
+            name = info.agent_name if info is not None else aid_str
+        running.append({"id": aid_str, "name": name})
+    return running
+
+
+def _handle_running_minds_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Return the shutdown-capable minds whose containers are currently running, for the quit prompt.
+
+    Derives state from the discovery snapshot's host state (plus any optimistic
+    override from a just-issued Start/Stop) in memory rather than shelling out to
+    ``mngr list`` -- so the quit dialog appears instantly instead of blocking on a
+    subprocess. The prompt's purpose is "free local resources you forgot about",
+    not exact accounting: a container stopped externally since the last discovery
+    snapshot may still be listed, but re-stopping it is idempotent. Each entry
+    carries the agent id and human-readable workspace name.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    return Response(
+        content=json.dumps({"running": _running_mind_entries(backend_resolver)}), media_type="application/json"
+    )
+
+
+def _handle_stop_mind_hosts_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Stop the hosts of the given shutdown-capable minds in one ``mngr stop --stop-host``.
+
+    The target agent ids come from repeated ``agent_id`` query params (the ids the
+    quit prompt listed). Each is resolved to the system-services agent sharing its
+    host -- the host-stop target -- and all are passed to a single, synchronous
+    ``mngr stop ... --stop-host``; mngr stops every named host concurrently via
+    its own executor, so this is one subprocess rather than one per mind.
+
+    After the attempt it recomputes liveness and returns the requested minds still
+    running, so the quit flow can offer Retry without polling. On full success
+    every targeted host is stopped, the STOPPED override is set per host, and
+    ``still_running`` is empty; on partial failure ``mngr stop`` raises (it still
+    joins every host first), so ``still_running`` reflects the current discovery
+    snapshot -- which may briefly over-report a host that did stop until discovery
+    catches up. A Retry re-stop is idempotent (mngr reports "already stopped").
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        return _json_error("Mind host control is unavailable in this configuration", status_code=503)
+    requested_ids = request.query_params.getlist("agent_id")
+    # Resolve each workspace agent to the system-services agent that shares its
+    # host (the host-stop target) and remember its host for the optimistic override.
+    services_agent_ids: list[AgentId] = []
+    host_ids: list[HostId] = []
+    for agent_id in requested_ids:
+        aid = AgentId(agent_id)
+        services_agent_id = backend_resolver.get_system_services_agent_id(aid)
+        if services_agent_id is None:
+            logger.warning("Could not locate the system-services agent for host stop on {}", aid)
+            continue
+        services_agent_ids.append(services_agent_id)
+        host_id = _resolve_host_id(backend_resolver, aid)
+        if host_id is not None:
+            host_ids.append(host_id)
+    if services_agent_ids:
+        env = dict(os.environ)
+        env["MNGR_HOST_DIR"] = str(request.app.state.mngr_host_dir)
+        argv = _build_mngr_stop_hosts_argv(request.app.state.mngr_binary, services_agent_ids)
+        try:
+            _run_mngr(concurrency_group, argv, env)
+        except MngrCommandError as exc:
+            logger.warning("Bulk host stop failed for {}: {}", requested_ids, exc)
+        else:
+            for host_id in host_ids:
+                backend_resolver.set_host_state_override(host_id, HostState.STOPPED)
+    requested_set = set(requested_ids)
+    still_running = [entry for entry in _running_mind_entries(backend_resolver) if entry["id"] in requested_set]
+    return Response(content=json.dumps({"still_running": still_running}), media_type="application/json")
+
+
+def _handle_stop_state_container_api(
+    request: Request,
+    auth_store: AuthStoreDep,
+) -> Response:
+    """Stop this env's mngr Docker state container, to fully free local resources at quit.
+
+    The docker provider keeps a singleton state container (``<MNGR_PREFIX>docker-
+    state-<user_id>``) holding host records; ``mngr stop --stop-host`` leaves it
+    running. The Electron quit flow calls this after all minds are stopped so
+    nothing minds-related is left running. It stops (not removes) the container --
+    the volume / records persist and it restarts on next use. This is inherently
+    docker-specific (the state container is a docker-provider construct); a no-op
+    for envs without one.
+    """
+    if not _is_authenticated(cookies=request.cookies, auth_store=auth_store):
+        return _json_error("Not authenticated", status_code=403)
+    concurrency_group: ConcurrencyGroup | None = request.app.state.root_concurrency_group
+    if concurrency_group is None:
+        return Response(content=json.dumps({"stopped": False}), media_type="application/json")
+    try:
+        was_attempted = stop_active_env_state_container(
+            mngr_host_dir=request.app.state.mngr_host_dir,
+            parent_concurrency_group=concurrency_group,
+        )
+    except DockerCleanupError as exc:
+        logger.warning("Failed to stop the Docker state container at shutdown: {}", exc)
+        return _json_error(f"Could not stop the Docker state container: {exc}", status_code=500)
+    return Response(content=json.dumps({"stopped": was_attempted}), media_type="application/json")
+
+
 def _handle_host_health_probe_api(
     agent_id: str,
     request: Request,
@@ -2762,17 +3310,27 @@ def _handle_workspace_settings(
     accounts = session_store.list_accounts() if session_store else []
     is_leased_imbue_cloud = _is_leased_imbue_cloud_workspace(backend_resolver, agent_id)
 
-    ws_name = backend_resolver.get_workspace_name(AgentId(agent_id))
+    parsed_agent_id = AgentId(agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_agent_id)
+    info = backend_resolver.get_agent_display_info(parsed_agent_id)
     if not ws_name:
-        info = backend_resolver.get_agent_display_info(AgentId(agent_id))
         ws_name = info.agent_name if info else agent_id
 
-    servers = [str(s) for s in backend_resolver.list_services_for_agent(AgentId(agent_id))]
+    servers = [str(s) for s in backend_resolver.list_services_for_agent(parsed_agent_id)]
 
     telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
     telegram_state: str | None = None
     if telegram_orchestrator is not None:
-        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(AgentId(agent_id)) else "pending"
+        telegram_state = "active" if telegram_orchestrator.agent_has_telegram(parsed_agent_id) else "pending"
+
+    # Pre-fill the color picker with the workspace's stored color (or the
+    # default when the workspace has no color label yet). Disable
+    # the picker controls when the provider that owns this workspace is
+    # in error state -- writes against an unreachable host would not be
+    # observable until the provider recovers.
+    current_color = _resolved_workspace_color(backend_resolver, parsed_agent_id)
+    errored_provider_names = {str(name) for name in backend_resolver.get_provider_errors()}
+    is_stale = _is_workspace_provider_errored(info, errored_provider_names)
 
     html = render_workspace_settings(
         agent_id=agent_id,
@@ -2782,6 +3340,8 @@ def _handle_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
     )
     return HTMLResponse(content=html)
 
@@ -2885,8 +3445,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     # permission requests are filed by ``system-services``, so
     # ``req.agent_id`` is the sibling-not-shown-on-homepage. Computing
     # accent off the homepage agent's id keeps the inbox color in sync
-    # with the rest of the UI. Falls back to keying off ``ws_name`` if
-    # no discovered agent claims that workspace (e.g. a freshly-arrived
+    # with the rest of the UI. Falls back to the default workspace color
+    # if no discovered agent claims that workspace (e.g. a freshly-arrived
     # request whose host hasn't been re-discovered yet).
     primary_agent_id_by_ws_name: dict[str, str] = {}
     for aid in backend_resolver.list_known_workspace_ids():
@@ -2911,14 +3471,24 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
         if not ws_name:
             info = backend_resolver.get_agent_display_info(parsed_id)
             ws_name = info.agent_name if info else req.agent_id[:16]
-        accent_key = primary_agent_id_by_ws_name.get(ws_name, ws_name)
+        # Inbox card accent mirrors the homepage tile's accent for the
+        # workspace the request belongs to. ``primary_agent_id_by_ws_name``
+        # comes from the resolver's current snapshot, so the primary id
+        # is always a freshly-stringified AgentId -- reparsing through
+        # AgentId is safe.
+        primary_agent_id_str = primary_agent_id_by_ws_name.get(ws_name)
+        accent = (
+            _resolved_workspace_color(backend_resolver, AgentId(primary_agent_id_str))
+            if primary_agent_id_str is not None
+            else DEFAULT_WORKSPACE_COLOR
+        )
         cards.append(
             {
                 "id": str(req.event_id),
                 "kind_label": kind_label,
                 "ws_name": ws_name,
                 "display_name": display_name,
-                "accent": workspace_accent(accent_key),
+                "accent": accent,
             }
         )
     return cards
@@ -3697,6 +4267,9 @@ def create_desktop_client(
     app.post("/api/destroying/{agent_id}/dismiss")(_handle_destroying_dismiss_api)
     app.get("/destroying/{agent_id}")(_handle_destroying_page)
 
+    # Workspace color route
+    app.post("/api/workspaces/{agent_id}/color")(_handle_set_workspace_color_api)
+
     # Telegram setup routes
     app.post("/api/agents/{agent_id}/telegram/setup")(_handle_telegram_setup)
     app.get("/api/agents/{agent_id}/telegram/status")(_handle_telegram_status)
@@ -3709,6 +4282,13 @@ def create_desktop_client(
     app.get("/api/agents/{agent_id}/host-health")(_handle_host_health_probe_api)
     app.post("/api/agents/{agent_id}/restart-system-interface")(_handle_restart_system_interface_api)
     app.post("/api/agents/{agent_id}/restart-host")(_handle_restart_host_api)
+
+    # Mind host Start / Stop + the quit-prompt running-minds lookup and bulk stop
+    app.post("/api/agents/{agent_id}/stop-host")(_handle_stop_host_api)
+    app.post("/api/agents/{agent_id}/start-host")(_handle_start_host_api)
+    app.get("/api/minds/running")(_handle_running_minds_api)
+    app.post("/api/minds/stop-hosts")(_handle_stop_mind_hosts_api)
+    app.post("/api/minds/stop-state-container")(_handle_stop_state_container_api)
 
     return app
 

@@ -428,6 +428,29 @@ def setup_mngr_test_environment(
     assert_home_is_temp_directory()
 
 
+@contextmanager
+def capture_log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages, yielding the list they accumulate in.
+
+    Core logic shared by all log_warnings fixtures (in mngr/conftest.py and
+    plugin_testing.py). This is the single source of truth so the fixtures stay
+    thin delegation wrappers rather than duplicating the handler bookkeeping.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may no
+    longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
+
+
 def get_subprocess_test_env(
     root_name: str = "mngr-test",
     prefix: str | None = None,

@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Callable
@@ -14,7 +15,10 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -106,9 +110,27 @@ class BackendResolverInterface(MutableModel, ABC):
         """Return the last-known lifecycle state of a host, or None if unknown.
 
         Default implementation has no host-state data and returns None.
-        Subclasses fed by discovery should override this.
+        Subclasses fed by discovery should override this. Implementations may
+        return a short-lived optimistic override set via
+        :meth:`set_host_state_override` ahead of discovery catching up.
         """
         return None
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override a host's state until discovery confirms it.
+
+        Lets a UI-initiated lifecycle action (e.g. a Start/Stop click) flip
+        :meth:`get_host_state` immediately instead of waiting for the next
+        discovery snapshot. The override is dropped once discovery agrees with
+        it or a short TTL elapses. Default implementation is a no-op (resolvers
+        without discovery host state have nothing to override).
+        """
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id`` (e.g. after a failed action).
+
+        Default implementation is a no-op.
+        """
 
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
@@ -137,6 +159,19 @@ class BackendResolverInterface(MutableModel, ABC):
 
         Default implementation returns None.
         Subclasses with access to agent labels should override this.
+        """
+        return None
+
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the workspace color hex for an agent, or None if unset.
+
+        Returns a normalized ``#rrggbb`` lowercase string, ``None`` if the
+        agent has no ``color`` label (callers fall back to the default
+        workspace color), or the default color hex if the stored label is
+        malformed.
+
+        Default implementation returns None. Subclasses with access to
+        agent labels should override this.
         """
         return None
 
@@ -435,6 +470,21 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
 # -- MngrCliBackendResolver --
 
 
+# How long an optimistic host-state override is trusted before discovery is
+# believed instead. A UI lifecycle action's command has already returned by the
+# time the override is set, so the next discovery snapshot (~10s) normally
+# confirms it well within this window; the TTL only bounds how long a *stuck*
+# discovery (e.g. a provider erroring) can keep showing a stale optimistic state.
+_HOST_STATE_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
+
+
+class _HostStateOverride(FrozenModel):
+    """A short-lived optimistic host state set by a UI-initiated lifecycle action."""
+
+    state: HostState = Field(description="The optimistic state to report until discovery confirms it")
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
+
 class MngrCliBackendResolver(BackendResolverInterface):
     """Resolves backend URLs from continuously-updated state.
 
@@ -470,11 +520,22 @@ class MngrCliBackendResolver(BackendResolverInterface):
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _on_change_callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
     _on_request_callbacks: list[Callable[[str, str], None]] = PrivateAttr(default_factory=list)
+    # host_id_str -> a short-lived optimistic state set by a UI lifecycle action,
+    # masking discovery in ``get_host_state`` until discovery agrees or the TTL
+    # elapses. Guarded by _lock. Only ever holds a real RUNNING/STOPPED-style
+    # transition the user just triggered -- never DESTROYED -- so it cannot affect
+    # the DESTROYED-only filtering in ``list_active_workspace_ids``.
+    _host_state_override_by_host_id: dict[str, _HostStateOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the agents last completely enumerated on that host (the
     # in-memory image of the persisted last-good topology). Updated under
     # _lock by update_agents; read by get_system_services_agent_id as the
     # fallback when live discovery has lost the host.
     _last_good_agents_by_host: dict[str, tuple[_AgentRecord, ...]] = PrivateAttr(default_factory=dict)
+    # Set of agent ids for which we've already logged a malformed-color-label
+    # warning, so the log line fires once per agent rather than on every SSE
+    # tick. Plain set is fine -- get_workspace_color holds ``_lock`` while
+    # mutating it.
+    _logged_malformed_color_agents: set[str] = PrivateAttr(default_factory=set)
 
     def model_post_init(self, __context: object) -> None:
         """Load the persisted last-good agent topology from disk, if configured."""
@@ -547,11 +608,30 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             self._agents_result = result
             self._initial_discovery_done = True
+            self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             if self._merge_last_good_topology_locked(result.discovered_agents) and path is not None:
                 topology_to_write = _LastGoodAgentTopology(agents_by_host=dict(self._last_good_agents_by_host))
         if path is not None and topology_to_write is not None:
             _write_last_good_agent_topology(path, topology_to_write)
         self._fire_on_change()
+
+    def _sweep_host_state_overrides_locked(self, discovery_state_by_host_id: Mapping[str, HostState]) -> None:
+        """Drop optimistic overrides that the fresh snapshot has confirmed or that have expired.
+
+        Keeps the override map bounded to genuinely-still-pending overrides (so a
+        host that has since left discovery never lingers) without firing on-change
+        itself -- the surrounding ``update_agents`` already fires once. Must be
+        called with ``self._lock`` held.
+        """
+        now = time.monotonic()
+        for host_id_str in tuple(self._host_state_override_by_host_id):
+            override = self._host_state_override_by_host_id[host_id_str]
+            discovery_state = discovery_state_by_host_id.get(host_id_str)
+            if (
+                discovery_state == override.state
+                or (now - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
 
     def _merge_last_good_topology_locked(self, agents: tuple[DiscoveredAgent, ...]) -> bool:
         """Fold a fresh discovery snapshot into the last-good per-host topology.
@@ -682,9 +762,41 @@ class MngrCliBackendResolver(BackendResolverInterface):
             )
 
     def get_host_state(self, host_id: HostId) -> HostState | None:
-        """Return the last-known lifecycle state of a host from discovery, or None."""
+        """Return the host's lifecycle state, preferring a fresh optimistic override.
+
+        Discovery is authoritative: an optimistic override (set by a UI-initiated
+        Start/Stop) wins only until discovery agrees with it or its TTL elapses, at
+        which point it is dropped here and discovery is returned. Returns None when
+        neither an override nor discovery knows the host.
+        """
+        host_id_str = str(host_id)
         with self._lock:
-            return self._agents_result.host_state_by_host_id.get(str(host_id))
+            discovery_state = self._agents_result.host_state_by_host_id.get(host_id_str)
+            override = self._host_state_override_by_host_id.get(host_id_str)
+            if override is None:
+                return discovery_state
+            if (
+                discovery_state == override.state
+                or (time.monotonic() - override.set_at_monotonic) > _HOST_STATE_OVERRIDE_TTL_SECONDS
+            ):
+                del self._host_state_override_by_host_id[host_id_str]
+                return discovery_state
+            return override.state
+
+    def set_host_state_override(self, host_id: HostId, state: HostState) -> None:
+        """Optimistically override ``host_id``'s state until discovery confirms it; fires on-change."""
+        with self._lock:
+            self._host_state_override_by_host_id[str(host_id)] = _HostStateOverride(
+                state=state, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def clear_host_state_override(self, host_id: HostId) -> None:
+        """Drop any optimistic override for ``host_id``; fires on-change only if one was present."""
+        with self._lock:
+            existed = self._host_state_override_by_host_id.pop(str(host_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace label value for an agent, or None."""
@@ -693,6 +805,73 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 if agent.agent_id == agent_id:
                     return agent.labels.get("workspace")
             return None
+
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        """Return the normalized ``#rrggbb`` color label for an agent.
+
+        Returns ``None`` when the agent has no ``color`` label (callers
+        fall back to the default workspace color). Defensively parses the stored
+        value: if it is non-empty but not a recognized hex literal, logs
+        once at WARNING and returns the default workspace color so the
+        UI never crashes on a bad label. Mngr itself does not validate
+        label values, so a hand-edited or future-version label might
+        carry junk.
+        """
+        with self._lock:
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    raw = agent.labels.get("color")
+                    if raw is None:
+                        return None
+                    normalized = normalize_workspace_color(raw)
+                    if normalized is None:
+                        if str(agent_id) not in self._logged_malformed_color_agents:
+                            logger.warning(
+                                "Ignoring malformed color label {!r} for agent {}; "
+                                "rendering as default. Repick in workspace settings to fix.",
+                                raw,
+                                agent_id,
+                            )
+                            self._logged_malformed_color_agents.add(str(agent_id))
+                        return DEFAULT_WORKSPACE_COLOR
+                    return normalized
+            return None
+
+    def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
+        """Optimistically update the cached ``color`` label for an agent.
+
+        Called by the settings POST handler after a successful ``mngr label``
+        write so the SSE workspaces payload reflects the new color on the
+        next emit -- without having to wait the ~10s discovery tick for
+        the change to propagate back through ``mngr observe``.
+
+        ``color_hex`` must already be normalized (``#rrggbb`` lowercase);
+        the caller is responsible for validation. Returns True if the
+        snapshot was updated and ``_fire_on_change`` was called, False
+        if the agent is not in the current snapshot (in which case the
+        next discovery emit will pick up the on-disk label anyway).
+        """
+        with self._lock:
+            updated_agents: list[DiscoveredAgent] = []
+            found = False
+            for agent in self._agents_result.discovered_agents:
+                if agent.agent_id == agent_id:
+                    found = True
+                    new_labels = {**agent.labels, "color": color_hex}
+                    new_certified_data = {**agent.certified_data, "labels": new_labels}
+                    updated_agents.append(
+                        agent.model_copy_update(to_update(agent.field_ref().certified_data, new_certified_data))
+                    )
+                else:
+                    updated_agents.append(agent)
+            if not found:
+                return False
+            self._agents_result = self._agents_result.model_copy_update(
+                to_update(self._agents_result.field_ref().discovered_agents, tuple(updated_agents))
+            )
+            self._logged_malformed_color_agents.discard(str(agent_id))
+        self._fire_on_change()
+        return True
 
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
