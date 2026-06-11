@@ -200,7 +200,12 @@ class ProviderError(MngrError):
 
 
 class ProviderUnavailableError(ProviderError):
-    """Provider backend is not reachable (e.g. Docker daemon not running)."""
+    """Provider backend is not reachable (e.g. Docker daemon not running).
+
+    Commands that query multiple providers catch this and continue with
+    the providers that *are* available, so a single offline backend does
+    not block the entire operation.
+    """
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
         super().__init__(
