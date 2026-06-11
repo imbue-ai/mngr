@@ -183,6 +183,23 @@ def preserve_agent_state(
     )
 
 
+def flag_gated_items(
+    ref: DiscoveredAgent,
+    flag_name: str,
+    items: Sequence[PreservedItem],
+) -> Sequence[PreservedItem] | None:
+    """Return ``items`` if the discovered agent opted in via ``flag_name``, else None.
+
+    The shared selector body for a plugin's ``on_before_host_destroy``: it reads
+    a boolean preserve-on-destroy flag out of a :class:`DiscoveredAgent`'s
+    persisted ``agent_config`` (the raw data.json in ``certified_data``) and
+    returns the declared ``items`` to preserve only when that flag is truthy.
+    """
+    if not ref.certified_data.get("agent_config", {}).get(flag_name):
+        return None
+    return items
+
+
 def preserve_host_agents_on_destroy(
     host: HostInterface,
     mngr_ctx: MngrContext,

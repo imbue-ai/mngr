@@ -1,4 +1,5 @@
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
@@ -25,6 +27,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
@@ -224,12 +228,37 @@ def test_build_transcript_preserved_items_follows_convention() -> None:
 
 
 _SESSION_HISTORY_REL_PATH: str = "root_session"
+_SESSION_HISTORY_ITEMS: list[PreservedItem] = [PreservedItem(rel_path=_SESSION_HISTORY_REL_PATH, kind=FileType.FILE)]
 
 
-def _items_when_opted_in(ref: DiscoveredAgent) -> list[PreservedItem] | None:
-    if not ref.certified_data.get("agent_config", {}).get("preserve_on_destroy"):
-        return None
-    return [PreservedItem(rel_path=_SESSION_HISTORY_REL_PATH, kind=FileType.FILE)]
+def _make_discovered_agent(certified_data: dict[str, object]) -> DiscoveredAgent:
+    return DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("test"),
+        provider_name=ProviderInstanceName("local"),
+        certified_data=certified_data,
+    )
+
+
+@pytest.mark.parametrize(
+    "agent_config, expected",
+    [
+        ({"preserve_on_destroy": True}, _SESSION_HISTORY_ITEMS),
+        ({"preserve_on_destroy": False}, None),
+        ({}, None),
+    ],
+)
+def test_flag_gated_items_returns_items_only_when_opted_in(
+    agent_config: dict[str, object], expected: list[PreservedItem] | None
+) -> None:
+    """The items are returned only when the named flag is truthy; missing/false yields None."""
+    ref = _make_discovered_agent({"type": "codex", "agent_config": agent_config})
+    assert flag_gated_items(ref, "preserve_on_destroy", _SESSION_HISTORY_ITEMS) == expected
+
+
+def _items_when_opted_in(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
+    return flag_gated_items(ref, "preserve_on_destroy", _SESSION_HISTORY_ITEMS)
 
 
 def _write_agent_record_and_session(

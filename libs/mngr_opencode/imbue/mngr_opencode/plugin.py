@@ -50,6 +50,7 @@ import shlex
 import urllib.parse
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -64,6 +65,7 @@ from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -522,11 +524,9 @@ def _opencode_preserved_items() -> list[PreservedItem]:
     ]
 
 
-def _opencode_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list[PreservedItem] | None:
+def _opencode_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
     """Return the items to preserve for a discovered (offline) opencode agent, or None to skip it."""
-    if not ref.certified_data.get("agent_config", {}).get("preserve_on_destroy"):
-        return None
-    return _opencode_preserved_items()
+    return flag_gated_items(ref, "preserve_on_destroy", _opencode_preserved_items())
 
 
 @hookimpl

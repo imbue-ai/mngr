@@ -80,6 +80,7 @@ from __future__ import annotations
 import importlib.resources
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -99,6 +100,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_best_effort
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import build_transcript_preserved_items
+from imbue.mngr.api.preservation import flag_gated_items
 from imbue.mngr.api.preservation import preserve_agent_state
 from imbue.mngr.api.preservation import preserve_host_agents_on_destroy
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -920,11 +922,9 @@ def _antigravity_preserved_items() -> list[PreservedItem]:
     ]
 
 
-def _antigravity_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> list[PreservedItem] | None:
+def _antigravity_items_to_preserve_for_discovered_agent(ref: DiscoveredAgent) -> Sequence[PreservedItem] | None:
     """Return the items to preserve for a discovered (offline) antigravity agent, or None to skip it."""
-    if not ref.certified_data.get("agent_config", {}).get("preserve_on_destroy"):
-        return None
-    return _antigravity_preserved_items()
+    return flag_gated_items(ref, "preserve_on_destroy", _antigravity_preserved_items())
 
 
 @hookimpl
