@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.config.data_types import MngrContext
@@ -37,9 +39,12 @@ def test_backend_build_args_help_mentions_azure_specific_args() -> None:
 
 
 def test_build_provider_instance_raises_provider_empty_without_subscription(
-    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    # Isolate AZURE_CONFIG_DIR (the conftest autouse fixture pins it at the real
+    # ~/.azure) so the az-default-subscription fallback resolves nothing here.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
     config = AzureProviderConfig()
     with pytest.raises(ProviderEmptyError):
         AzureProviderBackend.build_provider_instance(

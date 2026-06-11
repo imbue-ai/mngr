@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import click
@@ -63,8 +64,12 @@ def test_cleanup_command_help_is_reachable() -> None:
     assert "--resource-group" in result.output
 
 
-def test_prepare_command_fails_clearly_without_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_command_fails_clearly_without_subscription(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
+    # Isolate AZURE_CONFIG_DIR (the conftest autouse fixture pins it at the real
+    # ~/.azure) so no az-default subscription resolves -- otherwise prepare would
+    # proceed and make real Azure calls in a unit test.
+    monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
     result = CliRunner().invoke(azure_cli_group, ["prepare", "--allowed-ssh-cidr", "0.0.0.0/0"])
     assert result.exit_code != 0
-    assert "subscription_id" in result.output
+    assert "subscription" in result.output.lower()

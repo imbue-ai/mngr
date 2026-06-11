@@ -1,8 +1,11 @@
+import json
 import os
+from pathlib import Path
 from typing import Any
 from typing import Final
 
 from azure.identity import DefaultAzureCredential
+from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.primitives import ProviderBackendName
@@ -24,6 +27,41 @@ DEFAULT_IMAGE_PUBLISHER: Final[str] = "Canonical"
 DEFAULT_IMAGE_OFFER: Final[str] = "ubuntu-24_04-lts"
 DEFAULT_IMAGE_SKU: Final[str] = "server"
 DEFAULT_IMAGE_VERSION: Final[str] = "latest"
+
+
+def read_az_cli_default_subscription() -> str | None:
+    """Return the Azure CLI's active (default) subscription id, or None.
+
+    This is the Azure analog of the ``gcloud config set project`` / ADC-resolved
+    project that the GCP provider falls back to: after ``az login`` (and
+    optionally ``az account set --subscription ...``), the CLI records the active
+    subscription in ``$AZURE_CONFIG_DIR/azureProfile.json`` (default
+    ``~/.azure/azureProfile.json``) with ``isDefault: true``. Reading that file
+    lets ``--provider azure`` work with no config and no env var, the same way
+    GCP works off the active gcloud project.
+
+    The file is read (not shelled out to ``az``) so this works without the az CLI
+    on PATH. Returns None when the file is absent / unreadable / has no enabled
+    default subscription, so callers fall through to the "no subscription" error.
+    azureProfile.json is written with a UTF-8 BOM, hence ``utf-8-sig``.
+    """
+    config_dir = os.environ.get("AZURE_CONFIG_DIR") or str(Path.home() / ".azure")
+    profile_path = Path(config_dir) / "azureProfile.json"
+    try:
+        raw = profile_path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    try:
+        subscriptions = json.loads(raw).get("subscriptions", [])
+    except (ValueError, AttributeError) as e:
+        logger.debug("Could not parse az profile {} for default subscription: {}", profile_path, e)
+        return None
+    for subscription in subscriptions:
+        if subscription.get("isDefault") and subscription.get("state", "Enabled") == "Enabled":
+            subscription_id = subscription.get("id")
+            if subscription_id:
+                return str(subscription_id)
+    return None
 
 
 class AzureProviderConfig(VpsDockerProviderConfig):
@@ -48,9 +86,10 @@ class AzureProviderConfig(VpsDockerProviderConfig):
     subscription_id: str = Field(
         default="",
         description=(
-            "Azure subscription ID for new resources (required). A plain identifier, not a "
-            "credential. Falls back to the AZURE_SUBSCRIPTION_ID env var when unset; "
-            "DefaultAzureCredential supplies the actual credentials."
+            "Azure subscription ID for new resources. A plain identifier, not a credential. "
+            "Optional: when unset, falls back to the AZURE_SUBSCRIPTION_ID env var, then to the "
+            "Azure CLI's active subscription (`az account show`), so `--provider azure` works with "
+            "no config after `az login` -- the same way GCP uses the active gcloud project."
         ),
     )
     default_region: str = Field(
@@ -135,8 +174,10 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         """Return the subscription ID, raising ``ValueError`` if unresolvable.
 
         Priority: the configured ``subscription_id`` > the ``AZURE_SUBSCRIPTION_ID``
-        env var. Like GCP's project ID, the subscription is a required plain
-        identifier with no sensible default. Raising here surfaces clearly on
+        env var > the Azure CLI's active subscription (from ``azureProfile.json``;
+        see ``read_az_cli_default_subscription``). The az-CLI fallback mirrors the
+        GCP provider using the active gcloud project, so ``--provider azure`` works
+        with no config after ``az login``. Raising here surfaces clearly on
         ``mngr create --provider azure`` while letting ``mngr list`` skip the
         provider (the backend wraps this in ``ProviderEmptyError``).
         """
@@ -145,8 +186,12 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         env_subscription = os.environ.get("AZURE_SUBSCRIPTION_ID")
         if env_subscription:
             return env_subscription
+        az_default_subscription = read_az_cli_default_subscription()
+        if az_default_subscription:
+            return az_default_subscription
         raise ValueError(
-            "No Azure subscription_id configured. Run "
-            "'mngr config set providers.azure.subscription_id <your-subscription-id>' to set it, "
+            "No Azure subscription resolved. Run `az login` (and optionally "
+            "`az account set --subscription <id>`) so the active subscription is used automatically, "
+            "or run 'mngr config set providers.azure.subscription_id <your-subscription-id>', "
             "or set the AZURE_SUBSCRIPTION_ID environment variable."
         )
