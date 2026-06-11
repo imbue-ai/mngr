@@ -415,16 +415,6 @@ jobs:
       launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
       w1_create:       ${{ steps.timings.outputs.w1_create }}
       w2_create:       ${{ steps.timings.outputs.w2_create }}
-      # FCT SHA re-resolved right before the e2e launches the .app
-      # (see the existing `fct_sha` step in this job's steps list).
-      # check_should_run's `fct_sha` was resolved at workflow-start
-      # time -- which can drift if FCT main moves during the build's
-      # 20-25 min run. This output reflects the SHA that the .app's
-      # `git clone` is about to use (assuming MINDS_WORKSPACE_BRANCH
-      # is set to a moving ref like `main`). update_marker keys the
-      # marker on this value; notify_slack reports it. Both are then
-      # truthful about what was actually tested.
-      tested_fct_sha:  ${{ steps.fct_sha.outputs.sha }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
@@ -659,21 +649,22 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
-          # Pin the FCT ref the binary creates against to the `template_ref`
-          # dispatch input. Without this, minds falls back to
-          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
-          # workflow_dispatch input says, so a `template_ref=main` run silently
-          # exercises v0.2.35 instead.
+          # Pin the FCT ref the binary creates against to the SHA
+          # `check_should_run` resolved at workflow-start time. Passing
+          # the resolved 40-char SHA (not the raw input ref like `main`)
+          # FREEZES the value: the agent inside lima clones exactly the
+          # SHA that the cache marker + slack message are about to
+          # claim was tested. Without freezing, FCT main can move during
+          # the 20-25 min ToDesktop build and the agent ends up cloning
+          # a different commit than the marker records.
           # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
-          # in templates._operator_workspace_default (an end-user `minds run` ignores
-          # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
-          # We pass the branch / tag name (not the resolved SHA) because the
-          # binary's `git clone --branch <ref>` only accepts branch names and
-          # tags. The resolved SHA is still recorded in the GHA step summary
-          # for audit. Moving refs (e.g. `main`) thus float between runs --
-          # the trade-off is "must clone-able" vs "must be byte-identical".
+          # in templates._operator_workspace_default (an end-user `minds run`
+          # ignores a stray MINDS_WORKSPACE_* in the shell unless explicitly
+          # opted in). Passing a SHA was unblocked by PR #2100: clone_git_repo
+          # + checkout_branch now go through git init + fetch + checkout
+          # rather than `git clone --branch <ref>`, which had rejected SHAs.
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref || 'main' }}
+          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -1019,13 +1010,13 @@ jobs:
     steps:
       - name: write marker file
         env:
-          # update_marker only runs when launch_to_msg succeeded (see this
-          # job's `if:`), so launch_to_msg's `fct_sha` step ran and
-          # tested_fct_sha is guaranteed populated -- the SHA we record
-          # here is the one the e2e actually exercised, not the start-
-          # time guess.
+          # The (mngr, FCT) pair we just verified green. Both SHAs are
+          # frozen at workflow-start time by `check_should_run`; the e2e
+          # exercises EXACTLY these SHAs (the SHA is passed to the .app
+          # via MINDS_WORKSPACE_BRANCH, which `clone_git_repo` accepts
+          # since PR #2100). No drift.
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           set -euo pipefail
           {
@@ -1038,11 +1029,11 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /tmp/launch-to-msg-marker.txt
-          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.launch_to_msg.outputs.tested_fct_sha }}
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
       - name: emit summary
         env:
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           {
             echo "## Marker updated"
@@ -1077,11 +1068,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
-          # Prefer launch_to_msg's re-resolved FCT SHA (truthful to what
-          # was tested) over check_should_run's start-time value when
-          # available. Skip path / failed-before-e2e leaves the start-time
-          # value, which is the right fallback in those cases.
-          FCT_SHA:  ${{ needs.launch_to_msg.outputs.tested_fct_sha || needs.check_should_run.outputs.fct_sha }}
+          # FCT SHA frozen at workflow-start by `check_should_run` and
+          # passed verbatim to the .app via MINDS_WORKSPACE_BRANCH. No
+          # drift between what we report and what the e2e cloned.
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
           BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
           MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
