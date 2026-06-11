@@ -171,6 +171,48 @@ def test_create_instance_sets_auto_delete_scheduling() -> None:
     scheduling = instances.inserted[0].scheduling
     assert scheduling.instance_termination_action == "DELETE"
     assert scheduling.max_run_duration.seconds == 3600
+    # Without --gcp-spot the provisioning model stays default (on-demand).
+    assert scheduling.provisioning_model != "SPOT"
+
+
+def test_create_instance_spot_sets_provisioning_model() -> None:
+    """``spot=True`` launches on GCE Spot capacity, deleting the VM on preemption."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        spot=True,
+    )
+    scheduling = instances.inserted[0].scheduling
+    assert scheduling.provisioning_model == "SPOT"
+    # A preempted Spot VM is deleted (not left stopped) -- mngr has no VM-level resume.
+    assert scheduling.instance_termination_action == "DELETE"
+
+
+def test_create_instance_spot_composes_with_auto_shutdown() -> None:
+    """spot + auto_shutdown both land on one Scheduling: SPOT model and the max-run-duration deadline."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances, auto_shutdown_minutes=60)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        spot=True,
+    )
+    scheduling = instances.inserted[0].scheduling
+    assert scheduling.provisioning_model == "SPOT"
+    assert scheduling.max_run_duration.seconds == 3600
+    assert scheduling.instance_termination_action == "DELETE"
 
 
 def test_create_instance_cross_zone_raises() -> None:

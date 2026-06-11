@@ -223,14 +223,7 @@ class ProviderEmptyError(ProviderError):
     (zero of zero), not misleading.
     """
 
-    reason: str
-
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
-        # Keep the bare reason addressable so callers can render just the cause
-        # (e.g. a discovery-skip warning) without re-deriving it from the
-        # composed message string -- which would double the provider name and
-        # the "has no state yet" framing baked into the message below.
-        self.reason = reason
         super().__init__(provider_name, f"Provider '{provider_name}' has no state yet: {reason}")
 
 

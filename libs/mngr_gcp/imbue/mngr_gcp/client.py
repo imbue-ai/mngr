@@ -332,11 +332,17 @@ class GcpVpsClient(VpsClientInterface):
         user_data: str,
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
+        spot: bool = False,
     ) -> VpsInstanceId:
         """Provision a GCE instance in the client's bound zone.
 
         ``region`` is interpreted as the **zone** for GCP (GCE VMs are zonal);
         it must equal the zone this client is bound to.
+
+        ``spot`` (from the per-host ``--gcp-spot`` build arg) launches the VM on
+        GCE Spot capacity (``scheduling.provisioning_model=SPOT``). GCE can
+        preempt Spot VMs at any time with ~30s notice, so it is opt-in only --
+        suitable for ephemeral / experimental agents, risky for long-lived ones.
         """
         if region != self.zone:
             raise VpsApiError(
@@ -417,14 +423,28 @@ class GcpVpsClient(VpsClientInterface):
             instance.service_accounts = [
                 compute_v1.ServiceAccount(email=self.service_account_email, scopes=list(self.service_account_scopes))
             ]
+        # Scheduling composes two independent opt-ins onto one Scheduling object:
+        #   - auto_shutdown_minutes -> max_run_duration (GCE-native auto-delete:
+        #     the VM self-deletes after the deadline even if the orchestrating
+        #     process is killed -- the analog of AWS
+        #     InstanceInitiatedShutdownBehavior=terminate).
+        #   - spot -> provisioning_model=SPOT (run on preemptible Spot capacity).
+        # Both want instance_termination_action=DELETE: the run-duration deadline
+        # AND a Spot preemption should delete the (ephemeral) VM, not leave a
+        # stopped instance behind -- mngr has no VM-level resume yet, so a stopped
+        # VM would just be cost/cruft.
+        scheduling = compute_v1.Scheduling()
+        has_scheduling = False
         if self.auto_shutdown_minutes is not None and self.auto_shutdown_minutes > 0:
-            # GCE-native auto-delete: the VM self-deletes after the deadline even
-            # if the orchestrating process is killed. The analog of AWS
-            # InstanceInitiatedShutdownBehavior=terminate.
-            instance.scheduling = compute_v1.Scheduling(
-                max_run_duration=compute_v1.Duration(seconds=self.auto_shutdown_minutes * 60),
-                instance_termination_action="DELETE",
-            )
+            scheduling.max_run_duration = compute_v1.Duration(seconds=self.auto_shutdown_minutes * 60)
+            scheduling.instance_termination_action = "DELETE"
+            has_scheduling = True
+        if spot:
+            scheduling.provisioning_model = "SPOT"
+            scheduling.instance_termination_action = "DELETE"
+            has_scheduling = True
+        if has_scheduling:
+            instance.scheduling = scheduling
 
         with self._translate_gcp_errors():
             operation = self._instances().insert(project=self.project_id, zone=self.zone, instance_resource=instance)
