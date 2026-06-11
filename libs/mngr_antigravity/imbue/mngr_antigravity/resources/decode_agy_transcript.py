@@ -208,7 +208,7 @@ def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: by
     source_value = _first_varint(metadata, _METADATA_SOURCE) if metadata is not None else None
     record: dict[str, object] = {
         "step_index": idx,
-        "source": _STEP_SOURCE_NAMES.get(source_value or 0, f"STEP_SOURCE_{source_value}"),
+        "source": _STEP_SOURCE_NAMES.get(source_value, f"STEP_SOURCE_{source_value}"),
         "type": _STEP_TYPE_NAMES.get(step_type, f"STEP_TYPE_{step_type}"),
         "status": _STEP_STATUS_NAMES.get(status, f"STEP_STATUS_{status}"),
         "created_at": _iso_timestamp(metadata),
