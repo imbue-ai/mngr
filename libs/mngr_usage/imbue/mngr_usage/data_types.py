@@ -120,6 +120,33 @@ class CostSnapshot(FrozenModel):
     total_lines_removed: int | None = Field(default=None, description="Lines of code removed during the session.")
 
 
+class TokenSnapshot(FrozenModel):
+    """Session-level token counts supplied by a writer that reports usage in tokens.
+
+    All fields optional and writer-driven, mirroring ``CostSnapshot``'s
+    passive-but-typed stance. The buckets are **non-overlapping**: ``input`` is
+    the non-cached input count, and ``cache_read`` / ``cache_creation`` are
+    separate, so the dollar cost is exactly
+    ``input*p_in + cache_read*p_cr + cache_creation*p_cw + output*p_out`` with no
+    double-counting (see :func:`imbue.mngr_usage.pricing.compute_cost`). Writers
+    whose source reports ``input`` inclusive of cache normalize it to the
+    non-cached count before emitting. ``output`` includes any reasoning tokens
+    (billed at the output rate).
+
+    Like ``CostSnapshot``, a ``TokenSnapshot`` plays two roles: one session's own
+    contribution at ``SessionCostRecord.tokens``, and the per-mode sum at
+    ``UsageSnapshot``'s token aggregates. Each field sums cleanly, so the same
+    type serves both.
+    """
+
+    input: int | None = Field(default=None, description="Non-cached input tokens (cache buckets are separate).")
+    output: int | None = Field(default=None, description="Output tokens, inclusive of reasoning tokens.")
+    cache_read: int | None = Field(default=None, description="Input tokens served from the prompt cache (read).")
+    cache_creation: int | None = Field(
+        default=None, description="Input tokens written to the prompt cache (creation/write)."
+    )
+
+
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's snapshot state.
 
