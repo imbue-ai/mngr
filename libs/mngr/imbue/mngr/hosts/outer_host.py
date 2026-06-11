@@ -52,6 +52,7 @@ from tenacity import stop_after_attempt
 from tenacity import wait_chain
 from tenacity import wait_fixed
 
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
@@ -489,9 +490,16 @@ class OuterHost(OuterHostInterface):
             # check() inspects is_timed_out before the return code, so this raises
             # ProcessTimeoutError (not a plain ProcessError) for the timeout case.
             finished.check()
+        return self._command_output_from_finished(finished, _success_exit_codes)
+
+    @staticmethod
+    def _command_output_from_finished(
+        finished: FinishedProcess,
+        _success_exit_codes: tuple[int, ...] | None,
+    ) -> tuple[bool, CommandOutput]:
+        """Convert a FinishedProcess into the (success, CommandOutput) pair pyinfra callers expect."""
         success_codes: tuple[int, ...] = _success_exit_codes if _success_exit_codes else (0,)
         success = finished.returncode in success_codes
-
         lines: list[OutputLine] = []
         for buffer_name, raw in (("stdout", finished.stdout), ("stderr", finished.stderr)):
             if not raw:
