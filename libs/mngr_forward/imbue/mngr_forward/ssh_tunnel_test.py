@@ -81,6 +81,7 @@ class FakeSSHTransport:
 
     _active: bool
     _port_forward_calls: list[tuple[str, int, object | None]]
+    _cancel_port_forward_calls: list[tuple[str, int]]
     _assigned_remote_port: int
 
     @classmethod
@@ -88,6 +89,7 @@ class FakeSSHTransport:
         instance = cls.__new__(cls)
         object.__setattr__(instance, "_active", active)
         object.__setattr__(instance, "_port_forward_calls", [])
+        object.__setattr__(instance, "_cancel_port_forward_calls", [])
         object.__setattr__(instance, "_assigned_remote_port", assigned_remote_port)
         return instance
 
@@ -99,7 +101,7 @@ class FakeSSHTransport:
         return self._assigned_remote_port
 
     def cancel_port_forward(self, address: str, port: int) -> None:
-        pass
+        self._cancel_port_forward_calls.append((address, port))
 
 
 class FakeSSHClient(paramiko.SSHClient):
@@ -227,6 +229,28 @@ def test_ssh_tunnel_manager_cleanup_is_idempotent() -> None:
     # Calling twice is fine -- used by the lifespan-shutdown path which can
     # race with explicit cleanup() during error paths.
     manager.cleanup()
+
+
+def test_cleanup_cancels_reverse_forward_even_when_connection_inactive(tmp_path: Path) -> None:
+    """cleanup() must attempt to cancel the reverse forward even when the SSH
+    connection reports inactive.
+
+    A half-dead transport that paramiko has not yet noticed would otherwise be
+    skipped, leaving the remote sshd's forwarded listener bound and orphaning
+    the remote port across restarts (the next run's ``request_port_forward``
+    is then denied).
+    """
+    ssh_info = _sample_ssh_info(tmp_path)
+    fake_client = FakeSSHClient.create(active=False)
+    manager = _make_manager_with_fake_connection(ssh_info, fake_client)
+    conn_key = f"{ssh_info.host}:{ssh_info.port}"
+    tunnel_info = ReverseTunnelInfo(ssh_info=ssh_info, local_port=8420, remote_port=5000)
+    with manager._lock:
+        manager._reverse_tunnels[(conn_key, 8420)] = tunnel_info
+
+    manager.cleanup()
+
+    assert fake_client._fake_transport._cancel_port_forward_calls == [("127.0.0.1", 5000)]
 
 
 def test_ssh_tunnel_manager_repair_callback_registers() -> None:

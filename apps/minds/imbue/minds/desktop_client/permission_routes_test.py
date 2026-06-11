@@ -31,8 +31,6 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -46,6 +44,8 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
@@ -185,11 +185,10 @@ def _make_recording_handler(
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
-    gateway_client.available_services_payload = dict(_TEST_SERVICES_CATALOG_PAYLOAD)
     return _RecordingHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
-        services_catalog=ServicesCatalog(gateway_client=gateway_client),
+        services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
