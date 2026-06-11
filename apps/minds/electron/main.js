@@ -1,4 +1,4 @@
-const { BaseWindow, WebContentsView, Menu, Notification, ipcMain, net, shell, app, session, screen, dialog, clipboard } = require('electron');
+const { BaseWindow, WebContentsView, Menu, Notification, clipboard, dialog, ipcMain, net, shell, app, session, screen } = require('electron');
 const todesktop = require('@todesktop/runtime');
 const path = require('path');
 const fs = require('fs');
@@ -18,6 +18,25 @@ if (app.isPackaged) {
   });
 } else {
   console.log('[update] Skipping ToDesktop init (dev build -- not packaged)');
+}
+
+// Surface the git SHA the build was cut from in the standard macOS About
+// panel, appended to ToDesktop's buildId so you can map a shipped binary
+// back to a commit. Gated on app.isPackaged because dev runs do not
+// regenerate build-info.json and would otherwise show a stale SHA.
+if (app.isPackaged) {
+  try {
+    const { gitSha } = JSON.parse(fs.readFileSync(path.join(__dirname, 'build-info.json'), 'utf8'));
+    const pkg = require('../package.json');
+    const shortSha = gitSha.slice(0, 8);
+    app.setAboutPanelOptions({
+      applicationName: pkg.productName,
+      applicationVersion: pkg.version,
+      version: pkg.tdBuildId ? `${pkg.tdBuildId} · ${shortSha}` : shortSha,
+    });
+  } catch (err) {
+    console.warn(`[about-panel] Could not load build-info.json: ${err.message}`);
+  }
 }
 
 // Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
@@ -75,6 +94,12 @@ let workspaceList = []; // [{id, name, account}]
 // window alone -- the recovery flow kicks in via the system_interface_status
 // event). Never cleared once added; a destroyed workspace's id is dead forever.
 const everSeenDestroying = new Set();
+// Latest per-agent system-interface health (``healthy`` / ``stuck`` /
+// ``restarting`` / ``restart_failed``) as pushed by the chrome SSE's
+// ``system_interface_status`` events. Read by the landing-page Stop handler so
+// it can leave a window that is mid-restart alone (the user is intentionally
+// restarting it there) rather than yanking it out from under them.
+const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null; // the first window created at startup
 let hasCompletedInitialStart = false;
@@ -230,6 +255,17 @@ function getMostRecentWindow() {
   return null;
 }
 
+// Whether ``bundle`` is the only still-open window. The `close` event fires
+// before `closed` (which removes the bundle from the set), so the closing
+// bundle is still counted here; "last" therefore means exactly one live window.
+function isLastLiveWindow(bundle) {
+  let liveCount = 0;
+  for (const b of bundles) {
+    if (!b.window.isDestroyed()) liveCount += 1;
+  }
+  return liveCount <= 1 && !bundle.window.isDestroyed();
+}
+
 function focusBundle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   if (bundle.window.isMinimized()) bundle.window.restore();
@@ -263,18 +299,64 @@ function updateAllOsTitles() {
   for (const b of bundles) updateOsTitle(b);
 }
 
+// Tear down every live window currently open to ``agentId``. If those windows
+// are the only ones left, navigate them to the home page instead of closing
+// them, so we never close the last window (which would commit an app
+// shutdown). Shared by the workspace-destroyed handler and the landing-page
+// Stop handler. (At most one window exists per workspace, so this affects at
+// most one window in practice.)
+function detachWindowsForWorkspace(agentId) {
+  if (!agentId) return;
+  const affected = [];
+  for (const b of bundles) {
+    if (!b.window.isDestroyed() && b.currentWorkspaceId === agentId) {
+      affected.push(b);
+    }
+  }
+  if (affected.length === 0) return;
+  const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+  for (const b of affected) {
+    if (liveBundleCount - affected.length >= 1) {
+      b.window.close();
+    } else {
+      b.currentWorkspaceId = null;
+      if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
+        b.contentView.webContents.loadURL(backendBaseUrl + '/');
+      }
+      updateOsTitle(b);
+      // Notify the chrome renderer that this window is no longer showing a
+      // workspace. The did-navigate handler that fires after the loadURL above
+      // would NOT send this IPC: its diff-guard (`bundle.currentWorkspaceId !==
+      // newAgentId`) sees null !== null and skips. Without this explicit
+      // notification the renderer's `currentTitleAgentId` would stay as the
+      // detached workspace's id, which then blocks the
+      // `last-workspace-agent-id-changed: null` broadcast from clearing the
+      // titlebar accent (the chrome.js handler gates on `currentTitleAgentId`
+      // being falsy).
+      sendCurrentWorkspaceToBundleViews(b);
+    }
+  }
+}
+
 // -- Layout --
 
 function updateBundleBounds(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   const { width, height } = bundle.window.getContentBounds();
 
-  if (bundle.isErrorState || bundle.isLoadingState) {
+  if (bundle.isErrorState || bundle.isLoadingState || bundle.isQuittingState) {
+    // The chrome view takes over the whole window; every other view collapses
+    // to zero so the takeover screen (shell.html) is the only thing visible.
+    // For loading/error the auxiliary views are already absent, so the loop is
+    // a no-op there; the quitting flip leaves them present-but-hidden, so this
+    // guarantees none of them peek out from behind the full-window chrome view.
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.setBounds({ x: 0, y: 0, width, height });
     }
-    if (bundle.contentView && !bundle.contentView.webContents.isDestroyed()) {
-      bundle.contentView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    for (const view of [bundle.contentView, bundle.sidebarView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
     }
     return;
   }
@@ -387,8 +469,10 @@ function createBundleWebContentsViews(win) {
   win.contentView.addChildView(chromeView);
   win.contentView.addChildView(contentView);
 
-  // Auto-open DevTools for dev-time inspection on both the chrome
-  // (titlebar) view and the workspace content view.
+  // Auto-open DevTools on both views when MINDS_OPEN_DEVTOOLS=1 is set.
+  // The built-in cmd+opt+I shortcut crashes on BaseWindow + WebContentsViews
+  // (Electron's menu handler assumes BrowserWindow), so this env var is
+  // the dev-time escape hatch.
   if (process.env.MINDS_OPEN_DEVTOOLS === '1') {
     chromeView.webContents.once('did-finish-load', () => {
       if (!chromeView.webContents.isDestroyed()) {
@@ -422,7 +506,19 @@ function wireBundleWindowEvents(bundle) {
   // so we can still reach the child webContents. BaseWindow does not guarantee
   // destruction of child WebContentsView render processes on its own; leaking
   // them across create/close cycles eventually starves new ones of resources.
-  win.on('close', () => {
+  win.on('close', (event) => {
+    // Closing the LAST window quits the app (the backend shuts down with it),
+    // so route that close through the quit sequence -- which shows the
+    // local-mind shutdown prompt BEFORE the window disappears. If the user
+    // proceeds, the quit sequence sets isShuttingDown and re-closes everything
+    // (this handler then falls through to teardown); if they cancel, the window
+    // stays open. Non-last windows, and closes once a quit is already underway,
+    // fall straight through to normal teardown.
+    if (!isShuttingDown && !isQuitSequenceRunning && getBackendProcess() && isLastLiveWindow(bundle)) {
+      event.preventDefault();
+      runQuitSequence();
+      return;
+    }
     // Snapshot session state on every manual window close: by the time
     // `before-quit` fires on the `window-all-closed` path, every bundle has
     // already been removed from `bundles` by its `closed` handler, so saving
@@ -498,6 +594,7 @@ function createBundle() {
     preErrorUrl: null,
     isErrorState: false,
     isLoadingState: true,
+    isQuittingState: false,
     showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
@@ -1057,6 +1154,79 @@ function reloadAllWindowsAfterRetry() {
   }
 }
 
+// -- Quitting takeover --
+//
+// Once a quit has committed (isShuttingDown is set) every open window flips to
+// a full-window "quitting" screen. It reuses shell.html -- the same animated
+// wordmark as the startup loading screen -- loaded with a `#quitting` hash so
+// the page reveals a status line. updateBundleBounds collapses every other view
+// so the chrome view alone fills the window, and stop/teardown progress is
+// pushed to it through the existing `status-update` IPC channel. Iterating an
+// empty `bundles` set makes this a natural no-op for a headless signal quit.
+
+// The most recent status pushed to the quitting page. The `#quitting` hash
+// seeds the page with this anyway, but an update can race ahead of the page
+// load (the first `Stopping N minds…` is sent right after `loadFile`, before
+// the renderer registers its listener), so each quitting screen re-pushes it
+// once it finishes loading -- otherwise that first update would be dropped and
+// the page would sit on `Quitting…` for the whole stop.
+let latestQuittingStatus = 'Quitting…';
+
+function showQuittingInAllWindows() {
+  latestQuittingStatus = 'Quitting…';
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = true;
+    // Hide the auxiliary views (without tearing them down or clearing their
+    // visible flags) so the full-window chrome view is the only thing on
+    // screen, and restoreFromQuittingInAllWindows can bring back exactly what
+    // was open if the user backs out of the quit.
+    for (const view of [bundle.sidebarView, bundle.modalView]) {
+      if (view && !view.webContents.isDestroyed()) view.setVisible(false);
+    }
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      const chromeContents = bundle.chromeView.webContents;
+      chromeContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'quitting' });
+      chromeContents.once('did-finish-load', () => {
+        if (!chromeContents.isDestroyed()) chromeContents.send('status-update', latestQuittingStatus);
+      });
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
+// Broadcast a status line to every window currently showing the quitting page.
+function updateQuittingStatus(message) {
+  latestQuittingStatus = message;
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed() || !bundle.isQuittingState) continue;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
+      bundle.chromeView.webContents.send('status-update', message);
+    }
+  }
+}
+
+// Reverse showQuittingInAllWindows. Used when the user backs out of an already
+// committed quit via the "could not be stopped" dialog's "Cancel quit": every
+// window returns to its normal layout with whatever views were open before the
+// flip (their pages were only hidden, never torn down).
+function restoreFromQuittingInAllWindows() {
+  for (const bundle of bundles) {
+    if (bundle.window.isDestroyed()) continue;
+    bundle.isQuittingState = false;
+    if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed() && backendBaseUrl) {
+      bundle.chromeView.webContents.loadURL(backendBaseUrl + '/_chrome');
+    }
+    if (bundle.sidebarView && bundle.sidebarVisible && !bundle.sidebarView.webContents.isDestroyed()) {
+      bundle.sidebarView.setVisible(true);
+    }
+    if (bundle.modalView && bundle.modalVisible && !bundle.modalView.webContents.isDestroyed()) {
+      bundle.modalView.setVisible(true);
+    }
+    updateBundleBounds(bundle);
+  }
+}
+
 function readLastLogLines(lineCount) {
   try {
     const logPath = path.join(paths.getLogDir(), 'minds.log');
@@ -1249,35 +1419,7 @@ function handleChromeSSEEvent(evt) {
     for (const oldId of oldIds) {
       if (newIds.has(oldId)) continue;
       if (!everSeenDestroying.has(oldId)) continue;
-      const affected = [];
-      for (const b of bundles) {
-        if (!b.window.isDestroyed() && b.currentWorkspaceId === oldId) {
-          affected.push(b);
-        }
-      }
-      const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
-      for (const b of affected) {
-        if (liveBundleCount - affected.length >= 1) {
-          b.window.close();
-        } else {
-          b.currentWorkspaceId = null;
-          if (b.contentView && !b.contentView.webContents.isDestroyed() && backendBaseUrl) {
-            b.contentView.webContents.loadURL(backendBaseUrl + '/');
-          }
-          updateOsTitle(b);
-          // Notify the chrome renderer that this window is no longer
-          // showing a workspace. The did-navigate handler that fires
-          // after the loadURL above would NOT send this IPC: its
-          // diff-guard (`bundle.currentWorkspaceId !== newAgentId`)
-          // sees null !== null and skips. Without this explicit
-          // notification the renderer's `currentTitleAgentId` would
-          // stay as the deleted workspace's id, which then blocks the
-          // `last-workspace-agent-id-changed: null` broadcast below
-          // from clearing the titlebar accent (the chrome.js handler
-          // gates on `currentTitleAgentId` being falsy).
-          sendCurrentWorkspaceToBundleViews(b);
-        }
-      }
+      detachWindowsForWorkspace(oldId);
       // Clear the stored accent in any window whose remembered "last
       // opened" was the destroyed workspace, so the next render of those
       // titlebars falls back to the dark default chrome rather than
@@ -1291,6 +1433,12 @@ function handleChromeSSEEvent(evt) {
     }
 
     updateAllOsTitles();
+  } else if (evt.type === 'system_interface_status') {
+    // Remember each mind's latest health so the Stop handler can leave a
+    // window that is actively restarting alone (see confirm-stop-mind).
+    if (evt.agent_id) {
+      systemInterfaceStatusByAgent.set(String(evt.agent_id), evt.status ? String(evt.status) : '');
+    }
   } else if (evt.type === 'auth_required') {
     // Clear every window's stored accent on the authenticated ->
     // unauthenticated boundary (account sign-out or session expiration).
@@ -1400,6 +1548,9 @@ function kickChromeSSEReconnect() {
 async function runChromeSSELoop() {
   // Runs until the app is shutting down. Maintains exactly one SSE
   // connection to /_chrome/events, reconnecting on end/error with backoff.
+  // `_started` tracks whether this loop is currently running so callers can
+  // tell whether it needs to be (re)started -- it is cleared on exit below.
+  runChromeSSELoop._started = true;
   while (!isShuttingDown) {
     if (!backendBaseUrl) {
       await sleepInterruptible(500);
@@ -1459,6 +1610,22 @@ async function runChromeSSELoop() {
     });
     // Brief backoff before reconnecting.
     await sleepInterruptible(1500);
+  }
+  // The loop has exited (isShuttingDown went true). Clear the flag so that if
+  // the user backs out of an already-committed quit, ensureChromeSSELoopRunning
+  // can restart it rather than leaving the titlebar without a live SSE feed.
+  runChromeSSELoop._started = false;
+}
+
+// Guarantee the chrome-events SSE consumer is running. Starts it if it has
+// never run or has exited (e.g. it terminated when a quit committed and the
+// user then backed out); otherwise nudges the existing connection to reconnect.
+// Idempotent and safe to call whenever the app returns to its normal state.
+function ensureChromeSSELoopRunning() {
+  if (!runChromeSSELoop._started) {
+    runChromeSSELoop();
+  } else {
+    kickChromeSSEReconnect();
   }
 }
 
@@ -1537,6 +1704,278 @@ function sleepInterruptible(ms) {
       }
     }, interval);
   });
+}
+
+// ---------- Mind shutdown on quit + landing Stop button ----------
+
+// Timeout for the instant, in-memory liveness lookup (GET /api/minds/running).
+const MIND_HTTP_TIMEOUT_MS = 10000;
+// Timeout for the synchronous command endpoints (single/bulk host stop, state
+// container stop). These block until the underlying ``mngr``/docker command
+// finishes; the server's own per-command ceiling is ~120s, so allow margin
+// above it here so the server-side failure surfaces rather than a client abort.
+const MIND_COMMAND_TIMEOUT_MS = 150000;
+
+// GET /api/minds/running -> { ok, running }. ``running`` is an array of
+// {id, name}; ``ok`` is false when the check itself failed (network, parse, no
+// backend) so the caller can distinguish "nothing running" from "couldn't tell"
+// instead of silently treating a failed check as an empty list.
+function getRunningMinds() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      console.warn('[mind-shutdown] no backend URL; cannot list running minds');
+      resolve({ ok: false, running: [] });
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/minds/running', method: 'GET', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct running-minds request:', e);
+      resolve({ ok: false, running: [] });
+      return;
+    }
+    let body = '';
+    let settled = false;
+    let statusOk = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] running-minds request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, running: [] });
+    }, MIND_HTTP_TIMEOUT_MS);
+    req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] running-minds returned HTTP ${response.statusCode}`);
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, running: [] }); return; }
+        try {
+          const parsed = JSON.parse(body);
+          settle({ ok: true, running: Array.isArray(parsed.running) ? parsed.running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse running-minds response:', e);
+          settle({ ok: false, running: [] });
+        }
+      });
+      response.on('error', (err) => { console.warn('[mind-shutdown] running-minds response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] running-minds request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    req.end();
+  });
+}
+
+// POST /api/agents/<id>/stop-host (synchronous). Resolves true when the server
+// reports the stop succeeded (<400), false otherwise. Used by the single-row
+// landing Stop relay.
+function postMindStop(agentId) {
+  return new Promise((resolve) => {
+    if (!agentId || !backendBaseUrl) {
+      console.warn('[mind-shutdown] missing agent id or backend URL; cannot stop mind');
+      resolve(false);
+      return;
+    }
+    let req;
+    try {
+      req = net.request({
+        url: `${backendBaseUrl}/api/agents/${encodeURIComponent(agentId)}/stop-host`,
+        method: 'POST',
+        useSessionCookies: true,
+      });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop request:', e);
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    let isOk = false;
+    const settle = () => { if (!settled) { settled = true; resolve(isOk); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop request for ${agentId} timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      isOk = response.statusCode < 400;
+      if (!isOk) console.warn(`[mind-shutdown] stop for ${agentId} returned HTTP ${response.statusCode}`);
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn(`[mind-shutdown] stop response error for ${agentId}:`, err); clearTimeout(timer); settle(); });
+    });
+    req.on('error', (err) => { console.warn(`[mind-shutdown] stop request failed for ${agentId}:`, err); clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
+// POST /api/minds/stop-hosts?agent_id=...&agent_id=... (synchronous). Issues ONE
+// ``mngr stop <ids...> --stop-host`` server-side (mngr stops the hosts
+// concurrently). Resolves { ok, stillRunning }: ``stillRunning`` is the subset
+// of requested minds the server still sees running after the attempt; ``ok`` is
+// false when the request itself failed (so the caller treats it as "couldn't
+// stop" rather than "all stopped").
+function postStopMinds(agentIds) {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl || !agentIds || agentIds.length === 0) {
+      console.warn('[mind-shutdown] no backend URL or no agent ids; cannot bulk-stop minds');
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    const query = agentIds.map((id) => 'agent_id=' + encodeURIComponent(id)).join('&');
+    let req;
+    try {
+      req = net.request({ url: `${backendBaseUrl}/api/minds/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
+      resolve({ ok: false, stillRunning: [] });
+      return;
+    }
+    let body = '';
+    let settled = false;
+    let statusOk = false;
+    const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] bulk-stop request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle({ ok: false, stillRunning: [] });
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      statusOk = response.statusCode < 400;
+      if (!statusOk) console.warn(`[mind-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
+      response.on('data', (chunk) => { body += chunk.toString(); });
+      response.on('end', () => {
+        clearTimeout(timer);
+        if (!statusOk) { settle({ ok: false, stillRunning: [] }); return; }
+        try {
+          const parsed = JSON.parse(body);
+          settle({ ok: true, stillRunning: Array.isArray(parsed.still_running) ? parsed.still_running : [] });
+        } catch (e) {
+          console.warn('[mind-shutdown] failed to parse bulk-stop response:', e);
+          settle({ ok: false, stillRunning: [] });
+        }
+      });
+      response.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    req.end();
+  });
+}
+
+// POST /api/minds/stop-state-container -- stops this env's mngr docker "state
+// container" (provider bookkeeping) so nothing minds-related is left running
+// after a full shutdown. Best-effort: resolves regardless of outcome, but logs.
+function postStopStateContainer() {
+  return new Promise((resolve) => {
+    if (!backendBaseUrl) {
+      console.warn('[mind-shutdown] no backend URL; cannot stop state container');
+      resolve();
+      return;
+    }
+    let req;
+    try {
+      req = net.request({ url: backendBaseUrl + '/api/minds/stop-state-container', method: 'POST', useSessionCookies: true });
+    } catch (e) {
+      console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
+      resolve();
+      return;
+    }
+    let settled = false;
+    const settle = () => { if (!settled) { settled = true; resolve(); } };
+    const timer = setTimeout(() => {
+      console.warn(`[mind-shutdown] stop-state-container request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      try { req.abort(); } catch { /* noop */ }
+      settle();
+    }, MIND_COMMAND_TIMEOUT_MS);
+    req.on('response', (response) => {
+      if (response.statusCode >= 400) console.warn(`[mind-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
+      response.on('data', () => {});
+      response.on('end', () => { clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
+    });
+    req.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
+    req.end();
+  });
+}
+
+// Stop every running mind via one synchronous bulk-stop call (the server runs a
+// single ``mngr stop --stop-host`` over all of them), then decide what to do
+// about any that did not stop. Progress is shown in-page on the quitting
+// takeover screen (which the quit sequence has already flipped to). Returns true
+// to proceed with the quit, false to cancel it. On a failure to stop everything,
+// offers Retry / Quit anyway / Cancel.
+async function stopAllMindsThenDecide(running) {
+  let remaining = running;
+  while (true) {
+    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
+    const { ok, stillRunning } = await postStopMinds(remaining.map((mind) => mind.id));
+    // ``ok`` && empty stillRunning = the server confirms everything is down. A
+    // request-level failure (ok=false) is treated as "could not confirm", so we
+    // fall through to the recovery dialog rather than quit assuming success.
+    if (ok && stillRunning.length === 0) {
+      // Every mind is down; also stop the mngr docker state container so no
+      // minds-related container is left running. Best-effort -- it preserves its
+      // volume and restarts on next use.
+      await postStopStateContainer();
+      return true;
+    }
+    const blocked = stillRunning.length > 0 ? stillRunning : remaining;
+    const names = blocked.map((mind) => mind.name).join(', ');
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
+      defaultId: 2,
+      cancelId: 0,
+      message: blocked.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
+      detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
+    });
+    if (response === 0) return false;
+    if (response === 1) return true;
+    remaining = blocked;
+  }
+}
+
+// On quit, ask whether to shut down any still-running minds. This is the FIRST
+// native prompt and runs BEFORE any window is flipped to the quitting page, so
+// cancelling here leaves the app fully intact with no visual change.
+// Returns a plan: `{ proceed, stop, running }`.
+//   proceed=false           -> user cancelled; stay open.
+//   proceed=true, stop=false -> quit now (no minds, or "Leave running").
+//   proceed=true, stop=true  -> quit and stop `running` after the flip.
+async function promptMindShutdown() {
+  if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
+  const { ok, running } = await getRunningMinds();
+  if (!ok) {
+    // The liveness check itself failed -- don't silently quit leaving minds
+    // running. Surface the uncertainty and let the user decide explicitly.
+    const { response } = await dialog.showMessageBox({
+      type: 'warning',
+      buttons: ['Cancel', 'Quit anyway'],
+      defaultId: 1,
+      cancelId: 0,
+      message: 'Could not check for running minds',
+      detail: 'Any local minds still running would keep using your computer\'s resources. '
+        + 'Quit anyway (they may keep running in the background), or cancel and stay open.',
+    });
+    if (response === 0) return { proceed: false, stop: false, running: [] };
+    return { proceed: true, stop: false, running: [] };
+  }
+  if (running.length === 0) return { proceed: true, stop: false, running: [] };
+  const names = running.map((mind) => mind.name).join(', ');
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    buttons: ['Cancel', 'Leave running', 'Shut down all'],
+    defaultId: 2,
+    cancelId: 0,
+    message: running.length === 1
+      ? '1 local mind is still running'
+      : `${running.length} local minds are still running`,
+    detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
+      + 'Shutting them down stops their agents and makes their services inaccessible '
+      + '(your data is preserved and you can start them again).',
+  });
+  if (response === 0) return { proceed: false, stop: false, running: [] };
+  if (response === 1) return { proceed: true, stop: false, running: [] };
+  return { proceed: true, stop: true, running };
 }
 
 function fetchInitialChromeState(timeoutMs = 4000) {
@@ -1921,14 +2360,10 @@ async function startBackendWithRetry() {
 
     console.log('[startup] Backend ready. Loading chrome from', backendBaseUrl + '/_chrome');
 
-    // Kick off the shared chrome-events SSE consumer (idempotent: only starts once).
-    if (!runChromeSSELoop._started) {
-      runChromeSSELoop._started = true;
-      runChromeSSELoop();
-    } else {
-      // On retry after backend restart, force the live connection to reconnect.
-      kickChromeSSEReconnect();
-    }
+    // Kick off the shared chrome-events SSE consumer (idempotent: starts it if
+    // it isn't already running, otherwise forces a reconnect after a backend
+    // restart).
+    ensureChromeSSELoopRunning();
 
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
@@ -2394,6 +2829,42 @@ ipcMain.on('open-log-file', () => {
   shell.openPath(logPath);
 });
 
+// Landing-page Stop button: show a native confirmation, then issue the host
+// stop ourselves. The SSE drives the row from running -> stopped once it lands.
+// Only content-relay-preload.js can emit this channel (for an allowlisted
+// `minds:confirm-stop-mind` postMessage); we re-validate the id here against the
+// same conservative agent-id shape (never trust the renderer).
+ipcMain.on('confirm-stop-mind', async (event, agentId, name) => {
+  if (typeof agentId !== 'string' || !/^agent-[a-f0-9]{1,64}$/i.test(agentId)) return;
+  const bundle = getBundleFromEvent(event) || getMostRecentWindow();
+  const parentWindow = bundle && !bundle.window.isDestroyed() ? bundle.window : null;
+  const options = {
+    type: 'warning',
+    buttons: ['Cancel', 'Stop mind'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `Stop "${name || agentId}"?`,
+    detail: 'Its agents will stop and its services become inaccessible. '
+      + 'Your data is preserved and you can start it again.',
+  };
+  const { response } = parentWindow
+    ? await dialog.showMessageBox(parentWindow, options)
+    : await dialog.showMessageBox(options);
+  if (response !== 1) return;
+  const ok = await postMindStop(agentId);
+  if (!ok) {
+    console.warn(`[mind-shutdown] single-row stop for ${agentId} did not succeed`);
+    return;
+  }
+  // The stop succeeded, so the mind's container is down. Any other window still
+  // open to this mind would observe the now-unreachable system interface, get
+  // redirected to the recovery page, and auto-restart the host -- silently
+  // undoing the stop. Close that window now. Skip it if the mind is mid-restart
+  // (the user is intentionally restarting it in that window).
+  if (systemInterfaceStatusByAgent.get(agentId) === 'restarting') return;
+  detachWindowsForWorkspace(agentId);
+});
+
 ipcMain.on('window-minimize', (event) => {
   const bundle = getBundleFromEvent(event);
   if (bundle && !bundle.window.isDestroyed()) bundle.window.minimize();
@@ -2439,40 +2910,105 @@ function initiateFullQuit() {
   app.quit();
 }
 
-// Route POSIX SIGTERM / SIGINT through `app.quit()` so they trigger the
-// same `before-quit` chain that window-close uses (which already runs
-// `backend.shutdown()`, SIGTERMing the python backend and waiting for
-// uvicorn's graceful exit). Without these handlers Node's default for
-// these signals is to exit immediately, which orphans the python backend
-// and the `mngr forward` / `observe` subprocesses. The `just minds-stop`
-// recipe sends SIGTERM to this process so the clean-shutdown chain can run.
+// Guards for the quit sequence. ``isQuitSequenceRunning`` prevents the prompt
+// from firing twice (before-quit + window-all-closed can both arrive).
+// ``isHeadlessQuit`` is set by signal handlers so a programmatic shutdown
+// (e.g. ``just minds-stop``) never shows an interactive dialog.
+let isQuitSequenceRunning = false;
+let isHeadlessQuit = false;
+
+// Single async chokepoint for quitting. The order is deliberate:
+//   1. Ask (first native prompt) whether to shut down running local minds.
+//      Cancelling here leaves the app fully intact -- no window has changed yet.
+//   2. Once the user has committed, flip every window to the quitting page so
+//      the teardown delay shows a clear "quitting" state instead of frozen UI.
+//   3. If they chose "Shut down all", stop the local minds with progress rendered
+//      on that page. Backing out there (its native "Cancel quit") restores the
+//      windows and leaves the app running.
+//   4. Tear the backend down and quit.
+async function runQuitSequence() {
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  isQuitSequenceRunning = true;
+
+  let plan = { proceed: true, stop: false, running: [] };
+  try {
+    if (!isHeadlessQuit) {
+      plan = await promptMindShutdown();
+      if (!plan.proceed) {
+        // User cancelled before committing -- stay open, no visual change.
+        isQuitSequenceRunning = false;
+        return;
+      }
+    }
+  } catch (err) {
+    // A failure deciding the prompt must not strand the user unable to quit;
+    // fall through to a normal shutdown.
+    console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
+    plan = { proceed: true, stop: false, running: [] };
+  }
+
+  // The quit is now committed. Flip every open window to the quitting page
+  // (a no-op for a headless quit, which has no interactive UI to update), then
+  // snapshot session state before teardown (the per-window `close` handler
+  // skips saving once isShuttingDown is set).
+  isShuttingDown = true;
+  if (!isHeadlessQuit) showQuittingInAllWindows();
+  if (bundles.size > 0) saveSessionState();
+
+  if (plan.stop && plan.running.length > 0) {
+    let shouldProceed = true;
+    try {
+      shouldProceed = await stopAllMindsThenDecide(plan.running);
+    } catch (err) {
+      // A failure in the stop loop must not strand the user; quit anyway.
+      console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
+    }
+    if (!shouldProceed) {
+      // User backed out via "Cancel quit" after committing -- return the app to
+      // its normal, running state. Clear isShuttingDown FIRST so the restarted
+      // chrome-events SSE loop (which guards on `while (!isShuttingDown)`) does
+      // not immediately exit again; the loop can die during the stop window if
+      // its connection happened to drop while isShuttingDown was set.
+      isShuttingDown = false;
+      restoreFromQuittingInAllWindows();
+      ensureChromeSSELoopRunning();
+      isQuitSequenceRunning = false;
+      return;
+    }
+  }
+
+  updateQuittingStatus('Closing…');
+  await shutdown();
+  app.quit();
+}
+
+// Route POSIX SIGTERM / SIGINT through the quit sequence so they trigger the
+// same `backend.shutdown()` chain that window-close uses (SIGTERMing the python
+// backend and waiting for uvicorn's graceful exit). Without these handlers
+// Node's default for these signals is to exit immediately, which orphans the
+// python backend and the `mngr forward` / `observe` subprocesses. The `just
+// minds-stop` recipe sends SIGTERM here; we mark it headless so it shuts down
+// without showing an interactive local-mind prompt.
 for (const signal of ['SIGTERM', 'SIGINT']) {
   process.on(signal, () => {
-    console.log(`[lifecycle] ${signal} received, requesting app.quit()`);
+    console.log(`[lifecycle] ${signal} received, requesting quit`);
+    isHeadlessQuit = true;
     app.quit();
   });
 }
 
-app.on('window-all-closed', async () => {
+app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  await shutdown();
-  app.quit();
+  if (isShuttingDown || isQuitSequenceRunning) return;
+  runQuitSequence();
 });
 
-app.on('before-quit', async (event) => {
+app.on('before-quit', (event) => {
   console.log('[lifecycle] before-quit fired, isShuttingDown=' + isShuttingDown + ', hasBackend=' + !!getBackendProcess());
-  // Capture session state for every open window before teardown. Only save
-  // when bundles is non-empty: on the `window-all-closed` -> `app.quit()`
-  // path, every bundle has already been removed from the Set by its `closed`
-  // handler (and the per-window `close` handler already wrote the last
-  // non-empty snapshot), so saving here would just clobber it with `[]`.
-  if (bundles.size > 0) saveSessionState();
-  if (getBackendProcess() && !isShuttingDown) {
-    isShuttingDown = true;
-    event.preventDefault();
-    await shutdown();
-    app.quit();
-  }
+  // Once the quit sequence has committed (isShuttingDown), let the final
+  // app.quit() proceed untouched. Otherwise intercept: defer the actual quit
+  // until the local-mind prompt + teardown finish (or the user cancels).
+  if (isShuttingDown) return;
+  event.preventDefault();
+  runQuitSequence();
 });

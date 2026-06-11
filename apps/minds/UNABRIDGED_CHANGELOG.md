@@ -4,6 +4,84 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+- The titlebar now paints the active workspace's accent color across its full width (was: a small swatch next to the page title) and the workspace content below floats inside a 4px inset frame with 12px rounded corners, so the accent reads as a colored frame around the content.
+- Title text, navigation icons, and the account button on the titlebar flip between dark and light foreground based on the accent's lightness, so future user-chosen accent colors (including dark ones) remain legible. The close button keeps its red destructive hover; the requests-badge red dot stays red.
+- The most-recently-opened workspace's accent persists per window across navigation to Home (each window's bar only changes when *that window* opens a different workspace), survives app restarts, and is cleared when the stored workspace is deleted (matching windows only) or the user signs out of their account (all windows). Stored per-entry in `~/.minds/window-state.json` (existing file extended from a bare array to an object).
+- Per-workspace accents are now `oklch(85% 0.08 <hue>)` (was `oklch(65% 0.15 <hue>)`); the same value powers the sidebar item spines and other accent affordances so the whole accent system stays in step. The redundant 3px top stripe on inner workspace pages is removed.
+
+Fix the requests panel X button being unclickable when the panel auto-opens at startup. The modal opened before chrome.js had registered its `onModalStateChanged` listener, so the initial `modal-state-changed: { open: true }` IPC was dropped, the `modal-open` body class never got applied, and the titlebar's drag region intercepted the click. The chrome view's startup state-priming step (`primeViewWithCachedChromeState`, called from `did-finish-load`) now also replays the current modal-open state, alongside the cached workspaces/auth/requests state it already primed.
+
+The startup loading window no longer flashes at the default centered
+position before jumping to its saved location. Saved bounds from the
+previous session are now applied to the initial window before its
+loading screen renders, so the loading view appears in place and no
+visible jump occurs when content loads.
+
+Window state is now persisted in most-recently-focused order, so for
+multi-window users the loading screen opens at the bounds of the last
+window they interacted with (rather than the oldest still-open one).
+The lesser-MRU windows are restored without stealing keyboard focus,
+and the most-recently-focused window is re-raised as each restored
+window appears so it stays on top in the window stack as well.
+
+Added a `FAILED` outcome to the latchkey permission-grant flow. Previously, if
+the browser sign-in (including the one-off `latchkey auth browser-prepare` step)
+failed when a user approved a permission request, the request was auto-denied:
+the agent was told its request was "denied" and the request was removed from the
+pending inbox. Now a failed approval is reported as `FAILED` instead: the request
+stays pending (no response event is written, the agent is not notified), and the
+desktop dialog shows the failure reason so the user can click Approve again to
+retry. Denials remain a separate, explicit user action.
+
+Fixed a bug that broke WebDAV file sharing for macOS users. The `/api/v1/files`
+WebDAV server shares the user's home directory, but on macOS that path
+(`/Users/<name>`) contains uppercase characters. WsgiDAV matches request paths
+against a lowercased copy of each share key yet looks the matched share back up
+by that lowercased string, so any share key with uppercase characters resolved
+to no provider and every request under it returned `404 Not Found: Could not
+find resource provider`. The share is now registered under a lowercased key
+(while the filesystem provider keeps the real, correct-case path), so home-
+directory paths under macOS resolve correctly. Linux users were unaffected
+because `/home/<name>` and `/tmp` are already lowercase.
+
+Added the ability to change the shared path in the file-sharing permission
+dialog before approving. The agent-requested path is now shown in an editable
+field; you can paste a different absolute path or pick one with new
+"Choose file…" / "Choose folder…" buttons that open a native OS file dialog
+(separate file and folder pickers because a single combined picker can't select
+both on Linux/Windows). Approving with an
+edited path retargets the grant to your chosen path -- the access mode the agent
+asked for (read-only vs. read & write) is preserved, and the edited path is
+re-validated for traversal before any grant is written. The buttons appear only
+in the desktop app (they use a native picker); in a plain browser you can still
+paste a path.
+
+The edited path is also validated against the WebDAV mount roots (your home
+directory and the system temp directory) directly in Minds, so a path outside
+those is rejected immediately with a clear message instead of being forwarded to
+the gateway. The dialog gives instant feedback too: Approve stays disabled (and a
+hint appears) while the path field is empty or points outside a shared folder, as
+you type or pick.
+
+# e2e: detect the CI branch so the FCT branch-matching step fires
+
+The Electron e2e workspace runner pairs the current mngr branch with a
+same-named forever-claude-template branch (`resolve_fct_path` step 2), falling
+back to FCT `main` otherwise. In CI the checkout is a detached HEAD, so
+`git rev-parse --abbrev-ref HEAD` returned `HEAD` and the branch-matching step
+never fired -- a PR that changes the mngr<->FCT config contract could only ever
+be tested against FCT `main`. `_current_mngr_branch` now consults GitHub
+Actions' `GITHUB_HEAD_REF` (PR source branch) / `GITHUB_REF_NAME` (push branch,
+ignoring `<n>/merge` refs) before the git fallback, so the FCT branch matching
+works in CI. Other PRs are unaffected (they have no matching FCT branch and
+still use FCT `main`).
+
+## 2026-06-08
+
+Fix `test_create_local_docker_workspace_via_electron` failing on CI (and any host without gVisor). FCT's `[providers.docker]` block now sets `docker_runtime = "runsc"` to harden the local-docker provider, but `runsc` is not installed in GitHub Actions runners, so `docker run --runtime runsc` failed with "unknown or invalid runtime name: runsc" and the workspace never reached the agent navigation URL. The test now sets `MNGR__PROVIDERS__DOCKER__DOCKER_RUNTIME=runc` via `monkeypatch.setenv` -- the exact escape hatch FCT's settings.toml comment names for CI / Modal -- which the Electron child inherits through `_build_electron_env`.
+
 ## 2026-06-08
 
 The right-side requests panel is gone: pending permission requests now live

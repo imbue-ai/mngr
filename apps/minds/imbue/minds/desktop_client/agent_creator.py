@@ -391,22 +391,33 @@ def checkout_branch(
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
-    """Check out a specific branch in a cloned repository.
+    """Check out a ref in a cloned repository, materializing it as a named local branch.
 
-    Raises GitOperationError if the checkout fails (e.g. branch does not exist).
+    Uses ``git checkout -B <branch> <branch>`` rather than plain
+    ``git checkout <branch>`` so an annotated-tag input (e.g. the
+    ``FALLBACK_BRANCH = "v0.3.0"`` pin in templates.py) lands the worktree
+    on a real local branch named after the tag instead of in detached-HEAD
+    state. Downstream mngr.create's source-base autodetection (``git
+    rev-parse --abbrev-ref HEAD``) then returns that branch name and the
+    mirror-pushed ``refs/tags/<branch>`` makes the target's ``checkout -B
+    new <branch>`` resolve cleanly. Plain ``git checkout`` on a tag would
+    leave HEAD detached, returning the literal string ``HEAD`` to
+    autodetection, which is not a valid ref in the bare-init target.
+
+    Raises GitOperationError if the ref does not exist.
     """
-    logger.debug("Checking out branch {} in {}", branch, repo_dir)
+    logger.debug("Checking out {} in {}", branch, repo_dir)
     cg = _make_child_cg("git-checkout", parent_cg)
     with cg:
         result = cg.run_process_to_completion(
-            command=["git", "checkout", str(branch)],
+            command=["git", "checkout", "-B", str(branch), str(branch)],
             cwd=repo_dir,
             is_checked_after=False,
             on_output=on_output,
         )
     if result.returncode != 0:
         raise GitOperationError(
-            "git checkout failed for branch '{}' (exit code {}):\n{}".format(
+            "git checkout failed for ref '{}' (exit code {}):\n{}".format(
                 branch,
                 result.returncode,
                 result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
@@ -486,11 +497,11 @@ def _build_mngr_create_command(
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
     every minds workspace; the host name (the user's input from the
-    create-project form) is the workspace identifier. ``--reuse`` and
-    ``--update`` are passed for the non-IMBUE_CLOUD modes so re-deploying
-    resets the agent on the same host instead of failing on a duplicate
-    name (IMBUE_CLOUD's lease flow is one-shot per pool host, so reuse
-    is not meaningful there).
+    create-project form) is the workspace identifier. Only IMBUE_CLOUD
+    passes ``--reuse`` (to satisfy the pre-baked services-agent on the
+    pool host); the other modes rely on ``--new-host`` for fresh-host
+    intent and pass neither ``--reuse`` nor ``--update`` because
+    mngr's ``--reuse`` matches on agent name without host scope.
 
     Secrets (``ANTHROPIC_API_KEY``, ``ANTHROPIC_BASE_URL``) are forwarded by
     the FCT template's own ``pass_(host_)env`` declarations, not by inline
@@ -580,7 +591,12 @@ def _build_mngr_create_command(
             # transfer + provisioning round the bake already paid for.
             mngr_command.append("--reuse")
         case _:
-            mngr_command.extend(["--reuse", "--update"])
+            # Non-IMBUE_CLOUD modes pass neither ``--reuse`` nor ``--update``:
+            # the create form is "give me a new agent on a new host", and
+            # ``--reuse`` matches only on agent name (``system-services``)
+            # without scoping to host, so it collides across hosts. The
+            # ``--new-host`` flag below already covers fresh-host intent.
+            pass
 
     # Per-mode template + per-mode runtime flags. All modes use
     # ``--template main --template <mode>``; the per-mode template provides
@@ -1302,12 +1318,14 @@ class AgentCreator(MutableModel):
                         # .git/worktrees/ dir, which breaks when copied into Docker.
                         # Clone locally to get a standalone repo.
                         #
-                        # Full clone (no --depth=1): mngr's downstream mirror push
-                        # to the agent container's bare `.git` rejects shallow
-                        # updates with "shallow update not allowed" whenever the
-                        # source's tip has a parent not in the pack. Cloning
-                        # deeply avoids that failure mode. Local file:// clones
-                        # are cheap regardless.
+                        # Full clone (no --depth=1): a shallow clone only pulls
+                        # the default branch (e.g. main) and not the user's
+                        # target branch (e.g. pilot), so the subsequent
+                        # `git checkout <branch>` fails with `pathspec did not
+                        # match`. mngr's downstream mirror push into the agent
+                        # container's bare receiver also rejects shallow source
+                        # packs with "shallow update not allowed". Cloning
+                        # deeply avoids both. Local file:// clones are cheap.
                         # Use a stable path based on repo name so Docker layer caching works.
                         log_queue.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
