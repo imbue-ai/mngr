@@ -588,10 +588,15 @@ def test_creating_page_returns_501_without_agent_creator(tmp_path: Path) -> None
 
 def _create_test_server_with_agent_creator(
     tmp_path: Path,
+    backend_resolver: BackendResolverInterface | None = None,
 ) -> tuple[TestClient, FileAuthStore, AgentCreator]:
     """Create a desktop client with an agent creator for testing.
 
     The returned client is already authenticated with a global session.
+
+    ``backend_resolver`` defaults to an empty ``StaticBackendResolver``; pass a
+    populated resolver to exercise paths that consult it (e.g. the
+    duplicate-agent-name guard in ``_handle_create_agent_api``).
 
     The ``AgentCreator.root_concurrency_group`` is an ad-hoc group entered for
     the helper and left active for the caller's test duration. These tests only
@@ -599,7 +604,8 @@ def _create_test_server_with_agent_creator(
     not actually run agent creation subprocesses against the group, so leaving
     it in the ACTIVE state until GC is acceptable here.
     """
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    if backend_resolver is None:
+        backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
     root_cg = ConcurrencyGroup(name="test-root")
     root_cg.__enter__()
     agent_creator = AgentCreator(
@@ -664,6 +670,47 @@ def test_create_agent_api_passes_host_name(tmp_path: Path) -> None:
     assert response.status_code == 200
     data = response.json()
     assert "agent_id" in data
+    agent_creator.wait_for_all()
+
+
+def test_create_agent_api_rejects_duplicate_host_name(tmp_path: Path) -> None:
+    """POST /api/create-agent returns 409 when the requested name is already in use.
+
+    The guard walks ``backend_resolver.list_known_workspace_ids()`` and rejects
+    the create if any known workspace agent's ``workspace`` label matches the
+    requested name -- failing fast at the API boundary instead of deep in the
+    git-mirror push.
+    """
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "existing-agent", "is_primary": "true"}),
+    )
+    client, _, _ = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo", "host_name": "existing-agent"},
+    )
+
+    assert response.status_code == 409
+    assert "existing-agent" in response.json()["error"]
+
+
+def test_create_agent_api_allows_unique_host_name_when_others_exist(tmp_path: Path) -> None:
+    """The duplicate-name guard must not false-positive on a distinct name."""
+    existing_id = AgentId()
+    resolver = make_resolver_with_data(
+        make_agents_json(existing_id, labels={"workspace": "existing-agent", "is_primary": "true"}),
+    )
+    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path, backend_resolver=resolver)
+
+    response = client.post(
+        "/api/create-agent",
+        json={"git_url": "file:///nonexistent-repo", "host_name": "a-different-name"},
+    )
+
+    assert response.status_code == 200
+    assert "agent_id" in response.json()
     agent_creator.wait_for_all()
 
 
