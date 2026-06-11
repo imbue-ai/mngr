@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.cli.complete import COMPLETION_SHIM_MARKER
+from imbue.mngr.cli.complete import get_managed_completion_script_path
 from imbue.mngr.cli.extras import _CLAUDE_CODE_PLUGINS
 from imbue.mngr.cli.extras import _completion_status
 from imbue.mngr.cli.extras import _detect_shell
@@ -135,7 +136,7 @@ def test_completion_status_returns_tuple() -> None:
 
 
 def test_install_completion_auto_writes_shim_and_managed_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """_install_completion writes the rc shim + managed files when auto=True; idempotent once present."""
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
@@ -149,6 +150,12 @@ def test_install_completion_auto_writes_shim_and_managed_files(
     assert _install_completion(auto=True, status_fn=_status) is True
     assert COMPLETION_SHIM_MARKER in rc.read_text()
     assert (tmp_path / "completions" / "mngr.zsh").is_file()
+
+    # The success path prints how to activate completion in the current shell,
+    # pointing at the managed completion file (no new shell needed).
+    install_out = capsys.readouterr().out
+    assert "source" in install_out
+    assert str(get_managed_completion_script_path("zsh")) in install_out
 
     # Second call: now configured -> returns True without appending the shim again
     assert _install_completion(auto=False, status_fn=_status) is True
