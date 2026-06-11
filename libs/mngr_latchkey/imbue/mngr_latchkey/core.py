@@ -767,10 +767,11 @@ class Latchkey(MutableModel):
         """Write a re-encrypted copy of the credential store, filtered to ``service_names``.
 
         Shells out to ``latchkey auth re-encrypt <destination> --services <service> ...``.
-        The source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``)
-        is decrypted with the current per-directory encryption key and a
-        re-encrypted copy containing *only* the listed services'
-        credentials is written to ``destination``. The new key is read
+        ``destination`` is an output *directory* (which must already exist): the
+        source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``) is
+        decrypted with the current per-directory encryption key and a
+        re-encrypted copy containing *only* the listed services' credentials is
+        written into it as ``credentials.json.enc``. The new key is read
         from the child's stdin; we pass an empty stdin (``DEVNULL``) so
         ``re-encrypt`` reuses the same encryption key, keeping the copy
         readable by the same gateway -- and the same derived password /

@@ -206,17 +206,19 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
         "    sys.exit(0)\n"
         # ``auth re-encrypt <destination> [service ...]`` writes a fake
-        # filtered store to <destination> recording the requested services
-        # (and that stdin was empty, i.e. the same key is reused). Enough to
-        # verify the manager builds the right command and reads the result.
+        # filtered store as ``credentials.json.enc`` into the <destination>
+        # directory, recording the requested services (and that stdin was
+        # empty, i.e. the same key is reused). Enough to verify the manager
+        # builds the right command and reads the result.
         'if sys.argv[1:3] == ["auth", "re-encrypt"]:\n'
-        "    import json as _json\n"
+        "    import json as _json, os as _os\n"
         "    destination = sys.argv[3]\n"
         "    rest = sys.argv[4:]\n"
         "    services = rest[1:] if rest[:1] == ['--services'] else []\n"
         "    stdin_key = sys.stdin.read()\n"
         "    payload = {'services': services, 'reused_key': stdin_key == ''}\n"
-        "    open(destination, 'w').write(_json.dumps(payload))\n"
+        "    out = _os.path.join(destination, 'credentials.json.enc')\n"
+        "    open(out, 'w').write(_json.dumps(payload))\n"
         "    sys.exit(0)\n"
         "import os, socket, signal\n"
         'assert sys.argv[1] == "gateway"\n'
@@ -608,11 +610,12 @@ def test_export_credentials_subset_passes_sorted_services_and_reuses_key(tmp_pat
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
-    destination = tmp_path / "subset.json.enc"
+    destination = tmp_path / "subset"
+    destination.mkdir()
 
     manager.export_credentials_subset(destination, {"slack", "github", "discord"})
 
-    payload = json.loads(destination.read_text())
+    payload = json.loads((destination / "credentials.json.enc").read_text())
     # Sorted for a deterministic command line.
     assert payload["services"] == ["discord", "github", "slack"]
     # Empty stdin (DEVNULL) means the same encryption key is reused.
