@@ -796,24 +796,40 @@ class AwsProvider(VpsDockerProvider):
             return self._offline_host_from_tags(host_id, instance)
 
     def _compact_agent_tag_value(self, agent_data: Mapping[str, object]) -> str | None:
-        """Build a compact JSON tag value (id/name[/type]) kept under the 256-char tag limit.
+        """Build a compact JSON tag value (id/name[/type][/labels]) under the 256-char tag limit.
 
-        Returns ``None`` when the required ``id``/``name`` are missing. Drops the
-        optional ``type`` if including it would exceed the limit, so the
-        required-minimum (id + name, enough to resolve by name) always fits.
+        Returns ``None`` when the required ``id``/``name`` are missing. Prefers
+        the richest representation that fits, dropping ``labels`` (user metadata)
+        first, then ``type``, before the required id+name minimum (which always
+        fits and is enough to resolve by name). Including ``labels`` lets an
+        offline ``mngr label`` on a stopped host actually round-trip; if a given
+        agent's labels are too large to fit, they are dropped and a warning is
+        logged so the write does not silently no-op.
         """
         agent_id = agent_data.get("id")
         agent_name = agent_data.get("name")
         if agent_id is None or agent_name is None:
             return None
         minimal: dict[str, object] = {"id": agent_id, "name": agent_name}
-        full = dict(minimal)
+        with_type = dict(minimal)
         agent_type = agent_data.get("type")
         if agent_type is not None:
-            full["type"] = agent_type
-        value = json.dumps(full, separators=(",", ":"))
-        if len(value) > _MAX_TAG_VALUE_LEN:
-            value = json.dumps(minimal, separators=(",", ":"))
+            with_type["type"] = agent_type
+        with_labels = dict(with_type)
+        labels = agent_data.get("labels")
+        if labels:
+            with_labels["labels"] = labels
+        for candidate in (with_labels, with_type, minimal):
+            value = json.dumps(candidate, separators=(",", ":"))
+            if len(value) <= _MAX_TAG_VALUE_LEN:
+                if labels and "labels" not in candidate:
+                    logger.warning(
+                        "Labels for agent {} do not fit the {}-char EC2 tag and were omitted from "
+                        "its tag mirror; they will not be visible while the host is stopped",
+                        agent_name,
+                        _MAX_TAG_VALUE_LEN,
+                    )
+                return value
         return value
 
     def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:

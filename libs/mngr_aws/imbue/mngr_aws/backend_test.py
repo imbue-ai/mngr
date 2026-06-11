@@ -320,6 +320,30 @@ def test_compact_agent_tag_value_none_without_id_or_name(temp_mngr_ctx: MngrCont
     assert provider._compact_agent_tag_value({"id": "agent-1"}) is None
 
 
+def test_compact_agent_tag_value_includes_labels_when_they_fit(temp_mngr_ctx: MngrContext) -> None:
+    """Labels round-trip in the tag when the encoded value fits the limit (so offline `mngr label` works)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value(
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+    )
+    assert value is not None
+    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+
+
+def test_compact_agent_tag_value_drops_oversized_labels_with_warning(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """Labels too large to fit are dropped (id/name/type kept) and a warning is logged, not a silent no-op."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value(
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}}
+    )
+    assert value is not None
+    assert len(value) <= 256
+    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command"}
+    assert any("do not fit" in w for w in log_warnings), log_warnings
+
+
 def test_validate_provider_args_under_pytest_raises_when_unset(
     temp_mngr_ctx: MngrContext,
 ) -> None:
