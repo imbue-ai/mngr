@@ -44,6 +44,9 @@ import boto3
 import pytest
 from botocore.exceptions import ClientError
 
+from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.config import ExistingSecurityGroup
@@ -333,16 +336,41 @@ def test_provider_lifecycle_create_stop_start_destroy(
         time.sleep(20)
 
 
-def _find_instance_id_by_name_tag(client: AwsVpsClient, name: str) -> str | None:
-    """Return the EC2 instance id whose ``Name`` tag equals ``name`` (or None).
+def _find_test_instance_id(client: AwsVpsClient) -> str | None:
+    """Return the EC2 instance id of the instance the current release test created.
 
-    ``list_instances`` normalizes tags to ``"key=value"`` strings and includes
-    stopped instances, so this resolves the instance even while it is stopped.
+    Test instances are tagged ``mngr-pytest-launched=true`` (``create_instance``
+    adds it when ``PYTEST_CURRENT_TEST`` is set, which the ``_run_mngr``
+    subprocess inherits). Filtering on that tag isolates the test's instance
+    from any real mngr instances in the account, and -- unlike the ``Name`` tag,
+    which is ``mngr-<host-name>`` and so differs from the agent name -- is a
+    reliable handle. ``list_instances`` includes stopped instances, so this
+    resolves the instance even after it has stopped. Returns ``None`` unless
+    exactly one such instance exists (an ambiguous count means leftover state).
     """
-    for instance in client.list_instances():
-        if f"Name={name}" in instance.get("tags", ()):
-            return instance["id"]
+    matches = [
+        instance
+        for instance in client.list_instances()
+        if f"{AWS_PYTEST_LAUNCHED_TAG}=true" in instance.get("tags", ())
+    ]
+    if len(matches) == 1:
+        return matches[0]["id"]
     return None
+
+
+def _terminate_instance_best_effort(client: AwsVpsClient, instance_id: VpsInstanceId) -> None:
+    """Directly terminate an instance, swallowing errors.
+
+    A belt-and-suspenders backstop after ``mngr destroy`` in each test's
+    ``finally``: if destroy fails or partially completes, this guarantees the
+    test's EC2 instance is terminated so nothing leaks between iterative local
+    runs (the conftest session-end scanner is the final net, but only fires at
+    session end).
+    """
+    try:
+        client.destroy_instance(instance_id)
+    except MngrError:
+        pass
 
 
 @pytest.mark.rsync
@@ -377,9 +405,10 @@ def test_provider_stop_host_stops_ec2_instance_and_start_resumes(
     )
     assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
 
+    instance_id: str | None = None
     try:
-        instance_id = _find_instance_id_by_name_tag(aws_release_client, f"mngr-{agent_name}")
-        assert instance_id is not None, "could not find the created EC2 instance by Name tag"
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
         vps_instance_id = VpsInstanceId(instance_id)
 
         result = _run_mngr(aws_test_settings_dir, temp_git_repo, "stop", agent_name, "--stop-host")
@@ -398,11 +427,93 @@ def test_provider_stop_host_stops_ec2_instance_and_start_resumes(
         assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
         assert "alive-after-host-restart" in result.stdout
     finally:
-        # --force skips the destroy confirmation. Best-effort cleanup; result
-        # unchecked. No post-destroy settle sleep here (the session-end leak
-        # scanner and cloud-init auto-shutdown are the real backstops), to avoid
-        # adding a time.sleep the ratchet flags.
+        # --force skips the destroy confirmation; result unchecked (best-effort).
+        # The direct terminate is a backstop so a failed/partial destroy can't
+        # leak the instance between iterative local runs.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
+
+
+@pytest.mark.rsync
+def test_provider_idle_watcher_auto_stops_then_resumes(
+    aws_test_settings_dir: Path,
+    temp_git_repo: Path,
+    aws_release_client: AwsVpsClient,
+) -> None:
+    """The on-host idle watcher self-stops the EC2 instance when idle; `mngr start` resumes it.
+
+    Creates an agent with a short ``--idle-timeout`` and no SSH connection, so
+    the in-container activity watcher sees no activity, touches the sentinel, and
+    the host-side systemd path/service stops the instance via its IAM role. We
+    poll EC2 until the instance is ``stopped`` (proving auto-stop end to end),
+    then resume and confirm it stays running with a working post-resume command,
+    which proves the stale-sentinel handling: a resumed instance must not
+    immediately re-stop.
+    """
+    agent_name = f"{AWS_TEST_NAME_PREFIX}idle-{int(time.time()) % 100000}"
+    result = _run_mngr(
+        aws_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "aws",
+        "--no-connect",
+        "--idle-timeout",
+        "45",
+        "--",
+        "sleep",
+        "99999",
+    )
+    assert result.returncode == 0, f"Create failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+
+    instance_id: str | None = None
+    try:
+        instance_id = _find_test_instance_id(aws_release_client)
+        assert instance_id is not None, "could not find the created EC2 instance (pytest-launched tag)"
+        vps_instance_id = VpsInstanceId(instance_id)
+
+        # Auto-stop needs the mngr-aws self-stop IAM profile attached. If the
+        # account/creds lack the iam:* perms to provision it, `create` degrades
+        # gracefully and launches without it -- in which case there is nothing to
+        # test here, so skip rather than wait pointlessly for a stop that can't
+        # happen.
+        described = aws_release_client._describe_instance(vps_instance_id)
+        if described is None or not described.get("IamInstanceProfile"):
+            pytest.skip(
+                "instance has no IAM instance profile (self-stop role unavailable, likely missing "
+                "iam:* permissions); cannot exercise the idle self-stop watcher"
+            )
+
+        # Wait for the idle watcher to self-stop the instance. Budget: 45s idle +
+        # the watcher's 15s poll + systemd path latency + the stop transition.
+        # wait_for polls via the shared helper (no time.sleep in this package).
+        wait_for(
+            lambda: aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.HALTED,
+            timeout=360.0,
+            poll_interval=10.0,
+            error_message=(
+                f"EC2 instance {vps_instance_id} did not auto-stop on idle within 360s "
+                "(the on-host idle watcher should have stopped it)"
+            ),
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "start", agent_name, "--no-connect")
+        assert result.returncode == 0, f"start after auto-stop failed: {result.stderr}\n{result.stdout}"
+        assert aws_release_client.get_instance_status(vps_instance_id) == VpsInstanceStatus.ACTIVE, (
+            "EC2 instance should be running again after `mngr start`"
+        )
+
+        result = _run_mngr(aws_test_settings_dir, temp_git_repo, "exec", agent_name, "echo alive-after-idle-stop")
+        assert result.returncode == 0, f"post-resume exec failed: {result.stderr}\n{result.stdout}"
+        assert "alive-after-idle-stop" in result.stdout
+    finally:
+        _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
+        if instance_id is not None:
+            _terminate_instance_best_effort(aws_release_client, VpsInstanceId(instance_id))
 
 
 # =============================================================================

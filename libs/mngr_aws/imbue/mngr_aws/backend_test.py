@@ -144,20 +144,24 @@ def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContex
 
 
 def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: MngrContext) -> None:
-    """A host with no matching instance tag (e.g. terminated and gone) resolves to None."""
+    """A host with no matching instance tag resolves to None (after a cache-refresh retry).
+
+    On a cache miss ``_find_instance_for_host`` refreshes the instance list once
+    and retries (so a just-created instance absent from a stale cache is still
+    found), hence two ``describe_instances`` calls before giving up.
+    """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
-    stubber.add_response(
-        "describe_instances",
-        _describe_instances_response(
-            [
-                {
-                    "InstanceId": "i-other",
-                    "State": {"Name": "running"},
-                    "Tags": [{"Key": "mngr-host-id", "Value": str(HostId.generate())}],
-                },
-            ]
-        ),
+    no_match = _describe_instances_response(
+        [
+            {
+                "InstanceId": "i-other",
+                "State": {"Name": "running"},
+                "Tags": [{"Key": "mngr-host-id", "Value": str(HostId.generate())}],
+            },
+        ]
     )
+    stubber.add_response("describe_instances", no_match)
+    stubber.add_response("describe_instances", no_match)
     stubber.activate()
     try:
         found = provider._find_instance_for_host(HostId.generate())

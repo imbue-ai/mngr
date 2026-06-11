@@ -21,6 +21,7 @@ from botocore.exceptions import BotoCoreError
 from loguru import logger
 
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
@@ -91,7 +92,18 @@ def _perform_cleanup(client: AwsVpsClient) -> tuple[str | None, str | None]:
             "<agent>` (or terminate them), then re-run `mngr aws cleanup`."
         )
     deleted_sg_id = client.delete_security_group()
-    deleted_profile_name = client.delete_self_stop_instance_profile()
+    # IAM teardown is best-effort, mirroring prepare: an admin whose creds lack
+    # the iam:* delete permissions (or who never had them to create the role)
+    # should still be able to clean up the security group.
+    try:
+        deleted_profile_name = client.delete_self_stop_instance_profile()
+    except MngrError as e:
+        logger.warning(
+            "Could not delete the self-stop IAM instance profile ({}); the security group was "
+            "cleaned up. Delete the `mngr-aws` IAM role / instance profile manually if it exists.",
+            e,
+        )
+        deleted_profile_name = None
     return deleted_sg_id, deleted_profile_name
 
 
@@ -143,10 +155,12 @@ def prepare(
 
     Idempotent: re-running re-authorizes any missing ingress rules and re-ensures
     the IAM resources without duplicating. Needs ec2:DescribeSecurityGroups +
-    ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress, plus
-    iam:CreateRole + iam:PutRolePolicy + iam:CreateInstanceProfile +
-    iam:AddRoleToInstanceProfile. After this succeeds, `mngr create --provider
-    aws` only needs RunInstances + DescribeSecurityGroups + DescribeInstances +
+    ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress for the security
+    group (required), and iam:CreateRole + iam:PutRolePolicy +
+    iam:CreateInstanceProfile + iam:AddRoleToInstanceProfile for the optional
+    self-stop role (best-effort: missing IAM perms just warn and skip, so agents
+    won't auto-stop on idle). After this succeeds, `mngr create --provider aws`
+    only needs RunInstances + DescribeSecurityGroups + DescribeInstances +
     ImportKeyPair etc. (no SG- or IAM-management permissions).
     """
     base_defaults = AwsProviderConfig()
@@ -165,10 +179,25 @@ def prepare(
         raise click.ClickException(str(e)) from e
     sg_id = client.ensure_security_group()
     logger.info("Prepared AWS security group {} in region {}", sg_id, client.region)
-    profile_name = client.ensure_self_stop_instance_profile()
-    logger.info("Prepared AWS self-stop IAM instance profile {}", profile_name)
     write_human_line(f"security group: {sg_id}")
-    write_human_line(f"instance profile: {profile_name}")
+    # The self-stop IAM role enables the idle watcher but is OPTIONAL: the
+    # security group is the essential part of prepare. If the admin's
+    # credentials lack the iam:* permissions, still succeed -- agents just
+    # won't auto-stop on idle (manual `mngr stop --stop-host` still works).
+    try:
+        profile_name = client.ensure_self_stop_instance_profile()
+    except MngrError as e:
+        logger.warning(
+            "Could not provision the self-stop IAM instance profile ({}); the security group is "
+            "ready, but agents will not auto-stop on idle. Grant iam:CreateRole / iam:PutRolePolicy "
+            "/ iam:CreateInstanceProfile / iam:AddRoleToInstanceProfile and re-run `mngr aws "
+            "prepare` to enable it.",
+            e,
+        )
+        write_human_line("instance profile: skipped (insufficient IAM permissions)")
+    else:
+        logger.info("Prepared AWS self-stop IAM instance profile {}", profile_name)
+        write_human_line(f"instance profile: {profile_name}")
 
 
 @aws_cli_group.command(name="cleanup")
