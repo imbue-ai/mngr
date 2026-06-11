@@ -6,17 +6,12 @@ and wraps it in a stubber so each test can declaratively queue expected
 requests and canned responses.
 """
 
-from collections.abc import Generator
 from collections.abc import Iterator
-from contextlib import contextmanager
-from datetime import datetime
-from datetime import timezone
 
 import boto3
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
-from loguru import logger
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_aws.client import AwsVpsClient
@@ -24,24 +19,11 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
-
-
-@contextmanager
-def _captured_loguru_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru WARNING messages for in-test assertions."""
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 @pytest.fixture()
@@ -511,45 +493,23 @@ def test_list_ssh_keys(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
 # =============================================================================
 
 
-def test_list_snapshots_empty(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_snapshots",
-        {"Snapshots": []},
-        expected_params={"OwnerIds": ["self"]},
-    )
-    assert client.list_snapshots() == []
+def test_create_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """EBS snapshot support is intentionally unwired; any caller fails loudly."""
+    client, _ = stubbed_client
+    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
+        client.create_snapshot(VpsInstanceId("i-irrelevant"), "irrelevant")
 
 
-def test_list_snapshots(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_snapshots",
-        {
-            "Snapshots": [
-                {
-                    "SnapshotId": "snap-1",
-                    "Description": "test snapshot",
-                    "StartTime": datetime(2026, 1, 1, tzinfo=timezone.utc),
-                }
-            ]
-        },
-        expected_params={"OwnerIds": ["self"]},
-    )
-    snapshots = client.list_snapshots()
-    assert len(snapshots) == 1
-    assert snapshots[0].id == VpsSnapshotId("snap-1")
-    assert snapshots[0].description == "test snapshot"
+def test_delete_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    client, _ = stubbed_client
+    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
+        client.delete_snapshot(VpsSnapshotId("snap-irrelevant"))
 
 
-def test_delete_snapshot(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "delete_snapshot",
-        {},
-        expected_params={"SnapshotId": "snap-1"},
-    )
-    client.delete_snapshot(VpsSnapshotId("snap-1"))
+def test_list_snapshots_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    client, _ = stubbed_client
+    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
+        client.list_snapshots()
 
 
 # =============================================================================
@@ -564,7 +524,7 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     assert client.ensure_security_group() == "sg-test"
 
 
-def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
+def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: list[str]) -> None:
     """Empty allowed_ssh_cidrs creates/reuses the SG with no ingress and logs a warning.
 
     Mirrors how Vultr/OVH provisioning behaves in this monorepo (no provider-managed firewall);
@@ -598,14 +558,13 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs() -> None:
     )
     stubber.activate()
     try:
-        with _captured_loguru_warnings() as warnings:
-            assert client.ensure_security_group() == "sg-empty"
+        assert client.ensure_security_group() == "sg-empty"
     finally:
         stubber.deactivate()
-    assert any("allowed_ssh_cidrs is empty" in msg for msg in warnings)
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
 
 
-def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None:
+def test_ensure_security_group_auto_create_warns_when_open_to_internet(log_warnings: list[str]) -> None:
     """0.0.0.0/0 is the default but should still produce a visible warning at provision time."""
     session = boto3.Session(
         aws_access_key_id="AKIATEST",
@@ -631,11 +590,10 @@ def test_ensure_security_group_auto_create_warns_when_open_to_internet() -> None
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        with _captured_loguru_warnings() as warnings:
-            assert client.ensure_security_group() == "sg-open"
+        assert client.ensure_security_group() == "sg-open"
     finally:
         stubber.deactivate()
-    assert any("0.0.0.0/0" in msg for msg in warnings)
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_security_group_reuses_existing_sg_when_found(

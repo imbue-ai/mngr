@@ -15,15 +15,23 @@ Splits the test surface into two layers:
 
 import boto3
 import click
+import pluggy
 import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 from click.testing import CliRunner
 
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.config import LocalProviderConfig
+from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.cli import _perform_cleanup
+from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
+from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 
 _ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
@@ -197,18 +205,25 @@ def test_ami_command_is_future_stub() -> None:
     assert "not yet implemented" in result.output.lower()
 
 
-def test_prepare_command_fails_clearly_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_command_fails_clearly_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
     """When AWS creds aren't resolvable, the click command surfaces a clean error.
 
     This is the only test that goes through ``CliRunner`` against the real
     ``prepare`` callback, because the credential-missing path is the
     user-facing error message and worth exercising at the CLI boundary.
+    Passes ``obj=plugin_manager`` because ``prepare`` now runs through
+    ``setup_command_context`` (so it can read ``[providers.NAME]`` from the
+    user's settings.toml as defaults), and ``setup_command_context`` reads
+    the plugin manager off ``ctx.obj``.
     """
     for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    runner = CliRunner()
-    result = runner.invoke(aws_cli_group, ["prepare"])
+    result = cli_runner.invoke(aws_cli_group, ["prepare"], obj=plugin_manager)
     assert result.exit_code != 0
     assert "credentials not configured" in result.output.lower()
 
@@ -221,3 +236,66 @@ def test_prepare_command_help_is_reachable() -> None:
     assert "--region" in result.output
     assert "--sg-name" in result.output
     assert "--allowed-ssh-cidr" in result.output
+
+
+# =============================================================================
+# Provider-config resolution (the bug-fix surface for `mngr aws prepare`)
+# =============================================================================
+#
+# Earlier versions of ``_build_operator_client`` used ``AwsProviderConfig()``
+# class defaults unconditionally, so a user with a non-default ``default_region``
+# in ``[providers.aws]`` running ``mngr aws prepare`` without ``--region``
+# would land the SG in ``us-east-1`` while the runtime create path looked in
+# whatever region their settings.toml specified. ``_resolve_provider_config``
+# fixes this by reading the user's resolved provider config off the
+# ``MngrContext``; these tests pin that behavior.
+
+
+def test_resolve_provider_config_uses_user_provider_block(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    user_config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_region="us-west-2", vpc_id="vpc-user")
+    name = ProviderInstanceName("aws-prod")
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {name: user_config})
+    )
+    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+    resolved = _resolve_provider_config(ctx_with_provider, "aws-prod")
+
+    assert resolved.default_region == "us-west-2"
+    assert resolved.vpc_id == "vpc-user"
+
+
+def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """When the named provider block doesn't exist, class defaults are used.
+
+    Operator commands must work for first-run users who haven't yet pinned a
+    ``[providers.aws]`` block, so the fallback is a feature not a bug.
+    """
+    resolved = _resolve_provider_config(temp_mngr_ctx, "aws-does-not-exist")
+
+    assert resolved == AwsProviderConfig()
+
+
+def test_resolve_provider_config_falls_back_when_named_block_is_non_aws(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back.
+
+    The operator CLI still works against the class defaults plus whatever the
+    user passes on the command line; refusing here would block a legitimate
+    out-of-band run.
+    """
+    non_aws = LocalProviderConfig()
+    name = ProviderInstanceName("aws")
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {name: non_aws})
+    )
+    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+    resolved = _resolve_provider_config(ctx_with_provider, "aws")
+
+    assert resolved == AwsProviderConfig()

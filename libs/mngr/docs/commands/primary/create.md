@@ -206,7 +206,11 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 Provider: aws
   EC2-specific args (consumed by provider, not passed to docker):
-    --aws-region=REGION         AWS region (default: us-east-1)
+    --aws-region=REGION         Must match the provider config's default_region;
+                                the client is bound to one region at construction
+                                and refuses cross-region creates. To target multiple
+                                regions, define one [providers.aws-<region>] block
+                                per region (see mngr_aws README 'Multiple regions').
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
                                 (default: provider config's default_ami_id /
@@ -229,6 +233,7 @@ Provider: gcp
     --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal
                              the provider's configured zone; default: us-west1-a)
     --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
+    --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).
     --git-depth=N            Shallow-clone build context to depth N before upload
 
   The GCE VM image is taken from the provider config (default_source_image);

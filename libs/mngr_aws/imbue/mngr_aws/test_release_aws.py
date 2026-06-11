@@ -341,8 +341,8 @@ def aws_release_client() -> AwsVpsClient:
     """Real AWS API client for release-test read-only calls.
 
     Built with placeholder AMI / security-group IDs because the tests below
-    only exercise read-only API operations (list_instances, list_ssh_keys,
-    list_snapshots) that ignore those fields.
+    only exercise read-only API operations (list_instances, list_ssh_keys)
+    that ignore those fields.
     """
     session = boto3.Session(region_name=AWS_DEFAULT_REGION)
     return AwsVpsClient(
@@ -361,11 +361,6 @@ def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClie
 def test_api_client_list_ssh_keys_does_not_error(aws_release_client: AwsVpsClient) -> None:
     keys = aws_release_client.list_ssh_keys()
     assert isinstance(keys, list)
-
-
-def test_api_client_list_snapshots_does_not_error(aws_release_client: AwsVpsClient) -> None:
-    snapshots = aws_release_client.list_snapshots()
-    assert isinstance(snapshots, list)
 
 
 def _latest_debian_12_amd64_ami_id(region: str) -> str | None:
