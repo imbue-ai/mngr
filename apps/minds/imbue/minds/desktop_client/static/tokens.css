@@ -12,8 +12,7 @@
  * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
  * and the implicit --workspace-accent / --titlebar-bg / --titlebar-fg
  * (set per-workspace via inline style by chrome.js; consumed by the
- * .accent-spine / .sidebar-item / .accent-swatch / .titlebar-* rules
- * below).
+ * .accent-spine / .accent-swatch / .titlebar-* rules below).
  */
 
 :root {
