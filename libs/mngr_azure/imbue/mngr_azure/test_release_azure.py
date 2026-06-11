@@ -289,6 +289,81 @@ def test_provider_lifecycle_create_stop_start_destroy(
         time.sleep(20)
 
 
+@pytest.mark.rsync
+def test_provider_create_builds_dockerfile_on_vm(
+    azure_test_settings_dir: Path,
+    temp_git_repo: Path,
+) -> None:
+    """Azure builds a project Dockerfile on the VM and runs the agent from it.
+
+    The other lifecycle tests create from the default base image; this one exercises
+    the remote-build path the ``-t azure`` template relies on (the same shared
+    ``mngr_vps_docker`` flow ``gcp`` uses): ``mngr create`` uploads the build context,
+    runs ``docker build`` on the VM, and starts the agent container FROM the built
+    image. We confirm that by baking a marker into the image with a ``RUN`` and reading
+    it back via ``exec`` -- if create silently fell back to the base image, the marker
+    would be absent.
+
+    Uses the default ``DOCKER`` builder (native ``docker build`` on the VM; no
+    DEPOT_TOKEN needed) and a tiny Dockerfile, so the test stays fast and self-contained.
+    The marker stands in for any Dockerfile-installed content -- e.g. ``gh`` and the rest
+    of the mngr toolchain in the real image -- whose contents are already build-tested by
+    the docker/modal CI image builds; what is azure-specific, and untested until now, is
+    the build-on-VM integration itself.
+    """
+    marker = "azure-dockerfile-build-ok"
+    (temp_git_repo / "Dockerfile").write_text(
+        f"FROM debian:bookworm-slim\nRUN echo {marker} > /azure-build-marker.txt\n"
+    )
+    # mngr create refuses an unclean working tree, so commit the Dockerfile (the
+    # normal case: a tracked Dockerfile built from the worktree).
+    subprocess.run(["git", "-C", str(temp_git_repo), "add", "Dockerfile"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(temp_git_repo), "commit", "-q", "-m", "add test Dockerfile"],
+        check=True,
+        capture_output=True,
+    )
+    agent_name = f"{AZURE_TEST_NAME_PREFIX}build-{int(time.time()) % 100000}"
+
+    result = _run_mngr(
+        azure_test_settings_dir,
+        temp_git_repo,
+        "create",
+        agent_name,
+        "--type",
+        "command",
+        "--provider",
+        "azure",
+        # D2s_v3 because B-series is currently NotAvailableForSubscription in westus.
+        "-b",
+        "--azure-vm-size=Standard_D2s_v3",
+        "-b",
+        "--file=Dockerfile",
+        "-b",
+        ".",
+        "--no-connect",
+        "--",
+        "sleep",
+        "99999",
+        timeout=900,
+    )
+    assert result.returncode == 0, (
+        f"Create (with Dockerfile build) failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+    )
+    assert "successfully" in result.stdout.lower(), f"unexpected create output: {result.stdout}"
+
+    try:
+        result = _run_mngr(azure_test_settings_dir, temp_git_repo, "exec", agent_name, "cat /azure-build-marker.txt")
+        assert result.returncode == 0, f"Exec failed: {result.stderr}\n--- stdout ---\n{result.stdout}"
+        assert marker in result.stdout, (
+            "Dockerfile build marker missing -- the agent container was NOT built from the "
+            f"provided Dockerfile (silent fall-back to the base image?). Output: {result.stdout}"
+        )
+    finally:
+        _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
+        time.sleep(20)
+
+
 # =============================================================================
 # API client smoke tests (real network calls, read-only)
 # =============================================================================
