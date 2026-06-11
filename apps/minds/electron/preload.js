@@ -40,7 +40,7 @@ contextBridge.exposeInMainWorld('minds', {
   // (all numbers; viewport-relative). Main packs it into the sidebar's URL
   // so Sidebar.jinja can position the menu via server-rendered inline
   // style. If omitted, the server falls back to sensible defaults
-  // (anchor just below a 38px-tall element at the top-left, +8px gap).
+  // (anchor a 38px-tall element at the top-left, nudged 2px left and 2px below it).
   toggleSidebar: (anchor) => ipcRenderer.send('toggle-sidebar', anchor),
 
   // Inbox modal (formerly the right-side requests panel)
