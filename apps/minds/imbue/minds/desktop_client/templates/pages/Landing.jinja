@@ -58,11 +58,22 @@
     window.landingRowClick = function (event, row) {
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
+      var ret = row.dataset.defaultHref || '';
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
-        var ret = row.dataset.defaultHref || '';
         window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+      } else if (mindLivenessByAgent[agentId] === 'STOPPED') {
+        // The mind's container is stopped, so loading the workspace directly would
+        // strand the user on the loader for the full HEALTHY->STUCK probe-failure
+        // threshold before any restart is dispatched. We already know it's down, so
+        // route straight to the recovery page, which confirms host_offline via its
+        // probe and cold-boots the host immediately. ``intent=restart`` is required:
+        // the health tracker has never probed this stopped mind so it still reports
+        // HEALTHY, and without the intent the recovery handler would 302 us right
+        // back to the loader instead of dispatching the restart.
+        window.location = '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
       } else {
-        window.location = row.dataset.defaultHref;
+        window.location = ret;
       }
     };
 
