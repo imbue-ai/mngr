@@ -1,4 +1,6 @@
+import hashlib
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from imbue.mngr.cli.complete import _read_discovery_names
 from imbue.mngr.cli.complete import _read_git_branches
 from imbue.mngr.cli.complete import _read_host_names
 from imbue.mngr.cli.complete import _segment_keys
+from imbue.mngr.cli.complete import generate_bash_script
 from imbue.mngr.cli.complete import generate_bash_shim
 from imbue.mngr.cli.complete import generate_zsh_script
 from imbue.mngr.cli.complete import generate_zsh_shim
@@ -1920,6 +1923,44 @@ def test_managed_script_carries_version_sentinel() -> None:
     """
     script = generate_zsh_script()
     assert f"{_SHIM_VERSION_ENV_VAR}={_COMPLETION_SHIM_VERSION}" in script
+
+
+# Fingerprint of the generated zsh+bash completion function bodies, with the baked
+# python path normalised out (it varies by environment). Pinned so a change to the
+# generated function can't land silently: such a change alters the contract with the
+# completer (how candidate strings are interpreted), so it must be paired with a bump
+# of ``_COMPLETION_SHIM_VERSION`` -- which keeps out-of-date installs getting the
+# refresh nudge. See ``test_completion_function_change_requires_version_bump``.
+_EXPECTED_COMPLETION_FUNCTION_FINGERPRINT = "395ccc884fbb8fbe0e30d50022128f2bdfdb14785521456e368d29cf524f44aa"
+
+
+def _completion_function_fingerprint() -> str:
+    """sha256 of the generated zsh+bash function bodies, with the baked python path removed."""
+    bodies = (generate_zsh_script() + "\n" + generate_bash_script()).replace(sys.executable, "PYTHON")
+    return hashlib.sha256(bodies.encode("utf-8")).hexdigest()
+
+
+def test_completion_function_change_requires_version_bump() -> None:
+    """Changing the generated completion function must be accompanied by a shim-version bump.
+
+    The generated zsh/bash function bodies define a contract with the completer
+    (how trailing ``.``/``=`` candidates are treated, the candidate shape, etc.).
+    If a body changes but ``_COMPLETION_SHIM_VERSION`` does not, an already-installed
+    function can silently misbehave against the current completer instead of
+    prompting the user to refresh. This pins a fingerprint of the bodies; if it
+    fails because you changed the generated function:
+
+    1. Bump ``_COMPLETION_SHIM_VERSION`` in ``complete.py`` (so stale installs get
+       the refresh nudge).
+    2. Update ``_EXPECTED_COMPLETION_FUNCTION_FINGERPRINT`` to the new value printed
+       in the assertion message below.
+    """
+    current = _completion_function_fingerprint()
+    assert current == _EXPECTED_COMPLETION_FUNCTION_FINGERPRINT, (
+        "The generated completion function changed. Bump _COMPLETION_SHIM_VERSION in "
+        "complete.py (so out-of-date installs get the refresh nudge), then set "
+        f"_EXPECTED_COMPLETION_FUNCTION_FINGERPRINT = {current!r}"
+    )
 
 
 def test_write_managed_completion_scripts_writes_both_shells(
