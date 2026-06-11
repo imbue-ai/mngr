@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import tomllib
 from datetime import datetime
 from datetime import timezone
@@ -22,6 +24,8 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import PERMISSIONS_WAITING_FILENAME
@@ -594,14 +598,40 @@ def test_resolve_lifecycle_state_for_permission(
     assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
 
 
-def test_get_lifecycle_state_never_reports_running_while_blocked_on_permission(codex_agent: CodexAgent) -> None:
-    """Exercises the override wiring (super() + marker read). With no live tmux pane
-    the base state is non-RUNNING, so the only guarantee here is that a blocked agent
-    is never RUNNING; the promotion rule itself is covered above."""
-    agent_dir = codex_agent._get_agent_dir()
+@pytest.mark.tmux
+def test_get_lifecycle_state_promotes_running_to_waiting_when_blocked_on_permission(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """End-to-end override against a live pane: the base state is RUNNING, and a
+    permissions_waiting marker promotes it to WAITING; removing the marker restores
+    RUNNING. (The promotion rule itself is unit-tested above without tmux.)"""
+    agent = _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    # A long-lived process that ps reports as "codex" (the expected process name) so
+    # the base lifecycle reads RUNNING -- the renamed-sleep trick from base_agent_test.
+    sleep_bin = shutil.which("sleep")
+    assert sleep_bin is not None
+    fake_codex = tmp_path / "codex"
+    shutil.copy(sleep_bin, fake_codex)
+    fake_codex.chmod(0o755)
+    agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
-    assert codex_agent.get_lifecycle_state() != AgentLifecycleState.RUNNING
+    (agent_dir / ACTIVE_MARKER_FILENAME).write_text("")
+    session_name = agent.session_name
+    agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s {shlex.quote(session_name)} {shlex.quote(str(fake_codex))} 600",
+        timeout_seconds=5.0,
+    )
+    try:
+        wait_for(
+            lambda: agent.get_lifecycle_state() == AgentLifecycleState.RUNNING,
+            error_message="expected codex agent to read RUNNING with a live pane",
+        )
+        (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.WAITING
+        (agent_dir / PERMISSIONS_WAITING_FILENAME).unlink()
+        assert agent.get_lifecycle_state() == AgentLifecycleState.RUNNING
+    finally:
+        cleanup_tmux_session(session_name)
 
 
 def test_agent_field_generators_exposes_codex_waiting_reason() -> None:

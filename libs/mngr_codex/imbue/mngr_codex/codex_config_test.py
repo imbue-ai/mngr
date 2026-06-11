@@ -290,7 +290,9 @@ def test_build_codex_hooks_config_maps_lifecycle_events_to_the_marker_scripts() 
     assert SUBAGENT_STARTED_SCRIPT_NAME in subagent_start[0]["hooks"][0]["command"]
     assert SUBAGENT_STOPPED_SCRIPT_NAME in subagent_stop[0]["hooks"][0]["command"]
     # The permission marker is a plain inline touch/remove, not a provisioned script.
-    assert permission_request[0]["hooks"][0]["command"] == f'touch "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
+    assert (
+        permission_request[0]["hooks"][0]["command"] == f'touch "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
+    )
     assert post_tool_use[0]["hooks"][0]["command"] == f'rm -f "$MNGR_AGENT_STATE_DIR/{PERMISSIONS_WAITING_FILENAME}"'
 
 
