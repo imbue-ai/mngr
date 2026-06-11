@@ -42,6 +42,7 @@ delivery is still pending now.
 
 import time
 import uuid
+from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
@@ -67,6 +68,20 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 _UNCANCEL_PROPAGATION_TIMEOUT_SECONDS: Final[float] = 30.0
 _UNCANCEL_POLL_INTERVAL_SECONDS: Final[float] = 2.0
 
+# How long to wait after writing our IAM lock tag before re-reading it to
+# confirm ownership. OVH IAM tags are last-write-wins with no compare-and-set,
+# and a read taken immediately after our own write echoes that write back even
+# while a concurrent claimer is about to overwrite it. Without this wait, N
+# ``mngr create``s racing on the same candidate each read their own
+# freshly-written value and ALL believe they won the same VPS (observed: 4
+# simultaneous pool bakes all claimed one VPS while the other candidates went
+# untouched). Sleeping lets every racing write land and OVH IAM converge to a
+# single last-writer value before the ownership check, so exactly one claimer
+# wins and the rest detect the loss and move to the next candidate. Generous
+# relative to OVH IAM propagation (sub-second in practice) and negligible
+# against a multi-minute bake.
+_LOCK_CONVERGENCE_SETTLE_SECONDS: Final[float] = 5.0
+
 
 class _Candidate(FrozenModel):
     """A cancelled VPS that passed all the recycle eligibility filters."""
@@ -90,6 +105,10 @@ def try_recycle_cancelled_vps(
     # fresh order would attach. Reserved keys are already rejected upstream by
     # ``parse_extra_tags_env``.
     extra_tags: Mapping[str, str],
+    # The convergence wait used between writing and re-reading the IAM lock tag
+    # (see ``_LOCK_CONVERGENCE_SETTLE_SECONDS``). Injectable so tests can drive
+    # the lock-race deterministically without sleeping.
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> RecycleHandle | None:
     """Lock a cancelled VPS and re-tag it for ``new_host_id``. Returns a handle, or None.
 
@@ -144,6 +163,7 @@ def try_recycle_cancelled_vps(
             new_host_id=new_host_id,
             lock_value=lock_value,
             extra_tags=extra_tags,
+            sleep_fn=sleep_fn,
         )
         if handle is not None:
             logger.info(
@@ -326,6 +346,7 @@ def _try_recycle_one(
     new_host_id: HostId,
     lock_value: str,
     extra_tags: Mapping[str, str],
+    sleep_fn: Callable[[float], None],
 ) -> RecycleHandle | None:
     """Lock + re-tag a candidate. Returns a handle on success, ``None`` on failure.
 
@@ -350,6 +371,11 @@ def _try_recycle_one(
     except MngrError as e:
         logger.debug("OVH recycle: failed to acquire lock on {} ({}); skipping", candidate.service_name, e)
         return None
+    # Wait for any concurrent lock writes on this candidate to converge before
+    # checking ownership -- otherwise reading our own just-written value back
+    # lets simultaneous claimers all "win" the same VPS. See
+    # ``_LOCK_CONVERGENCE_SETTLE_SECONDS``.
+    sleep_fn(_LOCK_CONVERGENCE_SETTLE_SECONDS)
     if not _confirm_lock_held(client, urn, lock_value):
         logger.info("OVH recycle: lost lock race on {}; trying next candidate", candidate.service_name)
         _release_lock(client, urn, lock_value)

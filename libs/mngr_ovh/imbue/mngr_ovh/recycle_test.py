@@ -15,6 +15,7 @@ from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.iam_tags import MNGR_HOST_ID_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
 from imbue.mngr_ovh.iam_tags import MNGR_RECYCLING_LOCK_TAG_KEY
+from imbue.mngr_ovh.recycle import _LOCK_CONVERGENCE_SETTLE_SECONDS
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
@@ -156,6 +157,10 @@ def _make_fake_client_with_one_candidate(
     return _client(fake), fake
 
 
+def _no_sleep(_seconds: float) -> None:
+    """Settle hook for tests: skip the real lock-convergence wait."""
+
+
 def test_returns_none_when_unconfigured() -> None:
     fake = _FakeOvh()
     fake.iam_payload = []
@@ -213,6 +218,7 @@ def test_recycle_claim_swaps_host_id_but_leaves_vps_cancelled() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert handle is not None
     assert handle.service_name == "vps-x.vps.ovh.us"
@@ -245,6 +251,7 @@ def test_recycle_claim_overwrites_extra_tags_for_new_owner() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={"minds_env": "staging"},
+        sleep_fn=_no_sleep,
     )
     assert handle is not None
     tags = fake.iam_payload[0]["tags"]
@@ -263,6 +270,7 @@ def test_finalize_recycle_un_cancels_and_releases_lock() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert handle is not None
     assert finalize_recycle(client, handle) is True
@@ -283,6 +291,7 @@ def test_abort_recycle_leaves_vps_cancelled_and_releases_lock() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert handle is not None
     abort_recycle(client, handle)
@@ -305,6 +314,7 @@ def test_skips_non_cancelled_candidate() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
     # No PUT to serviceInfos should have happened.
@@ -322,6 +332,7 @@ def test_skips_candidate_inside_safety_margin() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -337,6 +348,7 @@ def test_skips_candidate_with_plan_mismatch() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -352,6 +364,7 @@ def test_skips_candidate_with_region_mismatch() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -367,6 +380,7 @@ def test_skips_candidate_in_installing_state() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -386,6 +400,7 @@ def test_skips_candidate_already_locked_by_someone_else() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -410,6 +425,7 @@ def test_picks_candidate_with_latest_expiration() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is not None
     assert result.service_name == "vps-far.vps.ovh.us"
@@ -431,6 +447,7 @@ def test_caps_candidates_considered() -> None:
         safety_margin_hours=24,
         max_candidates=3,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     # Recycle should still succeed, but only the first 3 VPSes are evaluated.
     assert result is not None
@@ -455,6 +472,7 @@ def test_skips_candidate_with_active_engagement() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
 
@@ -471,6 +489,7 @@ def test_finalize_uses_read_modify_write() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert handle is not None
     finalize_recycle(client, handle)
@@ -512,6 +531,7 @@ def test_returns_none_when_host_id_tag_swap_fails() -> None:
         safety_margin_hours=24,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     assert result is None
     # VPS stays cancelled -- defers un-cancel to finalize_recycle, so a
@@ -539,8 +559,71 @@ def test_safety_margin_thresholds(safety_hours: int, days: int, should_recycle: 
         safety_margin_hours=safety_hours,
         max_candidates=10,
         extra_tags={},
+        sleep_fn=_no_sleep,
     )
     if should_recycle:
         assert result is not None
     else:
         assert result is None
+
+
+def test_claim_waits_for_lock_convergence_before_confirming_ownership() -> None:
+    """The claim settles (waits for IAM tag convergence) before the ownership check.
+
+    Without this wait, a read taken immediately after writing the lock echoes our
+    own value back, so simultaneous claimers all "win" the same VPS.
+    """
+    client, fake = _make_fake_client_with_one_candidate()
+    settle_durations: list[float] = []
+
+    handle = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=HostId.generate(),
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+        extra_tags={},
+        sleep_fn=settle_durations.append,
+    )
+
+    assert handle is not None
+    # The convergence wait must have happened, with a positive duration.
+    assert settle_durations == [_LOCK_CONVERGENCE_SETTLE_SECONDS]
+    assert _LOCK_CONVERGENCE_SETTLE_SECONDS > 0
+
+
+def test_simultaneous_claimers_do_not_both_win_the_same_vps() -> None:
+    """A rival claimer that overwrites our IAM lock during the settle wins; we back off.
+
+    Regression test for the lock race where N simultaneous ``mngr create``s each
+    read their own freshly-written lock value back and all believed they held the
+    same VPS (observed live: 4 concurrent pool bakes all claimed one VPS). The
+    settle-then-confirm must observe the *converged* (last-writer) value, so a
+    claimer whose value was overwritten returns ``None`` and leaves the winner's
+    lock intact rather than clobbering it.
+    """
+    client, fake = _make_fake_client_with_one_candidate()
+    rival_lock_value = "rival-claimer-uuid"
+
+    def rival_steals_lock_during_settle(_seconds: float) -> None:
+        # Simulate another ``mngr create`` writing its own lock value onto the
+        # same candidate while we wait for convergence.
+        fake.iam_payload[0]["tags"][MNGR_RECYCLING_LOCK_TAG_KEY] = rival_lock_value
+
+    handle = try_recycle_cancelled_vps(
+        client=client,
+        provider_name="alice-ovh",
+        new_host_id=HostId.generate(),
+        requested_plan="vps-2025-model1",
+        requested_region="US-EAST-VA",
+        safety_margin_hours=24,
+        max_candidates=10,
+        extra_tags={},
+        sleep_fn=rival_steals_lock_during_settle,
+    )
+
+    # We lost the race: no handle, and the rival's lock is left intact (not clobbered).
+    assert handle is None
+    assert fake.iam_payload[0]["tags"][MNGR_RECYCLING_LOCK_TAG_KEY] == rival_lock_value
