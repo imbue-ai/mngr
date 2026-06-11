@@ -29,7 +29,9 @@
   function buildIconButton(title, pathSvg, dataAttr, agentId, sizeClass) {
     var btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'sidebar-row-icon flex items-center justify-center bg-transparent border-none p-0.5 cursor-pointer text-white/70 rounded hover:text-white hover:bg-white/10';
+    // 24x24 hit area for easy clicking; the glyph keeps its own (smaller)
+    // size via sizeClass and is centered inside the button.
+    btn.className = 'sidebar-row-icon flex items-center justify-center w-6 h-6 bg-transparent border-none cursor-pointer text-white/70 rounded hover:text-white hover:bg-white/10';
     btn.title = title;
     btn.tabIndex = -1;
     btn.setAttribute(dataAttr, agentId);
@@ -70,7 +72,7 @@
     var row = document.createElement('div');
     row.className =
       'sidebar-item group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white'
-      + (isCurrent ? ' is-current bg-white/15' : ' hover:bg-white/5');
+      + (isCurrent ? ' is-current bg-white/15' : ' hover:bg-white/10');
     row.setAttribute('data-agent-id', workspace.id);
 
     var dot = document.createElement('span');

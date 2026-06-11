@@ -93,6 +93,12 @@ The settings gear inside the floating workspace menu rows is rendered
 smaller (Figma node 560-5111) so it reads as a lighter secondary action
 next to the workspace name, rather than competing with it.
 
+Workspace rows now use the same hover highlight (``bg-white/10``) as the
+"New workspace" and account rows at the bottom of the menu, so the whole
+menu responds to hover consistently. The per-row action icons (open in
+new window, settings) keep their glyph sizes but sit in larger 24x24
+buttons, giving a bigger, easier click target.
+
 The shared Card component's row layouts (``row`` / ``row-spread``) now use
 a tighter ``gap-1.5`` (6px) between children instead of ``gap-3`` (12px),
 so the landing-page workspace rows, account rows, and settings rows pack
