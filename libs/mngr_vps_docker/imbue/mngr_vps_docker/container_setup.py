@@ -1113,27 +1113,36 @@ def _clone_build_context_for_self_contained_git(local_context: Path, git_depth: 
         clone_reason = f"--git-depth={git_depth}"
     logger.log(LogLevel.BUILD.value, "Cloning build context locally ({})...", clone_reason, source="vps")
 
-    clone_target = Path(tempfile.mkdtemp(prefix="mngr-vps-build-")) / "repo"
+    clone_root = Path(tempfile.mkdtemp(prefix="mngr-vps-build-"))
+    clone_target = clone_root / "repo"
     clone_cmd = ["git", "clone"]
     if git_depth is not None:
         clone_cmd.extend(["--depth", str(git_depth)])
     # Use file:// so --depth is honored for local repos
     clone_cmd.extend([f"file://{local_context}", str(clone_target)])
     clone_cg = ConcurrencyGroup(name="git-clone-build-context")
-    with translate_outer_concurrency_errors("clone the build context"), clone_cg:
-        clone_result = clone_cg.run_process_to_completion(
-            command=clone_cmd,
-            is_checked_after=False,
-            timeout=120.0,
-        )
-        if clone_result.returncode != 0:
-            raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-        # Overlay the working tree (committed + uncommitted edits, e.g. a
-        # locally-rsynced ``vendor/mngr/``) on top of the fresh clone; the
-        # clone alone rolls the context back to HEAD. A depth-only clone of a
-        # bare repo has no working tree to overlay.
-        if is_git_repo:
-            rsync_worktree_over_clone(local_context, clone_target, cg=clone_cg)
+    # The caller only learns about (and cleans up) the temp dir once we return
+    # it, so clean up ourselves if we fail before returning.
+    cloned_ok = False
+    try:
+        with translate_outer_concurrency_errors("clone the build context"), clone_cg:
+            clone_result = clone_cg.run_process_to_completion(
+                command=clone_cmd,
+                is_checked_after=False,
+                timeout=120.0,
+            )
+            if clone_result.returncode != 0:
+                raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+            # Overlay the working tree (committed + uncommitted edits, e.g. a
+            # locally-rsynced ``vendor/mngr/``) on top of the fresh clone; the
+            # clone alone rolls the context back to HEAD. A depth-only clone of a
+            # bare repo has no working tree to overlay.
+            if is_git_repo:
+                rsync_worktree_over_clone(local_context, clone_target, cg=clone_cg)
+        cloned_ok = True
+    finally:
+        if not cloned_ok:
+            shutil.rmtree(clone_root, ignore_errors=True)
     return clone_target
 
 
