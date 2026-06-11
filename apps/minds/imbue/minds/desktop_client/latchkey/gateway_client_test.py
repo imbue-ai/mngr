@@ -190,6 +190,36 @@ def test_approve_permission_request_posts_through_gateway() -> None:
     assert captured == {"method": "POST", "path": "/permission-requests/approve/evt-abc"}
 
 
+def test_approve_permission_request_sends_no_body_without_override() -> None:
+    """Without an override path the approve POST carries an empty body (gateway uses the precomputed effect)."""
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc"})
+
+    client = _build_client(_handler)
+    client.approve_permission_request("evt-abc")
+    assert captured["content"] == b""
+
+
+def test_approve_permission_request_sends_override_path_body() -> None:
+    """An override path is sent as a ``{"path": ...}`` JSON body so the gateway recomputes the effect."""
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        captured["content_type"] = request.headers.get("content-type")
+        return httpx.Response(200, json={"request_id": "evt-abc"})
+
+    client = _build_client(_handler)
+    client.approve_permission_request("evt-abc", override_path="/Users/glenn/Documents/Shared")
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {"path": "/Users/glenn/Documents/Shared"}
+    assert captured["content_type"] == "application/json"
+
+
 def test_approve_permission_request_raises_on_4xx() -> None:
     """Unlike ``delete``, ``approve`` does *not* swallow 404 / 4xx: a missing grant is a hard error."""
 

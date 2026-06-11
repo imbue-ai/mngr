@@ -1,6 +1,7 @@
 /*
  * Design tokens + a handful of custom CSS that Tailwind doesn't cover
- * (per-workspace accent stripe, spinner keyframes, titlebar drop shadow).
+ * (per-workspace accent spine, spinner keyframes, titlebar drop shadow,
+ * titlebar foreground tokens).
  *
  * This file is committed and loaded alongside the Tailwind Play CDN JS
  * (which generates utility classes at runtime -- see static/tailwind.js).
@@ -9,9 +10,10 @@
  * uses raw Tailwind classes (bg-zinc-900, text-zinc-200, border-white/10,
  * focus:ring-blue-600/15, ...) directly. The only token consumed by
  * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
- * and the implicit --workspace-accent (set per-workspace via inline
- * style, consumed by the .page-workspace / .accent-spine / .sidebar-item
- * / .accent-swatch rules below).
+ * and the implicit --workspace-accent / --titlebar-bg / --titlebar-fg
+ * (set per-workspace via inline style by chrome.js; consumed by the
+ * .accent-spine / .sidebar-item / .accent-swatch / .titlebar-* rules
+ * below).
  */
 
 :root {
@@ -28,17 +30,6 @@ html {
   scrollbar-gutter: stable;
 }
 
-.page-workspace::before {
-  content: '';
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
-  z-index: 1000;
-}
-
 .accent-spine::before {
   content: '';
   position: absolute;
@@ -46,7 +37,7 @@ html {
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
+  background: var(--workspace-accent, oklch(85% 0.08 230));
 }
 
 .sidebar-item {
@@ -60,7 +51,7 @@ html {
   bottom: 8px;
   width: 3px;
   border-radius: 2px;
-  background: var(--workspace-accent, oklch(65% 0.15 230));
+  background: var(--workspace-accent, oklch(85% 0.08 230));
   opacity: 0.55;
   transition: opacity 100ms;
 }
@@ -70,7 +61,57 @@ html {
 }
 
 .accent-swatch {
-  background: var(--workspace-accent, oklch(65% 0.15 230));
+  background: var(--workspace-accent, oklch(85% 0.08 230));
+}
+
+/*
+ * Titlebar foreground tokens. ``--titlebar-bg`` and ``--titlebar-fg`` are
+ * set by chrome.js on the document root whenever a workspace is active
+ * (or cleared back to defaults when none is): ``--titlebar-bg`` is the
+ * full-width chrome bar color (an OKLCH workspace accent at 80%/0.1) and
+ * ``--titlebar-fg`` is the contrasting foreground as a space-separated
+ * RGB triple ("0 0 0" for dark text on light bars, "255 255 255" for
+ * white text on dark bars). Consumers use the ``.titlebar-*`` utility
+ * classes below rather than referencing the variables directly so the
+ * alpha levels stay consistent across the chrome.
+ *
+ * Why an RGB triple, not a full color: ``rgb(var(--titlebar-fg) / 0.55)``
+ * lets every consumer dial in its own alpha for the visual hierarchy
+ * (title bold, icons mid, hover tints low) off a single source of truth.
+ */
+.titlebar-title {
+  color: rgb(var(--titlebar-fg, 255 255 255) / 0.9);
+}
+.titlebar-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgb(var(--titlebar-fg, 255 255 255) / 0.55);
+  transition: color 100ms, background-color 100ms;
+}
+.titlebar-btn:hover {
+  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
+  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
+}
+.titlebar-btn:active {
+  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.10);
+}
+/* Close-button hover overrides the accent-aware tint with a destructive
+ * red regardless of the active workspace color. */
+.titlebar-btn-danger:hover {
+  color: #ffffff;
+  background-color: #dc2626; /* red-600 */
+}
+.titlebar-account {
+  color: rgb(var(--titlebar-fg, 255 255 255) / 0.7);
+  transition: color 100ms, background-color 100ms;
+}
+.titlebar-account:hover {
+  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
+  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
 }
 
 /*

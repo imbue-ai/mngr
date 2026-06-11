@@ -4,6 +4,45 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-09
+
+Fixed a type error introduced when an older branch merged into main: `mngr_usage`'s usage-preservation code referenced `VolumeFileType`, which had been renamed to `FileType` in `imbue.mngr.interfaces.data_types`. Updated the import and references to use `FileType`.
+
+`mngr usage` now preserves and reads back usage from destroyed agents.
+
+When an agent (or its whole host) is destroyed, its `events/<source>/usage` directories (plus its `data.json`, for filtering) are now copied to `<local_host_dir>/preserved/<agent-name>--<agent-id>/` before the state directory is deleted -- the same place `mngr claude` preserves session files. For remote agents the files are pulled to the local machine so they survive host destruction. This is controlled by the new `preserve_on_destroy` usage-plugin config option (default `true`; set to `false` to discard usage data on destroy).
+
+`mngr usage` (and `mngr usage wait`) now fold this preserved usage back into their output by default, so destroyed agents' spend still counts toward cost totals and rate-limit windows. Preserved agents honor the same `--provider` / `--project` / `--local` / label / CEL filters as live agents (evaluated against their preserved `data.json`). Pass `--no-preserved` to consider only live agents.
+
+## 2026-06-08
+
+Refined the cron automation recipes doc (`docs/cron_recipes.md`):
+
+- The agent-spawning recipes (`warm-window.sh`, `dispatch-task.sh`) now `cd
+  "$PROJECT_DIR"` before creating an agent, using a placeholder project path.
+  cron starts in `$HOME` (usually not a git repo), and mngr resolves
+  project-scoped config from the cwd's git worktree root -- so running inside
+  the project is what gives the new agent a git root to branch from and applies
+  the project's settings (`create_templates`, labels, etc.). Dropped the now
+  redundant `--from ":$PROJECT_DIR"` from `dispatch-task.sh` (cd makes the
+  create source default to the project's git root). Clarified that the
+  `warm-window.sh` warmer does no real work, so its `PROJECT_DIR` can be any git
+  repo already trusted in Claude Code -- the project context is irrelevant, and
+  `--no-connect` can't answer the trust prompt on first use.
+- Reworked the Scheduling section: the `PATH` note now covers both the Linux
+  (`/usr/bin` via apt) and macOS (`/opt/homebrew/bin` via Homebrew) dependency
+  locations around a single cron example.
+- Added a macOS LaunchAgent section as the recommended alternative to `cron` on
+  macOS. cron jobs run outside the GUI (Aqua) login session and so can't reach
+  the login Keychain, where Claude Code stores its credentials -- cron-launched
+  agents come up "Not logged in". A user LaunchAgent loaded into the Aqua
+  session has Keychain access and authenticates normally. Includes a plist
+  skeleton (`StartInterval`, `EnvironmentVariables` PATH, log paths),
+  `launchctl bootstrap`/`bootout` load/unload commands, and the
+  runs-only-while-logged-in tradeoff.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr usage` plugin with its own help-topic docs). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` pin is realigned to the current `0.2.10`. No runtime change.
+
 ## 2026-06-05
 
 - Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-mngr==0.2.6` pin is realigned to the current `0.2.10`. No runtime change.

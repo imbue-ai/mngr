@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Removed
+
+- Removed: `ModalProxyPermissionDeniedError` error class (`imbue.modal_proxy.errors`) and the `_translate_modal_error` branch that mapped `modal.exception.PermissionDeniedError` to it (`imbue.modal_proxy.direct`); permission-denied errors once again fall through to the base `ModalProxyError`. Modal has fixed the underlying async-permission-propagation bug on their side (read-after-write is now immediate), so the workaround is no longer needed.
+
+## [v0.1.13] - 2026-06-08
+
 ## [v0.1.12] - 2026-06-05
 
 ### Fixed

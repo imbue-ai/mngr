@@ -5,6 +5,11 @@ from datetime import timezone
 from typing import Any
 from unittest.mock import MagicMock
 
+from tenacity import Retrying
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_none
+
 from imbue.concurrency_group.errors import ProcessError
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_kanpan.data_source import FIELD_CI
@@ -17,19 +22,24 @@ from imbue.mngr_kanpan.data_sources.github import CiStatus
 from imbue.mngr_kanpan.data_sources.github import ConflictsField
 from imbue.mngr_kanpan.data_sources.github import CreatePrUrlField
 from imbue.mngr_kanpan.data_sources.github import FetchBoardResult
+from imbue.mngr_kanpan.data_sources.github import GitHubBoardFetchError
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSource
 from imbue.mngr_kanpan.data_sources.github import GitHubDataSourceConfig
 from imbue.mngr_kanpan.data_sources.github import PrFetchFailedField
 from imbue.mngr_kanpan.data_sources.github import PrInfo
 from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_sources.github import UnresolvedField
+from imbue.mngr_kanpan.data_sources.github import _MAX_SEARCH_PAGES
+from imbue.mngr_kanpan.data_sources.github import _PAGE_FETCH_ATTEMPTS
 from imbue.mngr_kanpan.data_sources.github import _build_board_graphql
 from imbue.mngr_kanpan.data_sources.github import _build_create_pr_url
+from imbue.mngr_kanpan.data_sources.github import _build_prs_from_nodes
 from imbue.mngr_kanpan.data_sources.github import _check_unresolved_threads
 from imbue.mngr_kanpan.data_sources.github import _get_cached_repo_field
-from imbue.mngr_kanpan.data_sources.github import _parse_board_response
+from imbue.mngr_kanpan.data_sources.github import _parse_board_page
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_node
 from imbue.mngr_kanpan.data_sources.github import _parse_pr_state
+from imbue.mngr_kanpan.data_sources.github import _summarize_failed_response
 from imbue.mngr_kanpan.data_sources.github import fetch_board
 from imbue.mngr_kanpan.data_sources.repo_paths import RepoPathField
 from imbue.mngr_kanpan.testing import make_agent_details
@@ -73,6 +83,7 @@ def _make_board_response(
     *,
     nodes: list[dict[str, Any]] | None = None,
     has_next_page: bool = False,
+    end_cursor: str | None = None,
     errors: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build a JSON-encoded `gh api graphql` response for the kanpan board query."""
@@ -80,7 +91,7 @@ def _make_board_response(
         "data": {
             "s": {
                 "nodes": nodes or [],
-                "pageInfo": {"hasNextPage": has_next_page},
+                "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
             }
         }
     }
@@ -89,15 +100,39 @@ def _make_board_response(
     return json.dumps(body)
 
 
+def _make_board_proc(stdout: str, stderr: str = "", returncode: int = 0) -> MagicMock:
+    """Mock process carrying the given stdout/stderr."""
+    proc = MagicMock()
+    proc.read_stdout.return_value = stdout
+    proc.read_stderr.return_value = stderr
+    proc.returncode = returncode
+    return proc
+
+
 def _make_board_cg(response_json: str, returncode: int = 0) -> MagicMock:
     """Mock ConcurrencyGroup that returns a single proc carrying the given stdout."""
-    proc = MagicMock()
-    proc.read_stdout.return_value = response_json
-    proc.read_stderr.return_value = ""
-    proc.returncode = returncode
     cg = MagicMock()
-    cg.run_process_in_background.return_value = proc
+    cg.run_process_in_background.return_value = _make_board_proc(response_json, returncode=returncode)
     return cg
+
+
+def _make_paginated_board_cg(*procs: MagicMock) -> MagicMock:
+    """Mock ConcurrencyGroup that returns the given procs across successive page requests."""
+    cg = MagicMock()
+    cg.run_process_in_background.side_effect = list(procs)
+    return cg
+
+
+def _no_wait_page_retrying() -> Retrying:
+    """The production per-page retry policy but with the backoff removed, so retry
+    behavior can be exercised in tests without real sleeps.
+    """
+    return Retrying(
+        retry=retry_if_exception_type(GitHubBoardFetchError),
+        stop=stop_after_attempt(_PAGE_FETCH_ATTEMPTS),
+        wait=wait_none(),
+        reraise=True,
+    )
 
 
 def _make_thread(*, resolved: bool = False, last_author: str | None = None) -> dict[str, Any]:
@@ -321,79 +356,128 @@ def test_build_board_graphql_includes_repos_and_branches() -> None:
     assert "mergeable" in query
     assert "reviewThreads" in query
     assert "nameWithOwner" in query
+    # pagination cursor is requested so the caller can fetch further pages
+    assert "endCursor" in query
 
 
-# === _parse_board_response ===
+def test_build_board_graphql_without_after_omits_after_clause() -> None:
+    query = _build_board_graphql([("org/a", "feat-1")])
+    assert "after:" not in query
 
 
-def test_parse_board_response_success() -> None:
-    response = _make_board_response(
-        nodes=[
-            _make_pr_node(number=1, head_branch="b1", repo="org/r"),
-            _make_pr_node(number=2, head_branch="b2", repo="org/r", state="MERGED"),
-        ],
+def test_build_board_graphql_with_after_includes_cursor() -> None:
+    query = _build_board_graphql([("org/a", "feat-1")], after="CURSOR_ABC")
+    assert "after:" in query
+    assert "CURSOR_ABC" in query
+
+
+# === _parse_board_page ===
+
+
+def test_parse_board_page_extracts_nodes_and_cursor() -> None:
+    response = json.loads(
+        _make_board_response(
+            nodes=[_make_pr_node(head_branch="b1", repo="org/r")],
+            has_next_page=True,
+            end_cursor="CURSOR_1",
+        )
     )
-    result = _parse_board_response(response, [("org/r", "b1"), ("org/r", "b2")], unresolved_ignore_user=None)
-    assert result.errors == ()
-    assert set(result.prs.keys()) == {("org/r", "b1"), ("org/r", "b2")}
-    assert result.prs[("org/r", "b1")].number == 1
-    assert result.prs[("org/r", "b2")].state == PrState.MERGED
+    page = _parse_board_page(response)
+    assert len(page.nodes) == 1
+    assert page.has_next_page is True
+    assert page.end_cursor == "CURSOR_1"
+    assert page.errors == ()
 
 
-def test_parse_board_response_unrequested_pair_skipped() -> None:
+def test_parse_board_page_surfaces_error_messages() -> None:
+    response = json.loads(
+        _make_board_response(
+            nodes=[_make_pr_node(head_branch="b1", repo="org/r")],
+            errors=[{"message": "Something went wrong", "type": "INTERNAL"}],
+        )
+    )
+    page = _parse_board_page(response)
+    assert any("Something went wrong" in e for e in page.errors)
+    # Successful nodes still pass through alongside the errors.
+    assert len(page.nodes) == 1
+
+
+def test_parse_board_page_null_node_skipped() -> None:
+    # A null entry in nodes (defensive guard) should not crash the parser.
+    response = {
+        "data": {
+            "s": {
+                "nodes": [None, _make_pr_node(head_branch="b1", repo="org/r")],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        }
+    }
+    page = _parse_board_page(response)
+    assert len(page.nodes) == 1
+
+
+# === _build_prs_from_nodes ===
+
+
+def test_build_prs_from_nodes_success() -> None:
+    nodes = [
+        _make_pr_node(number=1, head_branch="b1", repo="org/r"),
+        _make_pr_node(number=2, head_branch="b2", repo="org/r", state="MERGED"),
+    ]
+    prs = _build_prs_from_nodes(nodes, [("org/r", "b1"), ("org/r", "b2")], unresolved_ignore_user=None)
+    assert set(prs.keys()) == {("org/r", "b1"), ("org/r", "b2")}
+    assert prs[("org/r", "b1")].number == 1
+    assert prs[("org/r", "b2")].state == PrState.MERGED
+
+
+def test_build_prs_from_nodes_unrequested_pair_skipped() -> None:
     # Defensive: a node whose (repo, branch) we didn't ask about must be ignored.
-    response = _make_board_response(nodes=[_make_pr_node(head_branch="other-branch", repo="org/r")])
-    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert result.prs == {}
+    nodes = [_make_pr_node(head_branch="other-branch", repo="org/r")]
+    prs = _build_prs_from_nodes(nodes, [("org/r", "b1")], unresolved_ignore_user=None)
+    assert prs == {}
 
 
-def test_parse_board_response_multiple_prs_per_branch_prefers_open() -> None:
+def test_build_prs_from_nodes_multiple_prs_per_branch_prefers_open() -> None:
     closed = _make_pr_node(number=10, head_branch="b1", state="CLOSED", repo="org/r")
     open_pr = _make_pr_node(number=11, head_branch="b1", state="OPEN", repo="org/r")
     merged = _make_pr_node(number=12, head_branch="b1", state="MERGED", repo="org/r")
-    response = _make_board_response(nodes=[closed, merged, open_pr])
-    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert result.prs[("org/r", "b1")].number == 11
+    prs = _build_prs_from_nodes([closed, merged, open_pr], [("org/r", "b1")], unresolved_ignore_user=None)
+    assert prs[("org/r", "b1")].number == 11
 
 
-def test_parse_board_response_partial_errors_surfaces_messages() -> None:
-    response = _make_board_response(
-        nodes=[_make_pr_node(head_branch="b1", repo="org/r")],
-        errors=[{"message": "Something went wrong", "type": "INTERNAL"}],
-    )
-    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert any("Something went wrong" in e for e in result.errors)
-    # Successful nodes still pass through alongside the errors.
-    assert ("org/r", "b1") in result.prs
+def test_build_prs_from_nodes_dedupes_across_pages() -> None:
+    # The same branch can surface on different pages (e.g. closed-then-reopened);
+    # the OPEN > MERGED > CLOSED preference must hold across the accumulated set.
+    page1_closed = _make_pr_node(number=20, head_branch="b1", state="CLOSED", repo="org/r")
+    page2_open = _make_pr_node(number=21, head_branch="b1", state="OPEN", repo="org/r")
+    prs = _build_prs_from_nodes([page1_closed, page2_open], [("org/r", "b1")], unresolved_ignore_user=None)
+    assert prs[("org/r", "b1")].number == 21
 
 
-def test_parse_board_response_invalid_json() -> None:
-    result = _parse_board_response("not json", [("org/r", "b1")], unresolved_ignore_user=None)
-    assert result.prs == {}
-    assert len(result.errors) == 1
-    assert "parse error" in result.errors[0]
+# === _summarize_failed_response ===
 
 
-def test_parse_board_response_pagination_warns() -> None:
-    response = _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r")], has_next_page=True)
-    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert any("first: 100" in e or "100" in e for e in result.errors)
+def test_summarize_failed_response_prefers_graphql_error_messages() -> None:
+    response = {"data": None, "errors": [{"message": "API rate limit exceeded"}, {"message": "secondary thing"}]}
+    assert _summarize_failed_response(response, stderr_excerpt="ignored") == "API rate limit exceeded; secondary thing"
 
 
-def test_parse_board_response_null_node_skipped() -> None:
-    # A null entry in nodes (defensive guard) should not crash the parser.
-    response = json.dumps(
-        {
-            "data": {
-                "s": {
-                    "nodes": [None, _make_pr_node(head_branch="b1", repo="org/r")],
-                    "pageInfo": {"hasNextPage": False},
-                }
-            }
-        }
-    )
-    result = _parse_board_response(response, [("org/r", "b1")], unresolved_ignore_user=None)
-    assert ("org/r", "b1") in result.prs
+def test_summarize_failed_response_falls_back_to_top_level_message() -> None:
+    response = {"message": "You have exceeded a secondary rate limit"}
+    assert _summarize_failed_response(response, stderr_excerpt="ignored") == "You have exceeded a secondary rate limit"
+
+
+def test_summarize_failed_response_falls_back_to_stderr() -> None:
+    assert _summarize_failed_response({}, stderr_excerpt="gh: HTTP 502") == "stderr: gh: HTTP 502"
+
+
+def test_summarize_failed_response_no_information() -> None:
+    assert _summarize_failed_response({}, stderr_excerpt="") == "no data returned"
+
+
+def test_summarize_failed_response_non_dict() -> None:
+    # A bare JSON array (or other non-object) still yields a usable reason.
+    assert _summarize_failed_response([1, 2, 3], stderr_excerpt="gh: weird") == "stderr: gh: weird"
 
 
 # === fetch_board ===
@@ -443,6 +527,93 @@ def test_fetch_board_passes_unresolved_ignore_user() -> None:
     cg = _make_board_cg(response)
     result = fetch_board(cg, repo_branches=[("org/r", "b1")], unresolved_ignore_user="myuser")
     assert result.prs[("org/r", "b1")].has_unresolved is False
+
+
+def test_fetch_board_paginates_across_pages() -> None:
+    """When the first page reports hasNextPage, fetch_board follows the cursor
+    and merges PRs from every page into one result.
+    """
+    page1 = _make_board_proc(
+        _make_board_response(
+            nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=1)],
+            has_next_page=True,
+            end_cursor="CURSOR_1",
+        )
+    )
+    page2 = _make_board_proc(
+        _make_board_response(
+            nodes=[_make_pr_node(head_branch="b2", repo="org/r", number=2)],
+            has_next_page=False,
+        )
+    )
+    cg = _make_paginated_board_cg(page1, page2)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1"), ("org/r", "b2")])
+    assert result.errors == ()
+    assert result.prs[("org/r", "b1")].number == 1
+    assert result.prs[("org/r", "b2")].number == 2
+    # The second request must carry the first page's cursor as `after`.
+    assert cg.run_process_in_background.call_count == 2
+    second_query = next(a for a in cg.run_process_in_background.call_args_list[1][0][0] if a.startswith("query="))
+    assert "CURSOR_1" in second_query
+
+
+def test_fetch_board_keeps_earlier_pages_when_later_page_permanently_fails() -> None:
+    """A transport failure on page 2 must not discard page 1: the PRs already
+    fetched are kept and an error is surfaced. Page 1 is never re-fetched.
+    """
+    page1 = _make_board_proc(
+        _make_board_response(
+            nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=1)],
+            has_next_page=True,
+            end_cursor="CURSOR_1",
+        )
+    )
+    # Page 2 returns an HTTP-403 secondary-rate-limit body on every attempt. It
+    # is valid JSON but carries no `data.s` search result, so it is retried and,
+    # on exhaustion, surfaced as an error rather than silently dropped.
+    rate_limited_body = json.dumps(
+        {"message": "You have exceeded a secondary rate limit", "documentation_url": "https://docs.github.com"}
+    )
+    bad = _make_board_proc(rate_limited_body, stderr="gh: HTTP 403")
+    cg = _make_paginated_board_cg(page1, bad, bad, bad)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1"), ("org/r", "b2")], page_retrying=_no_wait_page_retrying())
+    assert result.prs[("org/r", "b1")].number == 1
+    assert any("failed after" in e for e in result.errors)
+    assert any("secondary rate limit" in e for e in result.errors)
+
+
+def test_fetch_board_retries_transient_page_then_succeeds() -> None:
+    """A page whose first attempt returns no parseable JSON body is retried, and
+    the retry's result is used -- no error surfaces when the retry succeeds.
+    """
+    bad = _make_board_proc("", stderr="temporary failure")
+    good = _make_board_proc(
+        _make_board_response(nodes=[_make_pr_node(head_branch="b1", repo="org/r", number=7)], has_next_page=False)
+    )
+    cg = _make_paginated_board_cg(bad, good)
+    result = fetch_board(cg, repo_branches=[("org/r", "b1")], page_retrying=_no_wait_page_retrying())
+    assert result.errors == ()
+    assert result.prs[("org/r", "b1")].number == 7
+
+
+def test_fetch_board_page_limit_surfaces_error() -> None:
+    """If GitHub keeps reporting hasNextPage past the page cap (its ~1000-result
+    ceiling), surface an explicit error rather than silently dropping data.
+    """
+    procs = [
+        _make_board_proc(
+            _make_board_response(
+                nodes=[_make_pr_node(head_branch=f"b{page_index}", repo="org/r", number=page_index)],
+                has_next_page=True,
+                end_cursor=f"CURSOR_{page_index}",
+            )
+        )
+        for page_index in range(_MAX_SEARCH_PAGES)
+    ]
+    cg = _make_paginated_board_cg(*procs)
+    result = fetch_board(cg, repo_branches=[("org/r", f"b{i}") for i in range(_MAX_SEARCH_PAGES)])
+    assert cg.run_process_in_background.call_count == _MAX_SEARCH_PAGES
+    assert any("too many matching PRs" in e for e in result.errors)
 
 
 # === GitHubDataSource.compute ===
