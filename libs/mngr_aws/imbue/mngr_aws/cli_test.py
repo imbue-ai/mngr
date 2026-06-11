@@ -358,7 +358,16 @@ def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: 
 
 def test_resolve_provider_config_uses_user_provider_block(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
+    """The happy path returns the configured ``AwsProviderConfig`` verbatim, silently.
+
+    Pins the third leg of the three-case contract: configured AWS block ->
+    return as-is, no warning. The two sibling tests cover the missing-block
+    and non-AWS-block fallbacks (silent and warning respectively); pinning
+    silence here too closes the {AWS / non-AWS / missing} x {warn / silent}
+    matrix so a future regression that always-warns can't slip through.
+    """
     user_config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_region="us-west-2", vpc_id="vpc-user")
     ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws-prod", user_config)
 
@@ -366,6 +375,7 @@ def test_resolve_provider_config_uses_user_provider_block(
 
     assert resolved.default_region == "us-west-2"
     assert resolved.vpc_id == "vpc-user"
+    assert log_warnings == [], f"happy path must be silent, got {log_warnings!r}"
 
 
 def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
