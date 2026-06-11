@@ -1,4 +1,5 @@
 import os
+import time
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -461,6 +462,70 @@ class AwsVpsClient(VpsClientInterface):
         with self._translate_aws_errors():
             self._ec2().terminate_instances(InstanceIds=[str(instance_id)])
         logger.info("Terminated EC2 instance {}", instance_id)
+
+    def stop_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> None:
+        """Stop (not terminate) an EC2 instance, preserving its EBS volumes.
+
+        Unlike ``destroy_instance`` (terminate), a stop keeps the root EBS
+        volume and all on-disk state intact so the instance can later be
+        resumed via ``start_instance``. Compute billing ends while stopped;
+        EBS storage continues to bill. Blocks until the instance reaches the
+        terminal ``stopped`` state so callers can rely on the volume being
+        quiesced before, e.g., snapshotting or reading metadata. Idempotent:
+        stopping an already-stopped instance still waits for ``stopped``.
+
+        This method widens ``AwsVpsClient`` beyond the shared
+        ``VpsClientInterface`` (which has no stop/start, since most VPS
+        providers in this repo only support create/destroy); ``AwsProvider``
+        reaches it through ``self.aws_client`` rather than the abstract
+        interface.
+        """
+        with self._translate_aws_errors():
+            self._ec2().stop_instances(InstanceIds=[str(instance_id)])
+        logger.info("Stopping EC2 instance {}", instance_id)
+        self._wait_for_instance_state(instance_id, "stopped", timeout_seconds)
+        logger.info("EC2 instance {} stopped", instance_id)
+
+    def start_instance(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
+        """Start a previously-stopped EC2 instance and return its public IP.
+
+        A stopped instance loses its public IPv4 address; AWS assigns a fresh
+        one on start (unless an Elastic IP is associated), so the returned IP
+        may differ from the pre-stop address -- callers must refresh any cached
+        address / known_hosts entries. Reuses ``wait_for_instance_active`` to
+        block until the instance is ``running`` and has a public IP. Idempotent:
+        starting an already-running instance returns its current IP.
+
+        AWS-only, like ``stop_instance`` -- reached via ``self.aws_client``.
+        """
+        with self._translate_aws_errors():
+            self._ec2().start_instances(InstanceIds=[str(instance_id)])
+        logger.info("Starting EC2 instance {}", instance_id)
+        return self.wait_for_instance_active(instance_id, timeout_seconds=timeout_seconds)
+
+    def _wait_for_instance_state(
+        self,
+        instance_id: VpsInstanceId,
+        target_state: str,
+        timeout_seconds: float,
+    ) -> None:
+        """Poll ``describe_instances`` every 5s until the instance reaches ``target_state``.
+
+        Used by ``stop_instance`` to wait for the terminal ``stopped`` state.
+        ``get_instance_status`` collapses ``stopping`` and ``stopped`` into one
+        ``HALTED`` status, so this checks the raw EC2 state name directly to
+        distinguish "still stopping" from "fully stopped".
+        """
+        start = time.monotonic()
+        while time.monotonic() - start < timeout_seconds:
+            instance = self._describe_instance(instance_id)
+            state = instance.get("State", {}).get("Name", "") if instance is not None else ""
+            if state == target_state:
+                return
+            time.sleep(5.0)
+        raise VpsProvisioningError(
+            f"EC2 instance {instance_id} did not reach state {target_state!r} within {timeout_seconds}s"
+        )
 
     def _describe_instance(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
         with self._translate_aws_errors():
