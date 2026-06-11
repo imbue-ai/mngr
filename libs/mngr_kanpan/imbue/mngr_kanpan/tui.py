@@ -127,8 +127,7 @@ BOARD_SECTION_ORDER: tuple[BoardSection, ...] = (
 )
 
 # Section heading prefix/suffix text lives in data_types (SECTION_PREFIX /
-# SECTION_SUFFIX) so the TUI and the JSON output path share one source of truth.
-# Only the urwid color attribute is display-specific and stays here.
+# SECTION_SUFFIX). Only the urwid color attribute is display-specific and stays here.
 _SECTION_ATTR: dict[BoardSection, str] = {
     BoardSection.PR_MERGED: "section_done",
     BoardSection.PR_CLOSED: "section_cancelled",
