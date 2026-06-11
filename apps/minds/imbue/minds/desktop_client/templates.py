@@ -298,6 +298,13 @@ def render_create_form(
     ``host_name`` is the value of the form's "Name" field; it drives the
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
+
+    ``color`` is the ``#rrggbb`` hex preselected in the form's palette
+    picker: the matching swatch renders checked and the hidden ``color``
+    input the form POSTs carries it. Callers pass the
+    suggested-unused-palette pick; it defaults to
+    ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care about color
+    (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_name = (
