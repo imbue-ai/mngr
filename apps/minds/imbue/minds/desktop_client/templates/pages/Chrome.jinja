@@ -75,9 +75,9 @@
      (Sidebar.jinja) is loaded into the shared modal WebContentsView and
      uses the same #sidebar-backdrop / #sidebar-menu shape with the
      /_static/sidebar.js renderer. Both modes share the position model:
-     menu.top-left = trigger.bottom-left + offset, with py-1.5 (vertical
-     padding only) so each row's px-2 (8px) lines up exactly with the
-     trigger button's icon offset inside its w-8 shell. #}
+     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
+     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
+     px-2 for the hover highlight's inset. #}
   <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
     <div id="sidebar-menu"
          class="absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
