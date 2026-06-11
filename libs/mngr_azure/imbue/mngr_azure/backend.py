@@ -12,7 +12,7 @@ from pydantic import Field
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -165,8 +165,8 @@ class AzureProvider(VpsDockerProvider):
         """Return public IPs of Azure VMs tagged with this provider's name.
 
         Credentials are guaranteed resolvable here: ``build_provider_instance``
-        raises ``ProviderEmptyError`` when ``config.get_subscription_id()`` fails,
-        so any AzureProvider that reaches this point has a subscription.
+        raises ``ProviderUnavailableError`` when ``config.get_subscription_id()``
+        fails, so any AzureProvider that reaches this point has a subscription.
         """
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
@@ -223,17 +223,21 @@ class AzureProviderBackend(ProviderBackendInterface):
         try:
             subscription_id = config.get_subscription_id()
         except ValueError as e:
-            # Match the AWS/GCP pattern: when the provider cannot be reached
-            # (here: no resolvable subscription), raise ProviderEmptyError so read
-            # paths (mngr list / mngr gc / discovery) skip the Azure provider
-            # entirely instead of constructing a half-working placeholder.
-            # Host-creation paths surface this same error to the user.
-            raise ProviderEmptyError(name, str(e)) from e
+            # A missing/unresolvable subscription means Azure was never reached:
+            # the state is *unknown* (agents may well exist on a configured
+            # subscription we transiently couldn't read -- e.g. the az CLI
+            # rewriting azureProfile.json under us). That is ProviderUnavailableError,
+            # NOT ProviderEmptyError: read paths (mngr list) must surface a warning
+            # rather than silently dropping the provider and its agents from the
+            # listing. Host-creation paths surface this same error to the user.
+            raise ProviderUnavailableError(name, str(e)) from e
 
         try:
             credential = config.get_credential()
         except AzureError as e:
-            raise ProviderEmptyError(name, str(e)) from e
+            # Same rationale: a credential we couldn't obtain leaves Azure's state
+            # unknown, so this is unavailable (warned), not empty (silently skipped).
+            raise ProviderUnavailableError(name, str(e)) from e
 
         azure_client = AzureVpsClient(
             credential=credential,

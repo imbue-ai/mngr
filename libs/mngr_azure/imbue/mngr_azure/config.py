@@ -181,8 +181,9 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         see ``read_az_cli_default_subscription``). The az-CLI fallback mirrors the
         GCP provider using the active gcloud project, so ``--provider azure`` works
         with no config after ``az login``. Raising here surfaces clearly on
-        ``mngr create --provider azure`` while letting ``mngr list`` skip the
-        provider (the backend wraps this in ``ProviderEmptyError``).
+        ``mngr create --provider azure`` while letting ``mngr list`` warn-and-skip
+        the provider (the backend wraps this in ``ProviderUnavailableError``: Azure
+        was unreachable, so its state -- and any agents on it -- is unknown).
         """
         if self.subscription_id:
             return self.subscription_id
