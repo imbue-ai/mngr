@@ -172,6 +172,31 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
+    """The onboarding picker passes a hex through; the command builder
+    lifts it into a --label color=<hex> flag alongside the existing
+    workspace / is_primary / user_created labels so the workspace ships
+    with its color from create time onward (no post-create write needed)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        color="#0b292b",
+    )
+    # The label must be expressed as two consecutive argv tokens so the
+    # CLI parser binds the value to ``-l``/``--label``.
+    joined = " ".join(command)
+    assert "--label color=#0b292b" in joined
+
+
+def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "color=" not in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 

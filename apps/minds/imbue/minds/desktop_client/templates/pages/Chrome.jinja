@@ -29,7 +29,6 @@
 {% endset %}
 {% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
 {% set _scripts %}
-<script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/chrome.js" defer></script>
 {% endset %}
 {# Body background tracks --titlebar-bg so the iframe's rounded top corners
