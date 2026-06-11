@@ -52,6 +52,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.host import get_agents_root_dir
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
@@ -146,7 +147,7 @@ def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
     projects_dirs: list[Path] = []
-    for parent in (local_host_dir / "agents", get_preserved_agents_root_dir(local_host_dir)):
+    for parent in (get_agents_root_dir(local_host_dir), get_preserved_agents_root_dir(local_host_dir)):
         if not parent.is_dir():
             continue
         for agent_dir in sorted(parent.iterdir()):
