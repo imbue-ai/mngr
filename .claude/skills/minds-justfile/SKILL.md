@@ -65,7 +65,9 @@ Pool hosts (OVH-backed, leased mode):
   label. Extra flags forward to `minds pool create` (e.g. `--no-recycle`,
   `--mngr-source`).
 - `just list-pool-hosts` -- list `pool_hosts` rows for the activated env.
-- `just cleanup-pool-hosts [env]` -- bulk-clean released hosts.
+- `just destroy-pool-host <pool-host-id>` -- cancel one host's OVH VPS + drop its
+  row (manual single-host teardown; steady-state release is automatic via the
+  connector's hourly cron, and `minds env destroy` tears down a whole tier).
 
 Desktop client / dev loop:
 - `just minds-start` / `just minds-stop` / `just minds-build`

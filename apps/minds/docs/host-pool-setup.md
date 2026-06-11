@@ -6,10 +6,9 @@ How to set up the infrastructure for the imbue-cloud-leased pool host flow.
 
 - Neon PostgreSQL database (two connection strings: pooled for runtime, direct for migrations)
 - OVH API credentials (AK / AS / CK) for the endpoint the pool uses
-  (default `ovh-us`). Pool hosts are provisioned via `mngr imbue_cloud
-  admin pool create` against the OVH backend. (The older Vultr-backed
-  path still works for one-off baking but every new pool flow uses
-  OVH; see the `--region` option on `admin pool create`.)
+  (default `ovh-us`). Pool hosts are provisioned (OVH-backed) via
+  `minds pool create` -- the env-aware wrapper around `mngr imbue_cloud
+  admin pool create`; see the `--region` option.
 - Modal account (for deploying the remote_service_connector)
 
 ## Step 1: Create the database schema
@@ -66,7 +65,7 @@ flow specifically:
 The **pooled** Neon connection string:
 
 ```bash
-vault kv put -mount=secrets kv/minds/production/neon \
+vault kv put -mount=secrets minds/production/neon \
     DATABASE_URL=postgresql://user:pass@host-pooler.neon.tech/db?sslmode=require
 ```
 
@@ -75,7 +74,7 @@ vault kv put -mount=secrets kv/minds/production/neon \
 The management private key:
 
 ```bash
-vault kv put -mount=secrets kv/minds/production/pool-ssh \
+vault kv put -mount=secrets minds/production/pool-ssh \
     POOL_SSH_PRIVATE_KEY=@.minds/production/pool_management_key/id_ed25519
 ```
 
