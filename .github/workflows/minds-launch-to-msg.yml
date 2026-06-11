@@ -1099,6 +1099,11 @@ jobs:
           APP_ZIP_URL: ${{ needs.build.outputs.app_zip_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
+          # Who/what initiated this run + which ref it ran on. For a
+          # workflow_dispatch this is the user; for schedule it's the
+          # github-actions[bot] (we hide that one for readability).
+          ACTOR:    ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [[ -z "$WEBHOOK" ]]; then
@@ -1197,12 +1202,22 @@ jobs:
           links_inner+=" | <https://github.com/imbue-ai/mngr/commit/${MNGR_SHA}|mngr commit>"
           links_inner+=" | <https://github.com/imbue-ai/forever-claude-template/commit/${FCT_SHA}|fct commit>"
           links_line="[${links_inner}]"
+          # Compose the "trigger=..." string. For the twice-daily cron
+          # show just `schedule on <ref>`; for a manual dispatch show
+          # who pressed the button and from which branch -- that's the
+          # signal you need to tell "running on main as a regular CI"
+          # apart from "weishi forced one to test branch X".
+          if [[ "$TRIGGER" == "schedule" ]]; then
+            trigger_str="schedule on ${REF_NAME}"
+          else
+            trigger_str="${TRIGGER} by @${ACTOR} on ${REF_NAME}"
+          fi
           # Assemble the final message. Line 1 is always present. Line 2
           # (SHAs) is always present. Line 3 (metrics) is omitted when we
           # have no values. Line 4 (links) is always present, though
           # `binary` falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
-            "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
+            "$emoji" "$verdict_word" "$duration" "$detail" "$trigger_str")
           line2="[_mngr_ \`${MNGR_SHORT}\` | _FCT_ \`${FCT_SHORT}\`]"
           if [[ -n "$metrics_line" ]]; then
             text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
