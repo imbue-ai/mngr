@@ -76,8 +76,7 @@ def _discover_provider_hosts_and_agents(
     try:
         provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
     except ProviderUnavailableError:
-        # Propagate unwrapped (not as a ProviderDiscoveryError) so the caller
-        # sees the clear "provider is not available" error.
+        # Re-raise as-is so the broad except below doesn't wrap it.
         raise
     except Exception as exc:
         raise ProviderDiscoveryError(provider.name, exc) from exc
@@ -122,8 +121,7 @@ def _run_discovery(
                 )
             )
 
-    # Re-raise any thread exception. Discovery does not swallow an unreachable
-    # provider: the error propagates and the caller decides what to do.
+    # Re-raise any thread exceptions
     for future in futures:
         future.result()
 

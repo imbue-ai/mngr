@@ -121,11 +121,7 @@ def _bucketize_mixed_identifiers(
 
 
 def _discover_all_hosts(mngr_ctx: MngrContext) -> list[DiscoveredHost]:
-    """Discover all hosts across every provider.
-
-    Lets ProviderUnavailableError propagate rather than snapshotting only the
-    reachable providers and silently omitting a down provider's hosts.
-    """
+    """Discover all hosts across every provider."""
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,

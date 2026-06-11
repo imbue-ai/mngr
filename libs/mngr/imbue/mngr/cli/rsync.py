@@ -69,8 +69,7 @@ def _resolve_endpoint(
         online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
         return online_host, _user_path_to_str(parsed.path, parsed.has_trailing_path_slash)
 
-    # Scope discovery to the target's provider/agent so an unrelated unavailable
-    # provider isn't queried (discovery propagates ProviderUnavailableError).
+    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
     provider_names: tuple[str, ...] | None = None
     if parsed.host is not None and parsed.host.provider is not None:
         provider_names = (str(parsed.host.provider),)

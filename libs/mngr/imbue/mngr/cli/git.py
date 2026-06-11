@@ -70,8 +70,7 @@ def _resolve_remote_endpoint(
             "for local-only operations"
         )
 
-    # Scope discovery to the target's provider/agent so an unrelated unavailable
-    # provider isn't queried (discovery propagates ProviderUnavailableError).
+    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
     provider_names: tuple[str, ...] | None = None
     if parsed.host is not None and parsed.host.provider is not None:
         provider_names = (str(parsed.host.provider),)

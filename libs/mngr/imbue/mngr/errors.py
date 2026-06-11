@@ -200,12 +200,7 @@ class ProviderError(MngrError):
 
 
 class ProviderUnavailableError(ProviderError):
-    """Provider backend is not reachable (e.g. Docker daemon not running).
-
-    Discovery propagates this rather than swallowing it, since the backend's
-    state is unknown and skipping it could hide real agents. ``mngr gc`` and
-    ``mngr list`` catch it per-provider and continue.
-    """
+    """Provider backend is not reachable (e.g. Docker daemon not running)."""
 
     def __init__(self, provider_name: ProviderInstanceName, reason: str) -> None:
         super().__init__(
