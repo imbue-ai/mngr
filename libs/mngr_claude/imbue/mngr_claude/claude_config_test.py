@@ -14,6 +14,7 @@ from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_co
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import check_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import check_source_directory_trusted
+from imbue.mngr_claude.claude_config import deep_merge_settings
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
@@ -21,6 +22,7 @@ from imbue.mngr_claude.claude_config import find_user_claude_config
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
+from imbue.mngr_claude.claude_config import partition_settings_args
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
 
@@ -942,3 +944,80 @@ def test_build_permission_auto_allow_hooks_config_has_permission_request_hook() 
     assert inner_hook["timeout"] == 5
     assert "allow" in inner_hook["command"]
     assert "PermissionRequest" in inner_hook["command"]
+
+
+def test_partition_settings_args_separates_space_form() -> None:
+    """A space-separated ``--settings VALUE`` is pulled out, leaving the rest intact."""
+    values, remaining = partition_settings_args(("--verbose", "--settings", '{"a": 1}', "--model", "opus"))
+    assert values == ('{"a": 1}',)
+    assert remaining == ("--verbose", "--model", "opus")
+
+
+def test_partition_settings_args_separates_inline_form() -> None:
+    """The ``--settings=VALUE`` form is also recognized."""
+    values, remaining = partition_settings_args(("--settings={}", "--verbose"))
+    assert values == ("{}",)
+    assert remaining == ("--verbose",)
+
+
+def test_partition_settings_args_collects_multiple() -> None:
+    """Multiple ``--settings`` flags are all collected in order."""
+    values, remaining = partition_settings_args(("--settings", "a", "--settings", "b"))
+    assert values == ("a", "b")
+    assert remaining == ()
+
+
+def test_partition_settings_args_drops_dangling_flag() -> None:
+    """A trailing ``--settings`` with no value is dropped rather than mis-parsed."""
+    values, remaining = partition_settings_args(("--verbose", "--settings"))
+    assert values == ()
+    assert remaining == ("--verbose",)
+
+
+def test_partition_settings_args_no_settings() -> None:
+    """Tokens without ``--settings`` pass through unchanged."""
+    values, remaining = partition_settings_args(("--verbose", "--model", "opus"))
+    assert values == ()
+    assert remaining == ("--verbose", "--model", "opus")
+
+
+def test_deep_merge_settings_concatenates_hook_lists() -> None:
+    """Hook event lists from both sides survive the merge so both sets fire."""
+    base = {"hooks": {"SessionStart": [{"hooks": [{"command": "mngr"}]}]}}
+    overlay = {"hooks": {"SessionStart": [{"hooks": [{"command": "user"}]}]}}
+    merged = deep_merge_settings(base, overlay)
+    commands = [inner["command"] for entry in merged["hooks"]["SessionStart"] for inner in entry["hooks"]]
+    assert commands == ["mngr", "user"]
+
+
+def test_deep_merge_settings_adds_new_keys_and_events() -> None:
+    """Non-overlapping keys (and new hook events) from the overlay are added."""
+    base = {"hooks": {"SessionStart": [{"hooks": [{"command": "mngr"}]}]}}
+    overlay = {"model": "opus", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": []}]}}
+    merged = deep_merge_settings(base, overlay)
+    assert merged["model"] == "opus"
+    assert "SessionStart" in merged["hooks"]
+    assert "PreToolUse" in merged["hooks"]
+
+
+def test_deep_merge_settings_overlay_scalar_wins() -> None:
+    """For a scalar present on both sides, the overlay value wins."""
+    merged = deep_merge_settings({"model": "sonnet"}, {"model": "opus"})
+    assert merged["model"] == "opus"
+
+
+def test_deep_merge_settings_is_idempotent_on_lists() -> None:
+    """Re-merging the same overlay does not duplicate list items."""
+    base = {"hooks": {"SessionStart": [{"hooks": [{"command": "mngr"}]}]}}
+    overlay = {"hooks": {"SessionStart": [{"hooks": [{"command": "mngr"}]}]}}
+    merged = deep_merge_settings(base, overlay)
+    assert len(merged["hooks"]["SessionStart"]) == 1
+
+
+def test_deep_merge_settings_does_not_mutate_inputs() -> None:
+    """The merge leaves both inputs untouched."""
+    base = {"hooks": {"SessionStart": [{"hooks": [{"command": "mngr"}]}]}}
+    overlay = {"hooks": {"SessionStart": [{"hooks": [{"command": "user"}]}]}}
+    deep_merge_settings(base, overlay)
+    assert base["hooks"]["SessionStart"] == [{"hooks": [{"command": "mngr"}]}]
+    assert overlay["hooks"]["SessionStart"] == [{"hooks": [{"command": "user"}]}]

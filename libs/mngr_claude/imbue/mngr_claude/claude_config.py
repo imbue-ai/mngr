@@ -6,6 +6,7 @@ import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -842,3 +843,59 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
                 any_added = True
 
     return merged if any_added else None
+
+
+_SETTINGS_FLAG: Final[str] = "--settings"
+
+
+@pure
+def partition_settings_args(tokens: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split a token sequence into its ``--settings`` values and everything else.
+
+    Returns ``(settings_values, remaining_tokens)``. Recognizes both the
+    space-separated ``--settings VALUE`` form and the ``--settings=VALUE`` form.
+    A trailing ``--settings`` with no following value is dropped. The values are
+    returned exactly as they appear in ``tokens`` (no unquoting).
+    """
+    settings_values: list[str] = []
+    remaining: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == _SETTINGS_FLAG:
+            if index + 1 < len(tokens):
+                settings_values.append(tokens[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        inline_prefix = f"{_SETTINGS_FLAG}="
+        if token.startswith(inline_prefix):
+            settings_values.append(token[len(inline_prefix) :])
+            index += 1
+            continue
+        remaining.append(token)
+        index += 1
+    return tuple(settings_values), tuple(remaining)
+
+
+@pure
+def deep_merge_settings(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``overlay`` into ``base`` for Claude settings dicts.
+
+    Nested dicts merge key-by-key, lists concatenate (skipping items already
+    present, so the merge is idempotent), and any other value type takes the
+    overlay's value. Used to fold a user-supplied ``--settings`` payload into
+    mngr's managed settings so both sets of hooks survive instead of one
+    replacing the other. Does not mutate the inputs.
+    """
+    merged = copy.deepcopy(base)
+    for key, overlay_value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
+            merged[key] = deep_merge_settings(base_value, overlay_value)
+        elif isinstance(base_value, list) and isinstance(overlay_value, list):
+            merged[key] = base_value + [item for item in overlay_value if item not in base_value]
+        else:
+            merged[key] = copy.deepcopy(overlay_value)
+    return merged

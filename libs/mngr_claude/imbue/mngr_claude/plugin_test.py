@@ -460,6 +460,41 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     assert parsed.create_args == ["--verbose", "--model", "opus"]
 
 
+def test_claude_agent_assemble_command_strips_user_settings(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A user ``--settings`` (in cli_args or agent_args) is dropped from the launch args.
+
+    claude honors only the last ``--settings``, so a user value left in the args
+    would clobber mngr's managed file. assemble_command strips it (it is merged
+    into the managed file instead); only mngr's own ``--settings`` survives, and
+    the non-settings args are preserved in order.
+    """
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            cli_args='--settings \'{"model": "opus"}\' --verbose', check_installation=False
+        ),
+    )
+
+    command = agent.assemble_command(
+        host=host, agent_args=("--settings", '{"hooks": {}}', "--model", "opus"), command_override=None
+    )
+
+    parsed = _ParsedAssembleCommand(str(command))
+    # Only mngr's managed-settings arg remains; the user values are gone.
+    expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
+    assert parsed.resume_settings == expected_settings
+    assert parsed.create_settings == expected_settings
+    # The non-settings args survive in order; no stray --settings or JSON payloads.
+    assert parsed.resume_args == ["--verbose", "--model", "opus"]
+    assert parsed.create_args == ["--verbose", "--model", "opus"]
+    assert "--settings" not in parsed.resume_args
+    assert "--settings" not in parsed.create_args
+
+
 def test_claude_agent_assemble_command_with_command_override(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -1471,6 +1506,115 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     # No hook with matcher="*" should exist
     auto_allow_hooks = [h for h in permission_hooks if h.get("matcher") == "*"]
     assert len(auto_allow_hooks) == 0
+
+
+def _session_start_commands(settings: dict) -> list[str]:
+    """Flatten every SessionStart hook command in a settings dict."""
+    return [
+        inner["command"] for entry in settings["hooks"].get("SessionStart", []) for inner in entry.get("hooks", [])
+    ]
+
+
+def test_configure_agent_hooks_merges_user_settings_from_cli_args(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A user ``--settings`` in cli_args is folded into the managed file alongside mngr's hooks.
+
+    This mirrors a real config that injects its own SessionStart hook via
+    ``cli_args = "--settings '{...}'"``. Both the user's hook and mngr's
+    readiness hooks must end up in the managed file, since claude would
+    otherwise honor only one ``--settings``.
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    user_hook_command = "echo user-session-start"
+    user_settings_json = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}})
+    config = ClaudeAgentConfig(cli_args=f"--settings '{user_settings_json}'", check_installation=False)
+    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
+
+    agent._configure_agent_hooks(host)
+
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
+    commands = _session_start_commands(settings)
+    # The user's hook is present...
+    assert user_hook_command in commands
+    # ...and so are mngr's own readiness SessionStart hooks (more than just the user's one).
+    assert len(commands) > 1
+
+
+def test_configure_agent_hooks_merges_user_settings_from_agent_args(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A user ``--settings`` passed via agent_args (raw argv) is also merged in."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    user_hook_command = "echo agent-arg-session-start"
+    user_settings_json = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}})
+    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+
+    agent._configure_agent_hooks(host, agent_args=("--settings", user_settings_json))
+
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
+    assert user_hook_command in _session_start_commands(settings)
+
+
+def test_configure_agent_hooks_merges_user_settings_from_file_path(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A user ``--settings`` that names a file is read and merged (resolved against work_dir)."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    user_hook_command = "echo file-session-start"
+    settings_file = work_dir / "user-settings.json"
+    settings_file.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}}))
+    # Reference it with a relative path, which must resolve against work_dir.
+    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+
+    agent._configure_agent_hooks(host, agent_args=("--settings", "user-settings.json"))
+
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
+    assert user_hook_command in _session_start_commands(settings)
+
+
+def test_configure_agent_hooks_preserves_user_non_hook_settings(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """Non-hook keys in a user ``--settings`` (e.g. model) survive the merge."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    user_settings_json = json.dumps({"model": "opus"})
+    config = ClaudeAgentConfig(cli_args=f"--settings '{user_settings_json}'", check_installation=False)
+    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
+
+    agent._configure_agent_hooks(host)
+
+    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
+    assert settings["model"] == "opus"
+    # mngr's hooks are still there too.
+    assert "SessionStart" in settings["hooks"]
+
+
+def test_configure_agent_hooks_rejects_invalid_user_settings_json(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A malformed inline ``--settings`` JSON raises a clear UserInputError."""
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+
+    config = ClaudeAgentConfig(cli_args="--settings '{not valid json}'", check_installation=False)
+    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
+
+    with pytest.raises(UserInputError):
+        agent._configure_agent_hooks(host)
 
 
 def test_provision_configures_readiness_hooks(

@@ -84,6 +84,7 @@ from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_co
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
+from imbue.mngr_claude.claude_config import deep_merge_settings
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
@@ -96,6 +97,7 @@ from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import merge_hooks_config
+from imbue.mngr_claude.claude_config import partition_settings_args
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
@@ -356,6 +358,24 @@ an mngr agent rather than in the user's persistent ~/.claude/ directory.
 # project's settings.local.json. See ``get_managed_settings_path``.
 _MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
 MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
+
+
+def _unquote_cli_settings_value(value: str) -> str:
+    """Recover the literal payload of a shell-quoted ``cli_args`` ``--settings`` value.
+
+    String-form ``cli_args`` are tokenized by ``split_cli_args_string`` (non-POSIX
+    shlex, which keeps quote characters), so a value reaches us still wrapped in
+    the user's shell quoting. ``shlex.split`` unwraps it exactly as the shell
+    would before claude sees it. A token that does not resolve to a single shell
+    word is a malformed config and raises.
+    """
+    words = shlex.split(value)
+    if len(words) != 1:
+        raise UserInputError(
+            f"Could not parse the --settings value {value!r} from cli_args: it must be a single shell-quoted argument."
+        )
+    return words[0]
+
 
 _PLUGINS_DIR_MARKER: Final[str] = "/plugins/"
 """Generic marker for extracting relative plugin paths.
@@ -1606,7 +1626,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Build the additional arguments (cli_args from config + agent_args from CLI).
         # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
         # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
-        all_extra_args = self.agent_config.cli_args + quote_agent_args(agent_args)
+        # A user ``--settings`` is dropped here and merged into the managed file instead
+        # (see ``_configure_agent_hooks``): claude honors only the last ``--settings`` on
+        # the command line, so leaving it would replace mngr's managed file wholesale.
+        _, cli_args = partition_settings_args(self.agent_config.cli_args)
+        _, raw_agent_args = partition_settings_args(agent_args)
+        all_extra_args = cli_args + quote_agent_args(raw_agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1746,7 +1771,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         return transfers
 
-    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
+    def _configure_agent_hooks(self, host: OnlineHostInterface, agent_args: tuple[str, ...] = ()) -> None:
         """Write mngr's Claude hooks to the agent's managed settings file.
 
         Loaded at launch via ``claude --settings`` (see ``assemble_command``)
@@ -1759,6 +1784,13 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         files in its state dir). Adds the macOS keychain-sync hook when
         sync_credentials_on_login is set, and the permission auto-allow hook
         when auto_allow_permissions is set.
+
+        Any user-supplied ``--settings`` (from config ``cli_args`` or CLI
+        passthrough ``agent_args``) is merged in too, so the user's hooks and
+        mngr's both fire. claude honors only the last ``--settings`` on the
+        command line, so folding the user's payload into this single managed
+        file is what keeps mngr's hooks from being clobbered (or vice versa);
+        ``assemble_command`` drops the user's own ``--settings`` flag in turn.
         """
         # The always-on readiness hooks, plus the optional credential-sync
         # (macOS) and permission auto-allow hooks.
@@ -1772,12 +1804,48 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         for hook_config in hook_configs:
             settings = merge_hooks_config(settings, hook_config) or settings
 
+        for user_settings_value in self._collect_user_settings_values(agent_args):
+            settings = deep_merge_settings(settings, self._resolve_user_settings(host, user_settings_value))
+
         settings_path = get_managed_settings_path(self._get_agent_dir())
         # The plugin/claude/ parent may not exist yet (e.g. in use_env_config_dir
         # mode, where the per-agent config dir is not provisioned), so create it.
         host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
         with log_span("Configuring agent hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
+
+    def _collect_user_settings_values(self, agent_args: tuple[str, ...]) -> tuple[str, ...]:
+        """Return the literal value of every user ``--settings`` flag.
+
+        ``cli_args`` tokens are shell-quoted (``split_cli_args_string`` keeps the
+        quote characters), so each value is run back through ``shlex.split`` to
+        recover the payload the shell would have handed to claude. ``agent_args``
+        are raw argv and are used as-is.
+        """
+        cli_values, _ = partition_settings_args(self.agent_config.cli_args)
+        agent_values, _ = partition_settings_args(agent_args)
+        return tuple(_unquote_cli_settings_value(value) for value in cli_values) + agent_values
+
+    def _resolve_user_settings(self, host: OnlineHostInterface, value: str) -> dict[str, Any]:
+        """Resolve a user ``--settings`` value -- inline JSON or a file path -- to a dict."""
+        stripped = value.strip()
+        if stripped.startswith("{"):
+            raw = stripped
+        else:
+            settings_file = Path(value)
+            if not settings_file.is_absolute():
+                settings_file = self.work_dir / settings_file
+            try:
+                raw = host.read_text_file(settings_file)
+            except OSError as error:
+                raise UserInputError(f"Could not read --settings file '{settings_file}': {error}") from error
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise UserInputError(f"Invalid JSON in --settings value '{value}': {error}") from error
+        if not isinstance(parsed, dict):
+            raise UserInputError(f"--settings value '{value}' must be a JSON object, got {type(parsed).__name__}.")
+        return parsed
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
         """Ensure all known Claude startup dialogs are dismissed in the global config.
@@ -2089,8 +2157,9 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if not config.use_env_config_dir:
                 self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
-            # Configure readiness hooks (for both local and remote hosts)
-            self._configure_agent_hooks(host)
+            # Configure readiness hooks (for both local and remote hosts), folding in
+            # any user-supplied --settings from cli_args / agent_args.
+            self._configure_agent_hooks(host, options.agent_args)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)
