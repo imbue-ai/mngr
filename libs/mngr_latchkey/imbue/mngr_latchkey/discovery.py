@@ -148,6 +148,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # Guarded by ``_remote_hosts_lock``, held only for the brief check-and-set
     # (never across the provisioning I/O).
     _provisioning_hosts: set[str] = PrivateAttr(default_factory=set)
+    # host_ids whose VPS-resident gateway has been provisioned successfully this
+    # supervisor lifetime. Provisioning is expensive (multiple SSH round-trips)
+    # and the discovery stream re-emits the full agent set on every cycle, so we
+    # skip re-provisioning an already-provisioned host rather than re-running it
+    # every cycle. Ongoing credential/permission sync is handled separately by
+    # the remote-state watcher; a supervisor restart clears this and re-provisions.
+    # A failed pass is *not* recorded here, so it retries on the next cycle.
+    _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def __call__(self, agent_id: AgentId, host_id: HostId, ssh_info: RemoteSSHInfo | None, provider_name: str) -> None:
@@ -275,6 +283,17 @@ class LatchkeyDiscoveryHandler(MutableModel):
             return False
         host_id_str = str(host_id)
         with self._remote_hosts_lock:
+            if host_id_str in self._provisioned_hosts:
+                # Already provisioned this host this supervisor lifetime; skip the
+                # expensive idempotent re-run that every discovery cycle would
+                # otherwise trigger. A supervisor restart re-provisions.
+                logger.debug(
+                    "VPS-resident gateway already provisioned for host {} this session; "
+                    "skipping re-provision for agent {}",
+                    host_id,
+                    agent_id,
+                )
+                return False
             if host_id_str in self._provisioning_hosts:
                 # A provisioning pass for this host is already in flight. The
                 # work is host-scoped (one container, one gateway, one tunnel),
@@ -381,9 +400,15 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 sync_permissions(outer, self.latchkey.latchkey_directory, host_id)
                 sync_credentials(outer, self.latchkey, host_id)
             logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
+            # Record success so later discovery cycles skip the expensive re-run.
+            # Only reached when provisioning completed without raising (a failure
+            # propagates past here, leaving the host eligible for retry).
+            with self._remote_hosts_lock:
+                self._provisioned_hosts.add(str(host_id))
         finally:
-            # Release the per-host in-flight guard so a later discovery fire can
-            # re-provision this host, and clear the per-agent pending flag.
+            # Release the per-host in-flight guard, and clear the per-agent
+            # pending flag. (A failed pass leaves the host out of
+            # ``_provisioned_hosts``, so a later discovery fire retries it.)
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(str(host_id))
             with self._pending_lock:

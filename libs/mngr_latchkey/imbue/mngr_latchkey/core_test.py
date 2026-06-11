@@ -942,6 +942,8 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
     ) -> None:
         try:
             self._provisioned.append((agent_id, host_id))
+            with self._remote_hosts_lock:
+                self._provisioned_hosts.add(str(host_id))
         finally:
             with self._remote_hosts_lock:
                 self._provisioning_hosts.discard(str(host_id))
@@ -1056,6 +1058,43 @@ def test_provisioning_coalesces_when_host_pass_already_in_flight(
         assert handler._provisioned == []
         with handler._remote_hosts_lock:
             assert handler._provisioning_hosts == {str(host_id)}
+
+
+def test_provisioning_skips_host_already_provisioned_this_session(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A host already provisioned this supervisor lifetime is not re-provisioned.
+
+    The discovery stream re-emits the full agent set every cycle; re-running the
+    expensive idempotent provisioning each time is wasteful, so an
+    already-provisioned host is skipped (a supervisor restart re-provisions).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Mark the host as already provisioned this session.
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+            AgentId(), host_id, ssh_info, "imbue_cloud"
+        )
+
+        # Skipped: no new pass dispatched and nothing marked in flight.
+        assert dispatched is False
+        assert handler._provisioned == []
+        with handler._remote_hosts_lock:
+            assert handler._provisioning_hosts == set()
 
 
 class _SyncRecordingHandler(LatchkeyDiscoveryHandler):
