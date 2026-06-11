@@ -4,6 +4,9 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import docker
+import docker.errors
+import docker.models.containers
 import pytest
 
 from imbue.concurrency_group.errors import ProcessError
@@ -703,6 +706,68 @@ def test_discover_hosts_and_agents_raises_when_daemon_offline(temp_mngr_ctx: Mng
     provider = make_offline_docker_provider(temp_mngr_ctx)
     with pytest.raises(ProviderUnavailableError, match="not available"):
         provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+
+class _ContainersRaising:
+    """Stand-in for ``client.containers`` whose ``list`` always raises."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def list(self, **kwargs: object) -> list[docker.models.containers.Container]:
+        raise self._error
+
+
+class _FakeDockerClient:
+    """Already-constructed Docker client whose container listing fails.
+
+    Lets tests exercise the post-construction failure paths (daemon dies after
+    the client was built, or the daemon responds with an API error) without a
+    real daemon. The offline-provider helper only covers construction-time
+    failure, which surfaces differently (a DockerException, not a raw transport
+    error).
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.containers = _ContainersRaising(error)
+
+
+@pytest.mark.docker_sdk
+def test_discover_hosts_raises_provider_unavailable_when_daemon_dies_after_connect(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A connection drop on an already-built client is treated as unavailable.
+
+    When the daemon goes away after the client was constructed (e.g. a daemon
+    restart mid-operation), ``containers.list()`` raises a raw
+    ``requests.exceptions.ConnectionError`` -- not a ``DockerException``. This
+    must still surface as ProviderUnavailableError so GC skips the provider
+    rather than crashing or deleting its volumes.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    # A version-pinned client skips the daemon ping at construction, so it builds
+    # successfully even though the socket is dead -- mirroring a client that was
+    # built while the daemon was up and is used after it went away.
+    provider.__dict__["_docker_client"] = docker.DockerClient(
+        base_url="unix:///nonexistent/docker.sock", version="1.40"
+    )
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+
+
+def test_discover_hosts_propagates_api_error_without_marking_unavailable(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A responsive daemon that returns an API error is not mistaken for unavailable.
+
+    ``docker.errors.APIError`` means the daemon was reached and answered with an
+    error. Mislabeling it ProviderUnavailableError would make GC silently skip a
+    healthy provider; the error must propagate so the failure is surfaced.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
+    with pytest.raises(docker.errors.APIError):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
 # =========================================================================

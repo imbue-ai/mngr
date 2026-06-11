@@ -19,6 +19,7 @@ import docker.context
 import docker.errors
 import docker.models.containers
 import docker.models.images
+import requests.exceptions
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -962,7 +963,10 @@ kill -TERM 1
                 all=True,
                 filters={"label": [f"{LABEL_PROVIDER}={self.name}"]},
             )
-        except docker.errors.DockerException as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # Only a transport failure means the daemon is unreachable. A
+            # docker.errors.APIError (the daemon answered with an error) is a
+            # real fault and must propagate, not be mislabeled as unavailable.
             raise ProviderUnavailableError(self.name, f"Cannot connect to Docker daemon: {e}") from e
 
         prefix = self.mngr_ctx.config.prefix
@@ -1572,12 +1576,13 @@ kill -TERM 1
 
         # Never swallow a failure into an empty list: GC treats an empty host
         # list as "every volume is orphaned" and would delete every live host's
-        # data. Raise ProviderUnavailableError so an empty list always means
-        # "genuinely zero hosts".
+        # data. Raise ProviderUnavailableError on a transport failure so an empty
+        # list always means "genuinely zero hosts". A docker.errors.APIError (the
+        # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
-        except docker.errors.DockerException as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
 
         # Map running containers by host_id, and harvest host names from labels.

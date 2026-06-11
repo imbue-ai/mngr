@@ -12,6 +12,14 @@ restarted. The Docker provider's `discover_hosts` now raises
 zero hosts". GC skips an unavailable provider at its own boundary (it must not
 delete volumes it cannot verify).
 
+"Unreachable" is judged by the transport, not by the exception base class: a
+dropped connection or timeout (including the daemon disappearing mid-operation,
+which surfaces as a raw `requests` connection error rather than a
+`DockerException`) maps to `ProviderUnavailableError`, while a
+`docker.errors.APIError` -- meaning the daemon was reached and answered with an
+error -- propagates as a real fault. This keeps a healthy-but-erroring daemon
+from being silently treated as offline (and its provider wrongly skipped by GC).
+
 Discovery no longer hides an unreachable provider. Previously, multi-provider
 discovery silently skipped a provider whose backend was down. That meant a
 command could quietly do a partial job -- e.g. `mngr message my-agent`, intended
