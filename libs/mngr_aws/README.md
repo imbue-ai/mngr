@@ -135,7 +135,6 @@ For `mngr create --provider aws` (per-host path):
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
 ```
 
@@ -161,7 +160,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
-- **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
+- **No snapshot workflow**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider has no host snapshot workflow today. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are intentionally unwired -- they raise `VpsDockerError` with an actionable "EBS snapshot support is not implemented in mngr_aws" message rather than running real EBS API calls that nothing else consumes. Restore from a fresh `mngr create` instead.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
 
 ## Release tests and cost
