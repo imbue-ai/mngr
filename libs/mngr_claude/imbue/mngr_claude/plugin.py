@@ -39,6 +39,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
+from imbue.mngr.api.preservation import get_preserved_agents_root_dir
 from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -145,7 +146,7 @@ def _mngr_session_projects_dirs(mngr_ctx: MngrContext) -> list[Path]:
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
     projects_dirs: list[Path] = []
-    for parent in (local_host_dir / "agents", local_host_dir / "preserved"):
+    for parent in (local_host_dir / "agents", get_preserved_agents_root_dir(local_host_dir)):
         if not parent.is_dir():
             continue
         for agent_dir in sorted(parent.iterdir()):
