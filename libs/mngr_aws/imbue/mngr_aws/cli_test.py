@@ -234,6 +234,7 @@ def test_prepare_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["prepare", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
     assert "--allowed-ssh-cidr" in result.output
