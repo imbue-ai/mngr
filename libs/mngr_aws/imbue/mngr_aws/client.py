@@ -323,6 +323,11 @@ class AwsVpsClient(VpsClientInterface):
                 if code != "InvalidPermission.Duplicate":
                     http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
                     raise VpsApiError(http_status, f"{code}: {e}") from e
+                logger.debug(
+                    "Skipping duplicate ingress rule on SG {} (tcp/{}): already authorized",
+                    sg_id,
+                    permission["FromPort"],
+                )
 
     # =========================================================================
     # Instance Operations
