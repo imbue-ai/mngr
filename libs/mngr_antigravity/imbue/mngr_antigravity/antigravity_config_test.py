@@ -47,7 +47,10 @@ def test_serialize_round_trips_to_two_space_indented_json() -> None:
 
     assert json.loads(serialized) == settings
     # Two-space indent, no trailing newline -- mirrors what agy itself writes.
-    assert "  " in serialized
+    # A top-level key must be indented by exactly two spaces (not four, which a
+    # bare ``"  " in serialized`` check could not distinguish).
+    color_scheme_line = next(line for line in serialized.splitlines() if '"colorScheme"' in line)
+    assert color_scheme_line.startswith("  ") and not color_scheme_line.startswith("   ")
     assert not serialized.endswith("\n")
 
 
@@ -283,4 +286,7 @@ def test_serialize_antigravity_hooks_round_trips() -> None:
     config = build_antigravity_hooks_config()
     serialized = serialize_antigravity_hooks(config)
     assert json.loads(serialized) == config
-    assert "  " in serialized
+    # Two-space indent: the top-level key must start with exactly two spaces,
+    # which a bare ``"  " in serialized`` check could not distinguish from four.
+    mngr_key_line = next(line for line in serialized.splitlines() if '"mngr"' in line)
+    assert mngr_key_line.startswith("  ") and not mngr_key_line.startswith("   ")
