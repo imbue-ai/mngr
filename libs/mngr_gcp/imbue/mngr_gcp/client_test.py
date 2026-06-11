@@ -7,9 +7,6 @@ Each fake records the requests it received and returns canned responses, so the
 tests exercise request-building and response-handling without real API calls.
 """
 
-from datetime import datetime
-from datetime import timezone
-
 import pytest
 from google.api_core import exceptions as google_api_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -20,13 +17,11 @@ from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
-from imbue.mngr_gcp.testing import FakeSnapshotsClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 def _present_firewalls() -> FakeFirewallsClient:
@@ -39,7 +34,6 @@ def _present_firewalls() -> FakeFirewallsClient:
 def _make_client(
     instances: FakeInstancesClient | None = None,
     firewalls: FakeFirewallsClient | None = None,
-    snapshots: FakeSnapshotsClient | None = None,
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_minutes: int | None = None,
@@ -56,7 +50,6 @@ def _make_client(
         auto_shutdown_minutes=auto_shutdown_minutes,
         stubbed_instances_client=instances or FakeInstancesClient(),
         stubbed_firewalls_client=firewalls if firewalls is not None else _present_firewalls(),
-        stubbed_snapshots_client=snapshots or FakeSnapshotsClient(),
     )
 
 
@@ -485,55 +478,9 @@ def test_list_mngr_managed_instances_translates_api_error() -> None:
 # =============================================================================
 
 
-def test_ssh_key_lifecycle_in_memory() -> None:
+def test_delete_ssh_key_is_tolerant_of_absent_key() -> None:
     client = _make_client()
-    assert client.upload_ssh_key("k1", "pub1") == "k1"
-    assert client.upload_ssh_key("k2", "pub2") == "k2"
-    keys = client.list_ssh_keys()
-    assert {k.id for k in keys} == {"k1", "k2"}
+    client.upload_ssh_key("k1", "pub1")
     client.delete_ssh_key("k1")
-    assert {k.id for k in client.list_ssh_keys()} == {"k2"}
     # Deleting an absent key is a tolerant no-op (fresh-process delete).
     client.delete_ssh_key("nonexistent")
-
-
-# =============================================================================
-# Snapshots
-# =============================================================================
-
-
-def test_create_snapshot() -> None:
-    instances = FakeInstancesClient()
-    instances.get_result = compute_v1.Instance(
-        name="i",
-        disks=[compute_v1.AttachedDisk(boot=True, source="projects/p/zones/us-west1-a/disks/i")],
-    )
-    snapshots = FakeSnapshotsClient()
-    client = _make_client(instances, snapshots=snapshots)
-    snapshot_id = client.create_snapshot(VpsInstanceId("i"), "my snapshot")
-    assert len(snapshots.inserted) == 1
-    assert snapshots.inserted[0].source_disk == "projects/p/zones/us-west1-a/disks/i"
-    assert str(snapshot_id) == snapshots.inserted[0].name
-
-
-def test_delete_snapshot() -> None:
-    snapshots = FakeSnapshotsClient()
-    client = _make_client(snapshots=snapshots)
-    client.delete_snapshot(VpsSnapshotId("mngr-snap-1"))
-    assert snapshots.deleted == ["mngr-snap-1"]
-
-
-def test_list_snapshots() -> None:
-    snapshots = FakeSnapshotsClient()
-    snapshots.list_result = [
-        compute_v1.Snapshot(
-            name="mngr-snap-1",
-            description="test snapshot",
-            creation_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
-        )
-    ]
-    client = _make_client(snapshots=snapshots)
-    result = client.list_snapshots()
-    assert len(result) == 1
-    assert result[0].id == VpsSnapshotId("mngr-snap-1")
-    assert result[0].description == "test snapshot"

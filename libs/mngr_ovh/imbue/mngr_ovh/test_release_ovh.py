@@ -182,7 +182,3 @@ class TestOvhVpsClient:
     def test_list_instances_does_not_error(self) -> None:
         client = _build_client()
         assert isinstance(client.list_instances(), list)
-
-    def test_list_ssh_keys_starts_empty(self) -> None:
-        client = _build_client()
-        assert client.list_ssh_keys() == []

@@ -21,14 +21,10 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Tag that ``create_instance`` adds to every EC2 instance launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses
@@ -576,33 +572,6 @@ class AwsVpsClient(VpsClientInterface):
         return instances
 
     # =========================================================================
-    # Snapshot Operations (EBS root volume of an instance)
-    # =========================================================================
-
-    # EBS snapshot wiring (create / delete / list) was written speculatively
-    # to satisfy the shared ``VpsClientInterface`` abstractmethods, but the
-    # AWS provider has no host snapshot workflow today -- nothing in
-    # ``mngr_aws`` or the broader ``mngr`` CLI calls these methods. Stubbed
-    # out with the same "unavailable" shape as
-    # ``ExternallyManagedVpsClient`` so any future caller fails loudly
-    # instead of running real EBS API calls that nothing else expects.
-    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
-        return VpsDockerError(
-            f"VPS API operation '{operation}' is unavailable: EBS snapshot support "
-            "is not implemented in mngr_aws. The AWS provider currently has no host "
-            "snapshot workflow; restore from a fresh `mngr create` instead."
-        )
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise self._snapshots_unavailable("create_snapshot")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise self._snapshots_unavailable("delete_snapshot")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise self._snapshots_unavailable("list_snapshots")
-
-    # =========================================================================
     # SSH Key Operations (EC2 KeyPairs)
     # =========================================================================
 
@@ -617,8 +586,3 @@ class AwsVpsClient(VpsClientInterface):
         with self._translate_aws_errors():
             self._ec2().delete_key_pair(KeyName=key_id)
         logger.debug("Deleted EC2 KeyPair {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        with self._translate_aws_errors():
-            result = self._ec2().describe_key_pairs()
-        return [VpsSshKeyInfo(id=k["KeyName"], name=k["KeyName"]) for k in result.get("KeyPairs", [])]

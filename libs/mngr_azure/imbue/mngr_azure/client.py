@@ -32,10 +32,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Tag key/value that ``create_instance`` adds to every VM launched while
 # ``PYTEST_CURRENT_TEST`` is set. The conftest session-end scanner uses this
@@ -788,56 +785,6 @@ class AzureVpsClient(VpsClientInterface):
         return self.resource_group
 
     # =========================================================================
-    # Snapshot Operations (OS managed disk of a VM)
-    # =========================================================================
-
-    def _os_disk_id(self, instance_id: VpsInstanceId) -> str:
-        with self._translate_azure_errors():
-            vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
-        managed_disk = vm.storage_profile.os_disk.managed_disk
-        if managed_disk is None or not managed_disk.id:
-            raise VpsApiError(500, f"VM {instance_id} has no OS managed disk")
-        return managed_disk.id
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        os_disk_id = self._os_disk_id(instance_id)
-        snapshot_name = f"mngr-snap-{uuid4().hex}"
-        # Azure snapshots have no description field; stash it in a tag so
-        # list_snapshots can round-trip it.
-        snapshot_tags = {**self._base_tags(), "description": description}
-        snapshot = compute_models.Snapshot(
-            location=self.region,
-            tags=snapshot_tags,
-            properties=compute_models.SnapshotProperties(
-                creation_data=compute_models.CreationData(create_option="Copy", source_resource_id=os_disk_id)
-            ),
-        )
-        with self._translate_azure_errors():
-            self._compute().snapshots.begin_create_or_update(self.resource_group, snapshot_name, snapshot).result()
-        logger.info("Created Azure snapshot {} from OS disk of {}", snapshot_name, instance_id)
-        return VpsSnapshotId(snapshot_name)
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        with self._translate_azure_errors():
-            self._compute().snapshots.begin_delete(self.resource_group, str(snapshot_id)).result()
-        logger.info("Deleted Azure snapshot {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        snapshots: list[VpsSnapshotInfo] = []
-        with self._translate_azure_errors():
-            page = self._compute().snapshots.list_by_resource_group(self.resource_group)
-            for snapshot in page:
-                tags = dict(snapshot.tags or {})
-                snapshots.append(
-                    VpsSnapshotInfo(
-                        id=VpsSnapshotId(snapshot.name),
-                        description=tags.get("description", ""),
-                        created_at=snapshot.time_created,
-                    )
-                )
-        return snapshots
-
-    # =========================================================================
     # SSH Key Operations (no native Azure per-key resource; in-memory map)
     # =========================================================================
 
@@ -857,7 +804,3 @@ class AzureVpsClient(VpsClientInterface):
         """Drop the in-memory key entry. Tolerant of an absent key (fresh-process delete)."""
         self._ssh_public_keys_by_id.pop(key_id, None)
         logger.debug("Dropped in-memory SSH public key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        """List the in-memory keys. Azure keys live only in per-VM config, not as a resource."""
-        return [VpsSshKeyInfo(id=key_id, name=key_id) for key_id in self._ssh_public_keys_by_id]

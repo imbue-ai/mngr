@@ -19,11 +19,9 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
-from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 @pytest.fixture()
@@ -474,42 +472,6 @@ def test_delete_ssh_key(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
         expected_params={"KeyName": "mngr-test-h1"},
     )
     client.delete_ssh_key("mngr-test-h1")
-
-
-def test_list_ssh_keys(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_key_pairs",
-        {"KeyPairs": [{"KeyName": "k1", "KeyFingerprint": "aa"}, {"KeyName": "k2", "KeyFingerprint": "bb"}]},
-    )
-    keys = client.list_ssh_keys()
-    assert len(keys) == 2
-    assert keys[0].id == "k1"
-    assert keys[0].name == "k1"
-
-
-# =============================================================================
-# Snapshots
-# =============================================================================
-
-
-def test_create_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    """EBS snapshot support is intentionally unwired; any caller fails loudly."""
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.create_snapshot(VpsInstanceId("i-irrelevant"), "irrelevant")
-
-
-def test_delete_snapshot_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.delete_snapshot(VpsSnapshotId("snap-irrelevant"))
-
-
-def test_list_snapshots_raises_unavailable(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
-    client, _ = stubbed_client
-    with pytest.raises(VpsDockerError, match="EBS snapshot support is not implemented"):
-        client.list_snapshots()
 
 
 # =============================================================================

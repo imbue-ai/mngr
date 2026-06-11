@@ -142,32 +142,11 @@ class FakeVirtualMachinesOperations:
         return self.list_result
 
 
-class FakeSnapshotsOperations:
-    """Fake ComputeManagementClient.snapshots: records create/delete, returns canned list."""
-
-    def __init__(self) -> None:
-        self.created: list[tuple[str, Any]] = []
-        self.deleted: list[str] = []
-        self.list_result: list[Any] = []
-
-    def begin_create_or_update(self, resource_group: str, snapshot_name: str, parameters: Any) -> FakePoller:
-        self.created.append((snapshot_name, parameters))
-        return FakePoller()
-
-    def begin_delete(self, resource_group: str, snapshot_name: str) -> FakePoller:
-        self.deleted.append(snapshot_name)
-        return FakePoller()
-
-    def list_by_resource_group(self, resource_group: str) -> list[Any]:
-        return self.list_result
-
-
 class FakeComputeClient:
-    """Fake ComputeManagementClient bundling the virtual_machines + snapshots operations."""
+    """Fake ComputeManagementClient bundling the virtual_machines operations."""
 
     def __init__(self) -> None:
         self.virtual_machines = FakeVirtualMachinesOperations()
-        self.snapshots = FakeSnapshotsOperations()
 
 
 class FakePublicIPAddressesOperations:

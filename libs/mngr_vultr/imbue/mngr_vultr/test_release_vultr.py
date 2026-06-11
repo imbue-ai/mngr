@@ -215,13 +215,3 @@ class TestVultrApiClient:
         """Verify the API client can list instances without error."""
         instances = vultr_release_client.list_instances()
         assert isinstance(instances, list)
-
-    def test_list_ssh_keys(self, vultr_release_client: VultrVpsClient) -> None:
-        """Verify the API client can list SSH keys."""
-        keys = vultr_release_client.list_ssh_keys()
-        assert isinstance(keys, list)
-
-    def test_list_snapshots(self, vultr_release_client: VultrVpsClient) -> None:
-        """Verify the API client can list snapshots."""
-        snapshots = vultr_release_client.list_snapshots()
-        assert isinstance(snapshots, list)

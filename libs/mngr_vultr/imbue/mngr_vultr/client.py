@@ -1,8 +1,6 @@
 import base64
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import Final
 
@@ -15,10 +13,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 _VULTR_API_BASE: Final[str] = "https://api.vultr.com/v2"
 
@@ -174,44 +169,6 @@ class VultrVpsClient(VpsClientInterface):
         return result["instances"]
 
     # =========================================================================
-    # Snapshot Operations
-    # =========================================================================
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        result = self._post("/snapshots", {"instance_id": str(instance_id), "description": description})
-        if result is None or "snapshot" not in result:
-            raise VpsApiError(500, "Failed to create snapshot")
-        snapshot_id = result["snapshot"]["id"]
-        logger.info("Created Vultr snapshot {}", snapshot_id)
-        return VpsSnapshotId(snapshot_id)
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        self._delete(f"/snapshots/{snapshot_id}")
-        logger.info("Deleted Vultr snapshot {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        result = self._get("/snapshots")
-        if result is None or "snapshots" not in result:
-            return []
-
-        snapshots: list[VpsSnapshotInfo] = []
-        for snap in result["snapshots"]:
-            created_str = snap.get("date_created", "")
-            try:
-                created_at = datetime.fromisoformat(created_str)
-            except ValueError:
-                created_at = datetime.now(timezone.utc)
-
-            snapshots.append(
-                VpsSnapshotInfo(
-                    id=VpsSnapshotId(snap["id"]),
-                    description=snap.get("description", ""),
-                    created_at=created_at,
-                )
-            )
-        return snapshots
-
-    # =========================================================================
     # SSH Key Operations
     # =========================================================================
 
@@ -226,9 +183,3 @@ class VultrVpsClient(VpsClientInterface):
     def delete_ssh_key(self, key_id: str) -> None:
         self._delete(f"/ssh-keys/{key_id}")
         logger.debug("Deleted SSH key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        result = self._get("/ssh-keys")
-        if result is None or "ssh_keys" not in result:
-            return []
-        return [VpsSshKeyInfo(id=k["id"], name=k["name"]) for k in result["ssh_keys"]]

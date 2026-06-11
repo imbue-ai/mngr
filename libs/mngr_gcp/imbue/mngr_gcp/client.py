@@ -23,10 +23,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 # Label key stamped on every mngr-managed instance (the provider-instance name
 # is the value). Discovery filters on it, and ``mngr gcp cleanup`` uses its
@@ -165,7 +162,6 @@ class GcpVpsClient(VpsClientInterface):
     _ssh_public_keys_by_id: dict[str, str] = PrivateAttr(default_factory=dict)
     _cached_instances_client: Any = PrivateAttr(default=None)
     _cached_firewalls_client: Any = PrivateAttr(default=None)
-    _cached_snapshots_client: Any = PrivateAttr(default=None)
 
     # =========================================================================
     # Lazily-built compute clients (overridden in tests to inject fakes)
@@ -180,11 +176,6 @@ class GcpVpsClient(VpsClientInterface):
         if self._cached_firewalls_client is None:
             self._cached_firewalls_client = compute_v1.FirewallsClient(credentials=self.credentials)
         return self._cached_firewalls_client
-
-    def _snapshots(self) -> Any:
-        if self._cached_snapshots_client is None:
-            self._cached_snapshots_client = compute_v1.SnapshotsClient(credentials=self.credentials)
-        return self._cached_snapshots_client
 
     @contextmanager
     def _translate_gcp_errors(self) -> Iterator[None]:
@@ -561,47 +552,6 @@ class GcpVpsClient(VpsClientInterface):
         return managed
 
     # =========================================================================
-    # Snapshot Operations (boot persistent disk of an instance)
-    # =========================================================================
-
-    def _boot_disk_source(self, instance_id: VpsInstanceId) -> str:
-        instance = self._get_instance(instance_id)
-        for disk in instance.disks:
-            if disk.boot and disk.source:
-                return disk.source
-        raise VpsApiError(500, f"Instance {instance_id} has no boot disk source")
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        source_disk = self._boot_disk_source(instance_id)
-        snapshot_name = f"mngr-snap-{uuid4().hex}"
-        snapshot = compute_v1.Snapshot(name=snapshot_name, source_disk=source_disk, description=description)
-        with self._translate_gcp_errors():
-            operation = self._snapshots().insert(project=self.project_id, snapshot_resource=snapshot)
-        self._await_operation(operation)
-        logger.info("Created snapshot {} from boot disk of {}", snapshot_name, instance_id)
-        return VpsSnapshotId(snapshot_name)
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        with self._translate_gcp_errors():
-            operation = self._snapshots().delete(project=self.project_id, snapshot=str(snapshot_id))
-        self._await_operation(operation)
-        logger.info("Deleted snapshot {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        snapshots: list[VpsSnapshotInfo] = []
-        with self._translate_gcp_errors():
-            page_result = self._snapshots().list(project=self.project_id)
-            for snapshot in page_result:
-                snapshots.append(
-                    VpsSnapshotInfo(
-                        id=VpsSnapshotId(snapshot.name),
-                        description=snapshot.description or "",
-                        created_at=datetime.fromisoformat(snapshot.creation_timestamp),
-                    )
-                )
-        return snapshots
-
-    # =========================================================================
     # SSH Key Operations (no native GCE per-key resource; in-memory map)
     # =========================================================================
 
@@ -621,7 +571,3 @@ class GcpVpsClient(VpsClientInterface):
         """Drop the in-memory key entry. Tolerant of an absent key (fresh-process delete)."""
         self._ssh_public_keys_by_id.pop(key_id, None)
         logger.debug("Dropped in-memory SSH public key {}", key_id)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        """List the in-memory keys. GCE keys live only in per-instance metadata, not as a resource."""
-        return [VpsSshKeyInfo(id=key_id, name=key_id) for key_id in self._ssh_public_keys_by_id]

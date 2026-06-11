@@ -4,7 +4,6 @@ import pytest
 
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 
 def test_vps_instance_id_valid() -> None:
@@ -15,16 +14,6 @@ def test_vps_instance_id_valid() -> None:
 def test_vps_instance_id_empty_raises() -> None:
     with pytest.raises(ValueError):
         VpsInstanceId("")
-
-
-def test_vps_snapshot_id_valid() -> None:
-    snapshot_id = VpsSnapshotId("snap-456")
-    assert str(snapshot_id) == "snap-456"
-
-
-def test_vps_snapshot_id_empty_raises() -> None:
-    with pytest.raises(ValueError):
-        VpsSnapshotId("")
 
 
 def test_vps_instance_status_values() -> None:

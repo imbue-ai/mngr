@@ -17,7 +17,6 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 
 _SUBSCRIPTION = "sub-123"
 _REGION = "westus"
@@ -426,7 +425,7 @@ def test_delete_managed_resource_group_none_when_missing() -> None:
 
 
 # =========================================================================
-# destroy / snapshots / ssh keys
+# destroy
 # =========================================================================
 
 
@@ -436,43 +435,3 @@ def test_destroy_instance_idempotent_on_404() -> None:
     client = _make_client(compute=compute)
     # Should not raise.
     client.destroy_instance(VpsInstanceId("vm1"))
-
-
-def test_create_snapshot_from_os_disk() -> None:
-    compute = FakeComputeClient()
-    compute.virtual_machines.get_result = SimpleNamespace(
-        storage_profile=SimpleNamespace(os_disk=SimpleNamespace(managed_disk=SimpleNamespace(id="/disks/os")))
-    )
-    client = _make_client(compute=compute)
-    snapshot_id = client.create_snapshot(VpsInstanceId("vm1"), "my snapshot")
-    assert len(compute.snapshots.created) == 1
-    snapshot = compute.snapshots.created[0][1]
-    assert snapshot.creation_data.source_resource_id == "/disks/os"
-    assert snapshot.tags["description"] == "my snapshot"
-    assert str(snapshot_id).startswith("mngr-snap-")
-
-
-def test_list_snapshots_round_trips_description() -> None:
-    compute = FakeComputeClient()
-    compute.snapshots.list_result = [
-        SimpleNamespace(
-            name="mngr-snap-1",
-            tags={"description": "backup"},
-            time_created=datetime(2026, 6, 10, tzinfo=timezone.utc),
-        )
-    ]
-    client = _make_client(compute=compute)
-    snapshots = client.list_snapshots()
-    assert snapshots[0].id == VpsSnapshotId("mngr-snap-1")
-    assert snapshots[0].description == "backup"
-
-
-def test_ssh_key_lifecycle_in_memory() -> None:
-    client = _make_client()
-    client.upload_ssh_key("k1", "pub1")
-    client.upload_ssh_key("k2", "pub2")
-    assert {key.id for key in client.list_ssh_keys()} == {"k1", "k2"}
-    client.delete_ssh_key("k1")
-    assert {key.id for key in client.list_ssh_keys()} == {"k2"}
-    # Deleting an absent key is a tolerant no-op.
-    client.delete_ssh_key("missing")

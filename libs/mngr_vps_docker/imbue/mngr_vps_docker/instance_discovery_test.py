@@ -55,10 +55,7 @@ from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 
 class _NoopVpsClient(VpsClientInterface):
@@ -91,23 +88,11 @@ class _NoopVpsClient(VpsClientInterface):
     def wait_for_instance_active(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
         raise AssertionError("VpsClient.wait_for_instance_active must not be called from discovery tests")
 
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        raise AssertionError("VpsClient.create_snapshot must not be called from discovery tests")
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        raise AssertionError("VpsClient.delete_snapshot must not be called from discovery tests")
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        raise AssertionError("VpsClient.list_snapshots must not be called from discovery tests")
-
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         raise AssertionError("VpsClient.upload_ssh_key must not be called from discovery tests")
 
     def delete_ssh_key(self, key_id: str) -> None:
         raise AssertionError("VpsClient.delete_ssh_key must not be called from discovery tests")
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        raise AssertionError("VpsClient.list_ssh_keys must not be called from discovery tests")
 
 
 class _DiscoveryTestProvider(VpsDockerProvider):

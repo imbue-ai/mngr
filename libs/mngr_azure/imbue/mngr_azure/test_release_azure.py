@@ -385,11 +385,6 @@ def test_api_client_list_instances_does_not_error(azure_release_client: AzureVps
     assert isinstance(instances, list)
 
 
-def test_api_client_list_snapshots_does_not_error(azure_release_client: AzureVpsClient) -> None:
-    snapshots = azure_release_client.list_snapshots()
-    assert isinstance(snapshots, list)
-
-
 def test_default_image_resolves(azure_release_subscription_id: str) -> None:
     """The default Ubuntu marketplace image must still resolve via the Compute API.
 
