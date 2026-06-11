@@ -10,6 +10,7 @@ hooks cannot drift on input validation or response framing.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 from typing import Final
 from typing import TextIO
@@ -21,6 +22,17 @@ from loguru import logger
 # two hooks cannot drift on the limit, since both also share the
 # emit_depth_limit_deny helper below which formats a reason that cites it.
 DEFAULT_MAX_SUBAGENT_DEPTH: Final[int] = 3
+
+
+def parse_int_env(name: str, default: int) -> int:
+    """Parse an int-valued env var; return ``default`` on missing/empty/invalid."""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def read_hook_stdin_json(stdin: TextIO, log_prefix: str) -> dict[str, Any] | None:
