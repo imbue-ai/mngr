@@ -94,10 +94,14 @@ both Claude-specific and must be generalized (see below).
 
 **Non-goals**
 
-- Rate-limit / quota windows for the new harnesses. OpenCode, pi, and Codex
-  (API-key mode) do not expose Claude-style windows; this spec is cost-focused.
-  The window schema stays optional and untouched; a harness that later exposes
-  quota data can populate it without a schema change.
+- Rate-limit / quota windows are not the focus. OpenCode and pi (API-key mode)
+  do not expose Claude-style windows, so for them this spec is cost-only. The
+  window schema stays optional; a harness that exposes quota data can populate
+  it without a schema change. **Exception:** Codex's `token_count` events *do*
+  carry rate-limit windows in subscription mode (verified — see
+  [Verified harness facts](#verified-harness-facts)), so the Codex writer should
+  populate `rate_limits` as a low-cost bonus; this is the one new harness that
+  gets windows.
 - Changing how Claude usage works. Claude continues to report cost directly; the
   generalization is purely additive.
 - Antigravity usage (deferred), and any new `mngr usage` CLI surface.
@@ -128,7 +132,16 @@ Add two optional fields to the event line and relax the contract:
 
 - `tokens` (object, optional): `{input, output, cache_read, cache_creation}`,
   all optional integers. **Cumulative-per-session** counts (see
-  [Cumulative discipline](#cumulative-discipline)).
+  [Cumulative discipline](#cumulative-discipline)). **Wire convention:** `input`
+  is the **non-cached** input count, and `cache_read` / `cache_creation` are
+  separate additive buckets, so the cost is exactly
+  `input·p_in + cache_read·p_cr + cache_creation·p_cw + output·p_out` with no
+  double-counting. Writers MUST normalize to this even when their source reports
+  `input` inclusive of cache (Codex does — its `input_tokens` includes
+  `cached_input_tokens`, so the writer emits `input = input_tokens −
+  cached_input_tokens`). `output` includes reasoning tokens (billed at the output
+  rate). Providers without a cache-creation surcharge (OpenAI/Codex) simply omit
+  `cache_creation`.
 - `model` (string, optional): the model id the tokens were billed against.
   Required for cost to be derivable when `cost` is absent.
 - `cost_mode` (string, optional): writer-declared `"SUBSCRIPTION"` or
@@ -272,11 +285,14 @@ is what usage data the tool exposes.
   (`libs/mngr_opencode/imbue/mngr_opencode/resources/mngr_opencode_plugin.ts`)
   already holds the assistant `message` object and writes a common-transcript
   record with `usage: null` (plugin.ts:236).
-- **Data:** OpenCode computes `message.cost` and `message.tokens` itself. The
-  writer emits a cumulative-per-session `cost` (and `tokens` for auditability)
-  per message. `cost_mode = API_KEY`, provenance `REPORTED`. No pricing math.
-- **To verify:** that `message.cost` / `message.tokens` are actually populated
-  in the pinned OpenCode version (see [Facts to verify](#facts-to-verify)).
+- **Data (verified, SDK 1.16.2):** every `AssistantMessage` carries
+  **non-optional** `cost: number` and `tokens: {input, output, reasoning,
+  cache: {read, write}}`, plus `modelID` / `providerID`
+  (`@opencode-ai/sdk/.../types.gen.d.ts`). The writer accumulates these
+  per-session (cost is per-message) and emits cumulative `cost` (provenance
+  `REPORTED`, no pricing math) plus `tokens` for auditability. Map
+  `cache.read → cache_read`, `cache.write → cache_creation`, fold `reasoning`
+  into `output`. `cost_mode = API_KEY`.
 
 ### pi (moderate: token-derived cost, multi-provider)
 
@@ -284,12 +300,20 @@ is what usage data the tool exposes.
   (`libs/mngr_pi_coding/imbue/mngr_pi_coding/resources/mngr_pi_lifecycle.ts`)
   already extracts `usage.{input,output,cacheRead,cacheWrite}` per assistant
   message (lifecycle.ts ~line 401).
-- **Data:** emit cumulative-per-session `tokens` + `model` (provider-qualified).
-  No reported cost → reader estimates. `cost_mode = API_KEY` (subscription
-  variants, if any, declare `SUBSCRIPTION`), provenance `ESTIMATED`.
-- **Added logic:** model-id normalization across providers
-  (Anthropic/OpenAI/Gemini/Groq/OpenRouter) so pricing lookups resolve. Map
-  pi's `cacheRead`/`cacheWrite` to `cache_read`/`cache_creation`.
+- **Data (verified, pi 0.79.1):** no reported cost → reader estimates,
+  provenance `ESTIMATED`. The model is a **bare name** (`claude-opus-4-8`) with
+  `provider` as a **separate** field (`anthropic`); providers are
+  anthropic/openai/gemini/groq/openrouter. `usage` is **per-message**
+  `{input, output, cacheRead, cacheWrite}` → accumulate per session. Auth mode
+  comes from `auth.json[provider].type` (`"api_key"` → `API_KEY`; an oauth-style
+  type → `SUBSCRIPTION`).
+- **Added logic:** the canonical pricing key is `provider/model`, so the writer
+  must emit **both** `provider` and `model` — `mngr_pi_lifecycle.ts` currently
+  emits only `model`, so it needs `provider` added. Map pi's
+  `cacheRead`/`cacheWrite` to `cache_read`/`cache_creation`.
+- **Residual (pin at impl time):** whether pi's `usage.input` is inclusive or
+  exclusive of `cacheRead` — decides the cache-subtraction in the writer per the
+  [wire convention](#wire-schema-additions). Confirm against a real pi session.
 
 ### Codex (moderate: token-derived cost, awkward injection)
 
@@ -299,20 +323,31 @@ is what usage data the tool exposes.
   The rollout already contains `token_count` events. The usage writer piggybacks
   on that rollout-reading path rather than a clean hook — more awkward than the
   TS harnesses.
-- **Data:** emit cumulative-per-session `tokens` + `model` from the rollout's
-  `token_count` events. `cost_mode = API_KEY`, provenance `ESTIMATED`.
-- **To verify:** the exact `token_count` field names, that it is cumulative, and
-  whether ChatGPT-subscription mode also exposes rate-limit windows there (if
-  so, Codex could additionally populate `rate_limits` and get Claude-style
-  windows — a bonus, not required).
+- **Data (verified, codex 0.138.0):** the `token_count` event
+  (`payload.type == "token_count"`) carries `info.total_token_usage`
+  (**cumulative**: `input_tokens`, `cached_input_tokens`, `output_tokens`,
+  `reasoning_output_tokens`, `total_tokens`) and `info.last_token_usage` (the
+  per-turn delta); `total = input + output`, `input_tokens` **includes**
+  `cached_input_tokens`, and reasoning is a subset of output. The writer emits
+  `input = input_tokens − cached_input_tokens`, `cache_read = cached_input_tokens`,
+  `output = output_tokens` (no `cache_creation` — OpenAI has no cache-write
+  surcharge). `cost_mode` is `SUBSCRIPTION` when `rate_limits`/`credits` are
+  present (ChatGPT plan), else `API_KEY`; provenance `ESTIMATED`. The `model`
+  comes from the rollout's `turn_context` / `session_meta`.
+- **Bonus (verified):** the same event carries `rate_limits` —
+  `primary` (`window_minutes: 300` = 5h) and `secondary` (`window_minutes: 10080`
+  = 7d), each `{used_percent, resets_at}`, plus `credits`/`plan_type`. The writer
+  maps these onto the `rate_limits` window schema (`used_percent → used_percentage`,
+  `window_minutes·60 → window_seconds`), giving Codex subscription agents
+  Claude-style windows.
 
 ### Difficulty summary
 
-| Harness   | Injection point (exists)        | Native data        | Cost path           | Difficulty |
-| --------- | ------------------------------- | ------------------ | ------------------- | ---------- |
-| OpenCode  | in-process TS plugin            | cost + tokens      | reported            | Easy       |
-| pi        | in-process TS extension         | tokens (multi-prov)| estimated           | Moderate   |
-| Codex     | rollout transcript streamer     | tokens             | estimated           | Moderate   |
+| Harness   | Injection point (exists)        | Native data            | Cost path  | Windows | Difficulty |
+| --------- | ------------------------------- | ---------------------- | ---------- | ------- | ---------- |
+| OpenCode  | in-process TS plugin            | cost + tokens          | reported   | no      | Easy       |
+| pi        | in-process TS extension         | tokens (multi-prov)    | estimated  | no      | Moderate   |
+| Codex     | rollout transcript streamer     | tokens + rate_limits   | estimated  | yes (sub) | Moderate |
 
 ## Edge cases and failure modes
 
@@ -356,18 +391,29 @@ is what usage data the tool exposes.
   provision an agent, drive a turn, assert `mngr usage` reflects its cost.
   Follow the existing `mngr_claude_usage` test layout.
 
-## Facts to verify
+## Verified harness facts
 
-These were established as unverified during design and gate the difficulty
-claims; confirm before implementing the affected writer:
+The difficulty claims were verified against the locally installed harnesses and
+their real on-disk data / shipped schemas (OpenCode 1.16.2, Codex 0.138.0, pi
+0.79.1). Results are folded into the per-harness sections above; in summary:
 
-1. **OpenCode:** `message.cost` and `message.tokens` are populated in the pinned
-   OpenCode version (decides OpenCode-as-easy).
-2. **Codex:** `token_count` rollout event field names; that the values are
-   cumulative; and whether subscription-mode rate-limit windows are present
-   there.
-3. **pi:** the auth-mode → `cost_mode` mapping, and the exact provider-qualified
-   model-id format pi emits (decides the normalization map).
+1. **OpenCode — confirmed (decides OpenCode-as-easy).** `AssistantMessage.cost`
+   (`number`) and `.tokens` (`{input, output, reasoning, cache:{read, write}}`)
+   are **non-optional** in the shipped SDK
+   (`@opencode-ai/sdk/dist/gen/types.gen.d.ts`), with `modelID`/`providerID`.
+   Reported cost, no pricing math.
+2. **Codex — confirmed and better than assumed.** `token_count` payloads carry
+   `info.total_token_usage` (cumulative) + `info.last_token_usage` (delta) with
+   `input_tokens`/`cached_input_tokens`/`output_tokens`/`reasoning_output_tokens`/
+   `total_tokens` (`input` is inclusive of cached; `total = input + output`), and
+   **also carry `rate_limits`** (`primary` 5h, `secondary` 7d) in subscription
+   mode — so Codex gets Claude-style windows as a bonus.
+3. **pi — confirmed, one residual.** Model is a bare name with a separate
+   `provider` field (canonical key `provider/model`); `auth.json[provider].type`
+   gives the mode (`"api_key"` here → `API_KEY`); per-message
+   `{input, output, cacheRead, cacheWrite}` usage. **Residual:** whether
+   `usage.input` is inclusive of `cacheRead` — pin against a live pi session when
+   building the writer (only affects the estimate's accuracy, not feasibility).
 
 ## Out of scope and deferred work
 
