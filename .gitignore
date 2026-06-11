@@ -255,7 +255,6 @@
 
 # we stick the image build artifacts here
 **/.mngr/dev/build/
-**/.mngr/dev/azure-build/
 **/.mngr/dev/secrets/
 
 # Offload caches and local files
