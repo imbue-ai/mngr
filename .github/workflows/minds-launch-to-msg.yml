@@ -43,13 +43,13 @@ concurrency:
   group: mac-runner
   cancel-in-progress: false
 
-# The marker that gates the skip-on-unchanged decision lives in an
-# actions/cache entry keyed by the (mngr, FCT) pair fingerprint.
-# `actions/cache/save` and `actions/cache/restore` use the runner's
-# injected cache token, not GITHUB_TOKEN, so no `actions: write`
-# is needed. Default `contents: read` is enough.
+# `contents: read` is the default; `actions: read` is needed by
+# `notify_slack` to fetch the run's `run_started_at` for the duration
+# field in the slack message. actions/cache uses its own injected
+# cache token, not GITHUB_TOKEN, so no write scope is needed.
 permissions:
   contents: read
+  actions: read
 
 jobs:
   # Free Linux job that decides whether the rest of the pipeline runs.
@@ -1033,14 +1033,15 @@ jobs:
       - name: post status to slack
         env:
           WEBHOOK: ${{ secrets.SLACK_LAUNCH_TO_MSG_WEBHOOK }}
-          DECISION: ${{ needs.check_should_run.outputs.should_run == 'true' && 'ran' || 'skipped (pair unchanged from last green)' }}
-          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
           FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
-          BUILD_RESULT:        ${{ needs.build.result }}
+          BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
-          MACOS_LAUNCH_RESULT: ${{ needs.macos_launch.result }}
+          MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
           UPDATE_MARKER_RESULT: ${{ needs.update_marker.result }}
+          CHECK_SHOULD_RUN_RESULT: ${{ needs.check_should_run.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
         run: |
@@ -1049,40 +1050,68 @@ jobs:
             echo "::warning::SLACK_LAUNCH_TO_MSG_WEBHOOK not set -- skipping slack notification"
             exit 0
           fi
-          # Render an emoji from a job result. Skipped is intentionally a
-          # neutral marker because the whole point of the skip path is that
-          # work was correctly elided.
-          emoji() {
-            case "$1" in
-              success)  echo ":white_check_mark:" ;;
-              failure)  echo ":x:" ;;
-              cancelled) echo ":no_entry_sign:" ;;
-              skipped)  echo ":fast_forward:" ;;
-              *)        echo ":grey_question:" ;;
-            esac
+          # Total wallclock from when the run was queued to now. GNU date
+          # parses ISO-8601 directly on Ubuntu runners.
+          start_iso=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at')
+          start_s=$(date -d "$start_iso" +%s)
+          now_s=$(date +%s)
+          total_s=$((now_s - start_s))
+          fmt_duration() {
+            local s=$1
+            if (( s < 60 )); then
+              printf '%ds' "$s"
+            else
+              printf '%dm%02ds' $((s / 60)) $((s % 60))
+            fi
           }
-          # Pick an overall headline emoji: red if any required job failed
-          # outright; green if everything we needed succeeded or skipped;
-          # yellow otherwise (e.g. cancellation).
-          overall=":white_check_mark:"
-          for r in "$BUILD_RESULT" "$LAUNCH_TO_MSG_RESULT" "$MACOS_LAUNCH_RESULT" "$UPDATE_MARKER_RESULT"; do
-            if [[ "$r" == "failure" ]]; then overall=":x:"; break; fi
-            if [[ "$r" == "cancelled" ]]; then overall=":warning:"; fi
-          done
+          duration=$(fmt_duration "$total_s")
+          # Classify the outcome.
+          # - skipped: check_should_run decided not to run; all downstream skipped
+          # - failed: some required downstream returned failure
+          # - cancelled: any required downstream was cancelled (no failures)
+          # - ran: everything that needed to run succeeded
+          failed_jobs=""
+          cancelled_jobs=""
+          # If check_should_run itself failed, surface that. Otherwise iterate
+          # the downstream jobs.
+          if [[ "$CHECK_SHOULD_RUN_RESULT" == "failure" ]]; then
+            failed_jobs="check_should_run"
+          else
+            for pair in "build:$BUILD_RESULT" \
+                        "launch_to_msg:$LAUNCH_TO_MSG_RESULT" \
+                        "macos_launch:$MACOS_LAUNCH_RESULT" \
+                        "update_marker:$UPDATE_MARKER_RESULT"; do
+              name="${pair%%:*}"
+              result="${pair##*:}"
+              case "$result" in
+                failure)   failed_jobs="$failed_jobs $name" ;;
+                cancelled) cancelled_jobs="$cancelled_jobs $name" ;;
+              esac
+            done
+          fi
           MNGR_SHORT="${MNGR_SHA:0:12}"
           FCT_SHORT="${FCT_SHA:0:12}"
-          # printf with literal \n keeps the message single-statement so
-          # YAML's `run: |` literal-block-scalar indentation is preserved.
-          text=$(printf '%s *launch-to-msg* | trigger: `%s` | decision: %s\n\nmngr=`%s`  fct=`%s`\n\n%s build           `%s`\n%s launch_to_msg   `%s`\n%s macos_launch    `%s`\n%s update_marker   `%s`\n\n<%s|run logs>' \
-            "$overall" "$TRIGGER" "$DECISION" \
-            "$MNGR_SHORT" "$FCT_SHORT" \
-            "$(emoji "$BUILD_RESULT")" "$BUILD_RESULT" \
-            "$(emoji "$LAUNCH_TO_MSG_RESULT")" "$LAUNCH_TO_MSG_RESULT" \
-            "$(emoji "$MACOS_LAUNCH_RESULT")" "$MACOS_LAUNCH_RESULT" \
-            "$(emoji "$UPDATE_MARKER_RESULT")" "$UPDATE_MARKER_RESULT" \
+          if [[ -n "$failed_jobs" ]]; then
+            emoji=":x:"
+            verdict="failed in $duration"
+            detail=" | failed:$failed_jobs"
+          elif [[ -n "$cancelled_jobs" ]]; then
+            emoji=":warning:"
+            verdict="cancelled in $duration"
+            detail=" | cancelled:$cancelled_jobs"
+          elif [[ "$SHOULD_RUN" != "true" ]]; then
+            emoji=":fast_forward:"
+            verdict="skipped in $duration (free Linux only)"
+            detail=""
+          else
+            emoji=":white_check_mark:"
+            verdict="ran in $duration"
+            detail=""
+          fi
+          text=$(printf '%s *launch-to-msg* | %s%s\nmngr=`%s`  fct=`%s`  trigger=`%s`\n<%s|run logs>' \
+            "$emoji" "$verdict" "$detail" \
+            "$MNGR_SHORT" "$FCT_SHORT" "$TRIGGER" \
             "$RUN_URL")
-          # jq -Rs '.' wraps the text safely as a JSON string, escaping
-          # newlines and any embedded quotes.
           payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "$payload" "$WEBHOOK"
