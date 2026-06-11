@@ -1,7 +1,7 @@
-{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, is_leased_imbue_cloud=False #}
+{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
 {#
-  Workspace settings page. Account section, sharing servers list,
-  optional Telegram setup, and the danger-zone destroy flow.
+  Workspace settings page. Color picker, account section, sharing servers
+  list, optional Telegram setup, and the danger-zone destroy flow.
 
   telegram_state controls the Telegram section:
     - None        : no Telegram orchestrator; section hidden
@@ -12,8 +12,16 @@
   Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
   confusing "account mixing", so the account section shows the bound account
   with a disabled Disassociate control and offers no association controls.
+
+  current_color is the stored workspace color hex (#rrggbb); it pre-fills the
+  hex input and pre-selects the matching palette swatch (if any).
+  is_stale disables the picker controls when the workspace's provider's last
+  discovery poll errored -- writes against an unreachable host would not be
+  observable until provider recovery.
+  palette is the {name: hex} map of pickable swatches (12 entries).
 #}
 {% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
 <script src="/_static/workspace_settings.js" defer></script>
 <script>
   (function() {
@@ -65,11 +73,46 @@
       body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
       scripts={{ _scripts }}>
   <PageContainer>
-    <div id="workspace-settings" data-agent-id="{{ agent_id }}">
+    <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">
       <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
       <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
 
-      <SectionHeader>Account</SectionHeader>
+      {# ``extra`` turns the h2 into a flex row so the badge centers on
+         the title's vertical axis; ``leading-none`` + fixed badge height
+         keeps the line box from growing when the badge un-hides (which
+         would push the swatches down a couple px). #}
+      <SectionHeader extra="flex items-center gap-2">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-zinc-900 bg-white rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
+      <div id="color-section">
+        {% if is_stale %}
+          <Notice variant="warn">
+            This workspace is currently unreachable, so its color can't be changed right now.
+            Try again once the workspace reconnects.
+          </Notice>
+        {% endif %}
+        <div role="radiogroup"
+             aria-label="Workspace color palette"
+             class="flex flex-wrap items-center gap-2 mb-3"
+             id="color-swatches">
+          {% for name, hex_value in palette.items() %}
+            <ColorSwatch :hex="hex_value" :name="name" size="md"
+                         :selected="hex_value == current_color" :disabled="is_stale" />
+          {% endfor %}
+          <input id="color-hex-input"
+                 type="text"
+                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 placeholder:text-zinc-400 disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
+                 value="{{ current_color }}"
+                 placeholder="#a1b2c3"
+                 maxlength="9"
+                 spellcheck="false"
+                 autocomplete="off"
+                 aria-label="Workspace color hex"
+                 size="8"
+                 {% if is_stale %}disabled{% endif %}>
+        </div>
+        <p id="color-error" class="hidden text-sm text-red-600 mt-2" role="alert"></p>
+      </div>
+
+      <SectionHeader divider>Account</SectionHeader>
       <div id="account-section">
       {% if is_leased_imbue_cloud %}
         {% if current_account %}
