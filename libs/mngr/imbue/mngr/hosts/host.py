@@ -2484,6 +2484,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             try:
                 agent.on_destroy(self)
             except MngrError as e:
+                logger.warning("on_destroy hook failed for agent {} on host {}: {}", agent.name, self.id, e)
                 failures.append(
                     CleanupFailure(
                         category=CleanupFailureCategory.OTHER,
@@ -2512,6 +2513,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             try:
                 self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
             except MngrError as e:
+                logger.warning("Failed to remove persisted data for agent {} on host {}: {}", agent.name, self.id, e)
                 failures.append(
                     CleanupFailure(
                         category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
@@ -2722,6 +2724,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 agent_name=agent_name,
                 host_id=self.id,
             )
+            logger.warning("Cleanup step timed out on host {}: {}", self.id, e)
             return CommandResult(stdout="", stderr=str(e), success=False), timeout_failure
         failure = self._classify_cleanup_command_stderr(
             command=command,
@@ -2730,6 +2733,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             benign_stderr_substrings=benign_stderr_substrings,
             agent_name=agent_name,
         )
+        if failure is not None:
+            logger.warning("Cleanup step left a resource behind on host {}: {}", self.id, failure.message)
         return result, failure
 
     def _classify_cleanup_command_stderr(

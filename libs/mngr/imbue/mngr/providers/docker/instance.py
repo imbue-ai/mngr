@@ -1433,6 +1433,7 @@ kill -TERM 1
             # Container already gone -- benign.
             pass
         except docker.errors.DockerException as e:
+            logger.warning("Failed to stop container for host {}: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -1450,6 +1451,7 @@ kill -TERM 1
             except docker.errors.NotFound:
                 pass
             except docker.errors.DockerException as e:
+                logger.warning("Failed to remove container for host {}: {}", host_id, e)
                 failures.append(
                     CleanupFailure(
                         category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -1465,6 +1467,7 @@ kill -TERM 1
         except docker.errors.NotFound:
             pass
         except docker.errors.DockerException as e:
+            logger.warning("Failed to remove build image for host {}: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -1477,6 +1480,7 @@ kill -TERM 1
         try:
             self._mark_host_destroyed(host_id)
         except MngrError as e:
+            logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.OTHER,

@@ -2098,6 +2098,7 @@ log "=== Shutdown script completed ==="
         except ModalProxyError as e:
             # ModalProxyInvalidError / ModalProxyInternalError and any other Modal
             # failure mean the resource may still exist.
+            logger.warning("Failed to terminate sandbox for host {}: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -2113,6 +2114,7 @@ log "=== Shutdown script completed ==="
         except ModalProxyNotFoundError:
             pass
         except ModalProxyError as e:
+            logger.warning("Failed to remove agent records for host {}: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
@@ -2125,6 +2127,7 @@ log "=== Shutdown script completed ==="
         try:
             self._mark_host_destroyed(host_id)
         except (ModalProxyError, MngrError) as e:
+            logger.warning("Failed to mark host {} destroyed: {}", host_id, e)
             failures.append(
                 CleanupFailure(
                     category=CleanupFailureCategory.OTHER,

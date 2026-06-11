@@ -1805,6 +1805,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             try:
                 self.client.release_host(token, host_db_id)
             except ImbueCloudConnectorError as exc:
+                logger.warning("Failed to release leased VPS for host {}: {}", host_id, exc)
                 failures.append(
                     CleanupFailure(
                         category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,

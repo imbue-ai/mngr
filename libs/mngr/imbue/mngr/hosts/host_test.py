@@ -1224,6 +1224,7 @@ def test_stop_agents_bounds_every_command_with_a_timeout(
     assert unbounded == [], f"stop_agents ran command(s) without a timeout: {unbounded}"
 
 
+@pytest.mark.allow_warnings(match=r"^Cleanup step timed out on host")
 def test_stop_agents_records_timeout_failure_and_continues(
     local_provider: LocalProviderInstance,
 ) -> None:
@@ -1253,6 +1254,7 @@ def test_stop_agents_records_timeout_failure_and_continues(
     assert any("kill-session" in command for command in commands)
 
 
+@pytest.mark.allow_warnings(match=r"^Cleanup step left a resource behind on host")
 def test_stop_agents_classifies_real_vs_benign_stderr(
     local_provider: LocalProviderInstance,
 ) -> None:
