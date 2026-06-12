@@ -1,0 +1,3 @@
+User-facing errors raised during agent provisioning (e.g. passing an unknown `--adopt-session` ID to `mngr create`) now render as a clean `Error: ...` message instead of crashing with a full "Unexpected error" traceback.
+
+Internal: such errors are raised inside a `ConcurrencyGroup` context (e.g. `provision_agent`), so they reach the top-level CLI handler wrapped in a `ConcurrencyExceptionGroup`, which is not a `ClickException`. The handler now unwraps a group carrying a single user-facing `ClickException`/`MngrError` (recursing through nesting) and surfaces it directly; groups carrying multiple failures or a genuine non-user-facing bug still surface as unexpected errors with their full traceback.

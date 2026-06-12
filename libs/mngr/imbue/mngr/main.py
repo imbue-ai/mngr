@@ -9,6 +9,7 @@ import setproctitle
 from click_option_group import OptionGroup
 
 import imbue.mngr.cli.builtin_help_topics as builtin_help_topics_module
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.cli.archive import archive
@@ -67,6 +68,28 @@ from imbue.mngr.utils.env_utils import parse_bool_env
 _plugin_manager_container: dict[str, pluggy.PluginManager | None] = {"pm": None}
 
 
+def _unwrap_user_facing_error(error: BaseException) -> click.ClickException | MngrError | None:
+    """Recursively unwrap a ConcurrencyExceptionGroup to the single user-facing error it carries.
+
+    Errors raised inside a ConcurrencyGroup's ``with`` block (e.g. ``provision_agent``)
+    are re-raised wrapped in a ConcurrencyExceptionGroup on exit. That wrapper is not a
+    ClickException, so without unwrapping, a clean user-facing error (e.g. a
+    UserInputError from a bad ``--adopt-session`` argument) would be reported as an
+    "Unexpected error" with a full traceback instead of rendering as a clean
+    ``Error: ...`` message.
+
+    Returns the underlying ClickException/MngrError when the group wraps exactly one
+    such error (recursing through nesting), or None otherwise -- groups carrying
+    multiple distinct failures or a genuine non-user-facing bug still surface as
+    unexpected errors with their full traceback.
+    """
+    if isinstance(error, (click.ClickException, MngrError)):
+        return error
+    if isinstance(error, ConcurrencyExceptionGroup) and len(error.exceptions) == 1:
+        return _unwrap_user_facing_error(error.exceptions[0])
+    return None
+
+
 def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
     """Call the on_error hook if command metadata was stored by setup_command_context.
 
@@ -123,6 +146,15 @@ class AliasAwareGroup(DefaultCommandGroup):
             emit_error_event(e, ctx.meta.get("output_format"))
             raise
         except Exception as e:
+            # A user-facing error (ClickException/MngrError) raised inside a
+            # ConcurrencyGroup's `with` block reaches us wrapped in a
+            # ConcurrencyExceptionGroup. Unwrap it so it renders as a clean
+            # `Error: ...` message instead of an "Unexpected error" traceback.
+            user_facing_error = _unwrap_user_facing_error(e)
+            if user_facing_error is not None:
+                _call_on_error_hook(ctx, user_facing_error)
+                emit_error_event(user_facing_error, ctx.meta.get("output_format"))
+                raise user_facing_error from e
             _call_on_error_hook(ctx, e)
             emit_error_event(e, ctx.meta.get("output_format"))
             if ctx.meta.get("is_error_reporting_enabled", False):
