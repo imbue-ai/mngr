@@ -574,7 +574,7 @@ def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
     Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
-    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    ``DOCKER`` / ``LIMA`` / ``SMOLVM`` run locally and have no region.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
