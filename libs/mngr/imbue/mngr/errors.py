@@ -40,6 +40,10 @@ class ParseSpecError(MngrError, ValueError):
     """Raised when parsing a specification string fails."""
 
 
+class MismatchedPreselectionError(MngrError, ValueError):
+    """Raised when a picker's preselected mask length does not match its options."""
+
+
 class InvalidRelativePathError(MngrError, ValueError):
     """Raised when a path that should be relative is actually absolute."""
 
@@ -170,6 +174,10 @@ class DuplicateAgentNameError(AgentError):
         self.agent_name = agent_name
         self.existing_agent_id = existing_agent_id
         super().__init__(f"An agent named '{agent_name}' already exists on this host (ID: {existing_agent_id})")
+
+
+class AgentStateInconsistencyError(AgentError, RuntimeError):
+    """Raised when an agent found during discovery is no longer present on the live host."""
 
 
 class AgentStartError(AgentError):
@@ -306,6 +314,30 @@ class DockerBuildTimeoutError(HostCreationError):
         self.user_help_text = (
             f"Increase build_timeout_seconds for this provider, e.g.:\n"
             f"  mngr config set --scope user providers.{provider_name}.build_timeout_seconds 1800"
+        )
+
+
+class DockerRuntimeNotRegisteredError(HostCreationError):
+    """Raised when the configured `docker_runtime` is not registered with the Docker daemon.
+
+    Surfaces Docker's native "unknown or invalid runtime name" failure as a
+    clean, actionable message instead of a raw `ProcessError` traceback that
+    buries the cause inside the full `docker run` command line.
+    """
+
+    def __init__(self, provider_name: ProviderInstanceName, runtime_name: str) -> None:
+        self.runtime_name = runtime_name
+        super().__init__(
+            provider_name,
+            f"Docker runtime '{runtime_name}' is not registered with the Docker daemon "
+            f"for provider '{provider_name}'.",
+        )
+        self.user_help_text = (
+            f"Install and register the '{runtime_name}' runtime with Docker (e.g. gVisor's "
+            f"runsc), or select the default runtime by setting docker_runtime to 'runc':\n"
+            f"  mngr config set --scope user providers.{provider_name}.docker_runtime runc\n"
+            f"or per-invocation:\n"
+            f"  MNGR__PROVIDERS__{provider_name.upper()}__DOCKER_RUNTIME=runc"
         )
 
 
@@ -446,6 +478,14 @@ class ConfigKeyNotFoundError(ConfigError, KeyError):
 
 class ConfigStructureError(ConfigError, TypeError):
     """Invalid configuration structure."""
+
+
+class InvalidKeyPathError(ConfigError, ValueError):
+    """Raised when a config key path is empty or otherwise malformed."""
+
+
+class DockerConfigValidationError(ConfigError, ValueError):
+    """Raised when Docker provider config fields are mutually inconsistent."""
 
 
 class UnknownAgentTypeError(ConfigError):

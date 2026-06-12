@@ -4,6 +4,23 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 19% to 45% to match the coverage CI already measures (~50%).
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
 ## 2026-06-08
 
 The imbue_cloud slow (rebuild) path now re-applies the full idempotent host

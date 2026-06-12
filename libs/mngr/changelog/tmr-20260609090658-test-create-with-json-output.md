@@ -1,1 +1,0 @@
-Fixed the e2e test fixture, which wrote a duplicate `type` key into its generated `settings.local.toml` and caused every e2e `mngr` command to fail config parsing. Added an e2e test that the `mngr create --quiet` flag suppresses all console output while still creating the agent.

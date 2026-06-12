@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 60% to 75% to match the coverage CI already measures (~79%).
+
 ## 2026-06-08
 
 OVH provisioning now applies the shared `mngr_vps_docker` host-setup steps over

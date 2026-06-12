@@ -1,16 +1,17 @@
 from pathlib import Path
+from typing import Self
 
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ActivitySource
-from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr_lima.constants import DEFAULT_CONTAINER_SSH_PORT
 from imbue.mngr_lima.constants import DEFAULT_HOST_DATA_DISK_SIZE
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
+from imbue.mngr_lima.errors import LimaConfigError
 
 
 class LimaProviderConfig(ProviderInstanceConfig):
@@ -37,7 +38,8 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "machine has no direct read path so get_volume_for_host() returns "
             "None and mngr event / mngr transcript against a stopped Lima host "
             "stops working until the host is started. The False mode is "
-            "intended for consistent btrfs snapshots of host_dir."
+            "intended for consistent btrfs snapshots of host_dir, and is "
+            "required when is_run_as_root=True."
         ),
     )
     host_data_disk_size: str = Field(
@@ -49,56 +51,18 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "Format follows Lima's size string (e.g. '100GiB')."
         ),
     )
-    is_host_in_docker: bool = Field(
+    is_run_as_root: bool = Field(
         default=False,
         description=(
-            "When False (default), mngr runs the agent directly inside the Lima "
-            "VM (today's behavior). When True, the VM is provisioned only with "
-            "Docker + btrfs + a snapshot helper, and the agent runs inside a "
-            "Docker container in the VM (built from the project's Dockerfile, "
-            "exactly like the docker/vps_docker providers). mngr treats the "
-            "container as the host: ssh and all agent work happen inside it, and "
-            "Lima forwards the container's sshd out to the host's localhost. "
-            "This mode forces the btrfs additional-disk layout "
-            "(is_host_data_volume_exposed must be False) so the per-host data "
-            "lives on a snapshottable filesystem."
-        ),
-    )
-    container_ssh_port: int = Field(
-        default=DEFAULT_CONTAINER_SSH_PORT,
-        description=(
-            "Guest-internal TCP port the agent container publishes its sshd on "
-            "(bound to the VM's loopback). Lima forwards this to a unique "
-            "host-side port. Only used when is_host_in_docker=True."
-        ),
-    )
-    default_image: str = Field(
-        default="debian:bookworm-slim",
-        description=(
-            "Default container base image used when is_host_in_docker=True and "
-            "no Dockerfile build args are supplied. Ignored in direct-in-VM mode."
-        ),
-    )
-    builder: DockerBuilder = Field(
-        default=DockerBuilder.DOCKER,
-        description="Image builder to use when building the container image inside the VM (DOCKER or DEPOT).",
-    )
-    docker_install_timeout: float = Field(
-        default=600.0,
-        description=(
-            "Timeout in seconds for pulling the agent container's base image inside the VM. Only used when "
-            "is_host_in_docker=True and no Dockerfile build args are supplied (the no-build pull path)."
-        ),
-    )
-    container_ssh_connect_timeout: float = Field(
-        default=180.0,
-        description="Timeout in seconds for waiting for the container's sshd to become reachable via the forwarded port.",
-    )
-    image_build_timeout_seconds: float = Field(
-        default=1800.0,
-        description=(
-            "Timeout in seconds for building the container image inside the VM. The default (30 min) is generous "
-            "because the project Dockerfile is built in-VM on a cold layer cache."
+            "When True, mngr runs the agent in the VM as root (uid 0), matching "
+            "the docker/vps_docker providers where the agent is root inside its "
+            "container: the agent can apt-install and write anywhere with no "
+            "sudo. mngr injects a root client key and SSHes in as root. This "
+            "requires the btrfs additional-disk layout "
+            "(is_host_data_volume_exposed must be False), because root cannot "
+            "traverse the 9p/reverse-sshfs bind mount the exposed layout uses. "
+            "When False (today's default), the agent runs as the Lima default "
+            "user with passwordless sudo."
         ),
     )
     default_image_url_aarch64: str | None = Field(
@@ -112,37 +76,6 @@ class LimaProviderConfig(ProviderInstanceConfig):
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default limactl start arguments applied to all VMs",
-    )
-    default_container_run_args: tuple[str, ...] = Field(
-        default=(),
-        description=(
-            "Extra arguments appended to the `docker run` that starts the agent container in "
-            "is_host_in_docker mode (e.g. '--workdir=/' and '--security-opt=no-new-privileges' when "
-            "running under gVisor). These reach the inner container only; the VM-level "
-            "`default_start_args` go to `limactl start` instead. Empty by default (no change to the "
-            "`docker run`). Ignored when is_host_in_docker is False (no container is run)."
-        ),
-    )
-    docker_runtime: str | None = Field(
-        default=None,
-        description=(
-            "Container runtime to pass to `docker run --runtime` for the agent container in "
-            "is_host_in_docker mode (e.g. 'runsc' for gVisor). When None (the default), no "
-            "`--runtime` flag is added and the in-VM Docker daemon uses its configured default. "
-            "The named runtime must be installed and registered inside the VM (see "
-            "`install_gvisor_runtime`), otherwise container creation fails with Docker's native "
-            "'unknown runtime' error. Override via MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME. "
-            "Ignored when is_host_in_docker is False (no container is run)."
-        ),
-    )
-    install_gvisor_runtime: bool = Field(
-        default=False,
-        description=(
-            "When True, the is_host_in_docker VM provisioning installs and registers the gVisor "
-            "`runsc` runtime with the in-VM Docker daemon (idempotent; a no-op when runsc is already "
-            "present). This only installs the runtime -- set `docker_runtime='runsc'` to actually run "
-            "the agent container under it. Ignored when is_host_in_docker is False."
-        ),
     )
     default_idle_timeout: int = Field(
         default=800,
@@ -176,3 +109,15 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "abort -- both have to be wide enough."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_run_as_root_requires_btrfs_layout(self) -> Self:
+        # Root cannot traverse the 9p/reverse-sshfs bind mount the exposed
+        # layout uses, so running the agent as root requires the btrfs
+        # additional-disk layout. Fail fast at config construction.
+        if self.is_run_as_root and self.is_host_data_volume_exposed:
+            raise LimaConfigError(
+                "providers.lima.is_run_as_root=True requires the btrfs additional-disk layout; "
+                "set providers.lima.is_host_data_volume_exposed=false."
+            )
+        return self

@@ -115,7 +115,7 @@ tests_passing_before/after booleans, and a markdown summary.""",
     see_also=(
         ("create", "Create a new agent"),
         ("list", "List agents"),
-        ("pull", "Pull files or git commits from an agent"),
+        ("rsync", "Rsync files between local and a remote host or agent"),
     ),
 ).register()
 
