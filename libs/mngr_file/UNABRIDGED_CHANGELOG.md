@@ -4,6 +4,20 @@ Full, unedited changelog entries for the `mngr_file` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Improved the quality of the mngr-file test suite (test-only changes, no behavior change):
+
+- Added a real end-to-end test that drives `mngr file put` and `mngr file get` through the CLI and asserts the content round-trips, replacing a test that bypassed the command code and only exercised the underlying host interface.
+- Strengthened the localhost listing test to create a known file and directory and assert they appear with the correct type and size, instead of merely asserting the listing was non-empty.
+- Replaced tautological `FileEntry` constructor assertions with tests that verify immutability and that optional fields default to `None` when omitted, and removed the tautological enum-value assertions entirely.
+- Tightened the CLI argument-validation tests to assert a usage error (exit code 2 with a "Missing argument" message) rather than just a non-zero exit code.
+- Parametrized the three near-identical `_is_volume_accessible_path` tests into one.
+
+Fixed stale See-Also references in the `file` command's help metadata. The `push` and `pull` references pointed at top-level commands that were removed when push/pull were restructured into `rsync` and `git push`/`git pull`; they are now replaced with a single `rsync` reference. Previously these produced broken `[mngr help push](mngr help push)` markdown links in the generated docs.
+
+Removed a stale `[tool.coverage.report]` comment that attributed coverage oscillation to test nondeterminism. The underlying offload bug that caused the oscillation has since been fixed, so coverage is deterministic; the floor is left unchanged at 75% (CI measures ~79%).
+
 ## 2026-06-09
 
 `mngr file get`, `list`, and `put` now operate through the unified host file interfaces

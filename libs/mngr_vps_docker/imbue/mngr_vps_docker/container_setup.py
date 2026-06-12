@@ -80,10 +80,18 @@ OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_help
 OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
 OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
 
-# Idempotent install: skip if depot already on PATH, otherwise download to
-# /usr/local/bin via depot.dev's official installer. Run once per build (cheap
-# no-op when already present); avoids needing a separate provisioning step.
-_DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
+# Resolve the depot CLI at run time, preferring a copy already on PATH so an
+# existing install is respected. depot.dev's installer drops the CLI at
+# $HOME/.depot/bin, which is not on a non-interactive shell's PATH, so we fall
+# back to that absolute location and install there only when nothing is found.
+# The remote shell captures the result in $DEPOT_BIN (so $HOME expands to the
+# connecting user's home), and the same value drives both the install check and
+# the invocation below.
+_DEPOT_RESOLVE_AND_INSTALL: Final[str] = (
+    'DEPOT_BIN="$(command -v depot || echo "$HOME/.depot/bin/depot")"; '
+    'test -x "$DEPOT_BIN" || curl -fsSL https://depot.dev/install-cli.sh | sh'
+)
+_DEPOT_BIN: Final[str] = '"$DEPOT_BIN"'
 
 # Env-var assignments whose values are secrets and must be redacted before any
 # remote command string ends up in logs or exception messages.
@@ -1041,7 +1049,7 @@ def build_image_on_outer(
         env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
         if depot_project_id:
             env["DEPOT_PROJECT_ID"] = depot_project_id
-        remote_cmd = f"{_DEPOT_INSTALL_CMD} && depot {quoted}"
+        remote_cmd = f"{_DEPOT_RESOLVE_AND_INSTALL} && {_DEPOT_BIN} {quoted}"
         run_env: Mapping[str, str] | None = env
     else:
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]

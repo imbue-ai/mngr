@@ -14,6 +14,7 @@ from imbue.mngr_gcp.backend import GcpProviderBackend
 from imbue.mngr_gcp.backend import ParsedGcpBuildOptions
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpCredentialsError
 
 
 class _StubAdcConfig(GcpProviderConfig):
@@ -30,7 +31,7 @@ class _StubAdcConfig(GcpProviderConfig):
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
         if not self.stub_has_credentials:
-            raise ValueError("GCP Application Default Credentials not configured (stub).")
+            raise GcpCredentialsError("GCP Application Default Credentials not configured (stub).")
         return AnonymousCredentials(), self.stub_resolved_project
 
 
@@ -131,7 +132,7 @@ class _FirewallStubClient(GcpVpsClient):
 
 
 def _build_provider(
-    mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None, firewall_missing: bool = False
+    mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None, firewall_missing: bool = False
 ) -> GcpProvider:
     """Construct a GcpProvider with the given auto-shutdown and firewall settings.
 
@@ -142,14 +143,14 @@ def _build_provider(
     config = GcpProviderConfig(
         backend=GCP_BACKEND_NAME,
         project_id="test-project",
-        auto_shutdown_minutes=auto_shutdown_minutes,
+        auto_shutdown_seconds=auto_shutdown_seconds,
     )
     client = _FirewallStubClient(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone=config.default_zone,
         image=config.default_source_image,
-        auto_shutdown_minutes=auto_shutdown_minutes,
+        auto_shutdown_seconds=auto_shutdown_seconds,
         stub_firewall_missing=firewall_missing,
     )
     return GcpProvider(
@@ -164,25 +165,25 @@ def _build_provider(
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: MngrContext) -> None:
-    """The pre-create hook fires when auto_shutdown_minutes is None (the config default).
+    """The pre-create hook fires when auto_shutdown_seconds is None (the config default).
 
     Without it, a release test would launch instances with no self-delete safety
     net. The hook must abort the launch before any GCE API call.
     """
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=None)
-    with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+    with pytest.raises(MngrError, match="auto_shutdown_seconds"):
         provider._validate_provider_args_for_create()
 
 
 def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     # No exception raised (auto_shutdown set, firewall present).
     provider._validate_provider_args_for_create()
 
 
 def test_validate_provider_args_under_pytest_raises_when_zero(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=0)
-    with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=0)
+    with pytest.raises(MngrError, match="auto_shutdown_seconds"):
         provider._validate_provider_args_for_create()
 
 
@@ -193,7 +194,7 @@ def test_validate_provider_args_requires_firewall_rule(temp_mngr_ctx: MngrContex
     get the actionable message before any provider write, not buried under a
     "Host creation failed, attempting cleanup..." line mid-create.
     """
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60, firewall_missing=True)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60, firewall_missing=True)
     with pytest.raises(MngrError, match="mngr gcp prepare"):
         provider._validate_provider_args_for_create()
 
@@ -204,7 +205,7 @@ def test_validate_provider_args_requires_firewall_rule(temp_mngr_ctx: MngrContex
 
 
 def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(None)
     # region holds the zone for GCP (base threads it to create_instance).
     assert parsed.region == "us-west1-a"
@@ -215,7 +216,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
 
 
 def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(
         [
             "--gcp-zone=us-west1-b",
@@ -236,18 +237,18 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
 
 def test_parse_build_args_rejects_gcp_spot_with_value(temp_mngr_ctx: MngrContext) -> None:
     """``--gcp-spot`` is presence-only; passing a value (e.g. ``--gcp-spot=true``) raises."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="presence-only flag"):
         provider._parse_build_args(["--gcp-spot=true"])
 
 
 def test_parse_build_args_rejects_unknown_gcp_flag(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="Unknown gcp build arg"):
         provider._parse_build_args(["--gcp-bogus=foo"])
 
 
 def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext) -> None:
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="no longer supported"):
         provider._parse_build_args(["--vps-region=us-west1-a"])

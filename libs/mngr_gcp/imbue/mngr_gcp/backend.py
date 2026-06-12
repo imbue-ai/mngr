@@ -115,7 +115,7 @@ class GcpProvider(VpsDockerProvider):
            the safety net that prevents leaked cost if pytest itself is killed.
            For GCP that net is ``scheduling.max_run_duration`` +
            ``instance_termination_action=DELETE`` (both rely on
-           ``auto_shutdown_minutes`` being set). If it isn't, fail closed.
+           ``auto_shutdown_seconds`` being set). If it isn't, fail closed.
 
         3. Require the SSH firewall rule (created once via ``mngr gcp prepare``)
            to already exist. Checking it read-only here -- before create_host
@@ -132,12 +132,12 @@ class GcpProvider(VpsDockerProvider):
                 self.gcp_client.project_id,
             )
         if "PYTEST_CURRENT_TEST" in os.environ:
-            minutes = self._get_effective_auto_shutdown_minutes()
-            if not (minutes and minutes > 0):
+            seconds = self._get_effective_auto_shutdown_seconds()
+            if not (seconds and seconds > 0):
                 raise MngrError(
                     "Refusing to create GCE instance during pytest without "
-                    "auto_shutdown_minutes set on the GCP provider config. "
-                    "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
+                    "auto_shutdown_seconds set on the GCP provider config. "
+                    "Set [providers.<instance>] auto_shutdown_seconds = <N> in "
                     "the project settings.toml so the instance launches with "
                     "scheduling.max_run_duration + instance_termination_action=DELETE "
                     "and self-deletes even if pytest is killed."
@@ -301,7 +301,7 @@ class GcpProviderBackend(ProviderBackendInterface):
             associate_external_ip=config.associate_external_ip,
             service_account_email=config.service_account_email,
             service_account_scopes=config.service_account_scopes,
-            auto_shutdown_minutes=config.auto_shutdown_minutes,
+            auto_shutdown_seconds=config.auto_shutdown_seconds,
             container_ssh_port=config.container_ssh_port,
         )
 

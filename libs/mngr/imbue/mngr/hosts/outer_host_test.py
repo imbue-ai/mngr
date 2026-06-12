@@ -16,6 +16,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
@@ -34,6 +35,36 @@ def test_outer_host_satisfies_outer_host_interface(temp_mngr_ctx: MngrContext) -
         mngr_ctx=temp_mngr_ctx,
     )
     assert isinstance(outer, OuterHostInterface)
+
+
+def test_prepend_env_exports_none_or_empty_is_unchanged() -> None:
+    """No env vars -> the command is returned untouched."""
+    assert _prepend_env_exports("docker build .", None) == "docker build ."
+    assert _prepend_env_exports("docker build .", {}) == "docker build ."
+
+
+def test_prepend_env_exports_uses_export_so_var_survives_compound_command() -> None:
+    """Env vars must be ``export``ed, not bare ``KEY=VAL`` prefixed.
+
+    A bare ``KEY=VAL command`` prefix only applies to the single simple command
+    it precedes, so for a compound command like ``install && depot build`` the
+    var would be gone by the time ``depot build`` runs. ``export KEY=VAL &&``
+    sets it in the shell environment for the whole chain.
+    """
+    compound = "test -x /root/.depot/bin/depot || curl x | sh && /root/.depot/bin/depot build"
+    result = _prepend_env_exports(compound, {"DEPOT_TOKEN": "depot_secret"})
+    # The export must come first and chain into the whole command with &&, so
+    # the var is in scope for the trailing ``depot build`` after the ``&&``/``||``.
+    # (shlex.quote leaves the safe KEY=VAL unquoted.)
+    assert result == "export DEPOT_TOKEN=depot_secret && " + compound
+    # Must not use a bare ``KEY=VAL`` assignment prefix.
+    assert not result.startswith("DEPOT_TOKEN=")
+
+
+def test_prepend_env_exports_quotes_values_with_shell_metacharacters() -> None:
+    """Values containing shell metacharacters are shlex-quoted so they can't break out."""
+    result = _prepend_env_exports("run", {"TOK": "a b;rm -rf /"})
+    assert result == "export 'TOK=a b;rm -rf /' && run"
 
 
 def test_outer_host_local_is_local(temp_mngr_ctx: MngrContext) -> None:

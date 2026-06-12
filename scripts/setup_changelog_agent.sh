@@ -6,8 +6,10 @@ set -euo pipefail
 # running this is the way to redeploy after editing the prompt or this
 # script.
 #
-# The scheduled agent runs nightly at 08:00 UTC (midnight or 1 AM Pacific,
-# depending on DST) as a headless_claude agent. The
+# The scheduled agent runs nightly at midnight Pacific time as a
+# headless_claude agent. The schedule is deployed with an explicit
+# --timezone (see SCHEDULE / TIMEZONE below) so the fire time does not
+# depend on the deploying machine's local timezone. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running consolidate_changelog.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md
@@ -44,8 +46,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 TRIGGER_NAME="changelog-consolidation"
-# 08:00 UTC nightly (midnight or 1 AM Pacific, depending on DST).
-SCHEDULE="0 8 * * *"
+# Midnight nightly, interpreted in TIMEZONE below (so it fires at midnight
+# Pacific regardless of where this deploy script runs).
+SCHEDULE="0 0 * * *"
+TIMEZONE="America/Los_Angeles"
 PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
@@ -125,6 +129,7 @@ echo "Creating schedule '${TRIGGER_NAME}' (provider=$PROVIDER, verify=$VERIFY)..
 uv run mngr schedule add "$TRIGGER_NAME" \
     --command create \
     --schedule "$SCHEDULE" \
+    --timezone "$TIMEZONE" \
     --provider "$PROVIDER" \
     --verify "$VERIFY" \
     --full-copy \

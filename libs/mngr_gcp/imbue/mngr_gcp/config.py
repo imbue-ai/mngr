@@ -4,6 +4,9 @@ from google.auth.credentials import Credentials
 from pydantic import Field
 
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_gcp.errors import GcpCredentialsError
+from imbue.mngr_gcp.errors import GcpProjectError
+from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 # OAuth scope granting full access to all Google Cloud Platform APIs. Only
@@ -141,7 +144,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         Returning both from a single ``default()`` call lets the backend resolve
         credentials and the fallback project without probing twice.
 
-        Raises ``ValueError`` when ADC resolves no credentials (no
+        Raises ``GcpCredentialsError`` when ADC resolves no credentials (no
         ``GOOGLE_APPLICATION_CREDENTIALS``, no ``gcloud auth
         application-default login`` file, no attached service account). The
         backend wraps this in ``ProviderUnavailableError`` (state *unknown* --
@@ -155,7 +158,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         try:
             credentials, resolved_project = google.auth.default()
         except google_auth_exceptions.DefaultCredentialsError as e:
-            raise ValueError(
+            raise GcpCredentialsError(
                 "GCP Application Default Credentials not configured. Run "
                 "'gcloud auth application-default login', set GOOGLE_APPLICATION_CREDENTIALS to a "
                 "service-account key file, or run on a GCE/Cloud Run/GKE instance with an attached "
@@ -164,7 +167,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         return credentials, resolved_project
 
     def resolve_project_id(self, adc_fallback_project: str | None) -> str:
-        """Return the project to launch instances in, raising ``ValueError`` if none.
+        """Return the project to launch instances in, raising ``GcpProjectError`` if none.
 
         The explicitly configured ``project_id`` always wins. When it is unset,
         fall back to ``adc_fallback_project`` -- the project ADC resolved from
@@ -182,7 +185,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         """
         project_id = self.project_id or adc_fallback_project
         if not project_id:
-            raise ValueError(
+            raise GcpProjectError(
                 "No GCP project_id configured and none was resolved from the environment. Run "
                 "'mngr config set providers.gcp.project_id <your-project>', set the "
                 "GOOGLE_CLOUD_PROJECT environment variable, or run 'gcloud config set project "
@@ -192,7 +195,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         return project_id
 
     def validate_zone_in_region(self) -> None:
-        """Raise ``ValueError`` if ``default_zone`` does not lie in ``default_region``.
+        """Raise ``GcpZoneRegionMismatchError`` if ``default_zone`` does not lie in ``default_region``.
 
         GCE zone names are ``<region>-<suffix>`` (e.g. ``us-west1-a`` is in
         ``us-west1``). A mismatched pair (e.g. region ``us-west1`` with zone
@@ -200,7 +203,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         surface as a confusing firewall/subnetwork-region error at create time.
         """
         if not self.default_zone.startswith(f"{self.default_region}-"):
-            raise ValueError(
+            raise GcpZoneRegionMismatchError(
                 f"GCP default_zone {self.default_zone!r} is not in default_region "
                 f"{self.default_region!r} (expected a zone like {self.default_region}-a)."
             )

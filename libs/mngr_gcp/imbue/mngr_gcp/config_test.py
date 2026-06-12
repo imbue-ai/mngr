@@ -4,6 +4,8 @@ import pytest
 
 from imbue.mngr_gcp.config import DEFAULT_GCE_IMAGE
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpProjectError
+from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
 
 
 def test_default_config_values() -> None:
@@ -23,7 +25,7 @@ def test_default_config_values() -> None:
     assert config.allowed_ssh_cidrs == ()
     assert config.firewall_target_tag == "mngr-ssh"
     assert config.associate_external_ip is True
-    assert config.auto_shutdown_minutes is None
+    assert config.auto_shutdown_seconds is None
 
 
 def test_backend_name_defaults_to_gcp() -> None:
@@ -51,7 +53,7 @@ def test_resolve_project_id_falls_back_to_adc_when_unset() -> None:
 
 def test_resolve_project_id_raises_when_unset_and_no_fallback() -> None:
     config = GcpProviderConfig()
-    with pytest.raises(ValueError, match="No GCP project_id configured"):
+    with pytest.raises(GcpProjectError, match="No GCP project_id configured"):
         config.resolve_project_id(None)
 
 
@@ -63,7 +65,7 @@ def test_validate_zone_in_region_accepts_matching() -> None:
 
 def test_validate_zone_in_region_rejects_mismatch() -> None:
     config = GcpProviderConfig(project_id="p", default_region="us-west1", default_zone="us-central1-a")
-    with pytest.raises(ValueError, match="is not in default_region"):
+    with pytest.raises(GcpZoneRegionMismatchError, match="is not in default_region"):
         config.validate_zone_in_region()
 
 

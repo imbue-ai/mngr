@@ -4,23 +4,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
-import pluggy
 import pytest
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
-from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.code_guardian_agent import CodeGuardianAgent
 from imbue.mngr_claude.code_guardian_agent import CodeGuardianAgentConfig
 from imbue.mngr_claude.code_guardian_agent import _CODE_GUARDIAN_SKILL_CONTENT
@@ -261,33 +257,33 @@ def test_fixme_fairy_skill_content_contains_fixme_instructions() -> None:
 
 
 @pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_creates_skill_file_in_non_interactive_mode(
+def test_install_skill_locally_creates_skill_file_in_per_agent_config_dir(
     skill_name: str,
     skill_content: str,
-    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
 ) -> None:
-    """In non-interactive mode, _install_skill_locally should create the skill file without prompting."""
-    skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+    """_install_skill_locally writes the skill into the agent's own config dir, not global ~/.claude."""
+    skill_path = tmp_path / "skills" / skill_name / "SKILL.md"
     assert not skill_path.exists()
 
-    _install_skill_locally(skill_name, skill_content, temp_mngr_ctx)
+    _install_skill_locally(skill_name, skill_content, tmp_path)
 
     assert skill_path.exists()
     assert skill_path.read_text() == skill_content
 
 
 @pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_overwrites_existing_skill_in_non_interactive_mode(
+def test_install_skill_locally_overwrites_existing_skill(
     skill_name: str,
     skill_content: str,
-    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
 ) -> None:
-    """In non-interactive mode, _install_skill_locally should overwrite an existing skill file."""
-    skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+    """_install_skill_locally should overwrite an existing skill file holding stale content."""
+    skill_path = tmp_path / "skills" / skill_name / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     skill_path.write_text("old content")
 
-    _install_skill_locally(skill_name, skill_content, temp_mngr_ctx)
+    _install_skill_locally(skill_name, skill_content, tmp_path)
 
     assert skill_path.read_text() == skill_content
 
@@ -296,44 +292,41 @@ def test_install_skill_locally_overwrites_existing_skill_in_non_interactive_mode
 def test_install_skill_locally_skips_when_content_unchanged(
     skill_name: str,
     skill_content: str,
-    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
 ) -> None:
     """When skill content is already up to date, installation should leave the file untouched."""
-    skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
+    skill_path = tmp_path / "skills" / skill_name / "SKILL.md"
     skill_path.parent.mkdir(parents=True, exist_ok=True)
     skill_path.write_text(skill_content)
 
-    _install_skill_locally(skill_name, skill_content, temp_mngr_ctx)
+    _install_skill_locally(skill_name, skill_content, tmp_path)
 
     # The file content must be exactly the already-installed content (not rewritten).
     assert skill_path.read_text() == skill_content
 
 
-@pytest.mark.parametrize("skill_name,skill_content", _SKILL_CONTENTS)
-def test_install_skill_locally_auto_approve_installs_without_prompting(
-    skill_name: str,
-    skill_content: str,
-    temp_config: MngrConfig,
-    temp_profile_dir: Path,
-    plugin_manager: "pluggy.PluginManager",
-) -> None:
-    """With is_auto_approve=True and is_interactive=True, skill should install without prompting."""
-    with ConcurrencyGroup(name="test-auto-approve") as cg:
-        auto_approve_ctx = make_mngr_ctx(
-            temp_config,
-            plugin_manager,
-            temp_profile_dir,
-            is_interactive=True,
-            is_auto_approve=True,
-            concurrency_group=cg,
-        )
-        skill_path = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
-        assert not skill_path.exists()
+def test_install_skill_locally_breaks_symlink_into_shared_skills(tmp_path: Path) -> None:
+    """When the per-agent skills/<name> is a child-symlink into the shared ~/.claude/skills/
+    (as _sync_user_resources leaves it), install must break the symlink and write a real
+    file, rather than following it and corrupting the shared source."""
+    shared_skill_dir = tmp_path / "home_claude" / "skills" / "code-guardian"
+    shared_skill_dir.mkdir(parents=True)
+    shared_skill_file = shared_skill_dir / "SKILL.md"
+    shared_skill_file.write_text("shared content")
 
-        _install_skill_locally(skill_name, skill_content, auto_approve_ctx)
+    config_dir = tmp_path / "agent_config"
+    agent_skills_dir = config_dir / "skills"
+    agent_skills_dir.mkdir(parents=True)
+    # Child-level symlink, mirroring what _sync_user_resources creates.
+    (agent_skills_dir / "code-guardian").symlink_to(shared_skill_dir)
 
-        assert skill_path.exists()
-        assert skill_path.read_text() == skill_content
+    _install_skill_locally("code-guardian", "agent content", config_dir)
+
+    # The agent's skill is now a real file holding the agent content...
+    assert not (agent_skills_dir / "code-guardian").is_symlink()
+    assert (agent_skills_dir / "code-guardian" / "SKILL.md").read_text() == "agent content"
+    # ...and the shared source is untouched.
+    assert shared_skill_file.read_text() == "shared content"
 
 
 # -- SkillProvisionedAgentConfig tests --
