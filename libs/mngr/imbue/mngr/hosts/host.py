@@ -1329,16 +1329,21 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("No info/exclude in source, skipping")
             return None
 
-    def _git_mirror_clone_from_source(
+    def _git_mirror_pull_from_source(
         self,
         source_host: OnlineHostInterface,
         source_path: Path,
         dest_git_dir: Path,
     ) -> None:
-        """Clone a bare mirror of a remote source repo onto this (local) machine via ssh.
+        """Mirror a remote source repo's branches and tags into a local bare repo via ssh.
 
-        The clone runs locally, so the source host's ssh key and known_hosts -- which
-        live on this machine -- are valid. `dest_git_dir` is the bare repo path to create.
+        Runs locally, so the source host's ssh key and known_hosts -- which live on this
+        machine -- are valid. `dest_git_dir` may already be an initialized bare repo (the
+        remote->local target, which `_transfer_git_repo` created via `git init --bare`) or
+        a fresh path (the remote->remote relay's temp mirror); `git init --bare` is
+        idempotent, so both cases are handled. We use a mirror-style `git fetch` rather
+        than `git clone --mirror` because clone refuses a non-empty destination, and the
+        remote->local target always pre-exists by this point.
         """
         source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
         if source_ssh_info is None:
@@ -1349,11 +1354,22 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
         try:
             self.mngr_ctx.concurrency_group.run_process_to_completion(
-                ["git", "clone", "--mirror", remote_url, str(dest_git_dir)],
+                ["git", "init", "--bare", str(dest_git_dir)],
+            )
+            self.mngr_ctx.concurrency_group.run_process_to_completion(
+                [
+                    "git",
+                    "-C",
+                    str(dest_git_dir),
+                    "fetch",
+                    "--prune",
+                    remote_url,
+                    *GIT_MIRROR_PUSH_REFSPECS,
+                ],
                 env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
             )
         except ProcessError as e:
-            raise MngrError(f"Failed to clone from remote source: {e}") from e
+            raise MngrError(f"Failed to fetch from remote source: {e}") from e
 
     def _git_push_to_target(
         self,
@@ -1380,7 +1396,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Remote source -> local target: pull a bare mirror straight onto
             # this machine using the source host's ssh credentials.
             with log_span("Fetching from remote source to local target"):
-                self._git_mirror_clone_from_source(source_host, source_path, target_path / ".git")
+                self._git_mirror_pull_from_source(source_host, source_path, target_path / ".git")
                 return
         elif not source_host.is_local:
             # Remote source -> remote target: a direct `git push` would run on
@@ -1397,7 +1413,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             with log_span("Relaying git repo remote-to-remote via local mirror: {}", git_url):
                 with tempfile.TemporaryDirectory(prefix="mngr-git-relay-") as temp_dir:
                     mirror_git_dir = Path(temp_dir) / "mirror.git"
-                    self._git_mirror_clone_from_source(source_host, source_path, mirror_git_dir)
+                    self._git_mirror_pull_from_source(source_host, source_path, mirror_git_dir)
                     command_args = [
                         "git",
                         "-C",

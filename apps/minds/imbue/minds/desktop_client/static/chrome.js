@@ -1,6 +1,7 @@
 // Persistent chrome (titlebar + sidebar + iframe). Shared between browser
-// mode (this iframe-based layout) and Electron (where the content + sidebar
-// are separate WebContentsViews and window.minds exposes IPC adapters).
+// mode (this iframe-based layout) and Electron (where the content is its
+// own WebContentsView, the sidebar page is loaded into the shared modal
+// WebContentsView when opened, and window.minds exposes IPC adapters).
 (function () {
   var isElectron = !!window.minds;
 
@@ -31,27 +32,70 @@
   }
 
   // -- Sidebar toggle -------------------------------------------------------
+  //
+  // The menu's position is derived from the trigger button's
+  // getBoundingClientRect + a caller-chosen offset (anchor model:
+  // menu.top-left = trigger.bottom-left + offset). This keeps the menu
+  // visually attached to whatever opens it -- if the button moves (mac
+  // traffic-light spacing, a future layout change, a different control
+  // entirely), the menu follows for free without baking the trigger
+  // location into a server-side template branch.
+  //
+  // Browser mode: this script positions the inline #sidebar-menu via
+  // style.left/style.top at toggle time, then toggles the backdrop's
+  // hidden class. Electron mode: the rect + offset are sent over IPC;
+  // main.js encodes them into /_chrome/sidebar's query string, the
+  // server passes them to Sidebar.jinja, and the menu is positioned by
+  // server-rendered inline style. Both modes share the same anchor math.
+  //
+  // ``sidebarOpen`` is intentionally browser-mode-only -- in Electron
+  // the main process owns visibility (see toggleSidebar / openModal /
+  // closeModal in electron/main.js).
+  // Nudge 2px left of the trigger's left edge, and sit 2px below its bottom.
+  var SIDEBAR_OFFSET_X = -2;
+  var SIDEBAR_OFFSET_Y = 2;
   var sidebarOpen = false;
+  function computeSidebarAnchor() {
+    var btn = document.getElementById('sidebar-toggle');
+    if (!btn) return null;
+    var rect = btn.getBoundingClientRect();
+    return {
+      trigger: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+      offset: { x: SIDEBAR_OFFSET_X, y: SIDEBAR_OFFSET_Y },
+    };
+  }
+  function positionInlineSidebarPanel(anchor) {
+    var menu = document.getElementById('sidebar-menu');
+    if (!menu || !anchor) return;
+    menu.style.left = Math.round(anchor.trigger.x + anchor.offset.x) + 'px';
+    menu.style.top = Math.round(anchor.trigger.y + anchor.trigger.height + anchor.offset.y) + 'px';
+  }
+  function showSidebarPanel() {
+    positionInlineSidebarPanel(computeSidebarAnchor());
+    document.getElementById('sidebar-backdrop').classList.remove('hidden');
+  }
+  function hideSidebarPanel() {
+    document.getElementById('sidebar-backdrop').classList.add('hidden');
+  }
   function toggleSidebar() {
     if (isElectron) {
-      window.minds.toggleSidebar();
-      sidebarOpen = !sidebarOpen;
+      window.minds.toggleSidebar(computeSidebarAnchor());
     } else {
-      var panel = document.getElementById('sidebar-panel');
       sidebarOpen = !sidebarOpen;
-      if (sidebarOpen) panel.classList.remove('-translate-x-full');
-      else panel.classList.add('-translate-x-full');
+      if (sidebarOpen) showSidebarPanel();
+      else hideSidebarPanel();
     }
+  }
+  function closeSidebar() {
+    if (isElectron) return;  // Electron sidebar.js handles its own dismissal.
+    if (!sidebarOpen) return;
+    sidebarOpen = false;
+    hideSidebarPanel();
   }
 
   function selectWorkspace(agentId) {
     navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
-    if (isElectron) {
-      sidebarOpen = false;
-    } else {
-      sidebarOpen = false;
-      document.getElementById('sidebar-panel').classList.add('-translate-x-full');
-    }
+    closeSidebar();
   }
 
   // -- Titlebar accent ------------------------------------------------------
@@ -195,7 +239,17 @@
     document.getElementById('max-btn').onclick = function () { window.minds.maximize(); };
     document.getElementById('close-btn').onclick = function () { window.minds.close(); };
     document.getElementById('content-frame').style.display = 'none';
-    document.getElementById('sidebar-panel').style.display = 'none';
+    document.getElementById('sidebar-backdrop').style.display = 'none';
+  } else {
+    // Browser mode: backdrop click outside the panel + Escape close the
+    // sidebar, matching the Electron sidebar's behavior.
+    document.getElementById('sidebar-backdrop').addEventListener('click', function (e) {
+      if (e.target.closest('#sidebar-menu')) return;
+      closeSidebar();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') closeSidebar();
+    });
   }
 
   // -- Title + URL tracking -------------------------------------------------
@@ -213,9 +267,14 @@
         document.getElementById('page-title').textContent = title || 'Minds';
       });
     }
-    window.minds.onContentURLChange(function () {
-      refreshAuthStatus();
-    });
+    // The account row that refreshAuthStatus would update lives inside the
+    // inline #sidebar-backdrop, which is display:none in Electron mode --
+    // the visible copy renders inside the shared modal WebContentsView when
+    // it is loaded with /_chrome/sidebar, and the sidebar.js running there
+    // subscribes to its own content-url-changed IPC and re-fetches
+    // /auth/api/status. So we don't subscribe to onContentURLChange here in
+    // Electron mode; doing so would fire the fetch on every nav for no
+    // visible effect.
     // In Electron mode the current workspace is authoritative via IPC: main.js
     // tracks the active workspace per bundle (handles both /goto/<id>/ URLs and
     // post-redirect agent-<id>.localhost subdomains) and pushes it here. Deriving
@@ -290,33 +349,57 @@
         var loc = document.getElementById('content-frame').contentWindow.location.pathname;
         var m = loc.match(/^\/goto\/([^/]+)/);
         var derivedAgentId = m ? m[1] : null;
+        // Re-render the inline workspace list only when the displayed
+        // workspace actually changes; otherwise the 500ms tick would
+        // tear down and rebuild every row twice per second forever.
+        // SSE-driven workspace add/remove/rename still flows through
+        // handleChromeEvent -> renderWorkspaces.
+        var workspaceChanged = currentTitleAgentId !== derivedAgentId;
         setDisplayedWorkspaceAgentId(derivedAgentId);
         applyTitleAccent(derivedAgentId);
+        if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
     document.getElementById('content-frame').addEventListener('load', refreshAuthStatus);
   }
 
-  // -- Auth status ----------------------------------------------------------
+  // -- Auth status (drives the in-sidebar account row) ----------------------
+  //
+  // Browser mode renders the floating sidebar inline (this script owns it),
+  // so we also keep the "Manage account(s)" / "Log in" label up-to-date here
+  // by toggling the same DOM the Electron sidebar.js uses. In Electron mode
+  // the sidebar lives in its own WebContentsView with its own copy of this
+  // logic; the writes below land on the inline #sidebar-account, which
+  // lives inside the display:none #sidebar-backdrop and so isn't
+  // user-visible. The main process drives the separate view.
   var signedIn = false;
   function updateAuthUI(data) {
-    var btn = document.getElementById('user-btn');
-    if (data.signedIn) {
-      signedIn = true;
-      btn.textContent = 'Manage account(s)';
+    signedIn = !!(data && data.signedIn);
+    var label = document.getElementById('sidebar-account-label');
+    var btn = document.getElementById('sidebar-account');
+    if (!label || !btn) return;
+    if (signedIn) {
+      label.textContent = 'Manage account(s)';
       btn.title = data.email || 'Manage accounts';
     } else {
-      signedIn = false;
-      btn.textContent = 'Log in';
+      label.textContent = 'Log in';
       btn.title = 'Sign in to your account';
     }
   }
   refreshAuthStatus();
 
-  document.getElementById('user-btn').onclick = function () {
-    if (signedIn) navigateContent('/accounts');
-    else navigateContent('/auth/login');
-  };
+  // -- Sidebar action wiring (browser mode only) ----------------------------
+  if (!isElectron) {
+    var newWsBtn = document.getElementById('sidebar-new-workspace');
+    if (newWsBtn) newWsBtn.onclick = function () { navigateContent('/create'); closeSidebar(); };
+    var accountBtn = document.getElementById('sidebar-account');
+    if (accountBtn) {
+      accountBtn.onclick = function () {
+        navigateContent(signedIn ? '/accounts' : '/auth/login');
+        closeSidebar();
+      };
+    }
+  }
 
   document.getElementById('requests-toggle').onclick = function () {
     if (isElectron) window.minds.toggleInbox();
@@ -347,16 +430,13 @@
   }
 
   // -- SSE-driven sidebar (browser mode only) -------------------------------
+  var lastWorkspaces = [];
+
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
+    if (!container) return;
     container.textContent = '';
-    if (!workspaces || workspaces.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'px-4 py-6 text-sm text-zinc-400 text-center';
-      empty.textContent = 'No projects';
-      container.appendChild(empty);
-      return;
-    }
+    if (!workspaces || workspaces.length === 0) return;
     var groups = {};
     workspaces.forEach(function (w) {
       var key = w.account || 'Private';
@@ -368,29 +448,30 @@
       if (b === 'Private') return 1;
       return a.localeCompare(b);
     });
-    keys.forEach(function (key) {
-      var header = document.createElement('div');
-      header.className = 'px-3 pt-2 pb-0.5 text-[11px] text-zinc-400 tracking-wider';
-      header.textContent = key === 'Private' ? 'PRIVATE' : key;
-      container.appendChild(header);
+    keys.forEach(function (key, keyIdx) {
+      if (keyIdx > 0 || keys.length > 1) {
+        var header = document.createElement('div');
+        header.className = 'px-2 pt-2 pb-1 text-[10px] text-white/40 uppercase tracking-wider';
+        header.textContent = key === 'Private' ? 'Private' : key;
+        container.appendChild(header);
+      }
       groups[key].forEach(function (w) {
-        var row = document.createElement('div');
-        row.className = 'sidebar-item cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-3 transition-colors hover:bg-white/5';
-        row.textContent = w.name || w.id;
-        row.setAttribute('data-agent-id', w.id);
-        // Retained-but-unverified workspace (its provider's last discovery poll
-        // errored): append an amber dot. The row stays fully clickable.
-        if (w.is_stale) {
-          row.classList.add('is-stale');
-          var staleDot = document.createElement('span');
-          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 ml-1.5 rounded-full bg-amber-400/80 align-middle';
-          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
-          row.appendChild(staleDot);
-        }
-        if (typeof w.accent === 'string') {
-          row.style.setProperty('--workspace-accent', w.accent);
-        }
-        row.addEventListener('click', function () { selectWorkspace(w.id); });
+        // Shared row builder. Browser mode has no multi-window concept, so
+        // withOpenNew:false (the current row still gets its settings gear).
+        // Unlike the Electron sidebar (delegated listeners) this view wires
+        // the click per-row, so attach it to the built element.
+        var row = window.mindsSidebarRow.buildRow(w, {
+          isCurrent: w.id === currentTitleAgentId,
+          withOpenNew: false,
+        });
+        row.addEventListener('click', function (e) {
+          if (e.target.closest('[data-open-settings]')) {
+            navigateContent('/workspace/' + w.id + '/settings');
+            closeSidebar();
+            return;
+          }
+          selectWorkspace(w.id);
+        });
         container.appendChild(row);
       });
     });
@@ -454,8 +535,9 @@
         return;
       }
       if (data.type === 'workspaces') {
-        rememberWorkspaceAccents(data.workspaces);
-        renderWorkspaces(data.workspaces);
+        lastWorkspaces = data.workspaces || [];
+        rememberWorkspaceAccents(lastWorkspaces);
+        renderWorkspaces(lastWorkspaces);
         // Replay the most recent ``applyTitleAccent`` call now that the
         // cache has fresh data. Catches two cases:
         //   1. Cold start: bootstrap set ``lastRequestedAccentAgentId``
