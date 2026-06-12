@@ -63,6 +63,11 @@ def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> li
 
     Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
     at module load time -- see the rationale on that constant.
+
+    This is intentionally separate from `cli.model_schema.walk_model_fields`
+    (which enumerates *all* fields for the `--schema` view): this walk yields
+    only dict-typed leaf paths as tuples and has no use for non-dict leaves, so
+    expressing it on the general walker would be more indirect, not less.
     """
     paths: list[tuple[str, ...]] = []
     for name, field in model.model_fields.items():
@@ -787,6 +792,12 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     # (host.provider is the documented short form; host.provider_name matches the data type)
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
+
+    # Expose labels.project as the bare `project` alias too, mirroring the --project
+    # filter flag and the host.provider alias, so CEL filters/sorts can use either name.
+    # Always set (None when unset), matching how optional scalar fields appear in the dump.
+    labels = result.get("labels")
+    result["project"] = labels.get("project") if isinstance(labels, dict) else None
 
     return result
 
