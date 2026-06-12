@@ -146,6 +146,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_PI_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="modal",
@@ -166,6 +167,12 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         entry_point_name="vultr",
         package_name="imbue-mngr-vultr",
         description="Vultr provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="aws",
+        package_name="imbue-mngr-aws",
+        description="AWS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(
