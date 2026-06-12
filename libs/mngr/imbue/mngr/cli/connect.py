@@ -5,6 +5,8 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.api.connect import connect_to_agent
+from imbue.mngr.api.connect import resolve_connect_command
+from imbue.mngr.api.connect import run_connect_command
 from imbue.mngr.api.data_types import ConnectionOptions
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -33,6 +35,7 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     start: bool
     reconnect: bool
     session_command: str | None
+    connect_command: str | None
     allow_unknown_host: bool
 
 
@@ -56,6 +59,10 @@ class ConnectCliOptions(AgentFilterCliOptions, CommonCliOptions):
     help="Automatically reconnect if dropped [future]",
 )
 @optgroup.option("--session-command", help="Command to run instead of attaching to main session [future]")
+@optgroup.option(
+    "--connect-command",
+    help="Command to run instead of the builtin connect. MNGR_AGENT_NAME and MNGR_SESSION_NAME env vars are set.",
+)
 @optgroup.option(
     "--allow-unknown-host/--no-allow-unknown-host",
     "allow_unknown_host",
@@ -103,6 +110,21 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         mngr_ctx=mngr_ctx,
     )
 
+    logger.info("Connecting to agent: {}", agent.name)
+
+    # A custom connect command (from --connect-command or config) replaces the
+    # builtin tmux attach, mirroring how create/start honor connect_command.
+    resolved_connect_command = resolve_connect_command(opts.connect_command, mngr_ctx)
+    if resolved_connect_command is not None:
+        session_name = f"{mngr_ctx.config.prefix}{agent.name}"
+        run_connect_command(
+            resolved_connect_command,
+            str(agent.name),
+            session_name,
+            is_local=host.is_local,
+        )
+        return
+
     # Build connection options
     connection_opts = ConnectionOptions(
         is_reconnect=opts.reconnect,
@@ -112,7 +134,6 @@ def connect(ctx: click.Context, **kwargs: Any) -> None:
         is_unknown_host_allowed=opts.allow_unknown_host,
     )
 
-    logger.info("Connecting to agent: {}", agent.name)
     connect_to_agent(agent, host, mngr_ctx, connection_opts)
 
 

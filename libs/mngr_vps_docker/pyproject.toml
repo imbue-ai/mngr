@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-vps-docker"
-version = "0.1.3"
+version = "0.1.5"
 description = "VPS Docker provider base classes for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.10",
+    "imbue-mngr==0.2.12",
 ]
 
 [build-system]
@@ -52,9 +52,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Initial threshold; recalibrate once we have a reliable CI measurement
-# of this package's coverage.
-fail_under = 40
+# Floor pinned just below CI-measured coverage; raise incrementally as tests are added.
+fail_under = 45
 omit = [
   "*_test.py",
   "test_*.py",

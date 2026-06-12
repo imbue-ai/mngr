@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import SecretStr
 
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -12,10 +13,13 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.instance import _build_delegated_vps_config
 from imbue.mngr_imbue_cloud.instance import _map_docker_status_to_host_state
 from imbue.mngr_imbue_cloud.instance import build_pool_host_wipe_script
+from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 
 
@@ -68,6 +72,33 @@ def test_map_docker_status_exited_nonzero_note_includes_exit_code() -> None:
     _state, note = _map_docker_status_to_host_state("exited", 137)
     assert note is not None
     assert "137" in note
+
+
+def test_build_delegated_vps_config_forwards_runtime_knobs() -> None:
+    """The slow-path rebuild must carry runsc + hardening args onto the vps_docker config."""
+    config = ImbueCloudProviderConfig(
+        account=ImbueCloudAccount("a@b.com"),
+        docker_runtime="runsc",
+        install_gvisor_runtime=True,
+        default_start_args=("--workdir=/", "--security-opt=no-new-privileges"),
+    )
+    vps_config = _build_delegated_vps_config(config)
+    assert vps_config.backend == "vps_docker"
+    assert vps_config.docker_runtime == "runsc"
+    assert vps_config.install_gvisor_runtime is True
+    assert vps_config.default_start_args == ("--workdir=/", "--security-opt=no-new-privileges")
+    # The connection-shape fields are still forwarded from the imbue_cloud config.
+    assert vps_config.host_dir == config.host_dir
+    assert vps_config.container_ssh_port == config.container_ssh_port
+
+
+def test_build_delegated_vps_config_defaults_to_no_runtime() -> None:
+    """With an unconfigured imbue_cloud config, no runtime is forced (runc)."""
+    config = ImbueCloudProviderConfig(account=ImbueCloudAccount("a@b.com"))
+    vps_config = _build_delegated_vps_config(config)
+    assert vps_config.docker_runtime is None
+    assert vps_config.install_gvisor_runtime is False
+    assert vps_config.default_start_args == ()
 
 
 class _StubImbueCloudProvider(ImbueCloudProvider):
@@ -229,3 +260,72 @@ def test_build_pool_host_wipe_script_renders_safe_host_id_inline() -> None:
     script = build_pool_host_wipe_script(_WIPE_HOST_ID)
     assert f"label=com.imbue.mngr.host-id={_WIPE_HOST_ID}" in script
     assert f"name=mngr-host-vol-{_WIPE_HOST_HEX}" in script
+
+
+# =============================================================================
+# _release_lease_on_failure -- the reliability invariant that a failure after a
+# successful lease releases the host back to the pool exactly once (so failed
+# fast/slow-path builds never leak a paid lease), while a success releases
+# nothing and lets the wrapped result/exception flow through untouched.
+# =============================================================================
+
+
+class _RecordingReleaseClient:
+    """Stub connector client that records release_host calls (and reports success)."""
+
+    def __init__(self) -> None:
+        self.release_calls: list[str] = []
+
+    def release_host(self, access_token: SecretStr, host_db_id: str) -> bool:
+        self.release_calls.append(host_db_id)
+        return True
+
+
+class _ReleaseGuardProvider(ImbueCloudProvider):
+    """Provider stub that records local-state cleanup instead of touching disk."""
+
+    _cleanup_calls: list[HostId] = []
+
+    def _cleanup_local_host_state(self, host_id: HostId) -> None:
+        self._cleanup_calls.append(host_id)
+
+
+def _make_release_guard_provider() -> tuple[_ReleaseGuardProvider, _RecordingReleaseClient]:
+    client = _RecordingReleaseClient()
+    provider = _ReleaseGuardProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=client,
+        _cleanup_calls=[],
+    )
+    return provider, client
+
+
+def test_release_lease_on_failure_releases_once_and_propagates() -> None:
+    """A failure inside the guard releases the lease exactly once and re-raises the original error."""
+    provider, client = _make_release_guard_provider()
+    host_id = HostId.generate()
+    original_error = RuntimeError("rebuild blew up")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        with provider._release_lease_on_failure(SecretStr("tok"), "lease-db-id", host_id, "slow-path rebuild"):
+            raise original_error
+
+    # The ORIGINAL exception must propagate untouched (the guard uses a
+    # success flag + finally, not except, so it never swallows or wraps it).
+    assert exc_info.value is original_error
+    # Exactly one release, against the lease's host_db_id.
+    assert client.release_calls == ["lease-db-id"]
+    # Local host state is cleaned up so a retry starts from a clean slate.
+    assert provider._cleanup_calls == [host_id]
+
+
+def test_release_lease_on_failure_does_not_release_on_success() -> None:
+    """A clean exit must NOT release the lease -- the host was successfully adopted/rebuilt."""
+    provider, client = _make_release_guard_provider()
+    host_id = HostId.generate()
+
+    with provider._release_lease_on_failure(SecretStr("tok"), "lease-db-id", host_id, "fast-path setup"):
+        pass
+
+    assert client.release_calls == []
+    assert provider._cleanup_calls == []

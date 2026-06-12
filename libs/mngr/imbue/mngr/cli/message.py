@@ -17,8 +17,8 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -113,10 +113,13 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
         opts.agent_list
     )
 
-    # Validate input: must have agents specified
+    # Validate input: must have agents specified.
     if not agent_addresses:
         if not stdin_consumed:
-            raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
+            raise UserInputError(
+                "Must specify at least one agent (use '-' to read agent ids from stdin, "
+                "e.g. `mngr list --ids | mngr message -`)"
+            )
         return
 
     # Read message from file if --message-file is provided
@@ -274,7 +277,7 @@ def _emit_json_output(result: MessageResult) -> None:
         "total_sent": len(result.successful_agents),
         "total_failed": len(result.failed_agents),
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 # Register help metadata for git-style help formatting
@@ -293,7 +296,7 @@ Use '-' in place of agent names to read them from stdin, one per line.""",
     examples=(
         ("Send a message to an agent", 'mngr message my-agent --message "Hello"'),
         ("Send to multiple agents", 'mngr message agent1 agent2 --message "Hello to all"'),
-        ("Send to all agents", "mngr list --ids | mngr message - --message 'Hello everyone'"),
+        ("Send to all agents via stdin", "mngr list --ids | mngr message - --message 'Hello everyone'"),
         ("Send message from a file", "mngr message my-agent --message-file prompt.txt"),
         ("Pipe message from stdin", 'echo "Hello" | mngr message my-agent'),
         ("Use --agent flag (repeatable)", 'mngr message --agent my-agent --agent another-agent --message "Hello"'),

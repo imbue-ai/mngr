@@ -9,10 +9,15 @@ from uuid import uuid4
 import psutil
 import pytest
 from pydantic import PrivateAttr
+from watchdog.events import FileModifiedEvent
+from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
+from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CredentialStatus
@@ -25,9 +30,14 @@ from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
+from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
+from imbue.mngr_latchkey.remote_gateway import RemoteGatewayError
+from imbue.mngr_latchkey.remote_gateway import local_credentials_path
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
+from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -195,6 +205,21 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    args = [a for a in sys.argv[3:] if not a.startswith('--')]\n"
         "    print(f'fake-jwt-for:{args[0]}' if args else 'fake-jwt')\n"
         "    sys.exit(0)\n"
+        # ``auth re-encrypt <destination> [service ...]`` writes a fake
+        # filtered store as ``credentials.json.enc`` into the <destination>
+        # directory, recording the requested services (and that stdin was
+        # empty, i.e. the same key is reused). Enough to verify the manager
+        # builds the right command and reads the result.
+        'if sys.argv[1:3] == ["auth", "re-encrypt"]:\n'
+        "    import json as _json, os as _os\n"
+        "    destination = sys.argv[3]\n"
+        "    rest = sys.argv[4:]\n"
+        "    services = rest[1:] if rest[:1] == ['--services'] else []\n"
+        "    stdin_key = sys.stdin.read()\n"
+        "    payload = {'services': services, 'reused_key': stdin_key == ''}\n"
+        "    out = _os.path.join(destination, 'credentials.json.enc')\n"
+        "    open(out, 'w').write(_json.dumps(payload))\n"
+        "    sys.exit(0)\n"
         "import os, socket, signal\n"
         'assert sys.argv[1] == "gateway"\n'
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
@@ -309,10 +334,20 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
             # expose more than one detent scope).
             assert isinstance(entries, list) and len(entries) > 0
             for entry in entries:
-                assert set(entry.keys()) == {"scope", "display_name", "permissions"}
+                assert {"scope", "display_name", "permissions"} <= set(entry.keys())
                 assert isinstance(entry["scope"], str) and len(entry["scope"]) > 0
                 assert isinstance(entry["display_name"], str) and len(entry["display_name"]) > 0
+                # The scope-level ``description`` carries detent's ``$comment``
+                # summary. It is optional -- consumers must not depend on it --
+                # so only assert its type when present.
+                assert isinstance(entry.get("description", ""), str)
+                # Each permission is an object whose ``name`` is required; the
+                # ``description`` (detent's ``$comment``) is colocated with it
+                # but optional.
                 assert isinstance(entry["permissions"], list)
+                for permission in entry["permissions"]:
+                    assert isinstance(permission["name"], str) and len(permission["name"]) > 0
+                    assert isinstance(permission.get("description", ""), str)
         manager.stop_gateway()
 
 
@@ -570,6 +605,55 @@ def test_derive_gateway_password_propagates_failure(tmp_path: Path) -> None:
         manager.derive_gateway_password()
 
 
+def test_export_credentials_subset_passes_sorted_services_and_reuses_key(tmp_path: Path) -> None:
+    """The filtered export lists the services (sorted) and reuses the key (empty stdin)."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    destination = tmp_path / "subset"
+    destination.mkdir()
+
+    manager.export_credentials_subset(destination, {"slack", "github", "discord"})
+
+    payload = json.loads((destination / "credentials.json.enc").read_text())
+    # Sorted for a deterministic command line.
+    assert payload["services"] == ["discord", "github", "slack"]
+    # Empty stdin (DEVNULL) means the same encryption key is reused.
+    assert payload["reused_key"] is True
+
+
+def test_export_credentials_subset_rejects_empty_service_set(tmp_path: Path) -> None:
+    """``--services`` requires at least one service, so an empty set is refused."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    destination = tmp_path / "subset.json.enc"
+
+    with pytest.raises(LatchkeyError, match="at least one service"):
+        manager.export_credentials_subset(destination, frozenset())
+    # Nothing was written: we never invoked the binary.
+    assert not destination.exists()
+
+
+def test_export_credentials_subset_raises_on_failure(tmp_path: Path) -> None:
+    """A non-zero ``auth re-encrypt`` exit must surface as ``LatchkeyError``."""
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        'if sys.argv[1] == "--version":\n'
+        f"    print('{LATCHKEY_MIN_VERSION}')\n"
+        "    sys.exit(0)\n"
+        "sys.stderr.write('boom\\n')\n"
+        "sys.exit(1)\n"
+    )
+    script.chmod(0o755)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+    manager.initialize()
+    with pytest.raises(LatchkeyError, match="re-encrypt"):
+        manager.export_credentials_subset(tmp_path / "out.enc", {"slack"})
+
+
 def test_create_permissions_override_jwt_returns_stripped_stdout(tmp_path: Path) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -672,7 +756,9 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
 # -- Discovery handler --
 
 
-def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Path) -> None:
+def test_discovery_handler_spawns_shared_gateway_for_every_provider(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Every provider triggers the shared gateway to start; a second call is a no-op."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -689,10 +775,11 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(tmp_path: Pa
                 latchkey=manager,
                 tunnel_manager=tunnel_manager,
                 concurrency_group=cg,
+                mngr_ctx=temp_mngr_ctx,
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
-                handler(AgentId(), None, provider_name)
+                handler(AgentId(), HostId(), None, provider_name)
             assert manager.is_gateway_running
             # Same shared gateway across all five callbacks; ensure it actually came up.
             # ``start_gateway`` is idempotent and returns the bound port even
@@ -725,12 +812,32 @@ class _RecordingTunnelManager(SSHTunnelManager):
         return 0
 
 
-def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: Path) -> None:
+class _RaisingTunnelManager(SSHTunnelManager):
+    """SSHTunnelManager whose reverse-tunnel setup always fails (no SSH)."""
+
+    def setup_reverse_tunnel(
+        self,
+        ssh_info: RemoteSSHInfo,
+        local_port: int,
+        remote_port: int = 0,
+        agent_id: str | None = None,
+    ) -> int:
+        raise SSHTunnelError("simulated reverse-tunnel failure")
+
+    def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
+        return 0
+
+
+def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
     manager.initialize()
     tunnel_manager = _RecordingTunnelManager()
     agent_id = AgentId()
+    # The ``local`` provider has no outer host, so the handler falls back to the
+    # desktop-side reverse tunnel (rather than the VPS-resident gateway path).
     ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=22, key_path=tmp_path / "k")
     # The handler dispatches tunnel setup onto a CG worker thread, so
     # exit the CG (joining its threads) before asserting on the
@@ -742,14 +849,23 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(agent_id, ssh_info, "docker")
+        handler(agent_id, HostId(), ssh_info, "local")
 
         assert manager.is_gateway_running
         # ``start_gateway`` is idempotent and returns the bound port even
         # when the gateway is already running, so the test can use it as
         # the supported way to read the live port.
         host_side_port = manager.start_gateway(cg)
+
+        # Tunnel setup runs on a CG worker thread (now behind a provider-lookup
+        # that resolves the local provider has no outer host), so poll until it
+        # records before asserting rather than racing the worker.
+        _poll_event = threading.Event()
+        _deadline = time.monotonic() + 5.0
+        while time.monotonic() < _deadline and not tunnel_manager._calls:
+            _poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
 
         # Exactly one reverse tunnel, bridging the dynamic host-side gateway port
         # to the fixed agent-side port on the container's loopback. The tunnel
@@ -761,7 +877,9 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(tmp_path: 
         manager.stop_gateway()
 
 
-def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: Path) -> None:
+def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
     """Agents discovered without SSH info skip reverse-tunnel setup.
 
     Without an SSH route the handler cannot forward the host-side gateway
@@ -776,15 +894,16 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(tmp_path: 
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
 
         assert manager.is_gateway_running
         assert tunnel_manager._calls == []
         manager.stop_gateway()
 
 
-def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
+def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """A missing binary must not crash the discovery callback -- just log a warning."""
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -799,10 +918,282 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path) -> None:
             latchkey=manager,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
         )
-        handler(AgentId(), None, "local")
+        handler(AgentId(), HostId(), None, "local")
     assert not manager.is_gateway_running
     assert tunnel_manager._calls == []
+
+
+class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
+    """Handler stub that forces the VPS branch and records provisioning instead of running it."""
+
+    _provisioned: list[tuple[AgentId, HostId]] = PrivateAttr(default_factory=list)
+
+    def _host_has_outer_host(self, host_id: HostId, provider_name: str) -> bool:
+        return True
+
+    def _run_remote_gateway_provisioning(
+        self,
+        agent_id: AgentId,
+        host_id: HostId,
+        ssh_info: RemoteSSHInfo,
+        provider_name: str,
+    ) -> None:
+        try:
+            self._provisioned.append((agent_id, host_id))
+            with self._remote_hosts_lock:
+                self._provisioned_hosts.add(str(host_id))
+        finally:
+            with self._remote_hosts_lock:
+                self._provisioning_hosts.discard(str(host_id))
+            with self._pending_lock:
+                self._pending_remote_agents.discard(str(agent_id))
+
+
+def test_discovery_handler_dispatches_vps_provisioning_in_addition_to_desktop_tunnel(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A VPS agent gets BOTH the desktop reverse tunnel and the VPS-resident gateway provisioning."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+        host_side_port = manager.start_gateway(cg)
+
+        # Provisioning runs on its own fire-and-forget CG thread; poll for it.
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        # Both paths ran: the desktop gateway is reverse-tunneled onto the
+        # agent-side port AND the VPS-resident gateway provisioning was dispatched.
+        assert tunnel_manager._calls == [(ssh_info, host_side_port, AGENT_SIDE_LATCHKEY_PORT, str(agent_id))]
+        assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_discovery_handler_dispatches_vps_provisioning_when_desktop_tunnel_fails(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A desktop-side reverse-tunnel failure must not prevent VPS-resident gateway provisioning.
+
+    The two paths are independent (the agent reaches the desktop gateway on
+    ``AGENT_SIDE_LATCHKEY_PORT`` and the VPS gateway on ``INNER_PORT`` at once),
+    so a failing desktop tunnel still leaves the VPS provisioning dispatched.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RaisingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        handler(agent_id, host_id, ssh_info, "imbue_cloud")
+
+        # Provisioning runs on its own fire-and-forget CG thread; poll for it.
+        poll_event = threading.Event()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not handler._provisioned:
+            poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
+
+        # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
+        assert handler._provisioned == [(agent_id, host_id)]
+        manager.stop_gateway()
+
+
+def test_provisioning_coalesces_when_host_pass_already_in_flight(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A second agent on a host whose provisioning is already in flight is coalesced.
+
+    Provisioning is host-scoped (one container, one gateway, one tunnel), so a
+    concurrent second pass for another agent on the same host would be redundant
+    and race the first on the same VPS files; the per-host in-flight guard
+    coalesces it away instead.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Simulate a provisioning pass already in flight for this host.
+        with handler._remote_hosts_lock:
+            handler._provisioning_hosts.add(str(host_id))
+
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
+
+        # Coalesced: no second pass was dispatched, and the in-flight guard is
+        # left intact for the pass that is already running.
+        assert dispatched is False
+        assert handler._provisioned == []
+        with handler._remote_hosts_lock:
+            assert handler._provisioning_hosts == {str(host_id)}
+
+
+def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """A host already provisioned this supervisor lifetime is not re-provisioned.
+
+    The discovery stream re-emits the full agent set every cycle; re-running the
+    expensive idempotent provisioning each time is wasteful, so an
+    already-provisioned host is skipped (a supervisor restart re-provisions).
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    tunnel_manager = _RecordingTunnelManager()
+    host_id = HostId()
+    ssh_info = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, key_path=tmp_path / "k")
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _ProvisionRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Mark the host as already provisioned this session.
+        with handler._remote_hosts_lock:
+            handler._provisioned_hosts.add(str(host_id))
+
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
+
+        # Skipped: no new pass dispatched and nothing marked in flight.
+        assert dispatched is False
+        assert handler._provisioned == []
+        with handler._remote_hosts_lock:
+            assert handler._provisioning_hosts == set()
+
+
+class _SyncRecordingHandler(LatchkeyDiscoveryHandler):
+    """Handler stub that records ``_sync_state_to_host`` calls instead of opening VPS connections."""
+
+    _synced: list[tuple[str, bool, bool]] = PrivateAttr(default_factory=list)
+
+    def _sync_state_to_host(
+        self,
+        host_id_str: str,
+        provider_name: str,
+        *,
+        do_permissions: bool,
+        do_credentials: bool,
+    ) -> None:
+        self._synced.append((host_id_str, do_permissions, do_credentials))
+
+
+def _make_sync_recording_handler(
+    tmp_path: Path, temp_mngr_ctx: MngrContext, cg: ConcurrencyGroup
+) -> _SyncRecordingHandler:
+    return _SyncRecordingHandler(
+        latchkey=FakeLatchkey(latchkey_directory=tmp_path),
+        tunnel_manager=SSHTunnelManager(),
+        concurrency_group=cg,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+
+def test_remote_state_sync_initial_pass_does_permissions_then_credentials_for_known_hosts(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host_id_str = str(HostId())
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        with handler._remote_hosts_lock:
+            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
+        handler._sync_all_known_hosts()
+        # Full initial sync requests both permissions and credentials for the host.
+        assert handler._synced == [(host_id_str, True, True)]
+
+
+def test_remote_state_watch_handler_routes_credential_and_permission_changes(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    host_id = HostId()
+    host_id_str = str(host_id)
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        with handler._remote_hosts_lock:
+            handler._remote_host_provider_by_id[host_id_str] = "imbue_cloud"
+
+        credentials_path = local_credentials_path(tmp_path)
+        permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
+        event_handler = _LatchkeyStateChangeHandler(
+            credentials_path=credentials_path,
+            plugin_data_dir=handler.latchkey.plugin_data_dir,
+            known_remote_host_ids=handler._known_remote_host_ids,
+            on_credentials_changed=handler._sync_credentials_to_all_known_hosts,
+            on_host_permissions_changed=handler._sync_permissions_to_host,
+        )
+
+        # A change to the credentials file pushes credentials (only) to all hosts.
+        event_handler.dispatch(FileModifiedEvent(str(credentials_path)))
+        assert handler._synced == [(host_id_str, False, True)]
+
+        # A change to a host's permissions file pushes permissions (only) to that host.
+        handler._synced.clear()
+        event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
+        assert handler._synced == [(host_id_str, True, False)]
+
+        # An unrelated path (e.g. the gateway log) is ignored.
+        handler._synced.clear()
+        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_gateway.log")))
+        assert handler._synced == []
+
+        # A permissions file for an unknown host is ignored.
+        handler._synced.clear()
+        unknown_permissions = permissions_path_for_host(handler.latchkey.plugin_data_dir, HostId())
+        event_handler.dispatch(FileModifiedEvent(str(unknown_permissions)))
+        assert handler._synced == []
+
+        # Regression: the watchdog observer stores handlers in a set, so the
+        # handler must be hashable and schedulable (a MutableModel would raise
+        # ``TypeError: unhashable type`` here).
+        assert hash(event_handler) is not None
+        Observer().schedule(event_handler, str(tmp_path), recursive=False)
+
+
+def test_remote_state_watch_sentinel_fails_loudly_when_observer_dies(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _make_sync_recording_handler(tmp_path, temp_mngr_ctx, cg)
+        # A stopped observer that did NOT stop because of shutdown is a watcher
+        # failure -- the sentinel must raise loudly.
+        observer = Observer()
+        observer.start()
+        observer.stop()
+        observer.join()
+        shutdown_event = threading.Event()
+        with pytest.raises(RemoteGatewayError, match="stopped unexpectedly"):
+            handler._fail_loudly_if_observer_dies(observer, shutdown_event)
+
+        # When the observer stops *because* of shutdown, that is expected -- no raise.
+        shutdown_event.set()
+        handler._fail_loudly_if_observer_dies(observer, shutdown_event)
 
 
 def _make_fake_latchkey_binary_with_ensure_browser_counter(tmp_path: Path, counter_path: Path) -> Path:
@@ -1071,6 +1462,26 @@ def test_services_info_passes_latchkey_directory_through(tmp_path: Path) -> None
     latchkey.services_info("slack")
 
     assert report_path.read_text() == str(latchkey_dir)
+
+
+def test_services_info_offline_passes_offline_flag(tmp_path: Path) -> None:
+    report_path = tmp_path / "argv_report"
+    script = tmp_path / "latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"open({str(report_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'credentialStatus': 'valid'}))\n"
+    )
+    script.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(script))
+
+    latchkey.services_info("slack", is_offline=True)
+    assert json.loads(report_path.read_text()) == ["services", "info", "slack", "--offline"]
+
+    # Without the flag, ``--offline`` is absent.
+    latchkey.services_info("slack")
+    assert json.loads(report_path.read_text()) == ["services", "info", "slack"]
 
 
 def test_auth_browser_reports_success_on_zero_exit(tmp_path: Path) -> None:

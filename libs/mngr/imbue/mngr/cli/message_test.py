@@ -143,6 +143,22 @@ def test_message_nonexistent_agent(
     assert "No agents found" in result.output
 
 
+def test_message_no_all_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`--all` and `-a` are no longer accepted; users pipe ids from `mngr list` instead."""
+    for argv in (["--all", "-m", "hello"], ["-a", "-m", "hello"]):
+        result = cli_runner.invoke(
+            message,
+            argv,
+            obj=plugin_manager,
+            catch_exceptions=True,
+        )
+        assert result.exit_code != 0
+        assert "No such option" in result.output
+
+
 # =============================================================================
 # Tests for _emit_jsonl_success
 # =============================================================================

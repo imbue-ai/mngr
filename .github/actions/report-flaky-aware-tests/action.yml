@@ -105,7 +105,7 @@ runs:
     # so our custom check-run below is the only one on the PR checks page.
     - name: Annotate per-test failures
       if: always()
-      uses: mikepenz/action-junit-report@v5
+      uses: mikepenz/action-junit-report@v6
       with:
         report_paths: ${{ inputs.junit-path }}
         include_passed: false

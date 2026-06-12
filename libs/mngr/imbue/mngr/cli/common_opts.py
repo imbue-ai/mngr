@@ -205,7 +205,16 @@ def setup_command_context(
         to_update(mngr_ctx.field_ref().is_full_discovery, initial_opts.safe),
     )
 
-    # Apply --setting overrides to config (right before CLI defaults are applied)
+    # Capture the originally-loaded config before any --setting is applied. The
+    # end-of-pipeline re-application (which folds in create-template-contributed
+    # settings) runs against this pristine base so it never double-applies an
+    # ``__extend`` operator.
+    base_config = mngr_ctx.config
+
+    # Apply --setting overrides to config (right before CLI defaults are applied).
+    # This uses the CLI -S flags only; config-default and create-template
+    # ``setting`` entries are folded in later via the end-of-pipeline pass so they
+    # can affect command-default resolution and template resolution first.
     if initial_opts.setting:
         updated_config = apply_settings_to_config(
             mngr_ctx.config,
@@ -236,6 +245,21 @@ def setup_command_context(
     # 4. Append CLI tuple/list values to the template result so CLI ends up at
     #    the tail of the merged list (config_base + template_result + CLI).
     updated_params = restore_cli_list_values(updated_params, cli_list_values)
+
+    # 5. Fold create-template (and config-default) ``setting`` entries into the
+    #    config. apply_create_template appends them to ``updated_params["setting"]``,
+    #    but the only --setting application above used the CLI flags, so without
+    #    this pass template-provided settings would never reach the resolved
+    #    config (e.g. providers.<name>.docker_runtime). Re-apply against the
+    #    pristine base config so CLI -S still wins and no ``__extend`` is doubled.
+    if command_name == "create":
+        mngr_ctx = _apply_template_contributed_settings(
+            mngr_ctx,
+            base_config=base_config,
+            combined_settings=updated_params.get("setting", ()),
+            cli_settings=initial_opts.setting,
+            template_names=updated_params.get("template", ()),
+        )
 
     # Block plugins that were disabled via command defaults or create templates
     # (e.g. disable_plugin from [commands.create] in settings.toml). load_config
@@ -288,6 +312,11 @@ def setup_command_context(
     # so AliasAwareGroup.invoke() can check them when catching exceptions
     if ctx.parent is not None:
         ctx.parent.meta["is_interactive"] = is_interactive
+        # Expose the resolved output format on the group context so
+        # AliasAwareGroup.invoke() can emit a structured JSONL error event
+        # (with the exception's class name) when a command fails -- letting
+        # subprocess callers detect the error *type* without parsing text.
+        ctx.parent.meta["output_format"] = output_opts.output_format
         if mngr_ctx.config.is_error_reporting_enabled and is_interactive:
             ctx.parent.meta["is_error_reporting_enabled"] = True
 
@@ -458,6 +487,86 @@ def apply_settings_to_config(
         if violations:
             raise _build_setting_narrowing_error(violations)
     return config.merge_with(settings_config)
+
+
+# Top-level setting key segments whose effect is consumed earlier in
+# setup_command_context than the point where create-template ``setting`` entries
+# are folded into the config. A template (or command-default) ``setting``
+# targeting these can never take effect, so we reject it rather than dropping it
+# silently. Direct CLI ``-S`` for these keys is unaffected -- it is applied
+# before those phases run.
+_INEFFECTIVE_TEMPLATE_SETTING_PREFIXES: frozenset[str] = frozenset({"commands", "create_templates"})
+
+
+def _apply_template_contributed_settings(
+    mngr_ctx: MngrContext,
+    *,
+    base_config: MngrConfig,
+    combined_settings: Sequence[str],
+    cli_settings: Sequence[str],
+    template_names: Sequence[str],
+) -> MngrContext:
+    """Re-apply the post-template ``setting`` list to the config and return the updated context.
+
+    After the create pipeline runs, ``combined_settings`` is
+    ``config_default_settings + template_settings + cli_settings`` (the CLI flags
+    are appended last by ``restore_cli_list_values``). Only the CLI flags were
+    already merged into the config; the config-default and template-contributed
+    entries were not. Re-apply the whole list against the pristine ``base_config``
+    so those entries reach the resolved config, preserving "CLI wins" precedence
+    (CLI entries are last, and later same-key entries win) and avoiding
+    double-applying ``__extend`` operators.
+    """
+    combined = tuple(combined_settings)
+    cli = tuple(cli_settings)
+
+    # The CLI flags are the tail of the combined list; everything before them is
+    # contributed by config defaults or create templates and has not yet been
+    # applied to the config.
+    non_cli_count = len(combined) - len(cli)
+    if non_cli_count <= 0:
+        return mngr_ctx
+    assert combined[non_cli_count:] == cli, (
+        "Expected the CLI --setting flags to be the tail of the resolved setting list; "
+        f"got combined={combined!r}, cli={cli!r}"
+    )
+
+    non_cli_settings = combined[:non_cli_count]
+    _reject_ineffective_template_setting_keys(non_cli_settings, template_names)
+
+    final_config = apply_settings_to_config(base_config, combined, base_config.disabled_plugins)
+    return mngr_ctx.model_copy_update(
+        to_update(mngr_ctx.field_ref().config, final_config),
+    )
+
+
+def _reject_ineffective_template_setting_keys(settings: Sequence[str], template_names: Sequence[str]) -> None:
+    """Raise ``ConfigParseError`` if a non-CLI ``setting`` entry targets a key that cannot take effect.
+
+    ``commands.*`` (command defaults) and ``create_templates.*`` are resolved
+    earlier in setup_command_context than the point where create-template
+    ``setting`` entries are folded into the config, so such entries would be
+    silently ignored.
+    """
+    for setting_str in settings:
+        if "=" not in setting_str:
+            continue
+        key_path = setting_str.split("=", 1)[0].strip()
+        if not key_path:
+            continue
+        # Normalize hyphens to underscores so ``create-templates.*`` is caught
+        # the same way ``create_templates.*`` is (config key parsing treats them
+        # as equivalent).
+        first_segment = key_path.split(".", 1)[0].replace("-", "_")
+        if first_segment in _INEFFECTIVE_TEMPLATE_SETTING_PREFIXES:
+            template_hint = f" (from create template(s): {', '.join(template_names)})" if template_names else ""
+            raise ConfigParseError(
+                f"A create-template (or command-default) `setting` entry targets `{key_path}`{template_hint}, "
+                f"which cannot take effect: `commands.*` and `create_templates.*` are resolved before "
+                f"template settings are applied to the config, so the value would be silently ignored.\n"
+                f"Set this directly under the matching `[{first_segment}.*]` config section instead, or pass "
+                f"it as a direct CLI `-S {key_path}=...` (which is applied early enough to take effect)."
+            )
 
 
 def _build_setting_narrowing_error(violations: Sequence[str]) -> ConfigParseError:

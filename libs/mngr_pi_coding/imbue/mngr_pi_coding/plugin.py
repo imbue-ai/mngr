@@ -249,13 +249,17 @@ class PiCodingAgent(InteractiveTuiAgent[PiCodingAgentConfig]):
                 logger.info("Transferring settings.json to per-agent config dir...")
                 host.write_text_file(config_dir / "settings.json", settings_source.read_text())
 
+            # Transfer the resource directories with a single rsync rather than
+            # one write_file per file. A per-file upload opens an SFTP channel
+            # per file (a full round-trip over the SSH tunnel) and does not
+            # scale to large resource sets -- see github issue 1825.
+            include_args: list[str] = []
             for dir_name in ("skills", "prompts", "extensions", "themes"):
-                source = home_pi / dir_name
-                if source.exists() and source.is_dir():
-                    for file_path in source.rglob("*"):
-                        if file_path.is_file():
-                            relative = file_path.relative_to(home_pi)
-                            host.write_file(config_dir / relative, file_path.read_bytes())
+                if (home_pi / dir_name).is_dir():
+                    include_args.extend([f"--include={dir_name}/", f"--include={dir_name}/**"])
+            if include_args:
+                include_args.append("--exclude=*")
+                host.copy_local_directory(home_pi, config_dir, " ".join(include_args))
 
     def provision(
         self,

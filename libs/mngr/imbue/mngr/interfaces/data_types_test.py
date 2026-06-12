@@ -1,4 +1,5 @@
 import json
+import stat
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -11,6 +12,7 @@ from imbue.mngr.errors import InvalidRelativePathError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -22,6 +24,29 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
+
+
+@pytest.mark.parametrize(
+    ("type_bits", "expected"),
+    [
+        (stat.S_IFDIR, FileType.DIRECTORY),
+        (stat.S_IFLNK, FileType.SYMLINK),
+        (stat.S_IFREG, FileType.FILE),
+        (stat.S_IFIFO, FileType.PIPE),
+        (stat.S_IFSOCK, FileType.SOCKET),
+        (stat.S_IFBLK, FileType.BLOCK),
+        (stat.S_IFCHR, FileType.CHARACTER),
+    ],
+    ids=["dir", "symlink", "regular", "fifo", "socket", "block", "char"],
+)
+def test_file_type_from_stat_mode_classifies_each_posix_type(type_bits: int, expected: FileType) -> None:
+    # The permission bits must not affect classification -- only the S_IFMT type bits do.
+    assert FileType.from_stat_mode(type_bits | 0o644) == expected
+
+
+def test_file_type_from_stat_mode_unrecognized_type_bits_are_other() -> None:
+    # A mode with no recognized file-type bits (only permission bits) falls through to OTHER.
+    assert FileType.from_stat_mode(0o644) == FileType.OTHER
 
 
 def test_relative_path_accepts_relative_string() -> None:

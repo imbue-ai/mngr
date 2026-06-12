@@ -6,7 +6,7 @@ description: Identify divergences from the style guide in the $1 library
 
 Go gather all the context for the $1 library (per instructions in CLAUDE.md). Be sure to read non_issues.md as well.
 
-Once you've gathered that context, please do the below (and commit when you're finished).
+Once you've gathered that context, please do the below.
 
 Your task is to identify any places where the $1 library diverges from the established style guide (style_guide.md).
 

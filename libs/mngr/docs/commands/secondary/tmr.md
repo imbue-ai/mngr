@@ -99,7 +99,7 @@ mngr tmr [OPTIONS] [PYTEST_ARGS]...
 
 - [mngr create](../primary/create.md) - Create a new agent
 - [mngr list](../primary/list.md) - List agents
-- [mngr help pull](mngr help pull) - Pull files or git commits from an agent
+- [mngr rsync](../primary/rsync.md) - Rsync files between local and a remote host or agent
 
 ## Examples
 

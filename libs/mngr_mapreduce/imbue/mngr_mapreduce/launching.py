@@ -15,8 +15,6 @@ from imbue.mngr.api.data_types import CreateAgentResult
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.rsync import rsync_to_remote
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import AgentError
-from imbue.mngr.errors import HostError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import AgentDataOptions
 from imbue.mngr.interfaces.host import AgentGitOptions
@@ -179,10 +177,12 @@ def _create_agent(
     created from the snapshot then git-worktree off that path instead of
     re-uploading the source.
 
-    If the agent is being placed on an existing host built from a snapshot
-    (``existing_host`` is set and ``config.snapshot`` is set), source from
+    If the agent is being placed on a host built from a snapshot, source from
     that host's ``/code`` via git-worktree -- avoiding network roundtrips
-    to upload code that's already there.
+    to upload code that's already there. When no ``existing_host`` is passed
+    but ``config.snapshot`` is set, the host is pre-created here so the same
+    optimization applies (this is how the reducer benefits, since it doesn't
+    share a host pool with the mappers).
     """
     if existing_host is not None:
         target_host: OnlineHostInterface | NewHostOptions = existing_host
@@ -195,12 +195,21 @@ def _create_agent(
         target_host = config.source_host
     else:
         build = _resolve_build_options(config, mngr_ctx)
-        target_host = NewHostOptions(
+        new_host_options = NewHostOptions(
             provider=config.provider_name,
             name=host_name,
             build=build,
             environment=_build_host_environment(config),
         )
+        # When the host will be built from a snapshot, its /code already
+        # contains the source. Pre-create the host so the GIT_WORKTREE branch
+        # below sources from it instead of re-uploading from the laptop. The
+        # snapshotter is excluded since it's the agent that populates /code.
+        if config.snapshot is not None and kind is not AgentKind.SNAPSHOTTER:
+            existing_host = resolve_target_host(new_host_options, mngr_ctx)
+            target_host = existing_host
+        else:
+            target_host = new_host_options
 
     if kind is AgentKind.SNAPSHOTTER:
         source_location = HostLocation(host=config.source_host, path=config.source_dir)
@@ -313,7 +322,7 @@ def stop_agent_on_host(host: OnlineHostInterface, agent_id: AgentId, agent_name:
     try:
         host.stop_agents([agent_id])
         logger.info("Stopped agent '{}'", agent_name)
-    except (MngrError, HostError) as exc:
+    except MngrError as exc:
         logger.warning("Failed to stop agent '{}': {}", agent_name, exc)
 
 
@@ -348,7 +357,7 @@ def _create_host_pool(
         for future in futures:
             try:
                 hosts.append(future.result())
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (MngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create host: {}", exc)
 
     logger.info("Created {} host(s) for agent placement", len(hosts))
@@ -400,7 +409,7 @@ def launch_all_mappers(
             try:
                 snapshot_name = _create_snapshot_host(recipe.name, config, mngr_ctx, run_name)
                 launch_config = config.model_copy_update(to_update(config.field_ref().snapshot, snapshot_name))
-            except (MngrError, HostError, OSError, BaseExceptionGroup) as exc:
+            except (MngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to create snapshot, launching agents without snapshot: {}", exc)
 
     is_local = launch_config.provider_name.lower() == LOCAL_PROVIDER_NAME
@@ -447,7 +456,7 @@ def launch_all_mappers(
                 info, host = future.result()
                 agents.append(info)
                 agent_hosts[str(info.agent_id)] = host
-            except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
+            except (MngrError, OSError, BaseExceptionGroup) as exc:
                 logger.warning("Failed to launch agent for {}: {}", task.id, exc)
                 launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
 
@@ -508,7 +517,7 @@ def launch_mappers_up_to_limit(
                 )
             )
             continue
-        except (MngrError, HostError, AgentError, OSError, BaseExceptionGroup) as exc:
+        except (MngrError, OSError, BaseExceptionGroup) as exc:
             logger.warning("Failed to launch agent for {}: {}", task.id, exc)
             launch_failures.append(_make_launch_failure_metadata(task.id, agent_name, branch_name, exc))
             continue

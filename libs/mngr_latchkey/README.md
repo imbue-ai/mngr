@@ -120,7 +120,9 @@ latchkey.initialize()
 
 # (a) Pre-create env vars + opaque permissions handle for a new host.
 setup = prepare_agent_latchkey(latchkey, is_tunneled=True)
-# setup.env: LATCHKEY_GATEWAY[_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
+# setup.env: LATCHKEY_GATEWAY[_SECONDARY,_PASSWORD,_PERMISSIONS_OVERRIDE,_DISABLE_COUNTING]
+#   LATCHKEY_GATEWAY_SECONDARY (tunneled mode only) is the agent's URL for the
+#   per-VPS gateway: http://127.0.0.1:<INNER_PORT>
 # setup.opaque_permissions_path: pass to finalize_host_permissions later
 
 # ... mngr create returns the canonical host id ...
@@ -267,7 +269,10 @@ root is rejected with HTTP 403.
   a JSON object keyed by raw service name. Each value is an array of
   scope entries (a single service may expose more than one scope), each
   with the shape `{"scope": "<schema_name>", "display_name": "...",
-  "permissions": ["...", ...]}`.
+  "description": "...", "permissions": [{"name": "<schema_name>",
+  "description": "..."}, ...]}`. The scope-level `description` and each
+  permission's `description` carry detent's per-schema `$comment`
+  summaries (both optional).
 * `GET /permissions/available/<service_name>` returns the permission
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is
@@ -283,6 +288,18 @@ root is rejected with HTTP 403.
   preserved verbatim.
 * `DELETE /permissions/rules?path=<file>&rule_key=<scope>` removes
   the named rule.
+
+The `services.json` catalog is generated from detent's built-in request
+schemas; do not edit it by hand. Regenerate it against a detent checkout
+with:
+
+```sh
+uv run python libs/mngr_latchkey/scripts/generate_services_json.py \
+  --detent-root /path/to/detent
+```
+
+Display names and the service ordering are editorial metadata detent does
+not carry; they live as curated constants in that script.
 
 A typical end-to-end shell flow:
 

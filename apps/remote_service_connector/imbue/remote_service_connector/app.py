@@ -15,12 +15,15 @@ import binascii
 import contextlib
 import functools
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import re
 import shlex
+import threading
+import time
 from collections.abc import Callable
 from collections.abc import Iterator
 from typing import Any
@@ -30,12 +33,16 @@ from uuid import UUID
 
 import httpx
 import modal
+import ovh
 import paramiko
 import psycopg2
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import HTMLResponse
+from ovh.exceptions import APIError as OvhApiError
+from ovh.exceptions import HTTPError as OvhHttpError
+from ovh.exceptions import ResourceNotFoundError
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import field_validator
@@ -226,6 +233,14 @@ class InvalidHostNameError(ValueError):
         super().__init__(f"host_name must be alphanumeric (with dashes/underscores allowed in the middle): {value!r}")
 
 
+class InvalidPaidListEntryError(ValueError):
+    """Raised when a paid-list domain or email entry is malformed."""
+
+    def __init__(self, value: object, reason: str) -> None:
+        self.value = value
+        super().__init__(f"Invalid paid-list entry {value!r}: {reason}")
+
+
 class InvalidR2BucketNameError(ValueError):
     """Raised when a derived R2 bucket name violates Cloudflare's naming rules."""
 
@@ -285,6 +300,18 @@ class R2BucketLimitError(RuntimeError):
         super().__init__(f"Account is at the maximum of {limit} buckets; destroy one before creating another.")
 
 
+class PoolHostCleanupError(RuntimeError):
+    """Raised when a pool-host release/teardown cannot complete its OVH cleanup.
+
+    Surfaced (rather than swallowed to a warning) so a release that fails to
+    actually cancel the VPS reports failure instead of a false success.
+    """
+
+
+class MissingAuthWebsiteDomainError(RuntimeError):
+    """Raised when the required AUTH_WEBSITE_DOMAIN secret is not set."""
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -334,9 +361,9 @@ class AdminAuth(BaseModel):
     username: str
     # Verified email associated with the SuperTokens user, looked up at auth
     # time so that paid-feature endpoints (host pool, LiteLLM keys) can gate
-    # access by ``PAID_ACCOUNT_SUFFIXES``. ``None`` when the SuperTokens
-    # user record has no email or when the lookup failed -- in that case the
-    # paid-feature gate denies access.
+    # access against the ``paid_emails`` / ``paid_domains`` tables. ``None``
+    # when the SuperTokens user record has no email or when the lookup
+    # failed -- in that case the paid-feature gate denies access.
     email: str | None = None
 
 
@@ -382,6 +409,14 @@ class LeaseHostRequest(BaseModel):
         description=(
             "Lease-attribute filter. Matches with PostgreSQL '@>' so only fields the request "
             "explicitly sets are constrained; missing fields are unconstrained. Required."
+        ),
+    )
+    region: str | None = Field(
+        default=None,
+        description=(
+            "Hard region requirement (OVH datacenter code, e.g. 'US-EAST-VA'). When set, only "
+            "hosts whose region column equals this value are eligible; if none is available the "
+            "lease fails. Leave unset to be region-agnostic."
         ),
     )
 
@@ -1641,55 +1676,181 @@ def require_tunnel_access(auth: AuthResult, tunnel_name: str) -> str:
     return extract_username_from_tunnel_name(tunnel_name)
 
 
-_PAID_ACCOUNT_SUFFIXES_ENV = "PAID_ACCOUNT_SUFFIXES"
+# Env var holding the cache TTL (in seconds) for paid-status lookups. The
+# paid gate consults two Neon tables (``paid_emails`` / ``paid_domains``)
+# on every gated request; this in-memory cache bounds how often that DB
+# round-trip happens per container. Set to ``0`` to disable caching
+# entirely (every gated request hits the DB) -- useful in tests. Unset
+# falls back to ``_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS``. Each Modal
+# container caches independently, so a CRUD change to the lists takes up
+# to the TTL to be reflected everywhere.
+_PAID_LIST_CACHE_TTL_ENV = "MINDS_PAID_LIST_CACHE_TTL_SECONDS"
+_DEFAULT_PAID_LIST_CACHE_TTL_SECONDS = 60.0
+
+# Process-local cache mapping a lowercased email -> (expiry_monotonic, is_paid).
+# Guarded by a lock since uvicorn serves requests from a thread pool.
+_paid_status_cache: dict[str, tuple[float, bool]] = {}
+_paid_status_cache_lock = threading.Lock()
 
 
-def _parse_paid_account_suffixes(raw: str) -> tuple[str, ...]:
-    """Split a ``PAID_ACCOUNT_SUFFIXES`` value into a normalized tuple of suffixes."""
-    return tuple(s.strip().lower() for s in raw.split(",") if s.strip())
+def clear_paid_status_cache() -> None:
+    """Drop every cached paid-status entry (called after a CRUD write, and in tests)."""
+    with _paid_status_cache_lock:
+        _paid_status_cache.clear()
 
 
-def is_email_in_paid_account_allowlist(email: str | None, raw_suffixes: str) -> bool:
-    """Pure helper: does ``email`` match any of the comma-separated suffixes?
+def _paid_list_cache_ttl_seconds() -> float:
+    """Resolve the paid-status cache TTL from the environment.
 
-    Suffix matching is case-insensitive. An empty/missing suffix list always
-    returns ``False`` (no email is allowed), and a missing email always
-    returns ``False``.
+    Falls back to the default on an unset/empty value and on an
+    unparseable one (logging a warning in the latter case) so a typo'd
+    Modal secret degrades to "cache normally" rather than crashing the
+    gate.
     """
-    suffixes = _parse_paid_account_suffixes(raw_suffixes)
-    if not suffixes:
-        return False
-    if not email:
-        return False
-    email_lower = email.lower()
-    return any(email_lower.endswith(suffix) for suffix in suffixes)
-
-
-def require_paid_account(auth: AdminAuth) -> None:
-    """Enforce the ``PAID_ACCOUNT_SUFFIXES`` allowlist for paid features.
-
-    Raises ``HTTPException(403)`` when the env var is unset/empty (paid
-    features disabled on this server) or when ``auth.email`` does not end
-    with any of the configured suffixes. ``/tunnels/*`` (Cloudflare
-    forwarding) intentionally does NOT call this gate -- email-verified
-    accounts can still use forwarding regardless of the allowlist.
-    """
-    raw = os.environ.get(_PAID_ACCOUNT_SUFFIXES_ENV, "")
-    if not _parse_paid_account_suffixes(raw):
-        raise HTTPException(
-            status_code=403,
-            detail="Paid features (host pool, LiteLLM keys) are not enabled on this server",
+    raw = os.environ.get(_PAID_LIST_CACHE_TTL_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to %.0fs",
+            _PAID_LIST_CACHE_TTL_ENV,
+            raw,
+            _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS,
         )
+        return _DEFAULT_PAID_LIST_CACHE_TTL_SECONDS
+
+
+def _email_domain(email: str) -> str:
+    """Return the lowercased domain (part after the last ``@``) of an email, or ``""``."""
+    return email.strip().lower().rpartition("@")[2]
+
+
+def is_email_paid_in_db(
+    email: str,
+    connection_factory: Callable[[], Any] | None = None,
+) -> bool:
+    """Return whether ``email`` is paid per the ``paid_emails`` / ``paid_domains`` tables.
+
+    Paid when either an exact (lowercased) full-email match exists in
+    ``paid_emails`` with ``is_paid = true``, OR the email's exact domain
+    matches a ``paid_domains`` row with ``is_paid = true``. ``connection_factory``
+    is injected so unit tests can supply an in-memory backend; it defaults
+    to :func:`_get_pool_db_connection` (resolved lazily because that helper
+    is defined further down this module).
+
+    Raises ``psycopg2.Error`` on any database failure; the caller
+    (:func:`require_paid_account`) converts that into a fail-closed 403.
+    """
+    factory = connection_factory if connection_factory is not None else _get_pool_db_connection
+    email_lower = email.strip().lower()
+    domain = _email_domain(email_lower)
+    conn = factory()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM paid_emails WHERE email = %s AND is_paid = TRUE", (email_lower,))
+            if cur.fetchone() is not None:
+                return True
+            if domain:
+                cur.execute("SELECT 1 FROM paid_domains WHERE domain = %s AND is_paid = TRUE", (domain,))
+                if cur.fetchone() is not None:
+                    return True
+        return False
+    finally:
+        conn.close()
+
+
+def is_email_paid(
+    email: str,
+    db_lookup: Callable[[str], bool] = is_email_paid_in_db,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Cached wrapper around :func:`is_email_paid_in_db`.
+
+    Honors the ``MINDS_PAID_LIST_CACHE_TTL_SECONDS`` TTL: a non-positive
+    TTL bypasses the cache entirely, otherwise both positive and negative
+    results are cached for the TTL window. ``db_lookup`` / ``monotonic``
+    are injected for tests.
+    """
+    email_lower = email.strip().lower()
+    ttl_seconds = _paid_list_cache_ttl_seconds()
+    if ttl_seconds <= 0:
+        return db_lookup(email_lower)
+    now = monotonic()
+    with _paid_status_cache_lock:
+        cached = _paid_status_cache.get(email_lower)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+    is_paid = db_lookup(email_lower)
+    with _paid_status_cache_lock:
+        _paid_status_cache[email_lower] = (now + ttl_seconds, is_paid)
+    return is_paid
+
+
+def require_paid_account(
+    auth: AdminAuth,
+    paid_checker: Callable[[str], bool] = is_email_paid,
+) -> None:
+    """Gate paid features on the caller's email appearing in the paid lists.
+
+    Raises ``HTTPException(403)`` when the caller has no verified email,
+    when their email is not in the ``paid_emails`` / ``paid_domains``
+    tables, or when the database lookup fails (fail closed). ``/tunnels/*``
+    (Cloudflare forwarding) intentionally does NOT call this gate --
+    email-verified accounts can still use forwarding regardless.
+    ``paid_checker`` is injected for tests; production callers use the
+    cached, table-backed default.
+    """
     if not auth.email:
         raise HTTPException(
             status_code=403,
             detail="Account email unavailable; cannot authorize paid feature access",
         )
-    if not is_email_in_paid_account_allowlist(auth.email, raw):
+    try:
+        is_paid = paid_checker(auth.email)
+    except psycopg2.Error as exc:
+        logger.warning("Paid-status lookup failed for %s: %s", auth.email, exc)
+        raise HTTPException(
+            status_code=403,
+            detail="Could not verify paid-feature access (database error); please try again",
+        ) from exc
+    if not is_paid:
         raise HTTPException(
             status_code=403,
             detail="Account is not authorized for paid features",
         )
+
+
+# Env var holding the single fixed API key that authenticates the paid-list
+# CRUD endpoints (``/paid/*``). Distinct from the SuperTokens / tunnel-token
+# auth used by every other route: those routes reject this key, and the
+# ``/paid/*`` routes reject SuperTokens JWTs / tunnel tokens. Folded into the
+# ``supertokens-<env>`` Modal secret (see .minds/template/supertokens.sh).
+_PAID_ADMIN_KEY_ENV = "MINDS_PAID_ADMIN_KEY"
+
+
+def require_paid_admin_key(request: Request) -> None:
+    """Authenticate a paid-list CRUD request against the fixed admin API key.
+
+    Expects ``Authorization: Bearer <MINDS_PAID_ADMIN_KEY>`` and compares
+    in constant time. Raises ``HTTPException(403)`` when the server has no
+    key configured (the paid-list admin API is disabled), and
+    ``HTTPException(401)`` when credentials are missing or wrong.
+    """
+    expected = os.environ.get(_PAID_ADMIN_KEY_ENV, "")
+    if not expected:
+        raise HTTPException(status_code=403, detail="Paid-list admin API is not enabled on this server")
+    auth_header = request.headers.get("authorization", "")
+    if not auth_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer credentials")
+    provided = auth_header[len("bearer ") :]
+    # Compare over UTF-8 bytes: hmac.compare_digest raises TypeError on str
+    # operands containing non-ASCII characters, and HTTP header values can
+    # legitimately carry non-ASCII bytes. Encoding keeps the comparison both
+    # total (a malformed key cleanly yields 401, not a 500) and constant-time.
+    if not hmac.compare_digest(provided.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Invalid paid-list admin API key")
 
 
 # ---------------------------------------------------------------------------
@@ -1714,6 +1875,17 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, CloudflareApiError):
         logger.warning("Cloudflare API error: %s", exc)
         raise HTTPException(status_code=exc.status_code, detail={"errors": exc.cf_errors}) from exc
+    if isinstance(exc, PoolHostCleanupError):
+        # A release that could not finish its teardown -- surface as a server
+        # error so the client retries rather than treating the lease as gone.
+        logger.error("Pool host cleanup error: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if isinstance(exc, (OvhApiError, OvhHttpError)):
+        # OVH calls during teardown (tag strip / cancel) failed. Surface as a
+        # bad-gateway so the failed cancel is visible and retryable instead of
+        # being swallowed into a false "released" success.
+        logger.error("OVH API error during pool-host teardown: %s", exc)
+        raise HTTPException(status_code=502, detail=f"OVH API error during teardown: {exc}") from exc
     if isinstance(exc, TunnelNotFoundError):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if isinstance(exc, TunnelOwnershipError):
@@ -1723,6 +1895,8 @@ def raise_as_http(exc: Exception) -> NoReturn:
     if isinstance(exc, InvalidTunnelComponentError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, TunnelComponentTooLongError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, InvalidPaidListEntryError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if isinstance(exc, InvalidR2BucketNameError):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1789,6 +1963,174 @@ def _append_authorized_key(
             raise paramiko.SSHException(f"SSH command failed (exit {exit_status}): {stderr_text}")
     finally:
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# OVH pool-host cleanup
+#
+# Releasing a pool host (and the periodic sweep that mops up interrupted
+# releases) must (a) strip the per-lease OVH IAM tags so the VPS reads as a
+# clean, recyclable host and (b) cancel the VPS in OVH so it stops renewing.
+# We do this with direct OVH REST calls rather than running ``mngr`` here so
+# the connector image stays light; the call surface is intentionally tiny.
+# Keep the tag keys / endpoint defaults in sync with ``libs/mngr_ovh``.
+# ---------------------------------------------------------------------------
+
+# Always kept on a recyclable host so the OVH provider can still discover it.
+OVH_PROVIDER_TAG_KEY = "mngr-provider"
+# Per-lease tags stripped on cleanup (everything except the provider tag).
+_OVH_STALE_TAG_KEYS: tuple[str, ...] = ("minds_env", "mngr-host-id")
+_OVH_DEFAULT_ENDPOINT = "ovh-us"
+
+
+class OvhVpsResource(BaseModel):
+    """A single OVH IAM ``vps`` resource with its tags."""
+
+    urn: str = Field(description="IAM URN like urn:v1:us:resource:vps:<serviceName>")
+    name: str = Field(description="OVH VPS service name")
+    tags: dict[str, str] = Field(default_factory=dict, description="IAM resource tags")
+
+
+class OvhOps(Protocol):
+    """Abstraction over the few OVH REST calls the cleanup path needs."""
+
+    def delete_tag(self, urn: str, key: str) -> None: ...
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None: ...
+    def list_vps_resources(self) -> list[OvhVpsResource]: ...
+
+
+class OvhClientCaller(Protocol):
+    """The single python-ovh entrypoint HttpOvhOps depends on (a DI seam for tests)."""
+
+    def call(self, method: str, path: str, data: object, need_auth: bool) -> Any: ...
+
+
+class HttpOvhOps:
+    """OvhOps implementation backed by the official ``ovh`` SDK (signed calls)."""
+
+    def __init__(self, application_key: str, application_secret: str, consumer_key: str, endpoint: str) -> None:
+        self.client: OvhClientCaller = ovh.Client(
+            endpoint=endpoint,
+            application_key=application_key,
+            application_secret=application_secret,
+            consumer_key=consumer_key,
+        )
+
+    def delete_tag(self, urn: str, key: str) -> None:
+        # Idempotent: a missing tag means the strip already happened.
+        try:
+            self.client.call("DELETE", f"/v2/iam/resource/{urn}/tag/{key}", None, True)
+        except ResourceNotFoundError:
+            pass
+
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        # Read-modify-write so we don't clobber unrelated serviceInfos fields.
+        # Idempotent: a missing service means OVH already removed the VPS, so
+        # there is nothing left to cancel (treat as success, like delete_tag).
+        try:
+            info = dict(self.client.call("GET", f"/vps/{service_name}/serviceInfos", None, True) or {})
+            renew = dict(info.get("renew") or {})
+            renew["deleteAtExpiration"] = delete_at_expiration
+            info["renew"] = renew
+            self.client.call("PUT", f"/vps/{service_name}/serviceInfos", info, True)
+        except ResourceNotFoundError:
+            pass
+
+    def list_vps_resources(self) -> list[OvhVpsResource]:
+        payload = self.client.call("GET", "/v2/iam/resource?resourceType=vps", None, True)
+        if not isinstance(payload, list):
+            return []
+        resources: list[OvhVpsResource] = []
+        for raw in payload:
+            if not isinstance(raw, dict):
+                continue
+            urn = str(raw.get("urn") or "")
+            if not urn:
+                continue
+            tags = {str(k): str(v) for k, v in (raw.get("tags") or {}).items()}
+            resources.append(OvhVpsResource(urn=urn, name=str(raw.get("name") or ""), tags=tags))
+        return resources
+
+
+def ovh_region_code_for_endpoint(endpoint: str) -> str:
+    """Map an OVH endpoint id (``ovh-us``) to the URN region segment (``us``)."""
+    if endpoint.startswith("ovh-"):
+        return endpoint.removeprefix("ovh-")
+    return "us"
+
+
+def _get_ovh_endpoint() -> str:
+    return os.environ.get("OVH_ENDPOINT", _OVH_DEFAULT_ENDPOINT)
+
+
+def vps_urn_for(service_name: str, region_code: str) -> str:
+    """Build the IAM resource URN for an OVH VPS owned by this account."""
+    return f"urn:v1:{region_code}:resource:vps:{service_name}"
+
+
+@functools.cache
+def _get_ovh_ops() -> OvhOps:
+    return HttpOvhOps(
+        application_key=os.environ["OVH_APPLICATION_KEY"],
+        application_secret=os.environ["OVH_APPLICATION_SECRET"],
+        consumer_key=os.environ["OVH_CONSUMER_KEY"],
+        endpoint=_get_ovh_endpoint(),
+    )
+
+
+def clean_up_pool_host_in_ovh(ovh_ops: OvhOps, vps_instance_id: str, region_code: str) -> None:
+    """Strip the per-lease tags (keeping ``mngr-provider``) then cancel the VPS.
+
+    Tags are stripped first (per the cleanup contract) so a mid-crash leaves a
+    recyclable-looking host that the next sweep finishes cancelling. Each call
+    is idempotent, so re-running is safe.
+    """
+    urn = vps_urn_for(vps_instance_id, region_code)
+    for tag_key in _OVH_STALE_TAG_KEYS:
+        ovh_ops.delete_tag(urn, tag_key)
+    ovh_ops.set_delete_at_expiration(vps_instance_id, True)
+
+
+def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
+    """Delete a single pool_hosts row by id (committing immediately)."""
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+    conn.commit()
+
+
+def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
+    """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
+
+    Returns ``(success_count, failure_count)``. Per-host failures are logged
+    and skipped (the row stays ``removing`` for the next run); ``FOR UPDATE
+    SKIP LOCKED`` keeps a concurrent inline release and the sweep from
+    double-processing the same row.
+    """
+    success_count = 0
+    failure_count = 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, vps_instance_id FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED")
+        rows = cur.fetchall()
+        for host_db_id, vps_instance_id in rows:
+            # Per-host savepoint so a DB error on one host's DELETE doesn't
+            # abort the whole transaction (which would roll back every other
+            # host's already-issued DELETE in this run and poison subsequent
+            # statements). Rollback-to-savepoint leaves the transaction usable.
+            cur.execute("SAVEPOINT pool_host_cleanup")
+            try:
+                if vps_instance_id:
+                    clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
+                else:
+                    logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
+                cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
+                cur.execute("RELEASE SAVEPOINT pool_host_cleanup")
+                success_count += 1
+            except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
+                cur.execute("ROLLBACK TO SAVEPOINT pool_host_cleanup")
+                logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
+                failure_count += 1
+    conn.commit()
+    return success_count, failure_count
 
 
 # ---------------------------------------------------------------------------
@@ -2037,13 +2379,23 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
         try:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(
+                    # Build the lease selection dynamically. A hard ``region``
+                    # adds an equality filter; when unset the lease is
+                    # region-agnostic. The selection stays a single round-trip
+                    # (the fast path must not pay an extra query).
+                    where_clauses = ["status = 'available'", "attributes @> %s::jsonb"]
+                    query_params: list[object] = [json.dumps(body.attributes)]
+                    if body.region is not None:
+                        where_clauses.append("region = %s")
+                        query_params.append(body.region)
+                    order_by = "created_at ASC"
+                    lease_select_sql = (
                         "SELECT id, vps_address, ssh_port, ssh_user, container_ssh_port, agent_id, host_id, attributes "
                         "FROM pool_hosts "
-                        "WHERE status = 'available' AND attributes @> %s::jsonb "
-                        "ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-                        (json.dumps(body.attributes),),
+                        f"WHERE {' AND '.join(where_clauses)} "
+                        f"ORDER BY {order_by} LIMIT 1 FOR UPDATE SKIP LOCKED"
                     )
+                    cur.execute(lease_select_sql, tuple(query_params))
                     row = cur.fetchone()
                     if row is None:
                         raise HTTPException(
@@ -2098,12 +2450,22 @@ def lease_host(request: Request, body: LeaseHostRequest) -> dict[str, object]:
 
 @web_app.post("/hosts/{host_db_id}/release")
 def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
-    """Release a leased host back to the pool.
+    """Release a leased host: cancel the OVH VPS, strip its tags, drop the row.
 
-    Idempotent at the HTTP layer: a second release on an already-
-    released host returns 200 ``status: already_released`` rather than
-    404. Ownership is still enforced -- if some other user leased the
-    row, the call returns 403 regardless of status.
+    Runs the full cleanup chain inline and **synchronously**: flip the row to
+    ``removing`` (the durable, retryable in-progress marker), strip the
+    per-lease OVH tags, cancel the VPS, then delete the row.
+
+    Returns 200 only once *every* step has succeeded -- a "released" result
+    truly means the VPS is cancelled. If any teardown step fails, the row stays
+    ``removing`` and the endpoint returns an error (5xx) so the client (or the
+    hourly sweep backstop) retries; we never report success on a failed cancel.
+    A failure before ``removing`` is committed (lookup, ownership, the status
+    flip) surfaces as an error too.
+
+    Idempotent at the HTTP layer: a release on a row that is already gone
+    (deleted) or no longer leased returns 200 ``status: already_released``.
+    Ownership is still enforced -- a row leased by another user returns 403.
     """
     with handle_endpoint_errors():
         auth = authenticate_request(request, get_ctx().ops)
@@ -2116,27 +2478,53 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user, status FROM pool_hosts WHERE id = %s",
+                    "SELECT leased_to_user, status, vps_instance_id FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
+                # A missing row means cleanup already finished (idempotent).
                 if row is None:
-                    raise HTTPException(status_code=404, detail="Host not found")
-                leased_to_user, status = row
+                    return ReleaseHostResponse(status="already_released").model_dump()
+                leased_to_user, status, vps_instance_id = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
                 if leased_to_user != admin.username:
                     raise HTTPException(status_code=403, detail="You do not own this host lease")
-                if status != "leased":
+                # Only a leased or already-removing row is eligible for
+                # cleanup; anything else is treated as already released.
+                if status not in ("leased", "removing"):
                     return ReleaseHostResponse(status="already_released").model_dump()
-                cur.execute(
-                    "UPDATE pool_hosts SET status = 'released', released_at = NOW() WHERE id = %s",
-                    (str(host_db_id),),
-                )
-                conn.commit()
+                if status == "leased":
+                    cur.execute(
+                        "UPDATE pool_hosts SET status = 'removing', released_at = NOW() WHERE id = %s",
+                        (str(host_db_id),),
+                    )
+                    conn.commit()
+            # Past the commit point: the row is durably ``removing`` and the
+            # sweep will finish anything that fails below, so we always
+            # return 200 from here.
+            _finish_releasing_pool_host(conn, host_db_id, vps_instance_id)
         finally:
             conn.close()
         return ReleaseHostResponse(status="released").model_dump()
+
+
+def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str | None) -> None:
+    """Synchronous OVH cleanup + row delete for a host already marked ``removing``.
+
+    Strips the per-lease OVH tags, cancels the VPS, then deletes the row -- and
+    **raises** on any failure rather than swallowing it. The caller has already
+    committed the row to ``removing`` (a durable, retryable in-progress marker),
+    so a failure here propagates to the HTTP layer as an error: the release
+    reports failure, the row stays ``removing``, and the client (or the hourly
+    sweep backstop) retries. A release that cannot actually cancel the VPS must
+    never report success -- that false success is what previously left VPSes
+    running and billing with no error anywhere.
+    """
+    if not vps_instance_id:
+        raise PoolHostCleanupError(f"pool host {host_db_id} has no vps_instance_id; cannot cancel its VPS")
+    clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
+    _delete_pool_host_row(conn, host_db_id)
 
 
 @web_app.get("/hosts")
@@ -2174,6 +2562,162 @@ def list_leased_hosts(request: Request) -> list[dict[str, object]]:
             ).model_dump()
             for r in rows
         ]
+
+
+# ---------------------------------------------------------------------------
+# Paid-list CRUD (admin-key authenticated)
+# ---------------------------------------------------------------------------
+
+
+class PaidListEntryRequest(BaseModel):
+    value: str = Field(description="The domain or email to add/remove (normalized to lowercase server-side)")
+
+
+class PaidDomainInfo(BaseModel):
+    domain: str = Field(description="The allowed domain (lowercased)")
+    is_paid: bool = Field(description="Whether this domain currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+class PaidEmailInfo(BaseModel):
+    email: str = Field(description="The allowed email (lowercased)")
+    is_paid: bool = Field(description="Whether this email currently grants paid access")
+    created_at: str = Field(description="When the row was first inserted")
+    updated_at: str = Field(description="When is_paid was last changed")
+
+
+def _normalize_paid_domain(value: str) -> str:
+    """Lowercase + validate a domain entry (no ``@``, no internal whitespace, non-empty)."""
+    normalized = value.strip().lower()
+    if not normalized:
+        raise InvalidPaidListEntryError(value, "domain must not be empty")
+    if "@" in normalized:
+        raise InvalidPaidListEntryError(value, "domain must not contain '@' (use the email list for full addresses)")
+    if any(character.isspace() for character in normalized):
+        raise InvalidPaidListEntryError(value, "domain must not contain whitespace")
+    return normalized
+
+
+def _normalize_paid_email(value: str) -> str:
+    """Lowercase + validate an email entry (exactly one ``@`` with non-empty local + domain parts)."""
+    normalized = value.strip().lower()
+    local, separator, domain = normalized.partition("@")
+    if not separator or not local or not domain or "@" in domain or any(c.isspace() for c in normalized):
+        raise InvalidPaidListEntryError(value, "email must be of the form 'local@domain'")
+    return normalized
+
+
+def _list_paid_entries(table: str, value_column: str, paid_only: bool) -> list[tuple[str, bool, str, str]]:
+    """Return all rows of a paid-list table as ``(value, is_paid, created_at, updated_at)`` tuples."""
+    where_clause = " WHERE is_paid = TRUE" if paid_only else ""
+    conn = _get_pool_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {value_column}, is_paid, created_at, updated_at FROM {table}{where_clause} "
+                f"ORDER BY {value_column} ASC"
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [(row[0], bool(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+
+def _activate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Upsert a paid-list entry to ``is_paid = true`` (reactivating in place, keeping created_at)."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO {table} ({value_column}, is_paid, created_at, updated_at) "
+                    "VALUES (%s, TRUE, NOW(), NOW()) "
+                    f"ON CONFLICT ({value_column}) DO UPDATE SET is_paid = TRUE, updated_at = NOW()",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+def _deactivate_paid_entry(table: str, value_column: str, value: str) -> None:
+    """Soft-delete a paid-list entry (``is_paid = false``). A no-op when the row is absent."""
+    conn = _get_pool_db_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET is_paid = FALSE, updated_at = NOW() WHERE {value_column} = %s",
+                    (value,),
+                )
+    finally:
+        conn.close()
+    clear_paid_status_cache()
+
+
+@web_app.get("/paid/domains")
+def list_paid_domains(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-domain rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_domains", "domain", paid_only)
+        return [
+            PaidDomainInfo(domain=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/domains/add")
+def add_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid domain. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _activate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "added", "domain": domain}
+
+
+@web_app.post("/paid/domains/remove")
+def remove_paid_domain(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid domain (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        domain = _normalize_paid_domain(body.value)
+        _deactivate_paid_entry("paid_domains", "domain", domain)
+        return {"status": "removed", "domain": domain}
+
+
+@web_app.get("/paid/emails")
+def list_paid_emails(request: Request, paid_only: bool = False) -> list[dict[str, object]]:
+    """List paid-email rows. ``paid_only=true`` filters to currently-active entries."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        rows = _list_paid_entries("paid_emails", "email", paid_only)
+        return [
+            PaidEmailInfo(email=value, is_paid=is_paid, created_at=created_at, updated_at=updated_at).model_dump()
+            for (value, is_paid, created_at, updated_at) in rows
+        ]
+
+
+@web_app.post("/paid/emails/add")
+def add_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Add (or reactivate) a paid email. Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _activate_paid_entry("paid_emails", "email", email)
+        return {"status": "added", "email": email}
+
+
+@web_app.post("/paid/emails/remove")
+def remove_paid_email(request: Request, body: PaidListEntryRequest) -> dict[str, object]:
+    """Soft-remove a paid email (set is_paid=false). Idempotent."""
+    with handle_endpoint_errors():
+        require_paid_admin_key(request)
+        email = _normalize_paid_email(body.value)
+        _deactivate_paid_entry("paid_emails", "email", email)
+        return {"status": "removed", "email": email}
 
 
 # ---------------------------------------------------------------------------
@@ -3256,8 +3800,20 @@ _MINDS_DEPLOY_ID = os.environ.get(_MINDS_DEPLOY_ID_ENV_VAR, "MINDS_DEPLOY_ID_UNS
 # cheapest possible warm pool (cold start on first hit).
 _MIN_CONTAINERS = int(os.environ.get("MINDS_CONNECTOR_MIN_CONTAINERS", "0"))
 
+# How long (seconds) an idle container stays alive before Modal scales it
+# down. ``minds env deploy`` threads the tier's
+# ``[scaledown_window].connector`` from its committed ``deploy.toml`` here as
+# ``MINDS_CONNECTOR_SCALEDOWN_WINDOW`` at ``modal deploy`` time. Dev tiers set
+# this high (~10 min) so the no-warm-pool connector stays hot across a dev
+# session instead of cold-booting on every request; staging / production
+# leave it unset and rely on ``min_containers`` instead. ``0`` (the default,
+# and what the ci/test tier uses) means "don't pin it" -- the function falls
+# back to Modal's own default scaledown window. Modal requires the value to
+# be > 0, so 0 is normalized to ``None`` at the call site below.
+_SCALEDOWN_WINDOW = int(os.environ.get("MINDS_CONNECTOR_SCALEDOWN_WINDOW", "0"))
+
 image = modal.Image.debian_slim().pip_install(
-    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko"
+    "fastapi[standard]", "httpx", "supertokens-python", "psycopg2-binary", "paramiko", "ovh"
 )
 app = modal.App(name=f"rsc-{_DEPLOY_ENV}", image=image)
 
@@ -3275,7 +3831,7 @@ def _get_auth_website_domain() -> str:
     """
     value = os.environ.get("AUTH_WEBSITE_DOMAIN")
     if not value:
-        raise RuntimeError(
+        raise MissingAuthWebsiteDomainError(
             "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
             f"`supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}` Modal secret (the deploy script "
             "pushes it from the tier's Vault entry)."
@@ -3370,17 +3926,26 @@ def _init_supertokens() -> None:
     logger.info("SuperTokens SDK initialized (providers=%d)", len(providers))
 
 
-@app.function(
-    name="api",
-    secrets=[
+def _connector_secrets() -> list[modal.Secret]:
+    """The Modal secrets attached to every connector function (web app + cron).
+
+    Includes ``ovh-<env>`` so the release route and the cleanup cron can make
+    signed OVH calls (tag strip + cancel) at runtime.
+    """
+    return [
         modal.Secret.from_name(f"cloudflare-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"neon-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"pool-ssh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_name(f"litellm-connector-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
-        modal.Secret.from_name(f"paid-accounts-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
+        modal.Secret.from_name(f"ovh-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}"),
         modal.Secret.from_dict({"MNGR_DEPLOY_ENV": _DEPLOY_ENV, _MINDS_DEPLOY_ID_ENV_VAR: _MINDS_DEPLOY_ID}),
-    ],
+    ]
+
+
+@app.function(
+    name="api",
+    secrets=_connector_secrets(),
     # Warm-pool size driven by ``_MIN_CONTAINERS`` at the top of this
     # module: defaults to 1 for production / staging (avoid cold-boot
     # penalty on auth / lease / tunnel hits from the desktop client) and
@@ -3388,8 +3953,33 @@ def _init_supertokens() -> None:
     # at deploy time with ``MINDS_MIN_CONTAINERS=<n>``. Mirrors the
     # equivalent block in apps/modal_litellm/app.py.
     min_containers=_MIN_CONTAINERS,
+    # Idle-before-scaledown window driven by ``_SCALEDOWN_WINDOW``. ``0``
+    # (default / ci) -> ``None`` so Modal uses its own default; dev pins this
+    # high so the no-warm-pool connector stays hot across a dev session.
+    scaledown_window=_SCALEDOWN_WINDOW or None,
 )
 @modal.asgi_app()
 def fastapi_app() -> FastAPI:
     _init_supertokens()
     return web_app
+
+
+@app.function(
+    name="cleanup_removing_pool_hosts",
+    secrets=_connector_secrets(),
+    # Hourly mop-up of any pool host left in ``removing`` by a crashed or
+    # timed-out inline release. The happy path deletes the row inline, so this
+    # is purely a safety net.
+    schedule=modal.Cron("0 * * * *"),
+    timeout=900,
+)
+def cleanup_removing_pool_hosts() -> dict[str, int]:
+    conn = _get_pool_db_connection()
+    try:
+        success_count, failure_count = run_pool_host_cleanup_sweep(
+            conn, _get_ovh_ops(), ovh_region_code_for_endpoint(_get_ovh_endpoint())
+        )
+    finally:
+        conn.close()
+    logger.info("Pool host cleanup sweep done: cleaned=%d failed=%d", success_count, failure_count)
+    return {"cleaned": success_count, "failed": failure_count}

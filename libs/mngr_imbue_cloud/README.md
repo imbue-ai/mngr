@@ -52,12 +52,45 @@ mngr create my-agent@my-host.imbue_cloud_alice --new-host \
 `--build-arg KEY=VALUE` flags become `LeaseAttributes` (`repo_url`,
 `repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`); the connector
 matches them via JSONB containment against the pool host's
-`attributes` row. A request that does not match any available row is
-rejected with `409 No host available for these attributes`.
+`attributes` row. Any other `-b` entry (e.g. `--file=Dockerfile`, `.`)
+is forwarded verbatim as a build arg to the slow-path container rebuild.
 
-The pool host is fully pre-provisioned, so mngr's create pipeline only
-writes the agent env file (and patches the claude config when an
-`ANTHROPIC_API_KEY` lands in env) before starting the tmux session.
+## Fast path vs. slow path (`fast_mode`)
+
+`mngr create` against imbue_cloud can land on a pool host two ways, selected
+by `-b fast_mode=<require|prevent>`:
+
+- **`fast_mode=require`** -- the *fast path*. Lease a pool host whose
+  `attributes` row exactly matches and adopt its pre-baked `system-services`
+  agent. The pool host is fully pre-provisioned, so mngr's create pipeline only
+  writes the agent env file (and patches the claude config when an
+  `ANTHROPIC_API_KEY` lands in env) before starting the tmux session. If no
+  exact match is available, this raises `FastPathUnavailableError` rather than
+  falling back.
+
+- **`fast_mode=prevent`** -- the *slow path*, and the **default**. Lease any
+  adequately-sized available host (resource attributes only;
+  `repo_branch_or_tag`/`repo_url` are dropped), destroy its baked container,
+  and rebuild it from the FCT `Dockerfile` via the shared `mngr_vps_docker`
+  setup path. mngr's standard create pipeline then does full client-side setup
+  -- exactly as if this were a fresh OVH host. The rebuilt container keeps the
+  lease's pre-baked `host_id`/`agent_id` so identity stays aligned with the
+  connector's lease row.
+
+The slow path needs a usable build context: run `mngr create` from (or
+`--project` at) a forever-claude-template checkout whose `imbue_cloud` create
+template supplies the Dockerfile build args. The logs state which path was
+taken (`imbue_cloud[...] FAST PATH` vs `SLOW PATH`).
+
+The client owns the machine the moment the connector marks it `leased`: if any
+step after a successful lease fails, the lease is released back to the pool
+(no data wipe -- nothing sensitive exists yet) before the error propagates.
+
+minds drives this automatically: it tries `fast_mode=require` first and, on
+`FastPathUnavailableError`, retries with `fast_mode=prevent`.
+
+When the pool is genuinely empty, even the relaxed slow-path lease returns
+`ImbueCloudLeaseUnavailableError` (distinct from `FastPathUnavailableError`).
 
 ## Destroy / delete / stop
 

@@ -38,6 +38,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 import paramiko
 from loguru import logger
@@ -47,8 +48,8 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostAuthenticationError
-from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
@@ -59,6 +60,7 @@ from imbue.mngr.hosts.common import resolve_expected_process_name
 from imbue.mngr.hosts.common import timestamp_to_datetime
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -83,6 +85,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
@@ -100,10 +103,21 @@ from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
+from imbue.mngr_imbue_cloud.data_types import LeaseResult
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
+from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
+from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
 
@@ -352,7 +366,12 @@ def _scan_ssh_host_key(host: str, port: int) -> str | None:
     try:
         transport.start_client(timeout=10.0)
         host_key = transport.get_remote_server_key()
-    except (paramiko.SSHException, OSError):
+    except (paramiko.SSHException, OSError) as exc:
+        # Returning None is intentional (TOFU is best-effort), but log the
+        # cause: without the scanned key the caller can't add a known_hosts
+        # entry, so a later StrictHostKeyChecking SSH will fail -- this debug
+        # line makes the root cause of that downstream failure visible.
+        logger.debug("SSH host-key scan of {}:{} failed ({}); known_hosts entry will be missing", host, port, exc)
         return None
     finally:
         try:
@@ -360,6 +379,24 @@ def _scan_ssh_host_key(host: str, port: int) -> str | None:
         except (OSError, paramiko.SSHException):
             pass
     return f"{host_key.get_name()} {host_key.get_base64()}"
+
+
+@pure
+def _build_delegated_vps_config(config: ImbueCloudProviderConfig) -> VpsDockerProviderConfig:
+    """Build the delegated vps_docker config for the slow-path rebuild.
+
+    Forwards the runtime knobs (``docker_runtime`` / ``install_gvisor_runtime`` /
+    ``default_start_args``) from the imbue_cloud config so the rebuilt container
+    runs under the configured runtime with the configured hardening args.
+    """
+    return VpsDockerProviderConfig(
+        backend=ProviderBackendName("vps_docker"),
+        host_dir=config.host_dir,
+        container_ssh_port=config.container_ssh_port,
+        docker_runtime=config.docker_runtime,
+        install_gvisor_runtime=config.install_gvisor_runtime,
+        default_start_args=config.default_start_args,
+    )
 
 
 class ImbueCloudProvider(BaseProviderInstance):
@@ -505,11 +542,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             return self._leased_hosts_cache
         account = self._require_account()
         token = self._get_access_token(account)
-        try:
-            self._leased_hosts_cache = self.client.list_hosts(token)
-        except MngrError as exc:
-            logger.warning("imbue_cloud[{}] list_hosts failed: {}", self.name, exc)
-            self._leased_hosts_cache = []
+        # Do NOT swallow a discovery failure to an empty list: a transient
+        # connector outage / expired token would then look like "this account
+        # has zero leased hosts", which the discovery layer cannot distinguish
+        # from a real empty result (and which defeats mngr's mark-UNKNOWN-on-
+        # provider-failure safeguard). Let it propagate -- this method already
+        # raises (via _require_account), so callers tolerate it.
+        self._leased_hosts_cache = self.client.list_hosts(token)
         return self._leased_hosts_cache
 
     def discover_hosts(
@@ -662,7 +701,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 exc,
             )
             return None, f"outer SSH authentication failed: {exc}", True
-        except (HostConnectionError, HostNotFoundError, MngrError) as exc:
+        except MngrError as exc:
             logger.warning(
                 "imbue_cloud[{}] outer SSH unreachable for host {}: {}",
                 self.name,
@@ -965,7 +1004,16 @@ class ImbueCloudProvider(BaseProviderInstance):
             plugin={},
         )
 
-    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
+    def _build_host_object(self, lease: LeasedHostInfo, *, adopt_pre_baked_agent: bool = True) -> ImbueCloudHost:
+        """Construct the ``ImbueCloudHost`` for a leased host.
+
+        ``adopt_pre_baked_agent`` records whether the leased container still
+        carries the bake's pre-provisioned agent state to adopt. The fast path
+        (and discovery) leaves it True; the slow path passes False because it
+        tore down the baked container and rebuilt it, so there is nothing to
+        adopt -- ``pre_baked_agent_id=None`` then makes ``create_agent_*`` /
+        ``provision_agent`` all fall through to mngr's standard full create.
+        """
         host_id = HostId(lease.host_id)
         agent_id = AgentId(lease.agent_id)
         ssh_user = lease.ssh_user
@@ -1000,7 +1048,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
-            pre_baked_agent_id=agent_id,
+            pre_baked_agent_id=agent_id if adopt_pre_baked_agent else None,
             lease_db_id=host_db_id,
         )
         self._evict_cached_host(host_id, replacement=host)
@@ -1036,11 +1084,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             created_at=now,
             updated_at=now,
         )
-        return OfflineHost(
-            id=host_id,
-            certified_host_data=certified_host_data,
-            provider_instance=self,
-            mngr_ctx=self.mngr_ctx,
+        return make_readable_offline_host(
+            OfflineHost(
+                id=host_id,
+                certified_host_data=certified_host_data,
+                provider_instance=self,
+                mngr_ctx=self.mngr_ctx,
+            )
         )
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
@@ -1071,59 +1121,426 @@ class ImbueCloudProvider(BaseProviderInstance):
         authorized_keys: Sequence[str] | None = None,
         snapshot: SnapshotName | None = None,
     ) -> Host:
-        """Lease a pool host whose attributes match ``build_args`` and return it.
+        """Lease a pool host and return it, via the fast (adopt) or slow (rebuild) path.
 
-        Two address forms work:
-          - ``mngr create my-agent@.imbue_cloud_alice --new-host -b cpus=4 -b
-            version=...`` -- the per-account provider instance carries the
-            account in ``config.account`` and the build args are pure lease
-            attributes.
-          - ``mngr create my-agent@.imbue_cloud --new-host -b
-            account=alice@imbue.com -b cpus=4 -b version=...`` -- the
-            default instance has no account; the caller passes one through
-            build args.
+        The ``fast_mode`` build arg selects the path (default
+        :data:`~imbue.mngr_imbue_cloud.primitives.DEFAULT_FAST_MODE`):
 
-        ``account`` is extracted from ``build_args``; remaining keys are
-        parsed into ``LeaseAttributes`` and sent to the connector, which
-        finds an available pool host whose ``attributes`` JSONB row
-        matches. The returned ``ImbueCloudHost`` carries the pre-baked
-        agent id so the rest of mngr's create pipeline (agent state, env
-        injection, agent start) can adopt the existing agent under the
-        caller's chosen name.
+        - ``fast_mode=require`` -- the fast path. Lease a pool host whose
+          ``attributes`` JSONB row exactly matches the requested attributes and
+          adopt its pre-baked ``system-services`` agent (no transfer, minimal
+          provision). If no exact match exists, raise
+          ``FastPathUnavailableError`` so the caller can fall back.
+        - ``fast_mode=prevent`` -- the slow path. Lease any adequately-sized
+          available host (resource attributes only; ``repo_branch_or_tag`` /
+          ``repo_url`` are dropped), destroy its baked container, and rebuild
+          the host from scratch via the shared ``mngr_vps_docker`` setup path,
+          so mngr's standard create pipeline then does full client-side setup.
+
+        Two address forms work for both paths:
+          - ``...@.imbue_cloud_alice`` -- the per-account instance carries the
+            account in ``config.account``.
+          - ``...@.imbue_cloud -b account=alice@imbue.com`` -- the default
+            instance takes the account from build args.
+
+        Once a lease is obtained, any failure during the remaining setup
+        releases the lease back to the pool before re-raising -- the client
+        owns the machine the moment the connector marks it ``leased``.
         """
         if snapshot is not None:
             raise SnapshotsNotSupportedError(self.name)
-        if image is not None or start_args:
-            raise MngrError(
-                "imbue_cloud provider does not accept --image or --start-arg; "
-                "use --build-arg KEY=VALUE flags to constrain the lease attributes."
-            )
         try:
-            attributes, account_override = LeaseAttributes.from_build_args(build_args)
+            parsed = parse_imbue_cloud_build_args(build_args)
         except ValueError as exc:
             raise MngrError(f"Invalid build_args for imbue_cloud lease: {exc}") from exc
 
-        account = self._require_account(account_override)
+        account = self._require_account(parsed.account_override)
         token = self._get_access_token(account)
-        # The lease request needs a host_id placeholder so we can stash the
-        # per-host keypair under its canonical path before we know the
-        # pool-baked id. We generate a temp dir, then move the keys into the
-        # canonical hosts/<lease.host_id>/ once the lease comes back.
-        provider_dir = self._provider_data_dir()
-        leases_dir = provider_dir / "leases"
+
+        match parsed.fast_mode:
+            case FastMode.REQUIRE:
+                if image is not None or start_args:
+                    raise MngrError(
+                        "imbue_cloud fast_mode=require does not accept --image or --start-arg; "
+                        "the pre-baked agent is adopted as-is. Use fast_mode=prevent to rebuild."
+                    )
+                return self._create_host_fast_path(
+                    name=name,
+                    attributes=parsed.attributes,
+                    token=token,
+                    region=parsed.region,
+                )
+            case FastMode.PREVENT:
+                return self._create_host_slow_path(
+                    name=name,
+                    attributes=parsed.attributes,
+                    token=token,
+                    image=image,
+                    tags=tags,
+                    start_args=start_args,
+                    lifecycle=lifecycle,
+                    known_hosts=known_hosts,
+                    authorized_keys=authorized_keys,
+                    passthrough_build_args=parsed.passthrough_build_args,
+                    region=parsed.region,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _create_host_fast_path(
+        self,
+        *,
+        name: HostName,
+        attributes: LeaseAttributes,
+        token: SecretStr,
+        region: str | None,
+    ) -> Host:
+        """Lease an exact-attribute pool host and adopt its pre-baked agent.
+
+        Raises ``FastPathUnavailableError`` (not ``ImbueCloudLeaseUnavailableError``)
+        when no exact match exists, so the distinct signal lets a caller fall
+        back to the slow path.
+        """
+        logger.info("imbue_cloud[{}] FAST PATH: leasing exact-attribute pool host for {!r}", self.name, str(name))
+        tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
+        try:
+            lease_result = self.client.lease_host(
+                token,
+                attributes,
+                public_key_text,
+                str(name),
+                region=region,
+            )
+        except ImbueCloudLeaseUnavailableError as exc:
+            self._discard_pending_keypair(tmp_private_key, tmp_public_key)
+            raise FastPathUnavailableError(
+                f"No pool host exactly matches the requested attributes for the fast (adopt) path: {exc}"
+            ) from exc
+        self.reset_caches()
+
+        host_id = HostId(lease_result.host_id)
+        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "fast-path setup"):
+            # Install the keypair inside the guard: the connector has already
+            # marked the host leased, so a failure here (e.g. an OSError while
+            # moving the key files) must still release the lease.
+            final_private_key, _final_public_key = self._install_leased_keypair(
+                host_id, tmp_private_key, tmp_public_key
+            )
+            self._persist_lease_meta(host_id, lease_result)
+            # Wait for the leased container's sshd to be ready before we hand the
+            # host back to mngr's create pipeline (which SSHes in immediately).
+            wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+            known_hosts_path = self._scan_and_record_container_host_key(
+                host_id, lease_result.vps_address, lease_result.container_ssh_port
+            )
+            # The pool host's ``/mngr/data.json`` was baked with a placeholder
+            # host name; rewrite it to the user-supplied name so the FCT
+            # bootstrap inherits the user's chosen workspace name.
+            _rewrite_container_host_name(
+                vps_address=lease_result.vps_address,
+                container_ssh_port=lease_result.container_ssh_port,
+                private_key_path=final_private_key,
+                known_hosts_path=known_hosts_path,
+                new_host_name=str(name),
+            )
+            host = self._build_host_object(self._leased_info_from_result(lease_result))
+        logger.info(
+            "imbue_cloud[{}] FAST PATH: adopted pre-baked agent {} on leased host {}",
+            self.name,
+            lease_result.agent_id,
+            host_id,
+        )
+        return host
+
+    def _create_host_slow_path(
+        self,
+        *,
+        name: HostName,
+        attributes: LeaseAttributes,
+        token: SecretStr,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+        passthrough_build_args: tuple[str, ...],
+        region: str | None,
+    ) -> Host:
+        """Lease any available host (relaxed attributes), nuke its container, and rebuild it.
+
+        The rebuilt container keeps the lease's pre-baked ``host_id`` /
+        ``agent_id`` (so mngr identity stays aligned with the connector's lease
+        row) but has no on-disk agent state, so the returned ``ImbueCloudHost``
+        falls through to mngr's standard full create + provision pipeline --
+        exactly as if this were a fresh OVH host.
+        """
+        relaxed_attributes = attributes.relaxed()
+        logger.info(
+            "imbue_cloud[{}] SLOW PATH: no fast match requested; leasing any available host "
+            "(relaxed attributes {}) to rebuild for {!r}",
+            self.name,
+            relaxed_attributes.to_request_dict(),
+            str(name),
+        )
+        tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
+        try:
+            # Region constraints are NOT relaxed: a hard ``region`` requirement
+            # still applies to the rebuilt host.
+            lease_result = self.client.lease_host(
+                token,
+                relaxed_attributes,
+                public_key_text,
+                str(name),
+                region=region,
+            )
+        except ImbueCloudLeaseUnavailableError:
+            # Genuinely no available host in the pool -- nothing was leased, so
+            # there is nothing to release. Surface the pool-exhausted signal.
+            self._discard_pending_keypair(tmp_private_key, tmp_public_key)
+            raise
+        self.reset_caches()
+
+        host_id = HostId(lease_result.host_id)
+        with self._release_lease_on_failure(token, str(lease_result.host_db_id), host_id, "slow-path rebuild"):
+            # Install the keypair inside the guard: the connector has already
+            # marked the host leased, so a failure here (e.g. an OSError while
+            # moving the key files) must still release the lease.
+            _final_private_key, final_public_key = self._install_leased_keypair(
+                host_id, tmp_private_key, tmp_public_key
+            )
+            self._persist_lease_meta(host_id, lease_result)
+            per_host_public_key = final_public_key.read_text().strip()
+            self._rebuild_leased_container(
+                host_id=host_id,
+                name=name,
+                lease_result=lease_result,
+                per_host_public_key=per_host_public_key,
+                image=image,
+                tags=tags,
+                start_args=start_args,
+                lifecycle=lifecycle,
+                known_hosts=known_hosts,
+                authorized_keys=authorized_keys,
+                passthrough_build_args=passthrough_build_args,
+            )
+            # The rebuilt container has a freshly-generated host key; record it
+            # so the ImbueCloudHost's strict host-key checking succeeds.
+            self._scan_and_record_container_host_key(
+                host_id, lease_result.vps_address, lease_result.container_ssh_port
+            )
+            # The container was torn down and rebuilt -- there is no baked agent
+            # state to adopt, so don't mark the host as pre-baked. This makes
+            # mngr run its standard full create + provision (matching this
+            # method's "fresh OVH host" contract) instead of the adopt path.
+            host = self._build_host_object(self._leased_info_from_result(lease_result), adopt_pre_baked_agent=False)
+        logger.info(
+            "imbue_cloud[{}] SLOW PATH: rebuilt container on leased host {} (lease {}); "
+            "mngr will now run full client-side setup",
+            self.name,
+            host_id,
+            lease_result.host_db_id,
+        )
+        return host
+
+    def _rebuild_leased_container(
+        self,
+        *,
+        host_id: HostId,
+        name: HostName,
+        lease_result: LeaseResult,
+        per_host_public_key: str,
+        image: ImageReference | None,
+        tags: Mapping[str, str] | None,
+        start_args: Sequence[str] | None,
+        lifecycle: HostLifecycleOptions | None,
+        known_hosts: Sequence[str] | None,
+        authorized_keys: Sequence[str] | None,
+        passthrough_build_args: tuple[str, ...],
+    ) -> None:
+        """Tear down the leased VPS's baked container and rebuild it from the FCT Dockerfile.
+
+        Delegates both teardown and rebuild to the single canonical
+        ``mngr_vps_docker`` setup path, run over the root SSH the lease granted.
+        The per-host public key is added to the rebuilt container's
+        ``authorized_keys`` so the returned ``ImbueCloudHost`` (which uses the
+        per-host key) can reach it.
+        """
+        delegated_provider = self._build_delegated_vps_provider()
+        # The VPS root host key (port 22) feeds the rebuilt host's record; best
+        # effort -- it is bookkeeping the imbue_cloud paths do not read back.
+        vps_host_public_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.ssh_port) or ""
+        combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
+        with self._outer_for_leased_vps(host_id, lease_result) as outer:
+            delegated_provider.teardown_container_on_existing_vps(outer, host_id)
+            # Re-apply the full idempotent host setup on the leased VPS before
+            # rebuilding, so a host baked with an old version (or before runsc
+            # existed) is brought up to current: pinned Docker, runsc, sshd
+            # tuning, base packages. This is the single source of truth shared
+            # with the OVH bake + cloud-init backends. Runs after teardown (no
+            # container running, so a Docker upgrade/restart is safe) and before
+            # the rebuild; a failure raises and aborts the create. ``runsc`` is
+            # installed when the provider is configured for it (minds writes
+            # ``install_gvisor_runtime=true`` into the per-account block), so the
+            # rebuilt container can run under ``--runtime runsc``. qemu purge is
+            # enabled because the pool is OVH-backed (a no-op when no qemu).
+            apply_host_setup_on_outer(
+                outer,
+                install_gvisor_runtime=self.config.install_gvisor_runtime,
+                is_qemu_purge_enabled=True,
+            )
+            delegated_provider.create_host_on_existing_vps(
+                outer=outer,
+                host_id=host_id,
+                name=name,
+                vps_ip=lease_result.vps_address,
+                vps_instance_id=VpsInstanceId(str(lease_result.host_db_id)),
+                vps_ssh_key_id="",
+                vps_host_public_key=vps_host_public_key,
+                region="imbue-cloud-pool",
+                plan="imbue-cloud-pool",
+                os_id="imbue-cloud-pool",
+                image=image,
+                tags=tags,
+                build_args=passthrough_build_args,
+                start_args=start_args,
+                lifecycle=lifecycle,
+                known_hosts=known_hosts,
+                authorized_keys=combined_authorized_keys,
+            )
+
+    def _build_delegated_vps_provider(self) -> VpsDockerProvider:
+        """Construct a vps_docker provider bound to this instance's keys/config.
+
+        It only ever runs ``teardown_container_on_existing_vps`` /
+        ``create_host_on_existing_vps`` (which take a caller-supplied ``outer``
+        and make no VPS-API calls), so its ``vps_client`` is the
+        ``ExternallyManagedVpsClient`` stub that raises on any ordering call.
+
+        Forwards the runtime knobs from ``self.config`` (an
+        ``ImbueCloudProviderConfig``, which extends ``VpsDockerProviderConfig``)
+        so the rebuilt container runs under the configured runtime with the
+        configured hardening args -- e.g. ``docker_runtime='runsc'`` plus
+        ``--workdir=/`` / ``--security-opt=no-new-privileges`` from
+        ``default_start_args``, which minds bootstrap writes into the per-account
+        block.
+        """
+        vps_config = _build_delegated_vps_config(self.config)
+        return VpsDockerProvider(
+            name=self.name,
+            host_dir=self.config.host_dir,
+            mngr_ctx=self.mngr_ctx,
+            config=vps_config,
+            vps_client=ExternallyManagedVpsClient(),
+        )
+
+    @contextmanager
+    def _outer_for_leased_vps(self, host_id: HostId, lease_result: LeaseResult) -> Iterator[OuterHostInterface]:
+        """Open an outer host (root@vps:ssh_port) for the leased VPS via the per-host key.
+
+        Scans + records the VPS root host key first so strict host-key checking
+        succeeds on the very first connection.
+        """
+        private_key_path, _ = self._host_keypair_paths(host_id)
+        known_hosts_path = self._host_known_hosts_path(host_id)
+        known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        if not known_hosts_path.exists():
+            known_hosts_path.touch()
+        scanned_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.ssh_port)
+        if scanned_key is not None:
+            add_host_to_known_hosts(known_hosts_path, lease_result.vps_address, lease_result.ssh_port, scanned_key)
+        pyinfra_host = create_pyinfra_host(
+            hostname=lease_result.vps_address,
+            port=lease_result.ssh_port,
+            private_key_path=private_key_path,
+            known_hosts_path=known_hosts_path,
+            ssh_user=lease_result.ssh_user,
+        )
+        outer = OuterHost(
+            id=host_id,
+            connector=PyinfraConnector(pyinfra_host),
+            mngr_ctx=self.mngr_ctx,
+        )
+        try:
+            yield outer
+        finally:
+            outer.disconnect()
+
+    @contextmanager
+    def _release_lease_on_failure(
+        self,
+        token: SecretStr,
+        host_db_id: str,
+        host_id: HostId,
+        phase: str,
+    ) -> Iterator[None]:
+        """Release the lease back to the pool if the wrapped setup fails.
+
+        The client owns the machine the moment the connector marks it leased,
+        so any failure after a successful lease must return the host so it is
+        not leaked. No data wipe is attempted -- nothing sensitive exists on a
+        freshly-leased host yet, and it may not even be reachable.
+
+        Implemented with a success flag + ``finally`` (rather than ``except``)
+        so the wrapped exception propagates untouched while the lease is still
+        released on any non-success exit.
+        """
+        is_success = False
+        try:
+            yield
+            is_success = True
+        finally:
+            if not is_success:
+                logger.warning(
+                    "imbue_cloud[{}] {} failed for host {}; releasing lease {} back to the pool",
+                    self.name,
+                    phase,
+                    host_id,
+                    host_db_id,
+                )
+                self._release_lease_quietly(token, host_db_id)
+                self._cleanup_local_host_state(host_id)
+
+    def _release_lease_quietly(self, token: SecretStr, host_db_id: str) -> None:
+        """Best-effort release of a lease; logs (never raises) on failure.
+
+        Used only by the create-rollback path, where the *original* failure is
+        what the operator needs to see -- a release problem here must not mask
+        it, so we catch and log rather than propagate.
+        """
+        try:
+            self.client.release_host(token, host_db_id)
+        except ImbueCloudConnectorError as exc:
+            logger.warning("imbue_cloud[{}] release of lease {} did not succeed: {}", self.name, host_db_id, exc)
+
+    def _prepare_pending_keypair(self) -> tuple[Path, Path, str]:
+        """Generate a per-lease SSH keypair in a temp dir (host_id not yet known)."""
+        leases_dir = self._provider_data_dir() / "leases"
         leases_dir.mkdir(parents=True, exist_ok=True)
         tmp_key_dir = leases_dir / f"pending-{int(time.time() * 1000)}"
         tmp_key_dir.mkdir(parents=True, exist_ok=True)
         tmp_private_key, tmp_public_key = save_ssh_keypair(tmp_key_dir, "ssh_key")
-        public_key_text = tmp_public_key.read_text().strip()
+        return tmp_private_key, tmp_public_key, tmp_public_key.read_text().strip()
 
-        # ``name`` is the user-supplied HostName; send it to the connector so
-        # the leased pool row carries the same friendly name minds renders to
-        # the user. The connector validates it server-side too.
-        lease_result = self.client.lease_host(token, attributes, public_key_text, str(name))
-        self.reset_caches()
+    def _discard_pending_keypair(self, tmp_private_key: Path, tmp_public_key: Path) -> None:
+        """Remove a pending keypair + its temp dir when the lease never happened."""
+        for path in (tmp_private_key, tmp_public_key):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        try:
+            tmp_private_key.parent.rmdir()
+        except OSError:
+            pass
 
-        host_id = HostId(lease_result.host_id)
+    def _install_leased_keypair(
+        self,
+        host_id: HostId,
+        tmp_private_key: Path,
+        tmp_public_key: Path,
+    ) -> tuple[Path, Path]:
+        """Move a pending keypair into the canonical ``hosts/<host_id>/`` location."""
         host_state_dir = self._host_state_dir(host_id)
         host_state_dir.mkdir(parents=True, exist_ok=True)
         final_private_key = host_state_dir / "ssh_key"
@@ -1131,55 +1548,41 @@ class ImbueCloudProvider(BaseProviderInstance):
         tmp_private_key.replace(final_private_key)
         tmp_public_key.replace(final_public_key)
         final_private_key.chmod(0o600)
-        # Best-effort cleanup of the pending dir; fails harmlessly if a
-        # concurrent lease left peers behind.
+        # Best-effort cleanup of the pending dir; harmless if peers remain.
         try:
-            tmp_key_dir.rmdir()
+            tmp_private_key.parent.rmdir()
         except OSError:
             pass
+        return final_private_key, final_public_key
 
-        # Persist a small lease metadata file so subsequent commands (and
-        # ``hosts release``) can find host_db_id without going to the connector.
-        lease_meta_path = host_state_dir / "lease.json"
+    def _persist_lease_meta(self, host_id: HostId, lease_result: LeaseResult) -> None:
+        """Persist lease metadata so later commands find host_db_id without the connector."""
+        lease_meta_path = self._host_state_dir(host_id) / "lease.json"
         lease_meta_path.write_text(json.dumps(lease_result.model_dump(), indent=2, default=str))
 
-        # Wait for the leased container's sshd to be ready before we hand the
-        # host back to mngr's create pipeline (which will SSH in immediately
-        # to write the agent env file and start tmux).
-        wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+    def _scan_and_record_container_host_key(
+        self,
+        host_id: HostId,
+        vps_address: str,
+        container_ssh_port: int,
+    ) -> Path:
+        """Scan the container sshd's host key and add it to this host's known_hosts.
 
-        # Try to scan the container's host key so strict host-key checking
-        # succeeds. This is best-effort: if the scan fails we leave the
-        # known_hosts file empty and rely on mngr's auto-add policy.
+        Best-effort: on scan failure the known_hosts file is left as-is and we
+        rely on mngr's auto-add policy. Returns the known_hosts path.
+        """
         known_hosts_path = self._host_known_hosts_path(host_id)
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
         if not known_hosts_path.exists():
             known_hosts_path.touch()
-        scanned_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.container_ssh_port)
+        scanned_key = _scan_ssh_host_key(vps_address, container_ssh_port)
         if scanned_key is not None:
-            add_host_to_known_hosts(
-                known_hosts_path,
-                lease_result.vps_address,
-                lease_result.container_ssh_port,
-                scanned_key,
-            )
+            add_host_to_known_hosts(known_hosts_path, vps_address, container_ssh_port, scanned_key)
+        return known_hosts_path
 
-        # The pool host's ``/mngr/data.json`` was written at bake time with
-        # the bake's placeholder ``host_name`` (``pool-<hex>-host``). Rewrite
-        # it now to the user-supplied ``name`` so the FCT bootstrap (which
-        # reads that file to name the initial chat agent) inherits the
-        # user's chosen workspace name on the first start of the adopted
-        # services agent. Done after the host-key scan so strict
-        # host-key checking is enforceable during the SFTP round-trip.
-        _rewrite_container_host_name(
-            vps_address=lease_result.vps_address,
-            container_ssh_port=lease_result.container_ssh_port,
-            private_key_path=final_private_key,
-            known_hosts_path=known_hosts_path,
-            new_host_name=str(name),
-        )
-
-        leased_info = LeasedHostInfo(
+    def _leased_info_from_result(self, lease_result: LeaseResult) -> LeasedHostInfo:
+        """Build a ``LeasedHostInfo`` from a fresh lease response."""
+        return LeasedHostInfo(
             host_db_id=lease_result.host_db_id,
             vps_address=lease_result.vps_address,
             ssh_port=lease_result.ssh_port,
@@ -1191,7 +1594,6 @@ class ImbueCloudProvider(BaseProviderInstance):
             attributes=lease_result.attributes,
             leased_at="",
         )
-        return self._build_host_object(leased_info)
 
     def _resolve_container_id_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> str | None:
         """Look up the docker container id for the given inner host on its outer VPS.
@@ -1371,6 +1773,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         if host_db_id is not None:
             account = self._require_account()
             token = self._get_access_token(account)
+            # release_host raises ImbueCloudConnectorError on failure (transport
+            # error or non-2xx, e.g. the synchronous release returning 5xx when
+            # the OVH cancel failed). Let it propagate so the failure is visible
+            # and local state is NOT cleaned up below -- cleaning up here would
+            # make mngr "forget" a host that was never actually released (the
+            # old silent-orphan bug).
             self.client.release_host(token, host_db_id)
         self._cleanup_local_host_state(host_id)
 

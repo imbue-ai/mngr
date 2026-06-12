@@ -21,9 +21,9 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import MngrConfig
@@ -250,7 +250,10 @@ def _config_list_impl(ctx: click.Context, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         _emit_config_list(config_data, output_opts, scope, config_path)
     else:
-        full_view = mngr_ctx.config.model_dump(mode="json")
+        # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime
+        # on DockerProviderConfig); without it model_dump serializes providers by
+        # the declared base type and silently drops subclass-only keys.
+        full_view = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
         if opts.all:
             config_data = full_view
         else:
@@ -361,14 +364,14 @@ def _emit_config_list(
                 output["scope"] = scope.value.lower()
             if config_path is not None:
                 output["path"] = str(config_path)
-            emit_final_json(output)
+            write_json_line(output)
         case OutputFormat.JSONL:
             output_jsonl: dict[str, object] = {"event": "config_list", "config": config_data}
             if scope is not None:
                 output_jsonl["scope"] = scope.value.lower()
             if config_path is not None:
                 output_jsonl["path"] = str(config_path)
-            emit_final_json(output_jsonl)
+            write_json_line(output_jsonl)
         case OutputFormat.HUMAN:
             if scope is not None and config_path is not None:
                 write_human_line("Config from {} ({}):", scope.value.lower(), config_path)
@@ -444,7 +447,10 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         return
 
     # Merged mode: extends are already applied; bare key lookup is sufficient.
-    config_data = mngr_ctx.config.model_dump(mode="json")
+    # serialize_as_any preserves provider-subclass fields (e.g. docker_runtime on
+    # DockerProviderConfig); without it model_dump serializes providers by the
+    # declared base type and silently drops subclass-only keys.
+    config_data = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
     try:
         value = _get_nested_value(config_data, key)
         _emit_config_value(key, value, output_opts)
@@ -457,9 +463,9 @@ def _emit_config_value(key: str, value: Any, output_opts: OutputOptions) -> None
     """Emit a config value in the appropriate format."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"key": key, "value": value})
+            write_json_line({"key": key, "value": value})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_value", "key": key, "value": value})
+            write_json_line({"event": "config_value", "key": key, "value": value})
         case OutputFormat.HUMAN:
             write_human_line("{}", _format_value_for_display(value))
         case _ as unreachable:
@@ -488,9 +494,9 @@ def _emit_config_extend_value(key: str, extend_key: str, value: Any, output_opts
     """
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"key": extend_key, "value": value})
+            write_json_line({"key": extend_key, "value": value})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_value", "key": extend_key, "value": value})
+            write_json_line({"event": "config_value", "key": extend_key, "value": value})
         case OutputFormat.HUMAN:
             write_human_line("{}", _format_extend_sentinel(value))
         case _ as unreachable:
@@ -501,9 +507,9 @@ def _emit_key_not_found(key: str, output_opts: OutputOptions) -> None:
     """Emit a key not found error in the appropriate format."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"error": f"Key not found: {key}", "key": key})
+            write_json_line({"error": f"Key not found: {key}", "key": key})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "error", "message": f"Key not found: {key}", "key": key})
+            write_json_line({"event": "error", "message": f"Key not found: {key}", "key": key})
         case OutputFormat.HUMAN:
             logger.error("Key not found: {}", key)
         case _ as unreachable:
@@ -650,7 +656,7 @@ def _emit_config_extend_result(
     """Emit the result of a ``mngr config extend`` operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "key": extend_key,
                     "value": value,
@@ -659,7 +665,7 @@ def _emit_config_extend_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_extend",
                     "key": extend_key,
@@ -690,7 +696,7 @@ def _emit_config_set_result(
     """Emit the result of a config set operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "key": key,
                     "value": value,
@@ -699,7 +705,7 @@ def _emit_config_set_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_set",
                     "key": key,
@@ -773,7 +779,7 @@ def _emit_config_unset_result(
     """Emit the result of a config unset operation."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "key": key,
                     "scope": scope.value.lower(),
@@ -781,7 +787,7 @@ def _emit_config_unset_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_unset",
                     "key": key,
@@ -854,14 +860,14 @@ def _config_edit_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "scope": scope.value.lower(),
                     "path": str(config_path),
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_edited",
                     "scope": scope.value.lower(),
@@ -982,9 +988,9 @@ def _emit_schema_rows(rows: list[dict[str, Any]], output_opts: OutputOptions) ->
         return
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"schema": rows})
+            write_json_line({"schema": rows})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_list_schema", "schema": rows})
+            write_json_line({"event": "config_list_schema", "schema": rows})
         case OutputFormat.HUMAN:
             for row in rows:
                 write_human_line(
@@ -1032,9 +1038,9 @@ def _config_path_impl(ctx: click.Context, **kwargs: Any) -> None:
         except ConfigNotFoundError as e:
             match output_opts.output_format:
                 case OutputFormat.JSON:
-                    emit_final_json({"error": str(e), "scope": scope.value.lower()})
+                    write_json_line({"error": str(e), "scope": scope.value.lower()})
                 case OutputFormat.JSONL:
-                    emit_final_json({"event": "error", "message": str(e), "scope": scope.value.lower()})
+                    write_json_line({"event": "error", "message": str(e), "scope": scope.value.lower()})
                 case OutputFormat.HUMAN:
                     logger.error("{}", e)
                 case _ as unreachable:
@@ -1069,7 +1075,7 @@ def _emit_single_path(scope: ConfigScope, config_path: Path, output_opts: Output
     """Emit a single config path."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "scope": scope.value.lower(),
                     "path": str(config_path),
@@ -1077,7 +1083,7 @@ def _emit_single_path(scope: ConfigScope, config_path: Path, output_opts: Output
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "config_path",
                     "scope": scope.value.lower(),
@@ -1095,9 +1101,9 @@ def _emit_all_paths(paths: list[dict[str, Any]], output_opts: OutputOptions) -> 
     """Emit all config paths."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"paths": paths})
+            write_json_line({"paths": paths})
         case OutputFormat.JSONL:
-            emit_final_json({"event": "config_paths", "paths": paths})
+            write_json_line({"event": "config_paths", "paths": paths})
         case OutputFormat.HUMAN:
             for path_info in paths:
                 scope = path_info["scope"]

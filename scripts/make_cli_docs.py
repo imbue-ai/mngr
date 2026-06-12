@@ -78,7 +78,7 @@ SECONDARY_COMMANDS = {
     "tmr",
     "transcript",
     "tutor",
-    "uncapped-claude",
+    "robinhood",
     "usage",
     "wait",
     "notify",
@@ -114,13 +114,11 @@ def _format_option_type(option: click.Option) -> str:
     """Format option type for display."""
     if option.is_flag:
         return "boolean"
-    if option.type is not None:
-        type_name = option.type.name.lower()
-        if isinstance(option.type, click.Choice):
-            choices = " &#x7C; ".join(f"`{c}`" for c in option.type.choices)
-            return f"choice ({choices})"
-        return type_name
-    return "text"
+    # Click options always carry a non-None type (it defaults to click.STRING).
+    if isinstance(option.type, click.Choice):
+        choices = " &#x7C; ".join(f"`{c}`" for c in option.type.choices)
+        return f"choice ({choices})"
+    return option.type.name.lower()
 
 
 def _format_option_default(option: click.Option) -> str:
@@ -274,7 +272,13 @@ def generate_arguments_section(command: click.Command, command_name: str) -> str
 
 
 def _infer_argument_description(arg: click.Argument) -> str:
-    """Infer a description for an argument based on its properties."""
+    """Infer a description for an argument based on its properties.
+
+    These are best-effort heuristics for arguments that lack explicit metadata.
+    The preferred path is to supply ``arguments_description`` in
+    ``CommandHelpMetadata`` (handled by ``generate_arguments_section`` above),
+    which bypasses these substring guesses entirely.
+    """
     name = (arg.name or "arg").removesuffix("_pos")
 
     # Common argument patterns
@@ -408,7 +412,15 @@ def get_relative_link(from_command: str, to_name: str) -> str:
         from_dir = f"commands/{from_category}" if from_category else "commands"
         return os.path.relpath(topic.docs_path, from_dir)
 
-    return f"mngr help {to_name}"
+    # The ref resolves to neither a known command nor a topic with a docs path.
+    # Emitting a bare "mngr help <name>" here would produce a broken markdown link
+    # (href set to literal text). Fail loudly so `make_cli_docs.py --check` catches
+    # the typo'd or stale see_also ref instead of publishing a broken link.
+    raise ValueError(
+        f"See-Also reference {to_name!r} from command {from_command!r} resolves to "
+        f"neither a known command nor a help topic with a docs path; fix the see_also "
+        f"metadata for {from_command!r}."
+    )
 
 
 def format_see_also_section(command_name: str, metadata: CommandHelpMetadata) -> str:
@@ -452,7 +464,9 @@ def get_output_dir(command_name: str, base_dir: Path) -> Path | None:
 
 def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: str) -> str:
     """Generate documentation for all subcommands with grouped options."""
-    if not hasattr(command, "commands") or not command.commands:
+    # An empty group is a legitimate "nothing to document" case. The click.Group
+    # type guarantees a .commands attribute, so no hasattr guard is needed.
+    if not command.commands:
         return ""
 
     lines: list[str] = []

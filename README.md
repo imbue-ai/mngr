@@ -228,7 +228,7 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/scripts/install.
 ```
 This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-mngr`), then interactively prompts about system dependencies, optional extras, and a default agent type for `mngr create`. You can [review the script](scripts/install.sh) before running it.
 
-**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `ssh`, `git`, `tmux`, `jq`; optional: `rsync`, `unison`, `claude`):
+**Manual install** (requires [uv](https://docs.astral.sh/uv/) and core system deps: `git`, `tmux`, `jq`; optional: `ssh`, `rsync`, `unison`, `claude`):
 ```bash
 uv tool install imbue-mngr
 
@@ -243,8 +243,10 @@ uv tool upgrade imbue-mngr
 
 **For development:**
 ```bash
-git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages && uv tool install -e libs/mngr
+git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
+
+A pre-commit hook installs a small `mngr` shim into `~/.local/bin` (make sure that's on your PATH) that always runs the checkout you're working in -- so editing the source, or switching git worktrees, takes effect immediately with no per-worktree setup. (Don't `uv tool install -e libs/mngr` for development: that pins a single global `mngr` to one clone, which silently runs the wrong code when you work in another worktree.)
 
 ## Shell completion
 
@@ -385,7 +387,7 @@ As well as the code for some plugins that we maintain, including:
 
 - [libs/mngr_modal/](libs/mngr_modal/README.md)
 - [libs/mngr_claude/](libs/mngr_claude/README.md)
-- [libs/mngr_uncapped_claude/](libs/mngr_uncapped_claude/README.md)
+- [libs/mngr_robinhood/](libs/mngr_robinhood/README.md)
 - [libs/mngr_pair/](libs/mngr_pair/README.md)
 - [libs/mngr_opencode/](libs/mngr_opencode/README.md)
 - [libs/mngr_antigravity/](libs/mngr_antigravity/README.md)

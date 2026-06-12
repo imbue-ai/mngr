@@ -197,7 +197,8 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_to_agents_only_messages_requested_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -207,8 +208,8 @@ def test_send_message_to_agents_only_messages_requested_agents(
 
     Locally runs in ~5s. On offload it occasionally exceeds the default 10s
     pytest-timeout during tmux kill-session cleanup under CI load (the hang
-    is inside loguru's sink during log_span, not in the actual kill). Marked
-    flaky so offload retries rather than the whole sandbox failing.
+    is inside loguru's sink during log_span, not in the actual kill).
+    Bumped to 30s rather than marked flaky so failures stay loud.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
@@ -268,9 +269,9 @@ def test_send_message_one_agent_failure_does_not_prevent_other_agents(
 ) -> None:
     """One agent's SendMessageError must not kill the broadcast to other agents.
 
-    SendMessageError inherits from BaseMngrError (not MngrError). Before the switch
-    to concurrent sends, the serial loop only caught MngrError, so a SendMessageError
-    would propagate up and abort the entire broadcast.
+    SendMessageError is an AgentError, which inherits from MngrError. The per-agent
+    send is guarded by ``except MngrError`` so that, in CONTINUE mode, one
+    agent's failure is recorded without aborting the broadcast to the others.
     """
     host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
     assert isinstance(host, Host)
