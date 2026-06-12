@@ -2895,8 +2895,8 @@ def _build_start_agent_shell_command(
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # Apply the host config to this session's tmux server; a server started by
-    # an earlier session would otherwise never load it.
+    # Load the host tmux config (options and key bindings) into the server.
+    # tmux reads a config file automatically only when it starts the server.
     steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))}")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
