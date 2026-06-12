@@ -99,7 +99,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
-| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
+| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file. A session ID is searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: every named session is made available in the new agent, but only the last one is resumed on startup (Claude can only resume one session at a time). | None |
 
 ## Source Data (what to include in the new agent)
 
@@ -206,7 +206,11 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 Provider: aws
   EC2-specific args (consumed by provider, not passed to docker):
-    --aws-region=REGION         AWS region (default: us-east-1)
+    --aws-region=REGION         Must match the provider config's default_region;
+                                the client is bound to one region at construction
+                                and refuses cross-region creates. To target multiple
+                                regions, define one [providers.aws-<region>] block
+                                per region (see mngr_aws README 'Multiple regions').
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
                                 (default: provider config's default_ami_id /

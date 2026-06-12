@@ -14,6 +14,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Changed: `mngr file get`, `list`, and `put` now operate through the unified host file interfaces (online host or volume-backed stopped host, addressed by absolute paths under the host's `host_dir`) instead of branching internally between an online host and a separately-fetched volume; the per-command "volume path" computation and the duplicate cross-platform listing script are gone. Writing to a stopped host (offline `put`) still works through the volume-backed host's write interface; `--mode` continues to be ignored when the host is offline, and the existing "provider does not support volume access" error is unchanged.
 
+### Fixed
+
+- Fixed: `mngr file` See-Also references now link to `mngr rsync` instead of the removed `push` / `pull` commands, so the generated docs no longer contain broken `[mngr help push](mngr help push)` / `[mngr help pull](mngr help pull)` markdown links.
+
 ## [v0.1.9] - 2026-06-08
 
 ## [v0.1.8] - 2026-06-05

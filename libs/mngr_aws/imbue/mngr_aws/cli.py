@@ -16,17 +16,78 @@ command that produces a Debian + Docker + deps-baked AMI to skip the
 ~60-90s cloud-init bootstrap on every create.
 """
 
+from typing import Any
+
 import click
 from botocore.exceptions import BotoCoreError
 from loguru import logger
 
+from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 
 
+class _AwsOperatorCliOptions(CommonCliOptions):
+    """Shared option shape for ``mngr aws prepare`` and ``mngr aws cleanup``.
+
+    Both commands take the same provider-selection + region/SG/VPC overrides;
+    the only delta is that ``prepare`` also accepts ``--allowed-ssh-cidr`` for
+    the auto-created SG's ingress rules (``cleanup`` deletes the SG and so
+    needs no ingress information).
+    """
+
+    provider: str
+    region: str | None
+    sg_name: str | None
+    vpc_id: str | None
+
+
+class _AwsPrepareCliOptions(_AwsOperatorCliOptions):
+    allowed_ssh_cidrs: tuple[str, ...]
+
+
+def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsProviderConfig:
+    """Return the user's ``[providers.<provider_name>]`` block, or class defaults.
+
+    The operator commands need to land their SG / SG-deletion in the same
+    region and VPC the runtime ``mngr create --provider <provider_name>`` path
+    will later use. Class defaults (``AwsProviderConfig()``) are a fallback for
+    the first-run case where the user has not yet pinned a provider block; if
+    their settings.toml *does* configure the named provider, we honor it.
+
+    When the looked-up config is not an ``AwsProviderConfig`` (e.g. the user
+    pointed ``[providers.aws]`` at a non-AWS backend), fall back to class
+    defaults rather than erroring -- the operator command's CLI options
+    (``--region`` / ``--vpc-id`` / ``--sg-name``) can still drive an
+    AWS-targeted run. A warning is emitted in this case so the user notices
+    their ``--provider`` selection did not have the intended effect (a silent
+    fallback to class defaults would otherwise land the SG in
+    ``default_region`` / no VPC with no visible signal). The missing-block
+    case is silent because that is the expected first-run shape.
+    """
+    config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
+    if isinstance(config, AwsProviderConfig):
+        return config
+    if config is not None:
+        logger.warning(
+            "Provider {!r} is configured but is not an AWS backend (got {}); "
+            "falling back to AwsProviderConfig class defaults. Pass "
+            "--region / --vpc-id / --sg-name to override, or point --provider "
+            "at an AWS-backed block.",
+            provider_name,
+            type(config).__name__,
+        )
+    return AwsProviderConfig()
+
+
 def _build_operator_client(
+    base: AwsProviderConfig,
     region: str | None,
     sg_name: str | None,
     vpc_id: str | None,
@@ -34,27 +95,39 @@ def _build_operator_client(
 ) -> AwsVpsClient:
     """Construct an ``AwsVpsClient`` for the ``mngr aws`` operator commands.
 
-    Bridges click options into the client constructor: each option falls
-    back to the corresponding ``AwsProviderConfig`` default when not
-    supplied. Pulled out of the click callbacks purely for readability --
-    the defaults-and-fallback construction would otherwise crowd each
-    callback body alongside the credential-error handling. ``prepare`` passes
-    the effective ingress CIDRs; ``cleanup`` passes ``()`` (it only deletes,
-    never authorizes ingress, so the value is unused on that path).
+    Bridges click options into the client constructor. ``region`` /
+    ``vpc_id`` fall back to the matching field on ``base`` (the user's
+    resolved ``AwsProviderConfig`` for the selected provider, or class
+    defaults when the user has not pinned one) so the SG lands in the
+    region/VPC the runtime create path will use.
+
+    The ``sg_name`` fallback is narrower: when ``base.security_group`` is
+    an ``AutoCreateSecurityGroup``, its ``name`` is used; when it is an
+    ``ExistingSecurityGroup`` (the user has wired in an externally-managed
+    SG), the helper substitutes ``AutoCreateSecurityGroup()`` defaults
+    (name ``mngr-aws``) because prepare/cleanup only operate on
+    auto-created SGs -- an externally-managed SG is not theirs to create
+    or delete.
+
+    ``prepare`` passes the effective ingress CIDRs; ``cleanup`` passes
+    ``()`` (it only deletes, never authorizes ingress, so the value is
+    unused on that path).
     """
-    base = AwsProviderConfig()
     effective_region = region or base.default_region
-    effective_sg = AutoCreateSecurityGroup(name=sg_name) if sg_name else AutoCreateSecurityGroup()
+    if sg_name is not None:
+        effective_sg = AutoCreateSecurityGroup(name=sg_name)
+    elif isinstance(base.security_group, AutoCreateSecurityGroup):
+        effective_sg = base.security_group
+    else:
+        effective_sg = AutoCreateSecurityGroup()
     effective_vpc_id = vpc_id if vpc_id is not None else base.vpc_id
     session = base.get_session()
     # ``ami_id`` is unused by the SG-management methods (ensure / delete) and
-    # by ``list_mngr_managed_instances``, but the AwsVpsClient constructor
-    # requires it; a placeholder is fine because no operator path
-    # (``prepare`` / ``cleanup``) calls ``create_instance``.
+    # by ``list_mngr_managed_instances``, so leave the field empty -- no
+    # operator path (``prepare`` / ``cleanup``) calls ``create_instance``.
     return AwsVpsClient(
         session=session,
         region=effective_region,
-        ami_id="ami-placeholder",
         security_group=effective_sg,
         vpc_id=effective_vpc_id,
         allowed_ssh_cidrs=allowed_ssh_cidrs,
@@ -89,16 +162,28 @@ def aws_cli_group() -> None:
 
 @aws_cli_group.command(name="prepare")
 @click.option(
+    "--provider",
+    "provider",
+    default="aws",
+    show_default=True,
+    help=(
+        "Name of the [providers.NAME] block in settings.toml to read defaults from "
+        "(default_region, vpc_id, security_group.name, allowed_ssh_cidrs). When the "
+        "block does not exist, AwsProviderConfig class defaults are used as the "
+        "fallback. CLI options below override either source."
+    ),
+)
+@click.option(
     "--region",
     "region",
     default=None,
-    help="AWS region. Defaults to the provider config's default_region (us-east-1 if unset).",
+    help="AWS region. Defaults to the resolved provider config's default_region.",
 )
 @click.option(
     "--sg-name",
     "sg_name",
     default=None,
-    help="Security group name to create / reuse. Defaults to 'mngr-aws'.",
+    help="Security group name to create / reuse. Defaults to the provider config's SG name.",
 )
 @click.option(
     "--vpc-id",
@@ -112,15 +197,12 @@ def aws_cli_group() -> None:
     multiple=True,
     help=(
         "Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. "
-        "Defaults to ('0.0.0.0/0',) matching the provider config default. Tighten for production."
+        "Defaults to the provider config's allowed_ssh_cidrs. Tighten for production."
     ),
 )
-def prepare(
-    region: str | None,
-    sg_name: str | None,
-    vpc_id: str | None,
-    allowed_ssh_cidrs: tuple[str, ...],
-) -> None:
+@add_common_options
+@click.pass_context
+def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     """Create (or reuse) the AWS security group for mngr-managed instances.
 
     Idempotent: re-running re-authorizes any missing ingress rules but does
@@ -129,13 +211,18 @@ def prepare(
     --provider aws` only needs RunInstances + DescribeSecurityGroups +
     DescribeInstances + ImportKeyPair etc. (no SG-management permissions).
     """
-    base_defaults = AwsProviderConfig()
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="aws prepare",
+        command_class=_AwsPrepareCliOptions,
+    )
+    base = _resolve_provider_config(mngr_ctx, opts.provider)
     # Empty tuple => no --allowed-ssh-cidr flags passed: fall back to the
-    # provider config default. Non-empty tuple => caller supplied explicit
-    # values, use them verbatim.
-    effective_cidrs = allowed_ssh_cidrs or base_defaults.allowed_ssh_cidrs
+    # resolved provider config's value. Non-empty tuple => caller supplied
+    # explicit values, use them verbatim.
+    effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
     try:
-        client = _build_operator_client(region, sg_name, vpc_id, effective_cidrs)
+        client = _build_operator_client(base, opts.region, opts.sg_name, opts.vpc_id, effective_cidrs)
     except (ValueError, BotoCoreError) as e:
         # ``ValueError`` covers the no-credentials case raised by
         # ``AwsProviderConfig.get_session``; ``BotoCoreError`` covers
@@ -150,16 +237,27 @@ def prepare(
 
 @aws_cli_group.command(name="cleanup")
 @click.option(
+    "--provider",
+    "provider",
+    default="aws",
+    show_default=True,
+    help=(
+        "Name of the [providers.NAME] block in settings.toml to read defaults from "
+        "(default_region, vpc_id, security_group.name). When the block does not exist, "
+        "AwsProviderConfig class defaults are used as the fallback."
+    ),
+)
+@click.option(
     "--region",
     "region",
     default=None,
-    help="AWS region. Defaults to the provider config's default_region (us-east-1 if unset).",
+    help="AWS region. Defaults to the resolved provider config's default_region.",
 )
 @click.option(
     "--sg-name",
     "sg_name",
     default=None,
-    help="Security group name to delete. Defaults to 'mngr-aws'.",
+    help="Security group name to delete. Defaults to the provider config's SG name.",
 )
 @click.option(
     "--vpc-id",
@@ -167,26 +265,35 @@ def prepare(
     default=None,
     help="VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise.",
 )
-def cleanup(
-    region: str | None,
-    sg_name: str | None,
-    vpc_id: str | None,
-) -> None:
+@add_common_options
+@click.pass_context
+def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     """Undo `mngr aws prepare`: delete the mngr-managed security group.
 
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created `mngr-aws` security group.
-    Idempotent: a no-op (exit 0) when the security group is already gone.
+    instances present, deletes the auto-created security group. The name comes
+    from `--sg-name` if supplied; otherwise from the resolved
+    `[providers.<--provider>]` block's `security_group.name` when that block
+    configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
+    or configured with an `ExistingSecurityGroup` -- which carries an `id`
+    rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
+    (exit 0) when the security group is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
     created and deleted by the create/destroy lifecycle, not by `prepare`
     or `cleanup`.
     """
+    mngr_ctx, _output_opts, opts = setup_command_context(
+        ctx=ctx,
+        command_name="aws cleanup",
+        command_class=_AwsOperatorCliOptions,
+    )
+    base = _resolve_provider_config(mngr_ctx, opts.provider)
     try:
-        client = _build_operator_client(region, sg_name, vpc_id, ())
+        client = _build_operator_client(base, opts.region, opts.sg_name, opts.vpc_id, ())
     except (ValueError, BotoCoreError) as e:
         # Same credential / environment errors as the prepare path.
         raise click.ClickException(str(e)) from e

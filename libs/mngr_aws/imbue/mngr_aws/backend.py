@@ -12,7 +12,7 @@ from pydantic import Field
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
@@ -78,7 +78,7 @@ class AwsProvider(VpsDockerProvider):
         return self.aws_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Refuse to create an EC2 instance under pytest without auto_shutdown_minutes set.
+        """Refuse to create an EC2 instance under pytest without auto_shutdown_seconds set.
 
         Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
         when ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible
@@ -86,18 +86,18 @@ class AwsProvider(VpsDockerProvider):
         itself is killed. For AWS, that safety net is cloud-init
         ``shutdown -P +N`` combined with the launch flag
         ``InstanceInitiatedShutdownBehavior=terminate`` (both rely on
-        ``auto_shutdown_minutes`` being set on the provider config). If it
+        ``auto_shutdown_seconds`` being set on the provider config). If it
         isn't, fail closed at the pre-create hook rather than silently leak
         an instance.
         """
         if "PYTEST_CURRENT_TEST" not in os.environ:
             return
-        minutes = self._get_effective_auto_shutdown_minutes()
-        if not (minutes and minutes > 0):
+        seconds = self._get_effective_auto_shutdown_seconds()
+        if not (seconds and seconds > 0):
             raise MngrError(
                 "Refusing to create EC2 instance during pytest without "
-                "auto_shutdown_minutes set on the AWS provider config. "
-                "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
+                "auto_shutdown_seconds set on the AWS provider config. "
+                "Set [providers.<instance>] auto_shutdown_seconds = <N> in "
                 "the project settings.toml so cloud-init schedules "
                 "'shutdown -P +N' (combined with the launch flag "
                 "InstanceInitiatedShutdownBehavior=terminate) and the "
@@ -122,6 +122,19 @@ class AwsProvider(VpsDockerProvider):
         ami_override, args = extract_single_value_arg(args, "--aws-ami=")
         spot, args = extract_presence_flag(args, "--aws-spot")
         git_depth, args = extract_git_depth(args)
+        # FIXME: this allowlist only covers the per-host knobs wired up so far.
+        # Other AwsProviderConfig fields could plausibly be exposed as per-host
+        # build args but are not yet (today they are settings.toml-only):
+        #   --aws-subnet=            (subnet_id)
+        #   --aws-vpc=               (vpc_id)
+        #   --aws-security-group=    (security_group; existing id or auto-create name)
+        #   --aws-ssh-cidr=          (allowed_ssh_cidrs; repeatable)
+        #   --aws-iam-profile=       (iam_instance_profile)
+        #   --aws-root-volume-size=  (root_volume_size_gb)
+        #   --aws-root-volume-type=  (root_volume_type)
+        #   --aws-associate-public-ip / --aws-no-associate-public-ip (associate_public_ip)
+        #   --aws-eip                (planned, when the destroy-path lifecycle work lands)
+        # Add the corresponding extract_* parse and this allowlist entry together.
         valid_args = (
             "--aws-region=",
             "--aws-instance-type=",
@@ -156,8 +169,14 @@ class AwsProvider(VpsDockerProvider):
         Calls through ``self.aws_client`` (the concrete typed AWS client) rather
         than the shared ``self.vps_client`` interface so the AWS-only
         ``ami_id_override`` kwarg is statically visible. ``ami_id_override``
-        comes from ``--aws-ami=<ami-id>``; when None, the client's configured
-        default AMI applies.
+        comes from ``--aws-ami=<ami-id>``; when None, the default AMI for the
+        target region is resolved from the config just in time. Resolving AMI
+        here (the only create-path call site) rather than in
+        ``build_provider_instance`` keeps AMI selection a create-only concern
+        so a misconfigured AMI does not hide already-running instances from
+        ``mngr list`` / ``connect`` / ``gc``. The create path's ``create_host``
+        except handler reverses any SSH key upload that may have happened
+        before this raise, so the missing-AMI failure leaves no leaked state.
         """
         match parsed:
             case ParsedAwsBuildOptions(ami_id_override=ami_id_override, spot=spot):
@@ -168,6 +187,13 @@ class AwsProvider(VpsDockerProvider):
                     f"got {type(parsed).__name__}. This indicates the parser hook returned a "
                     "non-AWS shape; _parse_build_args must return ParsedAwsBuildOptions."
                 )
+        if ami_id_override:
+            effective_ami_id = ami_id_override
+        else:
+            try:
+                effective_ami_id = self.aws_config.get_ami_id_for_region(parsed.region)
+            except ValueError as e:
+                raise MngrError(f"AWS provider {self.name!r}: {e}") from e
         return self.aws_client.create_instance(
             label=label,
             region=parsed.region,
@@ -175,7 +201,7 @@ class AwsProvider(VpsDockerProvider):
             user_data=user_data,
             ssh_key_ids=ssh_key_ids,
             tags=tags,
-            ami_id_override=ami_id_override,
+            ami_id_override=effective_ami_id,
             spot=spot,
         )
 
@@ -183,7 +209,7 @@ class AwsProvider(VpsDockerProvider):
         """Return public IPs of EC2 instances tagged with this provider's name.
 
         Credentials are guaranteed to be resolvable here: ``build_provider_instance``
-        raises ``ProviderEmptyError`` when ``config.get_session()`` fails, so any
+        raises ``ProviderUnavailableError`` when ``config.get_session()`` fails, so any
         AwsProvider that reaches this point has working credentials. The shared
         ``VpsClientInterface`` base method that calls this is invoked for both
         listing and create-host flows, so AWS does not need a separate
@@ -217,7 +243,11 @@ class AwsProviderBackend(ProviderBackendInterface):
     def get_build_args_help() -> str:
         return (
             "EC2-specific args (consumed by provider, not passed to docker):\n"
-            "  --aws-region=REGION         AWS region (default: us-east-1)\n"
+            "  --aws-region=REGION         Must match the provider config's default_region;\n"
+            "                              the client is bound to one region at construction\n"
+            "                              and refuses cross-region creates. To target multiple\n"
+            "                              regions, define one [providers.aws-<region>] block\n"
+            "                              per region (see mngr_aws README 'Multiple regions').\n"
             "  --aws-instance-type=TYPE    EC2 instance type (default: t3.small)\n"
             "  --aws-ami=AMI-ID            Override the per-host AMI for this create only\n"
             "                              (default: provider config's default_ami_id /\n"
@@ -244,28 +274,27 @@ class AwsProviderBackend(ProviderBackendInterface):
         if not isinstance(config, AwsProviderConfig):
             raise MngrError(f"Expected AwsProviderConfig, got {type(config).__name__}")
 
+        # A missing/unresolvable AWS session means EC2 was never reached: the
+        # state is *unknown* (agents may still exist on a configured account we
+        # transiently couldn't auth to). That is ProviderUnavailableError, NOT
+        # ProviderEmptyError -- read paths (mngr list / gc) catch it via the
+        # generic catch-all in mngr.api.list._construct_and_discover_for_provider
+        # and log at error level, so a misconfigured provider stays visible
+        # rather than silently vanishing from the listing. Host-creation paths
+        # surface this same error directly (no override -- create just calls
+        # build_provider_instance first), so we use a single exit shape for
+        # both read and create paths, matching the Azure pattern. AMI selection
+        # is a create-only concern and is deliberately NOT validated here --
+        # see AwsProvider._create_vps_instance for the just-in-time resolution
+        # and the rationale.
         try:
             session = config.get_session()
         except (ValueError, BotoCoreError) as e:
-            # Match the Modal pattern in mngr_modal.backend.build_provider_instance:
-            # when the provider cannot be reached (here: no resolvable AWS credentials),
-            # raise ProviderEmptyError so read paths (mngr list / mngr gc / discovery)
-            # skip the AWS provider entirely instead of constructing a half-working
-            # placeholder. Host-creation paths surface this same error to the user.
-            raise ProviderEmptyError(name, str(e)) from e
-
-        try:
-            ami_id = config.get_ami_id_for_region(config.default_region)
-        except ValueError as e:
-            # No usable AMI configured -- analogous to the missing-creds case
-            # above. Surfaces clearly on `mngr create --provider aws` while
-            # letting `mngr list` skip the provider.
-            raise ProviderEmptyError(name, str(e)) from e
+            raise ProviderUnavailableError(name, str(e)) from e
 
         aws_client = AwsVpsClient(
             session=session,
             region=config.default_region,
-            ami_id=ami_id,
             security_group=config.security_group,
             subnet_id=config.subnet_id,
             vpc_id=config.vpc_id,

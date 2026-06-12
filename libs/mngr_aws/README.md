@@ -2,7 +2,7 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults and the IAM permission set may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, IAM profile, and `auto_shutdown_minutes` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults and the IAM permission set may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, IAM profile, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -97,7 +97,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
 | `iam_instance_profile` | `None` | IAM instance profile name. |
-| `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Combined with `InstanceInitiatedShutdownBehavior=terminate` (always on), this auto-terminates the EC2 instance. A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## One-time setup: `mngr aws prepare`
 
@@ -135,7 +135,6 @@ For `mngr create --provider aws` (per-host path):
 ec2:RunInstances, ec2:TerminateInstances, ec2:DescribeInstances,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeSnapshots, ec2:CreateSnapshot, ec2:DeleteSnapshot,
 ec2:DescribeImages
 ```
 
@@ -161,7 +160,7 @@ Tags are set in the `RunInstances` call via `TagSpecifications`, not via a separ
 - Discovery: `DescribeInstances` filtered by `tag:mngr-provider`, then SSH to each VPS to read host records from the state volume.
 - Instance shutdown behavior is set to `terminate` so a self-halted instance is garbage-collected automatically.
 - The security group (`mngr-aws` by default) is provisioned out-of-band via `mngr aws prepare` (one-time admin setup) and reused across hosts. `create_host` looks it up read-only and raises a clear "run `mngr aws prepare`" error if missing. It is not deleted on `destroy_host`; run `mngr aws cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists).
-- **No automatic snapshot-on-create**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider does not snapshot EC2 instances automatically. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented; you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created` to do it for you.
+- **No snapshot workflow**: unlike `mngr_modal`, where every sandbox is snapshotted at create time so a hard-killed host can be rehydrated, this provider has no host snapshot workflow today. `AwsVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are intentionally unwired -- they raise `VpsDockerError` with an actionable "EBS snapshot support is not implemented in mngr_aws" message rather than running real EBS API calls that nothing else consumes. Restore from a fresh `mngr create` instead.
 - **Spot capacity via `--aws-spot`**: opt-in (presence-only build arg). When set, the instance launches with `InstanceMarketOptions={"MarketType": "spot"}` and is billed at the spot rate. AWS may reclaim the instance with ~2 minutes' notice; mngr does not currently surface the spot-interruption signal, so the host is terminated cold from mngr's perspective (cloud-init's auto-shutdown safety net still fires correctly). Use for cheap experimental agents, not for long-running production-shaped workloads.
 
 ## Release tests and cost
@@ -178,9 +177,9 @@ Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
 2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
-3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_minutes = 60`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
+3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_seconds = 3600`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs.
 
-Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_minutes` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
+Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_seconds` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
 
 ## Future improvements
 

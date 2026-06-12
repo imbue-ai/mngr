@@ -12,6 +12,7 @@ from typing import Any
 from typing import Final
 
 import boto3
+import pytest
 from botocore.exceptions import BotoCoreError
 from pydantic import Field
 
@@ -39,7 +40,7 @@ AWS_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS")
 # Single source of truth for the release-test instance lifetime. Used in two
 # places that must stay aligned:
 #   1. ``test_release_aws.py`` writes it into a tmp-path settings.toml
-#      (``[providers.aws] auto_shutdown_minutes``) so cloud-init runs
+#      (``[providers.aws] auto_shutdown_seconds``) so cloud-init runs
 #      ``shutdown -P +N`` on every test instance.
 #   2. ``conftest.py`` derives the orphan-scan grace period from this value
 #      so the session-end leak detector never race-kills an in-flight test
@@ -47,7 +48,21 @@ AWS_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AWS_RELEASE_TESTS")
 # If these ever drift, the cloud-init backstop can fire after the leak
 # detector has already failed the session, or the leak detector can kill
 # instances that the auto-shutdown timer would have cleaned up on its own.
-AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
+AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
+
+
+def clear_aws_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Strip every ``AWS_*`` env var so credential-chain probes start clean.
+
+    boto3's chain inspects a dozen-plus env vars; clearing only those each
+    test cares about by name leaks knowledge of the chain into tests. Wipe
+    them all and let the test re-set only what it wants. Used by both the
+    config-level credential resolution tests and the backend-level
+    discovery-warning tests.
+    """
+    for key in list(os.environ.keys()):
+        if key.startswith("AWS_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 def aws_credentials_available() -> bool:

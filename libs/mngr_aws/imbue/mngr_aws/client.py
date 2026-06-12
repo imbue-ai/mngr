@@ -21,6 +21,7 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -57,7 +58,19 @@ class AwsVpsClient(VpsClientInterface):
 
     session: boto3.Session = Field(frozen=True, description="boto3 Session with resolved credentials")
     region: str = Field(frozen=True, description="AWS region this client targets")
-    ami_id: str = Field(frozen=True, description="Default AMI ID for instances created via this client")
+    ami_id: str = Field(
+        default="",
+        frozen=True,
+        description=(
+            "Fallback AMI ID used when ``create_instance`` is invoked without an "
+            "``ami_id_override``. The production code path always supplies an override "
+            "(``AwsProvider._create_vps_instance`` resolves the AMI just-in-time from "
+            "``AwsProviderConfig.get_ami_id_for_region``), so this defaults to empty "
+            "and ``create_instance`` raises if neither source supplies one. Kept as a "
+            "field so tests can pin a known AMI without going through the resolution "
+            "path."
+        ),
+    )
     security_group: SecurityGroupSpec = Field(
         default_factory=AutoCreateSecurityGroup,
         description=(
@@ -71,11 +84,10 @@ class AwsVpsClient(VpsClientInterface):
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "security group. Default ('0.0.0.0/0',) matches Vultr/OVH default reachability in "
-            "this monorepo (neither provider ships a managed firewall). Tighten for production "
-            "(e.g. ('203.0.113.4/32',) for a single IP). Empty tuple means 'add no ingress' -- "
-            "the SG ends up unreachable from outside its VPC; logged as a warning."
+            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
+            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
+            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")
@@ -323,6 +335,11 @@ class AwsVpsClient(VpsClientInterface):
                 if code != "InvalidPermission.Duplicate":
                     http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
                     raise VpsApiError(http_status, f"{code}: {e}") from e
+                logger.debug(
+                    "Skipping duplicate ingress rule on SG {} (tcp/{}): already authorized",
+                    sg_id,
+                    permission["FromPort"],
+                )
 
     # =========================================================================
     # Instance Operations
@@ -363,6 +380,15 @@ class AwsVpsClient(VpsClientInterface):
             )
 
         effective_ami_id = ami_id_override or self.ami_id
+        if not effective_ami_id:
+            raise VpsApiError(
+                400,
+                "AwsVpsClient.create_instance called without a usable AMI: neither "
+                "ami_id_override nor self.ami_id is set. The production path resolves "
+                "the AMI in AwsProvider._create_vps_instance and always supplies an "
+                "override; if you see this from a test, pass ami_id_override=... or "
+                "construct the client with ami_id=... explicitly.",
+            )
 
         sg_id = self.resolve_security_group_id()
 
@@ -552,46 +578,28 @@ class AwsVpsClient(VpsClientInterface):
     # Snapshot Operations (EBS root volume of an instance)
     # =========================================================================
 
-    def _get_root_volume_id(self, instance_id: VpsInstanceId) -> str:
-        instance = self._describe_instance(instance_id)
-        if instance is None:
-            raise VpsApiError(404, f"Instance {instance_id} not found")
-        for mapping in instance.get("BlockDeviceMappings", []):
-            ebs = mapping.get("Ebs", {})
-            if ebs.get("VolumeId"):
-                return ebs["VolumeId"]
-        raise VpsApiError(500, f"Instance {instance_id} has no EBS volume")
+    # EBS snapshot wiring (create / delete / list) was written speculatively
+    # to satisfy the shared ``VpsClientInterface`` abstractmethods, but the
+    # AWS provider has no host snapshot workflow today -- nothing in
+    # ``mngr_aws`` or the broader ``mngr`` CLI calls these methods. Stubbed
+    # out with the same "unavailable" shape as
+    # ``ExternallyManagedVpsClient`` so any future caller fails loudly
+    # instead of running real EBS API calls that nothing else expects.
+    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
+        return VpsDockerError(
+            f"VPS API operation '{operation}' is unavailable: EBS snapshot support "
+            "is not implemented in mngr_aws. The AWS provider currently has no host "
+            "snapshot workflow; restore from a fresh `mngr create` instead."
+        )
 
     def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        volume_id = self._get_root_volume_id(instance_id)
-        with self._translate_aws_errors():
-            result = self._ec2().create_snapshot(VolumeId=volume_id, Description=description)
-        snap_id = result.get("SnapshotId", "")
-        if not snap_id:
-            raise VpsApiError(500, "CreateSnapshot returned no SnapshotId")
-        logger.info("Created EBS snapshot {} for volume {}", snap_id, volume_id)
-        return VpsSnapshotId(snap_id)
+        raise self._snapshots_unavailable("create_snapshot")
 
     def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        with self._translate_aws_errors():
-            self._ec2().delete_snapshot(SnapshotId=str(snapshot_id))
-        logger.info("Deleted EBS snapshot {}", snapshot_id)
+        raise self._snapshots_unavailable("delete_snapshot")
 
     def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        with self._translate_aws_errors():
-            result = self._ec2().describe_snapshots(OwnerIds=["self"])
-        # boto3 returns tz-aware datetimes for EC2 timestamps; let a missing
-        # StartTime or unexpected type surface as a KeyError / TypeError
-        # rather than silently substituting "now" (which would be misleading
-        # data attached to the wrong snapshot).
-        return [
-            VpsSnapshotInfo(
-                id=VpsSnapshotId(snap["SnapshotId"]),
-                description=snap.get("Description", ""),
-                created_at=snap["StartTime"],
-            )
-            for snap in result.get("Snapshots", [])
-        ]
+        raise self._snapshots_unavailable("list_snapshots")
 
     # =========================================================================
     # SSH Key Operations (EC2 KeyPairs)

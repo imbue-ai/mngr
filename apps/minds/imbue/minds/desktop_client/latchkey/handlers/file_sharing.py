@@ -88,23 +88,47 @@ def _is_path_within_roots(path: str, allowed_roots: Sequence[Path]) -> bool:
     return False
 
 
-def _normalize_share_path(raw_path: str, allowed_roots: Sequence[Path]) -> str:
-    """Validate and normalize a user-edited absolute share path.
+def _expand_home_prefix(path: str, home_dir: Path) -> str:
+    """Expand a leading ``~`` / ``~/`` to ``home_dir``.
+
+    Mirrors the gateway's ``expandFileSharingHomePrefix``: a bare ``~``
+    or a ``~/...`` prefix expands against the user's home directory (the
+    home WebDAV mount root); ``~user`` notation for another user's home
+    cannot be resolved here and is rejected. The expansion is a pure
+    string splice (not ``Path`` joining) so any ``..`` in the remainder
+    survives into the result and is still caught by the traversal check
+    in ``_normalize_share_path``.
+    """
+    if path == "~" or path.startswith("~/"):
+        return f"{home_dir}{path[1:]}"
+    if path.startswith("~"):
+        raise InvalidSharePathError(
+            "The path to share uses unsupported '~user' notation; only '~' or '~/...' "
+            f"(your home directory) is accepted: {path}"
+        )
+    return path
+
+
+def _normalize_share_path(raw_path: str, allowed_roots: Sequence[Path], home_dir: Path) -> str:
+    """Validate and normalize a user-edited share path.
 
     Mirrors the gateway's ``validateAbsoluteFileSharingPath`` so the user
     gets a clear, immediate error instead of a generic gateway 4xx. The
     gateway re-validates on approve regardless -- this is a friendlier
     first line of defence, not the security boundary.
 
-    Rejects empty, relative, and ``..``-containing paths, and paths that
-    fall outside ``allowed_roots`` (the WebDAV mount roots: home + temp).
-    Returns the stripped path on success.
+    Expands a leading ``~`` / ``~/`` to ``home_dir``, then rejects empty,
+    relative, and ``..``-containing paths, and paths that fall outside
+    ``allowed_roots`` (the WebDAV mount roots: home + temp). Returns the
+    expanded, stripped path on success.
     """
-    path = raw_path.strip()
+    path = _expand_home_prefix(raw_path.strip(), home_dir)
     if not path:
         raise InvalidSharePathError("The path to share must not be empty.")
     if not path.startswith("/"):
-        raise InvalidSharePathError(f"The path to share must be absolute (start with '/'): {path}")
+        raise InvalidSharePathError(
+            f"The path to share must be absolute (start with '/') or use '~' / '~/...': {path}"
+        )
     # Reject any ``..`` segment regardless of separator, matching the
     # gateway's traversal check.
     if any(segment == ".." for segment in path.replace("\\", "/").split("/")):
@@ -193,6 +217,15 @@ class FileSharingGrantHandler(RequestEventHandler):
             "than being forwarded to the gateway. Defaults to the live WebDAV mount roots."
         ),
     )
+    home_dir: Path = Field(
+        default_factory=Path.home,
+        frozen=True,
+        description=(
+            "The user's home directory, used to expand a leading ``~`` / ``~/`` in a "
+            "user-edited share path (mirroring the gateway). Defaults to ``Path.home()``, "
+            "the home WebDAV mount root."
+        ),
+    )
 
     # -- RequestEventHandler interface ---------------------------------------
 
@@ -226,6 +259,7 @@ class FileSharingGrantHandler(RequestEventHandler):
             access=req_event.access,
             access_human_label=_access_human_label(req_event.access),
             allowed_roots_json=json.dumps([str(root) for root in self.share_roots]),
+            home_dir=str(self.home_dir),
             mngr_forward_origin=mngr_forward_origin,
         )
 
@@ -248,7 +282,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         raw_override = form.get(_FILE_PATH_FIELD)
         try:
             effective_path = (
-                _normalize_share_path(str(raw_override), self.share_roots)
+                _normalize_share_path(str(raw_override), self.share_roots, self.home_dir)
                 if raw_override is not None
                 else req_event.path
             )

@@ -12,8 +12,7 @@
  * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
  * and the implicit --workspace-accent / --titlebar-bg / --titlebar-fg
  * (set per-workspace via inline style by chrome.js; consumed by the
- * .accent-spine / .sidebar-item / .accent-swatch / .titlebar-* rules
- * below).
+ * .accent-spine / .accent-swatch / .titlebar-* rules below).
  */
 
 :root {
@@ -37,43 +36,25 @@ html {
   top: 0;
   bottom: 0;
   width: 3px;
-  background: var(--workspace-accent, oklch(85% 0.08 230));
-}
-
-.sidebar-item {
-  position: relative;
-}
-.sidebar-item::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--workspace-accent, oklch(85% 0.08 230));
-  opacity: 0.55;
-  transition: opacity 100ms;
-}
-.sidebar-item:hover::before,
-.sidebar-item.is-current::before {
-  opacity: 1;
+  background: var(--workspace-accent, #0b292b);
 }
 
 .accent-swatch {
-  background: var(--workspace-accent, oklch(85% 0.08 230));
+  background: var(--workspace-accent, #0b292b);
 }
 
 /*
  * Titlebar foreground tokens. ``--titlebar-bg`` and ``--titlebar-fg`` are
  * set by chrome.js on the document root whenever a workspace is active
  * (or cleared back to defaults when none is): ``--titlebar-bg`` is the
- * full-width chrome bar color (an OKLCH workspace accent at 80%/0.1) and
+ * full-width chrome bar color (a ``#rrggbb`` from the workspace's
+ * stored ``color`` label, served via the SSE workspaces payload) and
  * ``--titlebar-fg`` is the contrasting foreground as a space-separated
  * RGB triple ("0 0 0" for dark text on light bars, "255 255 255" for
- * white text on dark bars). Consumers use the ``.titlebar-*`` utility
- * classes below rather than referencing the variables directly so the
- * alpha levels stay consistent across the chrome.
+ * white text on dark bars), computed server-side via WCAG luminance.
+ * Consumers use the ``.titlebar-*`` utility classes below rather than
+ * referencing the variables directly so the alpha levels stay
+ * consistent across the chrome.
  *
  * Why an RGB triple, not a full color: ``rgb(var(--titlebar-fg) / 0.55)``
  * lets every consumer dial in its own alpha for the visual hierarchy
@@ -104,14 +85,6 @@ html {
 .titlebar-btn-danger:hover {
   color: #ffffff;
   background-color: #dc2626; /* red-600 */
-}
-.titlebar-account {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.7);
-  transition: color 100ms, background-color 100ms;
-}
-.titlebar-account:hover {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
-  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
 }
 
 /*
@@ -225,4 +198,84 @@ html {
   to {
     transform: rotate(360deg);
   }
+}
+
+/*
+ * Workspace color picker (workspace settings page + create form).
+ * The swatch's selected state is conveyed via aria-checked="true" so
+ * screen readers see the radio role correctly; the visual ring uses
+ * the same attribute selector so the two stay in lockstep. The 2px
+ * black-25% inset shadow gives every swatch a thin dark rim that's
+ * legible against any background -- including the lightest palette
+ * entries (white / clarity) over the zinc-50 page.
+ */
+.color-swatch {
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.color-swatch[aria-checked="true"] {
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb; /* blue-600 selection ring */
+}
+
+/*
+ * Create-form swatches are smaller (w-6 h-6 = 24px) than the
+ * workspace-settings ones (34px); the same 2px rim eats too much of
+ * the visible color area at that size, so override to a 1px rim there.
+ */
+#create-color-picker .color-swatch {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+#create-color-picker .color-swatch[aria-checked="true"] {
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb;
+}
+
+/*
+ * Hex-input pill (workspace settings page). Sits inline with the
+ * color swatches and mimics one visually: same height + the same 2px
+ * black-25% inset shadow as a "rim", pill-shaped via rounded-full on
+ * the element. Focus ring matches the swatch selection ring shape so
+ * the picker feels coherent under keyboard navigation.
+ */
+.color-hex-pill {
+  background: #ffffff;
+  box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.25);
+}
+.color-hex-pill:focus {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #60a5fa; /* blue-400: a 2px ring, lighter than the blue-600 selected ring */
+}
+/*
+ * When the active color is a custom hex (no palette swatch matches),
+ * the pill carries the same blue selection ring the swatches show via
+ * aria-checked. Toggled by workspace_settings.js in
+ * syncSwatchSelection; declared after :focus so the full-strength
+ * selected ring wins over the focus tint while both apply.
+ */
+.color-hex-pill.is-selected {
+  box-shadow:
+    inset 0 0 0 2px rgba(0, 0, 0, 0.25),
+    0 0 0 2px #fff,
+    0 0 0 4px #2563eb; /* blue-600, matches .color-swatch[aria-checked="true"] */
+}
+
+/*
+ * "Saving" cursor while a settings color POST is in flight. The
+ * workspace_settings.js handler toggles ``is-saving`` on
+ * ``#color-section`` during the save; CSS scopes the progress
+ * cursor to disabled controls inside that scope so the stale-
+ * workspace case (controls disabled at render time, no
+ * ``is-saving``) keeps the default cursor instead of looking
+ * mid-save.
+ */
+#color-section.is-saving .color-swatch:disabled,
+#color-section.is-saving .color-hex-pill:disabled {
+  cursor: progress;
 }

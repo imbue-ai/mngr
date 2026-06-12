@@ -83,5 +83,7 @@ builder = "DEPOT"
 [plugins.forward]
 enabled = true
 
+# This plugin is now disabled by default (it is opt-in; see its README), so
+# this is redundant -- kept explicit to document that we want it off here.
 [plugins.claude_subagent_proxy]
 enabled = false
