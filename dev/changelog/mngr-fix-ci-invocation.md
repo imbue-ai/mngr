@@ -1,1 +1,0 @@
-- Drop the now-removed `--use-snapshot` flag from the TMR GHA workflow (`.github/workflows/tmr.yml`) so the scheduled/manual TMR runs don't fail at invocation. Snapshot building on `--provider modal` is automatic now, so behavior is unchanged. Also refresh a stale comment in `.github/workflows/tmr-reintegrate.yml` that mentioned the same removed flag.

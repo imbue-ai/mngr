@@ -84,7 +84,10 @@ def build_check_and_install_packages_command(
 
     When host_volume_mount_path is provided, the host directory is created as
     a symlink to the volume mount path instead of as a regular directory. This
-    causes all data written to host_dir to persist on the volume.
+    causes all data written to host_dir to persist on the volume. The symlink
+    target is mkdir -p'd first so that a per-host subdirectory of a shared
+    mounted volume (e.g. ``/mngr-vol/host_dir``) is guaranteed to exist before
+    the symlink is created.
 
     Returns a shell command string that can be executed via sh -c.
     """
@@ -98,6 +101,9 @@ def build_check_and_install_packages_command(
     ]
 
     if host_volume_mount_path is not None:
+        # Ensure the symlink target exists on the volume before creating the symlink.
+        # Safe no-op when the directory already exists.
+        script_lines.append(f"mkdir -p {host_volume_mount_path}")
         # Remove any existing directory (e.g., from a pre-volume snapshot) before
         # creating the symlink. ln -sfn alone won't replace an existing directory.
         # The subshell groups the conditional removal so && chaining works correctly.

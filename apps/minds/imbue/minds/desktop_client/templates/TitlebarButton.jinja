@@ -1,0 +1,41 @@
+{#def variant="nav", tone="default", extra="" #}
+{#
+  Title-bar window-control button. Distinct from the general-purpose
+  Button primitive because the title bar's color now comes from the
+  per-workspace accent (a CSS variable set by chrome.js) and the
+  button's text + hover tints must compose against that variable
+  rather than against the old hard-coded ``bg-zinc-900``.
+
+  Foreground (text / icon stroke / hover tint) lives in ``.titlebar-btn``
+  in tokens.css. That class reads ``--titlebar-fg`` (an RGB triple,
+  default ``255 255 255``) and renders the text at 0.55 alpha, the hover
+  text at 0.95, and the hover background at 0.06 -- the same hierarchy
+  works on the dark default chrome and on any of the light pastel
+  workspace accents.
+
+  Props:
+    variant
+      "nav"     -- left-side icon hits (sidebar / home / back / forward /
+                   requests). ``w-8 h-7`` with a slight rounded corner.
+      "control" -- right-side native window controls (min / max / close)
+                   on platforms where minds draws its own frame.
+                   ``w-9 h-[38px]``, square corners (matches the OS).
+    tone
+      "default" -- accent-aware hover via ``.titlebar-btn``.
+      "danger"  -- close-button-only red hover regardless of accent
+                   (``.titlebar-btn-danger``); use on the close control
+                   to mirror native Windows / Linux behavior.
+
+  Any HTML attribute on the tag that is not declared above (id=, title=,
+  aria-*, data-*) flows through via JinjaX's ``attrs`` passthrough.
+#}
+{%- set _variants = {
+  "nav": "w-8 h-7 rounded-md",
+  "control": "w-9 h-[38px] rounded-none",
+} -%}
+{%- set _tones = {
+  "default": "",
+  "danger": "titlebar-btn-danger",
+} -%}
+{%- set _cls = "titlebar-btn " ~ _variants[variant] ~ " " ~ _tones[tone] ~ " " ~ extra -%}
+<button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

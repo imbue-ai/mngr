@@ -1035,7 +1035,7 @@ def test_build_package_mode_dockerfile_replaces_monorepo_install() -> None:
     result = _build_package_mode_dockerfile(mngr_dockerfile)
 
     # Should contain the pip install replacement
-    assert "uv pip install --system mngr mngr-schedule" in result
+    assert "uv pip install --system imbue-mngr imbue-mngr-schedule" in result
     # Should preserve the FROM and system deps
     assert "FROM python:3.11-slim" in result
     assert "apt-get update" in result
@@ -1077,7 +1077,7 @@ def test_build_package_mode_dockerfile_recognizes_post_source_setup_sentinel() -
     result = _build_package_mode_dockerfile(mngr_dockerfile)
 
     # The pip install replacement must land in place of the COPY+script block.
-    assert "uv pip install --system mngr mngr-schedule" in result
+    assert "uv pip install --system imbue-mngr imbue-mngr-schedule" in result
     # The script call itself must be stripped along with the install section.
     assert "scripts/post-source-setup.sh" not in result
     # COPY must be stripped.
@@ -1111,7 +1111,7 @@ def test_build_package_mode_dockerfile_works_with_real_dockerfile() -> None:
     result = _build_package_mode_dockerfile(mngr_dockerfile_content)
 
     # Must contain pip install replacement
-    assert "uv pip install --system mngr mngr-schedule" in result
+    assert "uv pip install --system imbue-mngr imbue-mngr-schedule" in result
     # Must NOT contain monorepo-specific steps
     assert "COPY . /code/" not in result
     assert "uv sync" not in result

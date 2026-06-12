@@ -73,3 +73,17 @@ def test_parse_agents_from_mngr_output_raises_on_invalid_json_first_line() -> No
     output = "{invalid json here\n" + valid_json
     with pytest.raises(json.JSONDecodeError):
         parse_agents_from_mngr_output(output)
+
+
+@pytest.mark.parametrize("stdout", ["", "   ", "\n\n", "   \n  \n"])
+def test_parse_agents_from_mngr_output_raises_on_empty_stdout(stdout: str) -> None:
+    """Empty/blank stdout means mngr produced no output at all, not "no agents"."""
+    with pytest.raises(MalformedMngrOutputError, match="stdout was empty/blank"):
+        parse_agents_from_mngr_output(stdout)
+
+
+def test_parse_agents_from_mngr_output_raises_on_missing_agents_key() -> None:
+    """A JSON object lacking an 'agents' key is malformed output, not a bare KeyError."""
+    output = json.dumps({"not_agents": []})
+    with pytest.raises(MalformedMngrOutputError, match="missing 'agents' key"):
+        parse_agents_from_mngr_output(output)

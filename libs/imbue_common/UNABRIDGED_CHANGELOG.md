@@ -4,6 +4,23 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 88% to 90% to match the coverage CI already measures (~95%), and removed the now-obsolete comment about per-package offload coverage drift (the offload bug that caused that drift has since been fixed, so coverage is deterministic).
+
+## 2026-06-04
+
+Ratchet file scans no longer crash on a tracked symlink that resolves to a directory. The file walker (`_get_all_files_with_extension`) now filters on `is_file()` instead of `exists()`, so a symlink-to-directory (which git lists as a blob but cannot be read as a file) is skipped instead of raising `FileReadError`.
+
+- Refresh the stale test-type docstring in `conftest_hooks.py` that described acceptance tests as running "on all branches except release" and release tests as running "only on release". There is no `release` branch; acceptance tests run on every PR and release tests run via the dedicated Release Tests workflow (manual dispatch and `v*` tag pushes) and TMR. No behavior change.
+
+Added a new common ratchet to the `ratchet_testing` framework: `check_per_file_host_upload` (AST-based `find_per_file_host_uploads_in_loops`) flags `write_file`/`write_text_file`/`put_file` calls inside `for`/`while` loops, steering bulk transfers toward a single rsync (`host.copy_directory`). Recurring per-file-over-SSH uploads have repeatedly caused upload timeouts and 'connection reset / SSH protocol banner' failures (see github issue 1825).
+
+## 2026-06-02
+
+A logging test that imported `BaseMngrError` from `imbue.mngr` (now removed) no longer reaches
+into the `mngr` package: it uses a local test-only exception instead. No runtime behavior change.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

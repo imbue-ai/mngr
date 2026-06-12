@@ -195,7 +195,7 @@ def test_prevent_unittest_mock_imports() -> None:
 
 
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(6))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(7))
 
 
 def test_prevent_test_container_classes() -> None:
@@ -214,7 +214,7 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(2))
+    rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -237,7 +237,7 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(2))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
 
 
 def test_prevent_cast_usage() -> None:
@@ -246,6 +246,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
 # --- Project-level checks ---

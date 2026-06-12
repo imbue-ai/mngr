@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import shlex
+import stat
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -58,6 +59,8 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
 
 
@@ -102,6 +105,90 @@ def create_ssh_pyinfra_host_using_user_config(
     pyinfra_host = inventory.get_host(hostname)
     pyinfra_host.init(state)
     return pyinfra_host
+
+
+def _local_dir_entry(entry_path: str) -> VolumeFile | None:
+    """Stat a local path into a VolumeFile, or None if it cannot be stat'd.
+
+    Classification uses ``lstat`` (does not follow symlinks) so it matches the
+    remote SFTP listing, which also reports symlink attributes rather than their
+    targets -- local and remote agree on the full entry type (symlinks classify
+    as ``SYMLINK``, devices/pipes/sockets as their own types) and on the mode
+    string surfaced as ``permissions``.
+    """
+    try:
+        st = os.lstat(entry_path)
+    except OSError:
+        return None
+    return VolumeFile(
+        path=entry_path,
+        file_type=FileType.from_stat_mode(st.st_mode),
+        mtime=int(st.st_mtime),
+        size=st.st_size,
+        permissions=stat.filemode(st.st_mode),
+    )
+
+
+def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
+    """List a directory on the local filesystem."""
+    entries: list[VolumeFile] = []
+    str_path = str(path)
+    if recursive:
+        for root, dirs, files in os.walk(str_path):
+            for name in dirs + files:
+                entry = _local_dir_entry(os.path.join(root, name))
+                if entry is not None:
+                    entries.append(entry)
+    else:
+        try:
+            names = os.listdir(str_path)
+        except OSError:
+            return []
+        for name in names:
+            entry = _local_dir_entry(os.path.join(str_path, name))
+            if entry is not None:
+                entries.append(entry)
+    return entries
+
+
+def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeFile]:
+    """List a remote directory via SFTP ``listdir_attr``, optionally recursing.
+
+    Entry paths are absolute (built from ``dir_path``). Classification uses the
+    entry's own mode (SFTP reports symlink attributes, not their targets), so a
+    symlink is reported as ``SYMLINK`` and is not descended into, matching the
+    ``lstat``-based local listing. A directory that cannot be listed (e.g. does
+    not exist) yields no entries.
+    """
+    try:
+        attrs = sftp.listdir_attr(dir_path)
+    except IOError as e:
+        logger.trace("list_directory failed for {}: {}", dir_path, e)
+        return []
+    base = dir_path.rstrip("/")
+    entries: list[VolumeFile] = []
+    for attr in attrs:
+        entry_path = f"{base}/{attr.filename}"
+        # SFTP may omit st_mode; without it we cannot classify, so fall back to
+        # FILE (and leave permissions None) rather than guessing.
+        if attr.st_mode is not None:
+            file_type = FileType.from_stat_mode(attr.st_mode)
+            permissions: str | None = stat.filemode(attr.st_mode)
+        else:
+            file_type = FileType.FILE
+            permissions = None
+        entries.append(
+            VolumeFile(
+                path=entry_path,
+                file_type=file_type,
+                mtime=int(attr.st_mtime) if attr.st_mtime is not None else 0,
+                size=int(attr.st_size) if attr.st_size is not None else 0,
+                permissions=permissions,
+            )
+        )
+        if recursive and file_type == FileType.DIRECTORY:
+            entries.extend(_sftp_walk(sftp, entry_path, recursive))
+    return entries
 
 
 def _is_transient_ssh_error(exception: BaseException) -> bool:
@@ -829,6 +916,48 @@ class OuterHost(OuterHostInterface):
     def get_file_mtime(self, path: Path) -> datetime | None:
         """Return the modification time of a file, or None if the file doesn't exist."""
         return self._get_file_mtime(path)
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        """List the entries under ``path`` on this host.
+
+        Returns one VolumeFile per entry, each with an absolute ``path``. Local
+        hosts read the filesystem directly; remote hosts list over SFTP (the
+        same paramiko channel used for file reads). Symlinks are not followed
+        when classifying entries, so local and remote listings agree. A
+        non-existent directory yields an empty list rather than raising.
+        """
+        if self.is_local:
+            return _list_directory_local(path, recursive)
+        return self._list_directory_remote(path, recursive)
+
+    def _list_directory_remote(self, path: Path, recursive: bool) -> list[VolumeFile]:
+        """List a remote directory over SFTP, classifying connection failures.
+
+        Mirrors ``_get_file``: transient SSH drops are retried and any remaining
+        connection-level error is surfaced as :class:`HostConnectionError` (a
+        missing directory still yields an empty list, handled in ``_sftp_walk``).
+        """
+        with self._notify_on_connection_error():
+            try:
+                return self._list_directory_remote_with_retry(path, recursive)
+            except OSError as e:
+                if "Socket is closed" in str(e):
+                    raise HostConnectionError("Connection was closed while listing directory") from e
+                raise
+            except (EOFError, SSHException) as e:
+                raise HostConnectionError("Could not list directory due to connection error") from e
+
+    @_retry_on_transient_ssh_error
+    def _list_directory_remote_with_retry(self, path: Path, recursive: bool) -> list[VolumeFile]:
+        self._ensure_connected()
+        transport = self._get_paramiko_transport()
+        sftp = self._create_sftp_client(transport)
+        if sftp is None:
+            raise HostConnectionError("Failed to create SFTP channel from transport")
+        try:
+            return _sftp_walk(sftp, str(path), recursive)
+        finally:
+            sftp.close()
 
     def get_ssh_connection_info(self) -> tuple[str, str, int, Path] | None:
         """Get SSH connection info for this host if it's remote."""

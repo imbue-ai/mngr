@@ -42,7 +42,12 @@ def sanitize_for_agent_name(raw: str) -> str:
 
     Replaces non-alphanumeric (and non-hyphen) characters with hyphens,
     collapses runs of hyphens, strips leading/trailing hyphens, lowercases,
-    and truncates to 40 chars.
+    and truncates to 40 chars. The trailing-hyphen strip is also re-applied
+    after truncation, since the truncation can leave a dangling hyphen
+    (which AgentName rejects -- "alphanumeric with dashes/underscores in
+    the middle"). For example, "test-create-modal-idle-mode-ssh-timeout-300"
+    must come back as "test-create-modal-idle-mode-ssh-timeout", not
+    "test-create-modal-idle-mode-ssh-timeout-".
     """
     cleaned = ""
     for ch in raw:
@@ -55,7 +60,7 @@ def sanitize_for_agent_name(raw: str) -> str:
         if ch == "-" and sanitized.endswith("-"):
             continue
         sanitized += ch
-    return sanitized.strip("-").lower()[:40]
+    return sanitized.strip("-").lower()[:40].rstrip("-")
 
 
 def resolve_templates(

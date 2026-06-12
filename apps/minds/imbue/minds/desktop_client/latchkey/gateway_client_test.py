@@ -11,7 +11,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from imbue.minds.desktop_client.latchkey.gateway_client import AvailableServiceEntry
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
@@ -189,6 +188,36 @@ def test_approve_permission_request_posts_through_gateway() -> None:
     assert captured == {"method": "POST", "path": "/permission-requests/approve/evt-abc"}
 
 
+def test_approve_permission_request_sends_no_body_without_override() -> None:
+    """Without an override path the approve POST carries an empty body (gateway uses the precomputed effect)."""
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc"})
+
+    client = _build_client(_handler)
+    client.approve_permission_request("evt-abc")
+    assert captured["content"] == b""
+
+
+def test_approve_permission_request_sends_override_path_body() -> None:
+    """An override path is sent as a ``{"path": ...}`` JSON body so the gateway recomputes the effect."""
+    captured: dict[str, object] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        captured["content_type"] = request.headers.get("content-type")
+        return httpx.Response(200, json={"request_id": "evt-abc"})
+
+    client = _build_client(_handler)
+    client.approve_permission_request("evt-abc", override_path="/Users/glenn/Documents/Shared")
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {"path": "/Users/glenn/Documents/Shared"}
+    assert captured["content_type"] == "application/json"
+
+
 def test_approve_permission_request_raises_on_4xx() -> None:
     """Unlike ``delete``, ``approve`` does *not* swallow 404 / 4xx: a missing grant is a hard error."""
 
@@ -200,110 +229,6 @@ def test_approve_permission_request_raises_on_4xx() -> None:
     with pytest.raises(LatchkeyGatewayClientError) as exc_info:
         client.approve_permission_request("evt-abc")
     assert "404" in str(exc_info.value)
-
-
-def test_get_available_services_returns_typed_entries() -> None:
-    """``get_available_services`` GETs the catalog endpoint and returns validated entries."""
-    payload = {
-        "slack": {
-            "scope": "slack-api",
-            "display_name": "Slack",
-            "permissions": ["slack-read-all"],
-        },
-        "linear": {
-            "scope": "linear-api",
-            "display_name": "Linear",
-            "permissions": [],
-        },
-    }
-
-    captured: dict[str, object] = {}
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        captured["path"] = request.url.path
-        captured["method"] = request.method
-        captured["auth"] = request.headers.get("X-Latchkey-Gateway-Password")
-        captured["override"] = request.headers.get("X-Latchkey-Gateway-Permissions-Override")
-        return httpx.Response(200, json=payload)
-
-    client = _build_client(_handler)
-    result = client.get_available_services()
-
-    assert result == {
-        "slack": AvailableServiceEntry(
-            scope="slack-api",
-            display_name="Slack",
-            permissions=("slack-read-all",),
-        ),
-        "linear": AvailableServiceEntry(
-            scope="linear-api",
-            display_name="Linear",
-            permissions=(),
-        ),
-    }
-    assert captured["method"] == "GET"
-    assert captured["path"] == "/permissions/available"
-    assert captured["auth"] == "hunter2"
-    assert captured["override"] == "admin-jwt-token"
-
-
-def test_get_available_services_raises_on_non_2xx() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(500, content=b"boom")
-
-    client = _build_client(_handler)
-    with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
-
-
-def test_get_available_services_raises_on_non_object_body() -> None:
-    def _handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(200, json=[1, 2, 3])
-
-    client = _build_client(_handler)
-    with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
-
-
-@pytest.mark.parametrize(
-    "bad_entry",
-    [
-        # Missing scope.
-        {"display_name": "X", "permissions": []},
-        # Missing display_name.
-        {"scope": "x-api", "permissions": []},
-        # Empty scope (violates min_length=1).
-        {"scope": "", "display_name": "X", "permissions": []},
-        # Empty display_name (violates min_length=1).
-        {"scope": "x-api", "display_name": "", "permissions": []},
-        # Non-string scope.
-        {"scope": 0, "display_name": "X", "permissions": []},
-        # Non-list permissions.
-        {"scope": "x-api", "display_name": "X", "permissions": "not a list"},
-        # List with a non-string element.
-        {"scope": "x-api", "display_name": "X", "permissions": ["valid", 7]},
-        # Top-level is not an object.
-        "definitely not a service entry",
-    ],
-)
-def test_get_available_services_raises_on_malformed_entry(bad_entry: object) -> None:
-    """Any structural defect in a single entry surfaces as ``LatchkeyGatewayClientError``.
-
-    The client is the single place that validates the wire shape; the
-    catalog module that consumes the result depends on this validation
-    so it can work with typed entries instead of ``dict[str, object]``.
-    """
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(200, json={"broken": bad_entry})
-
-    client = _build_client(_handler)
-    with pytest.raises(LatchkeyGatewayClientError) as exc_info:
-        client.get_available_services()
-    assert "broken" in str(exc_info.value)
 
 
 def test_get_granted_permissions_unions_matching_scopes() -> None:
@@ -422,12 +347,12 @@ def test_one_shot_methods_invalidate_on_connect_level_errors(transport_error: ht
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
+        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
     # ``_require_base_url`` now raises ``LatchkeyGatewayClientNotInitializedError``
     # (a subclass of ``LatchkeyGatewayClientError``) because the cache
     # was cleared by the connect-error handler.
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
+        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
 
 
 def test_non_connect_transport_errors_do_not_invalidate() -> None:
@@ -448,12 +373,12 @@ def test_non_connect_transport_errors_do_not_invalidate() -> None:
 
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
+        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
     # The cache was *not* cleared, so the second call hits the
     # transport again (instead of failing fast on the missing
     # ``base_url``).
     with pytest.raises(LatchkeyGatewayClientError):
-        client.get_available_services()
+        client.get_granted_permissions_for_scopes(Path("/tmp/p.json"), ("slack-api",))
     assert call_count["value"] == 2
 
 

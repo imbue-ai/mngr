@@ -14,11 +14,12 @@ from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 
 
-def _write_json_line(data: Mapping[str, Any]) -> None:
+def write_json_line(data: Mapping[str, Any]) -> None:
     """Write a JSON object as a line to stdout.
 
-    This is used for JSON and JSONL output formats where we need raw JSON
-    without any logger formatting.
+    Used for both JSON output (a single terminating object) and JSONL output
+    (one object per line, streamed) where we need raw JSON without any logger
+    formatting. Sibling to ``write_human_line``.
     """
     sys.stdout.write(json.dumps(data) + "\n")
     sys.stdout.flush()
@@ -114,7 +115,7 @@ def emit_info(message: str, output_format: OutputFormat) -> None:
             write_human_line(message)
         case OutputFormat.JSONL:
             event = {"event": "info", "message": message}
-            _write_json_line(event)
+            write_json_line(event)
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -136,7 +137,7 @@ def emit_event(
                 write_human_line(str(data["message"]))
         case OutputFormat.JSONL:
             event = {"event": event_type, **data}
-            _write_json_line(event)
+            write_json_line(event)
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -158,8 +159,10 @@ def on_error(
         case OutputFormat.HUMAN:
             logger.error(error_msg)
         case OutputFormat.JSONL:
-            event = {"event": "error", "message": error_msg}
-            _write_json_line(event)
+            error_event: dict[str, Any] = {"event": "error", "message": error_msg}
+            if exc is not None:
+                error_event["error_class"] = type(exc).__name__
+            write_json_line(error_event)
         case OutputFormat.JSON:
             # JSON mode: errors collected and shown in final output
             pass
@@ -171,9 +174,18 @@ def on_error(
         raise AbortError(error_msg, original_exception=exc)
 
 
-def emit_final_json(data: Mapping[str, Any]) -> None:
-    """Emit final JSON output (for JSON format only)."""
-    _write_json_line(data)
+def emit_error_event(error: BaseException, output_format: OutputFormat | None) -> None:
+    """Emit a machine-readable JSONL error record so subprocess callers can detect the error type.
+
+    No-op unless ``output_format`` is JSONL. Called from the top-level CLI
+    exception handler so every command surfaces a structured
+    ``{"event": "error", "error_class": ..., "message": ...}`` line in
+    ``--format jsonl`` mode -- letting callers (e.g. minds) branch on the
+    exception *type* without parsing human-formatted error text.
+    """
+    if output_format is not OutputFormat.JSONL:
+        return
+    write_json_line({"event": "error", "error_class": type(error).__name__, "message": str(error)})
 
 
 @pure
@@ -232,7 +244,7 @@ def output_rsync_result(
 
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("rsync_complete", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -258,7 +270,7 @@ def _output_git_sync_success(
     """
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json({"success": True})
+            write_json_line({"success": True})
         case OutputFormat.JSONL:
             emit_event(event_name, {"success": True}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

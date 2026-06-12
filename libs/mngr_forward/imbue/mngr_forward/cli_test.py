@@ -60,6 +60,19 @@ def test_validation_accepts_no_observe_with_forward_port() -> None:
     _validate_options(_opts(forward_port=8080, no_observe=True))
 
 
+def test_validation_rejects_observe_via_file_with_no_observe() -> None:
+    with pytest.raises(click.UsageError):
+        _validate_options(_opts(forward_port=8080, no_observe=True, observe_via_file=True))
+
+
+def test_validation_accepts_observe_via_file_with_service() -> None:
+    _validate_options(_opts(service="system_interface", observe_via_file=True))
+
+
+def test_validation_accepts_observe_via_file_with_forward_port() -> None:
+    _validate_options(_opts(forward_port=8080, observe_via_file=True))
+
+
 def test_build_strategy_service() -> None:
     strategy = _build_strategy(_opts(service="system_interface"))
     assert isinstance(strategy, ForwardServiceStrategy)

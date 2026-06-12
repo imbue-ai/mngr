@@ -7,6 +7,7 @@ import ovh
 import pytest
 from ovh.exceptions import APIError
 from ovh.exceptions import BadParametersError
+from ovh.exceptions import HTTPError
 from ovh.exceptions import ResourceNotFoundError
 
 from imbue.mngr.errors import MngrError
@@ -452,6 +453,35 @@ class TestOvhVpsClientServiceInfo:
 
         client = _client_with_call(fake)
         # No exception expected -- retry recovers.
+        client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
+        assert put_attempts["n"] == 3, f"expected 3 PUT attempts, got {put_attempts['n']}"
+
+    def test_set_renew_at_expiration_retries_on_transient_transport_error(self) -> None:
+        """A dropped connection during the cancel PUT is retried, not surfaced.
+
+        Reproduces the failure-cleanup cancel that lost a freshly-ordered
+        VPS to a transient ``ConnectionError`` (the rebuild-race cleanup
+        path): ``_call`` tags transport failures with ``status_code == 0``,
+        and the PUT retry must treat those as transient rather than letting
+        a single dropped connection leak a month of billing.
+        """
+        put_attempts = {"n": 0}
+
+        def fake(method: str, path: str, body: Any = None, need_auth: bool = True) -> Any:
+            if method == "GET" and path.endswith("/serviceInfos"):
+                return {
+                    "renew": {"deleteAtExpiration": False, "automatic": True},
+                    "renewalType": "automaticV2012",
+                }
+            if method == "PUT" and path.endswith("/serviceInfos"):
+                put_attempts["n"] += 1
+                if put_attempts["n"] <= 2:
+                    raise HTTPError("Connection aborted: Remote end closed connection without response")
+                return None
+            raise AssertionError(f"Unexpected {method} {path}")
+
+        client = _client_with_call(fake)
+        # No exception expected -- the transient transport error is retried.
         client.set_renew_at_expiration("vps-x", delete_at_expiration=True)
         assert put_attempts["n"] == 3, f"expected 3 PUT attempts, got {put_attempts['n']}"
 

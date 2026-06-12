@@ -89,7 +89,7 @@ $ mngr message my-agent --message "Hello"
 $ mngr message agent1 agent2 --message "Hello to all"
 ```
 
-**Send to all agents**
+**Send to all agents via stdin**
 
 ```bash
 $ mngr list --ids | mngr message - --message 'Hello everyone'

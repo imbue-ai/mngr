@@ -92,16 +92,8 @@ class SSHProviderInstance(BaseProviderInstance):
             except ValidationError as e:
                 logger.warning("Skipped malformed host '{}' in dynamic hosts file: {}", host_name, e)
                 continue
-            # Expand key_file paths
-            if host_config.key_file is not None:
-                host_config = SSHHostConfig(
-                    address=host_config.address,
-                    port=host_config.port,
-                    user=host_config.user,
-                    key_file=Path(host_config.key_file).expanduser(),
-                    known_hosts_file=host_config.known_hosts_file,
-                )
-            dynamic_hosts[host_name] = host_config
+            # Expand the key_file path (~ resolution), preserving all other fields.
+            dynamic_hosts[host_name] = host_config.with_expanded_key_file()
 
         return dynamic_hosts
 
@@ -212,6 +204,16 @@ class SSHProviderInstance(BaseProviderInstance):
 
     def on_connection_error(self, host_id: HostId) -> None:
         pass
+
+    # FIXME: implement to_offline_host so an SSH pool host that becomes
+    # unreachable mid-discovery can fall back to persisted offline data instead
+    # of aborting the provider's enumeration. This requires persisting
+    # host/agent records somewhere durable (the remote host_dir, or a local
+    # store) the way the docker provider does. Until then, a connection error to
+    # an SSH host propagates out of the default
+    # ProviderInstanceInterface.discover_hosts_and_agents (which assumes any host
+    # that can raise HostConnectionError implements to_offline_host) and surfaces
+    # as a per-provider ProviderDiscoveryError.
 
     # =========================================================================
     # Discovery Methods

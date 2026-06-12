@@ -12,6 +12,7 @@ from pathlib import Path
 import click
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
@@ -129,6 +130,38 @@ def _collect_all_options_from_cli() -> dict[str, set[str]]:
             if opts:
                 result[key] = opts
     return result
+
+
+def test_help_targets_cover_commands_and_topics(completion_cache_dir: Path) -> None:
+    """`mngr help` positional completion offers every top-level command and help topic.
+
+    Exercises the real CLI: help_targets must include the command names and the
+    topic keys passed in, and the help command must be wired to use them.
+    """
+    topic_names = sorted(get_all_topics().keys())
+    write_cli_completions_cache(cli_group=cli, topic_names=topic_names)
+    cache = _read_cache(completion_cache_dir)
+
+    # The help command is wired to complete against the help_targets source.
+    assert cache.positional_completions.get("help") == [["help_targets"]]
+
+    # Every top-level command (e.g. create, destroy) is a candidate.
+    for command_name in ("create", "destroy", "help"):
+        assert command_name in cache.help_targets, f"{command_name!r} missing from help_targets"
+
+    # Every registered topic (e.g. the built-in address topic) is a candidate.
+    assert "address" in cache.help_targets
+    for topic_name in topic_names:
+        assert topic_name in cache.help_targets, f"topic {topic_name!r} missing from help_targets"
+
+
+def test_help_targets_absent_without_topic_names(completion_cache_dir: Path) -> None:
+    """Without passed-in topic names, help_targets still covers commands (topics just absent)."""
+    write_cli_completions_cache(cli_group=cli)
+    cache = _read_cache(completion_cache_dir)
+
+    assert "create" in cache.help_targets
+    assert "address" not in cache.help_targets
 
 
 def test_every_option_is_classified(completion_cache_dir: Path) -> None:

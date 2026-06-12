@@ -11,6 +11,7 @@ dependencies = [
     "imbue-common",
     "loguru>=0.7",
     "modal>=1.4.3",
+    "ovh>=1.1",
     "paramiko>=3.0",
     "psycopg2-binary>=2.9",
     "pydantic>=2.0",
@@ -75,4 +76,4 @@ pythonVersion = "3.11"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 45
+fail_under = 80

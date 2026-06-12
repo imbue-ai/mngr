@@ -16,6 +16,7 @@ import json
 
 import pytest
 
+from imbue.mngr.api.testing import created_host
 from imbue.mngr.primitives import HostName
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
 from imbue.mngr_claude_usage.plugin import _stable_shim_path
@@ -39,8 +40,7 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
       and the wrapping ``<work_dir>/.claude/settings.local.json`` get
       written through the remote host as well.
     """
-    host = real_modal_provider.create_host(HostName("usage-test"))
-    try:
+    with created_host(real_modal_provider, HostName("usage-test")) as host:
         # State dir follows mngr core's ``get_agent_state_dir_path`` layout
         # (``<host_dir>/agents/<id>``) so the sidecar lands where the shim
         # expects it at render time.
@@ -85,5 +85,3 @@ def test_provision_statusline_shim_on_modal_host(real_modal_provider: ModalProvi
         assert sidecar_after == pre_existing_command
         installed_settings_after = json.loads(host.read_text_file(work_dir / ".claude" / "settings.local.json"))
         assert installed_settings_after["statusLine"]["command"] == str(shim_path)
-    finally:
-        real_modal_provider.destroy_host(host)

@@ -59,6 +59,15 @@ def test_sanitize_strips_leading_and_trailing_hyphens() -> None:
     assert sanitize_for_agent_name("__foo__") == "foo"
 
 
+def test_sanitize_strips_trailing_hyphen_after_truncation() -> None:
+    # The pre-truncation strip drops the leading/trailing hyphens, but truncation
+    # at exactly the 40th character can land on a hyphen and reintroduce one.
+    # Confirmed by a TMR failure with AgentName 'tmr-...-test-create-modal-idle-mode-ssh-timeout-'.
+    result = sanitize_for_agent_name("test_create_modal_idle_mode_ssh_timeout_300")
+    assert result == "test-create-modal-idle-mode-ssh-timeout"
+    assert not result.endswith("-")
+
+
 def test_sanitize_empty_input() -> None:
     """Empty input yields an empty slug (callers must dedup if they need uniqueness)."""
     assert sanitize_for_agent_name("") == ""

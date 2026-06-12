@@ -29,7 +29,6 @@ from imbue.mngr_kanpan.data_sources.repo_paths import repo_path_from_labels
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.fetcher import _get_local_work_dir
-from imbue.mngr_kanpan.fetcher import _is_agent_muted
 from imbue.mngr_kanpan.fetcher import _run_data_sources_parallel
 from imbue.mngr_kanpan.fetcher import collect_data_sources
 from imbue.mngr_kanpan.fetcher import compute_section
@@ -161,33 +160,6 @@ def test_compute_section_wrong_pr_type() -> None:
     }
     with pytest.raises(KanpanFieldTypeError, match="Expected PrField"):
         compute_section(fields)
-
-
-# === _is_agent_muted ===
-
-
-def test_is_agent_muted_true() -> None:
-    certified_data = {"plugin": {"kanpan": {"muted": True}}}
-    assert _is_agent_muted(certified_data) is True
-
-
-def test_is_agent_muted_false() -> None:
-    certified_data = {"plugin": {"kanpan": {"muted": False}}}
-    assert _is_agent_muted(certified_data) is False
-
-
-def test_is_agent_muted_missing_key() -> None:
-    assert _is_agent_muted({}) is False
-
-
-def test_is_agent_muted_no_kanpan_key() -> None:
-    certified_data = {"plugin": {}}
-    assert _is_agent_muted(certified_data) is False
-
-
-def test_is_agent_muted_no_muted_key() -> None:
-    certified_data = {"plugin": {"kanpan": {}}}
-    assert _is_agent_muted(certified_data) is False
 
 
 # === _run_data_sources_parallel ===

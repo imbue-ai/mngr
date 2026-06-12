@@ -5,7 +5,7 @@ from loguru import logger
 
 from imbue.mngr.api.list import list_agents
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -90,6 +90,6 @@ def run_check(check: StepCheck, mngr_ctx: MngrContext) -> bool:
     """Execute a step check and return whether it passes."""
     try:
         return _execute_check(check, mngr_ctx)
-    except (BaseMngrError, OSError):
+    except (MngrError, OSError):
         logger.debug("Check failed with exception for check type: {}", type(check).__name__)
         return False

@@ -1,0 +1,53 @@
+{#def mngr_forward_origin, trigger_x=0, trigger_y=0, trigger_w=0, trigger_h=38, offset_x=-2, offset_y=2 #}
+{#
+  Standalone sidebar page loaded into the shared modal WebContentsView
+  when the user opens the sidebar. The modal view covers the full window
+  content area, the body is the transparent backdrop, and the floating
+  panel is pinned at a position derived from the caller's trigger
+  geometry. Clicks on the backdrop (anywhere outside the panel) dismiss
+  the modal via /_static/sidebar.js; the Escape key is handled by
+  main.js's modal before-input-event listener (see openModal in
+  electron/main.js), so this page does not install its own Escape
+  handler. The panel's height comes from its own flex content -- no JS
+  measurement or Electron-side bounds math is needed.
+
+  Position model: the trigger (chrome page's #sidebar-toggle button)
+  passes its viewport-relative rect (trigger_x, trigger_y, trigger_w,
+  trigger_h) plus a caller-chosen offset (offset_x, offset_y). The menu
+  anchors its top-left at the trigger's bottom-left + offset:
+    left = trigger_x + offset_x
+    top  = trigger_y + trigger_h + offset_y
+  Because the chrome view and the modal view share the same window
+  coordinate space, the trigger's rect translates directly. The panel
+  carries a uniform 4px pad on all sides (``p-1``) with 2px between
+  entries (``gap-0.5``); each row adds its own ``px-2`` for the hover
+  highlight's inset.
+
+  Defaults (no query params): anchor a 38px-tall element at the top-left
+  of the window, nudged 2px left and 2px below it. That's the right shape
+  for the titlebar's first button without any caller customization.
+
+  mngr_forward_origin is exposed via data-mngr-forward-origin so sidebar.js
+  can build the cross-origin /goto/<agent>/ URL the plugin serves.
+#}
+{% set _body_attrs %}data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
+{% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
+<script src="/_static/sidebar.js" defer></script>
+{% endset %}
+{% set _menu_left = trigger_x + offset_x %}
+{% set _menu_top = trigger_y + trigger_h + offset_y %}
+<Base title="Projects"
+      body_class="font-sans antialiased bg-transparent"
+      body_attrs={{ _body_attrs }}
+      scripts={{ _scripts }}>
+  <div id="sidebar-backdrop" class="fixed inset-0">
+    <div id="sidebar-menu"
+         style="left:{{ _menu_left }}px; top:{{ _menu_top }}px;"
+         class="absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
+      <SidebarBottom />
+    </div>
+  </div>
+</Base>

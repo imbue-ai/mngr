@@ -4,6 +4,76 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 50% to 70% to match the coverage CI already measures (~75%).
+
+## 2026-06-08
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr forward` plugin, usable outside the minds bundle). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `concurrency-group`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `concurrency-group`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-04
+
+`mngr forward --observe-via-file` makes the forward server consume discovery by tailing the shared discovery events file in-process rather than spawning its own `mngr observe --discovery-only` subprocess. Per-agent `mngr event` streams are still spawned for discovered agents. The flag is mutually exclusive with `--no-observe` and works with either `--service` or `--forward-port`. In this mode SIGHUP is a no-op (there is no observe child to bounce; the file's own writer re-emits snapshots that the tailer picks up automatically).
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-04
+
+`mngr forward` no longer drops a live agent when its provider's discovery merely errored on a poll. The stream manager now retains agents whose provider is in the snapshot's `error_by_provider_name`, keeping their service mapping and per-agent events stream alive (logged at debug). A retained agent is only torn down on an explicit destroy or a later successful snapshot that omits it. A provider that succeeds and simply returns fewer agents still drops the missing ones as before.
+
+## 2026-06-03
+
+Stop following the per-agent `refresh` event source in `ForwardStreamManager`: the default event sources are now just `services` and `requests`.
+
+This is part of tearing out the unused refresh-event plumbing across `mngr_forward` and `minds.desktop_client`. The refresh-via-desktop-client mechanism has been superseded by an `open_tab` WebSocket broadcast from the workspace server.
+
+## 2026-06-02
+
+The forwarding plugin now reports an unreachable backend as a backend
+failure instead of flashing a raw error, and reports HTTP error responses
+with a single generic reason that consumers interpret themselves.
+
+- An SSH-tunnel setup failure and a refused host-loopback dial (no SSH
+  tunnel available) are both treated as backend failures: the plugin
+  emits a `CONNECT_ERROR` `system_interface_backend_failure` envelope and
+  serves the styled "Loading workspace" loader to HTML callers, the same
+  as other unreachable-backend cases. A consumer of the envelope stream
+  can use this to drive its own recovery UI.
+- The "Loading workspace" loader no longer shows the explanatory "This
+  page will reload automatically..." line -- it just shows the heading,
+  vertically centered against the spinner.
+- HTTP error handling is simplified. The plugin no longer special-cases
+  which status codes matter (it previously tagged only 502/503/504 as
+  `FIVEXX_RESPONSE` and 404-on-`GET` as `NOT_FOUND_RESPONSE`). It now
+  forwards every response unchanged and emits a single `ERROR_RESPONSE`
+  reason -- carrying the `status_code` -- for any non-2xx response,
+  leaving the policy decision (which statuses warrant action, and what
+  action) entirely to the consumer.
+- New `resolver_snapshot` envelope: the plugin emits the full per-agent
+  service map on every mutation of that map -- both `update_services`
+  (set/replace for one agent) and the destruction paths
+  (`remove_known_agent` and `update_known_agents` when they drop an agent
+  that had services) -- so a consumer's mirror does not retain stale
+  entries for destroyed agents. The full map is sent on every change (no
+  per-agent diff) so a late-attaching consumer only needs the most recent
+  envelope to be in sync. No periodic flushes, no debouncing, no initial
+  empty emission; the first envelope is sent on the first real services
+  event. A consumer older than this change transparently drops the new
+  payload; a consumer running against an older plugin simply sees no
+  `resolver_snapshot` -- the same transient as a fresh plugin startup.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
