@@ -5,12 +5,10 @@ from pathlib import Path
 import pytest
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.mngr import hookimpl
 from imbue.mngr.api.create import _create_new_host
 from imbue.mngr.api.create import _generate_unique_host_name
 from imbue.mngr.api.create import _run_post_host_create_commands
-from imbue.mngr.api.create import _unwrap_provisioning_user_error
 from imbue.mngr.api.create import _write_host_env_vars
 from imbue.mngr.api.create import create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
@@ -20,10 +18,8 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import AgentLabelOptions
-from imbue.mngr.interfaces.host import AgentProvisioningOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostInterface
@@ -496,73 +492,3 @@ def test_create_new_host_retained_on_failure_when_debug_flag_set(
             )
 
     assert provider.destroyed_host_ids == []
-
-
-def test_create_surfaces_provisioning_user_error_unwrapped(
-    local_provider: LocalProviderInstance,
-    temp_mngr_ctx: MngrContext,
-    temp_work_dir: Path,
-) -> None:
-    """A user-facing error raised during provisioning surfaces from create() as a bare MngrError.
-
-    provision_agent runs inside a ConcurrencyGroup that re-wraps any escaping error in a
-    ConcurrencyExceptionGroup, so without unwrapping the CLI would report it as an
-    "Unexpected error" with a traceback. A failing extra provision command raises an
-    MngrError inside that group, standing in for a bad --adopt-session ID; create() must
-    re-raise it bare (a ClickException) rather than the ConcurrencyExceptionGroup.
-    """
-    provider = _make_recording_provider(local_provider)
-    source_location = HostLocation(host=local_provider.create_host(HostName(LOCAL_HOST_NAME)), path=temp_work_dir)
-    target_host = NewHostOptions(provider=ProviderInstanceName(LOCAL_PROVIDER_NAME), name=HostName(LOCAL_HOST_NAME))
-    agent_options = CreateAgentOptions(
-        name=AgentName("test-provision-error-agent"),
-        agent_type=AgentTypeName(PLACEHOLDER_AGENT_TYPE),
-        command=CommandString("sleep 60"),
-        transfer_mode=TransferMode.NONE,
-        label_options=AgentLabelOptions(),
-        provisioning=AgentProvisioningOptions(extra_provision_commands=("exit 1",)),
-    )
-
-    with _injected_provider(ProviderInstanceName(LOCAL_PROVIDER_NAME), temp_mngr_ctx, provider):
-        with pytest.raises(MngrError, match="Extra provision command failed") as exc_info:
-            create(
-                source_location=source_location,
-                target_host=target_host,
-                agent_options=agent_options,
-                mngr_ctx=temp_mngr_ctx,
-            )
-
-    # The wrapper must be gone: a ClickException renders cleanly at the CLI boundary,
-    # whereas a ConcurrencyExceptionGroup would be reported as an unexpected error.
-    assert not isinstance(exc_info.value, ConcurrencyExceptionGroup)
-
-
-def test_unwrap_provisioning_user_error_unwraps_single_wrapped_error() -> None:
-    """A ConcurrencyExceptionGroup wrapping a single user-facing MngrError is unwrapped.
-
-    This is the provision_agent case: a UserInputError raised inside provision_agent's
-    concurrency group is re-raised wrapped in a ConcurrencyExceptionGroup on exit.
-    """
-    inner = UserInputError("session not found")
-    group = ConcurrencyExceptionGroup("wrapped", (inner,), main_exception=inner)
-    assert _unwrap_provisioning_user_error(group) is inner
-
-
-def test_unwrap_provisioning_user_error_unwraps_nested_groups() -> None:
-    """Nested single-exception ConcurrencyExceptionGroups are unwrapped recursively."""
-    inner = UserInputError("session not found")
-    nested = ConcurrencyExceptionGroup("inner", (inner,), main_exception=inner)
-    outer = ConcurrencyExceptionGroup("outer", (nested,), main_exception=nested)
-    assert _unwrap_provisioning_user_error(outer) is inner
-
-
-def test_unwrap_provisioning_user_error_returns_none_for_multiple_wrapped_errors() -> None:
-    """A group carrying multiple distinct failures is not unwrapped to a single error."""
-    group = ConcurrencyExceptionGroup("two failures", (UserInputError("a"), UserInputError("b")))
-    assert _unwrap_provisioning_user_error(group) is None
-
-
-def test_unwrap_provisioning_user_error_returns_none_for_wrapped_plain_exception() -> None:
-    """A group wrapping a single non-user-facing error stays unexpected (full traceback)."""
-    group = ConcurrencyExceptionGroup("wrapped bug", (RuntimeError("boom"),))
-    assert _unwrap_provisioning_user_error(group) is None

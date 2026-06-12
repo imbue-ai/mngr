@@ -1,3 +1,0 @@
-Passing an unknown `--adopt-session` ID (or hitting any other user-input error that is only validated during agent provisioning) now fails with a clean `Error: ...` message instead of crashing with a full "Unexpected error" traceback.
-
-Internal: `host.provision_agent` runs provisioning inside a `ConcurrencyGroup`, whose `__exit__` re-wraps any escaping error in a `ConcurrencyExceptionGroup` (not a `ClickException`), which is why such errors were reported as unexpected. The `mngr create` API now catches that group at the `provision_agent` call site and, when it wraps a single user-facing `MngrError` (recursing through nesting), re-raises that error bare so it renders cleanly. Groups carrying multiple failures or a genuine non-user-facing bug keep their full traceback.

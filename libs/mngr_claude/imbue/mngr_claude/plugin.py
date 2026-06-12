@@ -2677,6 +2677,15 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
             "adopt a session into the new agent. Pick one."
         )
 
+    # Validate that every named session resolves *now* -- before any host or worktree
+    # is created. The real resolution happens again later in on_after_provisioning, but
+    # that runs inside provision_agent's ConcurrencyGroup, whose __exit__ would re-wrap a
+    # bad-ID UserInputError in a ConcurrencyExceptionGroup and surface it as an
+    # "Unexpected error" with a traceback. Resolving here (the session source is always
+    # local, so the result matches) makes a bad ID a clean, fail-fast user error.
+    for session_arg in adopt_session:
+        _resolve_adopt_session(session_arg, mngr_ctx)
+
     return None
 
 
