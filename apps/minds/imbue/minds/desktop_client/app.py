@@ -95,6 +95,7 @@ from imbue.minds.desktop_client.region_preference import default_region_for_prov
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.region_preference import start_geo_detection
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -2166,7 +2167,7 @@ async def _handle_chrome_events(
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
-            last_requests_payload = _build_requests_payload(inbox)
+            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
             # ``auto_open`` is bundled with the requests payload (rather than
             # its own SSE event) so the Electron shell sees both atomically
             # when deciding whether to auto-open the panel.
@@ -2258,7 +2259,7 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = request.app.state.request_inbox
-                current_requests_payload = _build_requests_payload(inbox)
+                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
                 # still pushes an update and the panel refreshes.
@@ -2446,7 +2447,31 @@ def _build_workspace_list(
     return workspaces
 
 
-def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
+def _displayable_pending_requests(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> list[RequestEvent]:
+    """Pending requests whose originating agent's host is currently resolvable.
+
+    A permission request filed by an agent on a since-stopped workspace
+    lingers in the inbox after that workspace disappears from discovery
+    (the request file survives on the gateway). With no live agent to
+    resolve, the inbox can only fall back to raw agent ids, which render
+    as meaningless 16-char hex in the UI. Rather than show those, we hide
+    a request whenever ``get_agent_display_info`` can't resolve its agent
+    -- the same signal every other display path uses to map an agent to a
+    host/workspace. The request itself is untouched on the gateway, so it
+    reappears if the workspace comes back (or once a freshly-arrived
+    request's host is discovered).
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    return [req for req in pending if backend_resolver.get_agent_display_info(AgentId(req.agent_id)) is not None]
+
+
+def _build_requests_payload(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
 
     The chrome's live request UI (badge, panel refresh, auto-open) must react
@@ -2459,8 +2484,12 @@ def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
     ids (in a deterministic order) alongside the count. Consumers diff
     ``request_ids`` to decide whether to refresh the panel and which ids are
     newly arrived (for auto-open); the count remains for the badge.
+
+    Requests whose host can't be resolved are excluded (see
+    :func:`_displayable_pending_requests`) so the badge count and the
+    rendered cards stay in agreement.
     """
-    pending = inbox.get_pending_requests() if inbox else []
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     request_ids = [str(req.event_id) for req in pending]
     return {"count": len(request_ids), "request_ids": request_ids}
 
@@ -3478,8 +3507,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     most-recent-first.
     """
     inbox: RequestInbox | None = request.app.state.request_inbox
-    pending = inbox.get_pending_requests() if inbox else []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
@@ -3554,14 +3583,19 @@ def _resolve_inbox_selection(
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
         return "", ""
-    pending = inbox.get_pending_requests()
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
         return "", ""
 
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    # Only requests in the displayable set are selectable: a request whose
+    # host can't be resolved is hidden from the list, so honoring a stale
+    # ``selected_id`` that points at one would render the same
+    # agent-id-only detail we're hiding the card to avoid.
+    displayable_by_id = {str(req.event_id): req for req in pending}
     target = None
     if selected_id:
-        candidate = inbox.get_request_by_id(selected_id)
+        candidate = displayable_by_id.get(selected_id)
         if candidate is not None and not inbox.is_request_resolved(selected_id):
             target = candidate
     if target is None and selected_id:
