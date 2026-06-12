@@ -120,6 +120,12 @@ const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_SHARING]);
 
+// Detent's catch-all permission schema. The ``services.json``
+// catalog never lists it explicitly (every scope implicitly
+// admits it), so it is always a valid permission under any
+// known scope.
+const ALWAYS_AVAILABLE_PERMISSION = 'any';
+
 // Names and constants used when generating the ``effect`` for a
 // ``file-sharing`` request. The agent reaches the Minds API through
 // the gateway's ``minds-api-proxy`` extension, which mounts under
@@ -412,6 +418,9 @@ function validateAbsoluteFileSharingPath(rawPath) {
  * file is trusted package data, so any structural problem is a
  * deployment bug and surfaces as HTTP 500.
  *
+ * Each scope's set is seeded with the catch-all ``any`` permission,
+ * which every scope implicitly admits.
+ *
  * A service value is an array of scope entries, and each entry's
  * ``permissions`` are ``{name, description}`` objects; only the
  * ``name`` is collected here. Multiple entries that share a Detent
@@ -463,7 +472,10 @@ function loadValidPermissionsByScope() {
           `entry ${index} for '${serviceName}': 'permissions' must be an array.`,
         );
       }
-      const existing = permissionsByScope.get(entry.scope) ?? new Set();
+      // Every scope implicitly admits the catch-all ``any`` permission,
+      // even when the catalog enumerates none, so seed each scope's set
+      // with it.
+      const existing = permissionsByScope.get(entry.scope) ?? new Set([ALWAYS_AVAILABLE_PERMISSION]);
       permissions.forEach((permission, permissionIndex) => {
         // Each permission is a ``{name, description}`` object; only the
         // ``name`` matters for validating an incoming request.
