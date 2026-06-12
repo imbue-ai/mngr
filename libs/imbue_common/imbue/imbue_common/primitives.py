@@ -6,12 +6,16 @@ from pydantic_core import CoreSchema
 from pydantic_core import core_schema
 
 
+class InvalidPrimitiveValueError(ValueError):
+    """Raised when a constrained primitive (non-empty string, non-negative/positive number) is given an invalid value."""
+
+
 class NonEmptyStr(str):
     """A string that cannot be empty or whitespace-only."""
 
     def __new__(cls, value: str) -> Self:
         if not value or not value.strip():
-            raise ValueError(f"{cls.__name__} cannot be empty")
+            raise InvalidPrimitiveValueError(f"{cls.__name__} cannot be empty")
         return super().__new__(cls, value.strip())
 
     @classmethod
@@ -32,7 +36,7 @@ class NonNegativeInt(int):
 
     def __new__(cls, value: int) -> Self:
         if value < 0:
-            raise ValueError(f"{cls.__name__} must be >= 0, got {value}")
+            raise InvalidPrimitiveValueError(f"{cls.__name__} must be >= 0, got {value}")
         return super().__new__(cls, value)
 
     @classmethod
@@ -52,7 +56,7 @@ class PositiveInt(int):
 
     def __new__(cls, value: int) -> Self:
         if value <= 0:
-            raise ValueError(f"{cls.__name__} must be > 0, got {value}")
+            raise InvalidPrimitiveValueError(f"{cls.__name__} must be > 0, got {value}")
         return super().__new__(cls, value)
 
     @classmethod
@@ -72,7 +76,7 @@ class NonNegativeFloat(float):
 
     def __new__(cls, value: float) -> Self:
         if value < 0:
-            raise ValueError(f"{cls.__name__} must be >= 0, got {value}")
+            raise InvalidPrimitiveValueError(f"{cls.__name__} must be >= 0, got {value}")
         return super().__new__(cls, value)
 
     @classmethod
@@ -92,7 +96,7 @@ class PositiveFloat(float):
 
     def __new__(cls, value: float) -> Self:
         if value <= 0:
-            raise ValueError(f"{cls.__name__} must be > 0, got {value}")
+            raise InvalidPrimitiveValueError(f"{cls.__name__} must be > 0, got {value}")
         return super().__new__(cls, value)
 
     @classmethod

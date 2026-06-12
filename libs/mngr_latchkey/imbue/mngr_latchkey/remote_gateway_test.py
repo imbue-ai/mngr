@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,6 +11,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote_gateway import INNER_PORT
 from imbue.mngr_latchkey.remote_gateway import LATCHKEY_VERSION
@@ -161,29 +163,143 @@ def test_ensure_latchkey_installed_falls_back_to_stdout_when_stderr_empty() -> N
         _ensure_latchkey_installed(outer)
 
 
-def test_sync_credentials_copies_local_file_to_remote_latchkey_dir(tmp_path: Path) -> None:
+def _make_reencrypt_latchkey_binary(tmp_path: Path) -> Path:
+    """Build a fake ``latchkey`` covering ``services info --offline`` and ``auth re-encrypt``.
+
+    ``services info <svc> --offline`` reports ``missing`` for any service
+    named in the ``FAKE_MISSING_SERVICES`` env var (comma-separated) and
+    ``valid`` otherwise. ``auth re-encrypt`` writes ``credentials.json.enc``
+    into the destination *directory* as JSON recording the requested service
+    names (matching the real CLI, which takes an output directory). Together
+    these let ``sync_credentials`` be exercised end-to-end without a real
+    ``auth re-encrypt`` implementation.
+    """
+    script = tmp_path / "fake-latchkey"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        'if sys.argv[1:3] == ["services", "info"]:\n'
+        "    service = sys.argv[3]\n"
+        "    missing = os.environ.get('FAKE_MISSING_SERVICES', '').split(',')\n"
+        "    status = 'missing' if service in missing else 'valid'\n"
+        "    print(json.dumps({'credentialStatus': status}))\n"
+        "    sys.exit(0)\n"
+        'assert sys.argv[1:3] == ["auth", "re-encrypt"], sys.argv\n'
+        "rest = sys.argv[4:]\n"
+        "services = rest[1:] if rest[:1] == ['--services'] else []\n"
+        "out = os.path.join(sys.argv[3], 'credentials.json.enc')\n"
+        "open(out, 'w').write(json.dumps({'services': services}))\n"
+        "sys.exit(0)\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def _latchkey_with_fake_reencrypt(tmp_path: Path) -> Latchkey:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
-    (latchkey_directory / "credentials.json.enc").write_bytes(b"encrypted-secret-bytes")
+    return Latchkey(
+        latchkey_directory=latchkey_directory,
+        latchkey_binary=str(_make_reencrypt_latchkey_binary(tmp_path)),
+    )
+
+
+def _grant_permissions(latchkey: Latchkey, host_id: HostId, rules_json: str) -> None:
+    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey.latchkey_directory), host_id)
+    permissions_path.parent.mkdir(parents=True)
+    permissions_path.write_text(rules_json)
+
+
+def test_sync_credentials_ships_only_services_the_host_is_granted(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # Grant the host the slack scope; the catalog maps ``slack-api`` -> ``slack``.
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
 
-    sync_credentials(outer, latchkey_directory)
+    sync_credentials(outer, latchkey, host_id)
 
     written = _stub(outer).written
     assert len(written) == 1
     assert written[0].path == "/root/.latchkey/credentials.json.enc"
-    assert written[0].content == b"encrypted-secret-bytes"
+    # Only the granted service's credentials are exported, not the full store.
+    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["slack"]
     assert written[0].mode == "0600"
     # Written atomically (tmp + rename) so the remote gateway never reads a partial file.
     assert written[0].is_atomic is True
 
 
-def test_sync_credentials_raises_when_local_file_missing(tmp_path: Path) -> None:
+def test_sync_credentials_excludes_services_without_stored_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # Grant both slack and github (github-rest-api -> github in the catalog).
+    _grant_permissions(
+        latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}, {"github-rest-api": ["any"]}]}'
+    )
+    # Slack is granted but has no stored credentials; it must be dropped.
+    monkeypatch.setenv("FAKE_MISSING_SERVICES", "slack")
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    written = _stub(outer).written
+    assert len(written) == 1
+    assert json.loads(written[0].content.decode("utf-8"))["services"] == ["github"]
+
+
+def test_sync_credentials_clears_remote_store_for_deny_all_host(tmp_path: Path) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    # No permissions file -> deny-all -> nothing to ship; the remote store is cleared.
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    assert _stub(outer).written == []
+    rm_commands = [r.command for r in _stub(outer).recorded if r.command.startswith("rm -f")]
+    assert rm_commands == ["rm -f /root/.latchkey/credentials.json.enc"]
+
+
+def test_sync_credentials_clears_remote_store_when_all_services_lack_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    latchkey = _latchkey_with_fake_reencrypt(tmp_path)
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
+    # The only granted service has no stored credentials -> nothing to ship.
+    monkeypatch.setenv("FAKE_MISSING_SERVICES", "slack")
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+
+    sync_credentials(outer, latchkey, host_id)
+
+    assert _stub(outer).written == []
+    assert any(r.command.startswith("rm -f") for r in _stub(outer).recorded)
+
+
+def test_sync_credentials_raises_when_reencrypt_fails(tmp_path: Path) -> None:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
+    failing_binary = tmp_path / "fake-latchkey"
+    # ``services info`` succeeds (so the granted service is kept), but
+    # ``auth re-encrypt`` fails so we exercise the export-failure path.
+    failing_binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        'if sys.argv[1:3] == ["services", "info"]:\n'
+        "    print(json.dumps({'credentialStatus': 'valid'}))\n"
+        "    sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
+    failing_binary.chmod(0o755)
+    latchkey = Latchkey(latchkey_directory=latchkey_directory, latchkey_binary=str(failing_binary))
+    host_id = HostId.generate()
+    _grant_permissions(latchkey, host_id, '{"rules": [{"slack-api": ["slack-read-all"]}]}')
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    with pytest.raises(RemoteGatewayError, match="credentials file does not exist"):
-        sync_credentials(outer, latchkey_directory)
+
+    with pytest.raises(RemoteGatewayError, match="export filtered latchkey credentials"):
+        sync_credentials(outer, latchkey, host_id)
 
 
 def test_sync_permissions_copies_per_host_file_to_remote_permissions_json(tmp_path: Path) -> None:
@@ -243,13 +359,18 @@ def test_ports_are_integers() -> None:
     assert isinstance(OUTER_PORT, int)
 
 
+def _gateway_script(outer: OuterHostInterface) -> str:
+    """Return the single recorded command that launches the gateway."""
+    scripts = [r.command for r in _stub(outer).recorded if "nohup latchkey gateway" in r.command]
+    assert len(scripts) == 1, scripts
+    return scripts[0]
+
+
 def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_loopback(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, tmp_path)
-    assert len(_stub(outer).recorded) == 1
-    command = _stub(outer).recorded[0].command
-    # Gateway binds OUTER_PORT on loopback, with counting disabled, and the
-    # encryption key injected so it can decrypt the synced credentials.
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    command = _gateway_script(outer)
+    # Gateway binds OUTER_PORT on loopback, with counting disabled.
     assert f"LATCHKEY_GATEWAY_PORT={OUTER_PORT}" in command
     assert "LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1" in command
     assert "LATCHKEY_DISABLE_COUNTING=1" in command
@@ -257,7 +378,16 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     # user's OAuth token: it runs on a synced copy and the desktop-side
     # latchkey remains the single owner of credential refresh.
     assert "LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1" in command
-    assert "LATCHKEY_ENCRYPTION_KEY=" in command
+    # The encryption key and listen password are read from 0600 temp files into
+    # the environment (not interpolated), then the files are deleted, then the
+    # now-redundant cleanup trap is dropped.
+    assert 'LATCHKEY_ENCRYPTION_KEY="$(cat ' in command
+    assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat ' in command
+    assert "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD" in command
+    assert "trap 'rm -f " in command
+    assert "trap - EXIT" in command
+    # The literal secret values never appear in the command string.
+    assert "shared-password" not in command
     assert "nohup latchkey gateway" in command
     # Idempotent via a PID file + kill -0 (not pgrep, which would self-match the
     # shell running this very script). Records $! after launching.
@@ -270,25 +400,49 @@ def test_ensure_latchkey_gateway_running_starts_detached_gateway_on_outer_port_l
     assert "</dev/null" in command
 
 
+def test_ensure_latchkey_gateway_running_writes_secrets_to_0600_temp_files(tmp_path: Path) -> None:
+    outer = _outer(CommandResult(stdout="", stderr="", success=True))
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    written = _stub(outer).written
+    # Exactly the two secret files are written, both 0600, under the remote dir.
+    assert len(written) == 2
+    assert all(w.mode == "0600" for w in written)
+    assert all(w.path.startswith("/root/.latchkey/") for w in written)
+    # The password file's content is the literal secret; it is never written to
+    # a command (see the start-script test above). The temp files have random,
+    # non-descriptive names, so identify it by content rather than filename.
+    password_files = [w for w in written if w.content == b"shared-password"]
+    assert len(password_files) == 1
+    # The script reads back exactly the paths that were written.
+    command = _gateway_script(outer)
+    for w in written:
+        assert w.path in command
+
+
 def test_ensure_latchkey_gateway_running_injects_local_encryption_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Pin the local key (and clear any operator override) so the exact value is
-    # interpolated into LATCHKEY_ENCRYPTION_KEY.
+    # written to the encryption-key temp file (and never to a command).
     monkeypatch.delenv("LATCHKEY_ENCRYPTION_KEY", raising=False)
     key_path = encryption_key_path(tmp_path)
     key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text("my-test-key-abc123")
     os.chmod(key_path, 0o600)
     outer = _outer(CommandResult(stdout="", stderr="", success=True))
-    _ensure_latchkey_gateway_running(outer, tmp_path)
-    assert "LATCHKEY_ENCRYPTION_KEY=my-test-key-abc123" in _stub(outer).recorded[0].command
+    _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
+    # The temp files have random, non-descriptive names, so identify the
+    # encryption-key file by content rather than filename.
+    key_files = [w for w in _stub(outer).written if w.content == b"my-test-key-abc123"]
+    assert len(key_files) == 1
+    # The key never appears in any recorded command string.
+    assert all("my-test-key-abc123" not in r.command for r in _stub(outer).recorded)
 
 
 def test_ensure_latchkey_gateway_running_raises_on_failure(tmp_path: Path) -> None:
     outer = _outer(CommandResult(stdout="", stderr="latchkey: command not found", success=False))
     with pytest.raises(RemoteGatewayError, match="command not found"):
-        _ensure_latchkey_gateway_running(outer, tmp_path)
+        _ensure_latchkey_gateway_running(outer, tmp_path, "shared-password")
 
 
 def test_ensure_latchkey_gateway_reachable_opens_reverse_tunnel_into_container() -> None:
@@ -376,7 +530,12 @@ def test_ensure_container_tunnel_keypair_raises_on_failure() -> None:
 def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name="mngr-ws-1"))
     provision_remote_gateway(
-        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+        outer,
+        host_id=HostId(),
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        latchkey_directory=tmp_path,
+        gateway_password="shared-password",
     )
     commands = "\n\n".join(r.command for r in _stub(outer).recorded)
     # Install latchkey, run the gateway, find the container, mint+authorize a
@@ -389,13 +548,23 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     assert "docker exec -u root" in commands
     assert "mngr-ws-1" in commands
     assert "-R 127.0.0.1:" in commands
+    # The gateway listen password is passed via a temp file, never a command.
+    assert "shared-password" not in commands
+    # Temp files have random names; identify the password file by content.
+    password_files = [w for w in _stub(outer).written if w.content == b"shared-password"]
+    assert len(password_files) == 1
 
 
 def test_provision_remote_gateway_raises_when_container_not_found(tmp_path: Path) -> None:
     outer = cast(OuterHostInterface, _StubOuter(container_name=""))
     with pytest.raises(RemoteGatewayError, match="No container labeled"):
         provision_remote_gateway(
-            outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+            outer,
+            host_id=HostId(),
+            container_ssh_user="root",
+            container_ssh_port=2222,
+            latchkey_directory=tmp_path,
+            gateway_password="shared-password",
         )
 
 
@@ -404,6 +573,11 @@ def test_provision_remote_gateway_is_noop_on_local_outer_host(tmp_path: Path) ->
     # provisioned -- we don't apt/npm-install latchkey on the user's computer.
     outer = cast(OuterHostInterface, _StubOuter(is_local=True))
     provision_remote_gateway(
-        outer, host_id=HostId(), container_ssh_user="root", container_ssh_port=2222, latchkey_directory=tmp_path
+        outer,
+        host_id=HostId(),
+        container_ssh_user="root",
+        container_ssh_port=2222,
+        latchkey_directory=tmp_path,
+        gateway_password="shared-password",
     )
     assert _stub(outer).recorded == []

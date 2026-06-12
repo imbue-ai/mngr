@@ -144,10 +144,11 @@ def prepare(
             project_id, zone, firewall_name, firewall_target_tag, network, allowed_ssh_cidrs
         )
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
-        # ``ValueError`` covers the no-ADC case raised by
-        # ``GcpProviderConfig.get_credentials_and_resolved_project``;
-        # ``GoogleAuthError`` covers other auth-resolution failures. Mirrors the
-        # pair caught by ``GcpProviderBackend.build_provider_instance``.
+        # ``ValueError`` covers the no-ADC / no-project cases raised by
+        # ``GcpProviderConfig`` (``GcpCredentialsError`` / ``GcpProjectError``,
+        # both ``ValueError`` subclasses); ``GoogleAuthError`` covers other
+        # auth-resolution failures. Mirrors the pair caught by
+        # ``GcpProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     if not client.project_id:
         raise click.ClickException(

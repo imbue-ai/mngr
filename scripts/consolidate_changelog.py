@@ -15,6 +15,7 @@ Exits with code 0 and no changes if there are no changelog entries to consolidat
 
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -145,6 +146,15 @@ def _insert_section_into_changelog(changelog_path: Path, new_block: str) -> None
     changelog_path.write_text(result)
 
 
+def _format_section_line(project: str, dates_added: Sequence[str]) -> str:
+    """Format the per-project stdout signal the consolidation prompt parses.
+
+    One line per project -- ``SECTION <project> <date> [<date> ...]`` -- with
+    the inserted dates (newest first) space-separated.
+    """
+    return f"SECTION {project} {' '.join(dates_added)}"
+
+
 def _consolidate_project(project: str, repo_root: Path) -> tuple[list[str], list[str]]:
     """Consolidate one project's pending entries into its UNABRIDGED_CHANGELOG.md.
 
@@ -185,10 +195,12 @@ def main() -> None:
     total_entries = 0
     consolidated_any = False
     projects_with_entries = 0
-    # Emit one "SECTION <project> <date>" line per (project, date) the
-    # consolidator just inserted. The consolidation prompt parses these to
-    # know which CHANGELOG.md [Unreleased] sections to summarize and
-    # populate.
+    # Emit one "SECTION <project> <date> [<date> ...]" line per project the
+    # consolidator just touched, listing (newest first) the dates whose
+    # "## YYYY-MM-DD" sections were inserted into that project's
+    # UNABRIDGED_CHANGELOG.md. The consolidation prompt parses these to know
+    # which projects to summarize and which dated sections to read; one line
+    # per project matches how it summarizes (per project, pooling all dates).
     for project in all_known_projects(_REPO_ROOT):
         dates_added, entry_names = _consolidate_project(project, _REPO_ROOT)
         if not dates_added:
@@ -199,8 +211,7 @@ def main() -> None:
         target = project_dir(project, _REPO_ROOT).relative_to(_REPO_ROOT)
         print(f"Consolidated {len(entry_names)} entries for {project!r} into {target}/UNABRIDGED_CHANGELOG.md.")
         print(f"  Deleted: {', '.join(entry_names)}")
-        for date in dates_added:
-            print(f"SECTION {project} {date}")
+        print(_format_section_line(project, dates_added))
 
     if not consolidated_any:
         print("No changelog entries found. Nothing to consolidate.")

@@ -42,7 +42,7 @@ def _make_client(
     snapshots: FakeSnapshotsClient | None = None,
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
-    auto_shutdown_minutes: int | None = None,
+    auto_shutdown_seconds: int | None = None,
 ) -> GcpVpsClient:
     # Default to a prepared (existing) firewall so create-path tests don't each
     # have to wire one up; firewall-specific tests pass their own.
@@ -53,7 +53,7 @@ def _make_client(
         image="projects/debian-cloud/global/images/family/debian-12",
         machine_type="e2-small",
         allowed_ssh_cidrs=allowed_ssh_cidrs,
-        auto_shutdown_minutes=auto_shutdown_minutes,
+        auto_shutdown_seconds=auto_shutdown_seconds,
         stubbed_instances_client=instances or FakeInstancesClient(),
         stubbed_firewalls_client=firewalls if firewalls is not None else _present_firewalls(),
         stubbed_snapshots_client=snapshots or FakeSnapshotsClient(),
@@ -158,7 +158,7 @@ def test_create_instance_raises_when_firewall_missing() -> None:
 
 def test_create_instance_sets_auto_delete_scheduling() -> None:
     instances = FakeInstancesClient()
-    client = _make_client(instances, auto_shutdown_minutes=60)
+    client = _make_client(instances, auto_shutdown_seconds=3600)
     client.upload_ssh_key("key-1", "pub")
     client.create_instance(
         label="mngr-host",
@@ -198,7 +198,7 @@ def test_create_instance_spot_sets_provisioning_model() -> None:
 def test_create_instance_spot_composes_with_auto_shutdown() -> None:
     """spot + auto_shutdown both land on one Scheduling: SPOT model and the max-run-duration deadline."""
     instances = FakeInstancesClient()
-    client = _make_client(instances, auto_shutdown_minutes=60)
+    client = _make_client(instances, auto_shutdown_seconds=3600)
     client.upload_ssh_key("key-1", "pub")
     client.create_instance(
         label="mngr-host",

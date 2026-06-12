@@ -418,7 +418,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Default no-op. Subclasses override to enforce provider-specific
         pre-create invariants (e.g. GCP's firewall-rule existence, AWS's
-        pytest-only "must have auto_shutdown_minutes set" guard). It runs before
+        pytest-only "must have auto_shutdown_seconds set" guard). It runs before
         any provider API write -- in particular before the SSH key upload and
         instance creation -- so a failed precondition surfaces cleanly with no
         leaked resources and no cleanup path. Keep these checks cheap (local
@@ -904,7 +904,7 @@ class VpsDockerProvider(BaseProviderInstance):
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
             install_gvisor_runtime=self.config.install_gvisor_runtime,
-            auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
             authorized_user_public_key=vps_public_key,
         )
 
@@ -1551,14 +1551,14 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
-    def _get_effective_auto_shutdown_minutes(self) -> int | None:
-        """Return the auto-shutdown TTL (in minutes) to inject into cloud-init.
+    def _get_effective_auto_shutdown_seconds(self) -> int | None:
+        """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
 
         Subclasses can override this to add provider-specific escape hatches
         (e.g., a test-only env-var that forces a TTL regardless of project
         config). The base implementation simply returns the configured value.
         """
-        return self.config.auto_shutdown_minutes
+        return self.config.auto_shutdown_seconds
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH-reachable hostnames for VPSes owned by this provider instance.

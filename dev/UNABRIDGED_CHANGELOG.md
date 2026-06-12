@@ -4,6 +4,65 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Ignore local scratch shell scripts: added a general `**/*.local.sh` rule to `.gitignore` (mirroring the existing `**/*.local.md`), so any `*.local.sh` helper script stays untracked. This subsumes the previous single-file `**/scripts/notify_user.local.sh` entry, which was removed.
+
+Also broadened the identify-* `_tasks/` ignore rule from `*/*/_tasks/` to `**/_tasks/`, so the `dev` project's root-level `dev/_tasks/` output folder is ignored consistently with the `libs/<name>/_tasks/` and `apps/<name>/_tasks/` ones (the old two-level glob missed it).
+
+Hardened edge-case handling across `scripts/` per a suspicious-edge-case review:
+
+- `release.py`: `_get_pypi_version` and `_is_published_on_pypi` no longer swallow failures -- any network/HTTP/payload error now propagates (release.py needs PyPI access anyway, and "assume published" on error silently skipped a new package's first-publication safeguard). `_get_pypi_version` returns a plain `str` now, so its caller drops the `(could not check)` / `is not None` handling. `_detect_changed_packages` now treats only `git diff --quiet` exit code 1 as "changed" and fails loudly on a real git error (exit > 1), instead of misreading a git failure as "every package changed".
+- `modal_nuke.py`: replaced the `.get(..., "unknown")` fallback chains feeding `modal app stop`/`modal volume delete` with direct reads of the keys Modal's `--json` output actually emits (`"App ID"`, `"Name"`), raising a clear `ModalSchemaError` naming the unexpected schema if a key is missing, so the destructive path never runs against a placeholder identifier.
+- `make_cli_docs.py`: dropped a dead `option.type is not None` guard, removed a redundant `hasattr(command, "commands")` guard, and made an unresolved See-Also reference raise (caught by `--check`) instead of emitting a broken markdown link.
+- `sync_common_ratchets.py`: a check function in the source-of-truth file with no `# --- section ---` header now raises instead of silently syncing a bogus `# --- Unknown ---` section monorepo-wide.
+- Added focused tests for `modal_nuke` and `make_cli_docs`; added clarifying comments to `junit_test_summary.py`, `warm_cli_example.py`, and the doc-inference heuristics. `warm_cli_example.py` now warns to stderr instead of silently swallowing a failed `os.chdir`.
+- `make_cli_docs_test.py`: importing `make_cli_docs` sets `MNGR_LOAD_ALL_PLUGINS=1` process-wide (it must, to load all providers for doc generation); the test now pops that env var after import so the side effect cannot leak into other tests in the same xdist worker (it was breaking `libs/mngr`'s `create_plugin_manager` blocking test).
+
+Added the `identify-bad-tests` Claude skill. It scans a target path -- either a whole library or any
+subdirectory within one -- for low-quality, fragile, or misleading tests and reports candidates ranked
+by importance into the containing library's `_tasks/bad-tests/<date>.md`, in the same format as the
+other `identify-*` skills (so findings feed into `create-fixmes`). The skill grounds its checks in the
+"# Testing" section of the style guide: tautological/unfalsifiable assertions, "no exception raised"
+checks, tests coupled to implementation details, error tests that don't pin the error type/message,
+weak coverage-chasing assertions, missing edge/branch cases, mock and fake misuse, flakiness and
+isolation hazards, wrong test type/location/marking, test-grouping classes and poor naming, and
+snapshot misuse. The central evaluation question is whether a test would actually fail if the code
+under test had a real bug. Unlike the other skills it deliberately reads the `_test.py` / `test_*.py`
+files (which the repo conventions normally skip), and it defers raw pattern occurrences already
+counted by `test_ratchets.py` to those ratchets, reporting only the semantic test-quality problem.
+
+Also fixed a contradictory instruction shared by the existing `identify-*` skills
+(`identify-style-issues`, `identify-doc-code-disagreements`, `identify-outdated-docstrings`,
+`identify-inconsistencies`, `identify-suspicious-edge-cases`): their intro said to commit when
+finished, but their output files are gitignored and the closing line says no commit is needed.
+Removed the contradictory parenthetical from each.
+
+No runtime or tooling change.
+
+- Add a daily `schedule:` trigger to the `minds launch-to-first-message`
+  workflow. At 14:00 UTC (07:00 PDT / 06:00 PST) it builds + verifies the
+  current mngr `main` HEAD against FCT `main`, with the full slack flow
+  (latchkey + mocked slack server). Surfaces drift between the two repos
+  the morning it happens instead of waiting for the next manual dispatch.
+- `commit_sha` and `template_ref` inputs are now optional. Empty
+  `commit_sha` -> `github.sha` (mngr main HEAD when triggered by schedule;
+  caller's branch HEAD when dispatched without a value). Empty
+  `template_ref` -> `main`. Existing dispatches that pass both inputs
+  behave identically.
+- The cron only fires once this workflow file lands on the default branch
+  (`main`); GitHub Actions ignores schedule triggers defined only on
+  feature branches.
+
+- minds-launch-to-msg.yml: build job moves from `ubuntu-latest` to the self-hosted `minds-runner` Mac. Required to bundle Mac-native uv/git/lima into the resulting .app (the Linux runner shipped ELF binaries that crashed the desktop client at `uv` exec). Build and verify now serialize on the same runner.
+- repo: `.gitignore` now also ignores `**/scripts/*.local.sh` (one-off local test harnesses), `apps/minds_workspace_server/package-lock.json`, and `**/.DS_Store`.
+- specs: update `specs/electron-desktop-app/` (spec + concise) to reflect the shipped minds desktop-app architecture.
+- minds-launch-to-msg.yml: swap headline screenshot source -- per-window Playwright `.win.png` captures are now embedded in the GitHub step summary, with full-desktop `screencapture -x` shots demoted to `.desktop.png` forensic dupes in the artifact. CDP page activation does not move macOS WindowServer z-order, so the full-desktop captures routinely showed the unauthenticated /welcome BrowserWindow instead of the actual chat / projects / approval pages the e2e script was driving. The per-page captures bypass WindowServer (DOM-to-raster via CDP) and consistently show the correct content.
+- minds-launch-to-msg.yml: stop publishing screenshots to the `ci-screenshots` orphan git branch -- that branch grew to ~1.2GB of PNGs and was downloaded by every clone of the repo. Screenshots now ride only in the per-run `launch-to-first-message-<run_id>` GitHub Actions artifact (auto-expires per `retention-days`). The job summary now lists a manifest of milestone -> filename instead of inline images; viewers download the artifact zip to inspect. The orphan branch is being deleted from origin in the same change.
+- minds-launch-to-msg.yml: tee the launch-to-msg + slack flow Python script's stdout+stderr to `/tmp/launch-to-msg-logs/e2e-stdout.log` and bundle that directory into the diagnostics artifact. The e2e script's structured loguru output (phase progressions, kick attempts, navigation events) was previously only visible in GHA's console log (expires); the artifact zip is the durable post-mortem surface.
+- launch_to_msg_e2e.py: skip the periodic kick when no chat window is currently visible (replaces `find_chat_window(ctx) or win` with a `find_chat_window` check + early-skip). During the latchkey approval flow `win` is often the `/requests/<id>` page, which has no textarea; the previous behavior logged a spurious warning every KICK_INTERVAL.
+- Pre-merge cleanup of CI workflow hygiene: `minds-playwright-vanilla.yml` renamed to `minds-macos-launch.yml` (display name + job name aligned); added html reporter + always-upload + `run_attempt`-suffixed artifact so passing reruns no longer erase failing-attempt screenshots; trigger changed from `branches: [wz/minds_onboard]` to `[main]` + open `pull_request` so the workflow keeps running post-merge.
+
 ## 2026-06-09
 
 Added the titlebar-workspace-accent blueprint under ``blueprint/`` describing

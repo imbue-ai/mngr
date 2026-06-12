@@ -6,8 +6,21 @@ import boto3
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.data_types import ScalarStrTuple
+from imbue.mngr.config.data_types import ScalarTuple
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+
+
+class AwsConfigError(MngrError, ValueError):
+    """An AWS provider configuration is missing or unresolvable.
+
+    Inherits from ``ValueError`` (so existing ``except ValueError`` call sites --
+    e.g. ``AwsProvider.build_provider_instance`` wrapping ``get_session()`` into
+    ``ProviderUnavailableError`` -- keep working) and from ``MngrError`` (so it
+    renders as a clean CLI error and satisfies the no-bare-builtins ratchet).
+    """
 
 
 class ExistingSecurityGroup(FrozenModel):
@@ -111,17 +124,13 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
+    allowed_ssh_cidrs: ScalarStrTuple = Field(
+        default=ScalarTuple(("0.0.0.0/0",)),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the "
-            "auto-created security group. Default ['0.0.0.0/0'] matches the de-facto "
-            "Vultr / OVH norm in this monorepo (those providers ship instances with no "
-            "managed firewall, leaving SSH wide open at the network layer; key-only auth "
-            "is what actually protects the host). Tighten to e.g. ['203.0.113.4/32'] to "
-            "restrict to a known IP for production. Empty tuple means 'add no ingress "
-            "rules' -- the auto-created SG ends up unreachable from outside its VPC, "
-            "which is logged as a warning at provision time."
+            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
+            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
+            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(
@@ -148,15 +157,15 @@ class AwsProviderConfig(VpsDockerProviderConfig):
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.
 
-        Raises ``ValueError`` when no credentials are resolvable from any source
-        (``AWS_*`` env vars, ``~/.aws/credentials``, ``~/.aws/config``, EC2
-        IMDS). Lets ``botocore.exceptions.BotoCoreError`` subclasses (e.g.,
-        ``ProfileNotFound``) propagate when boto3 itself rejects the
-        environment.
+        Raises ``AwsConfigError`` (a ``ValueError``) when no credentials are
+        resolvable from any source (``AWS_*`` env vars, ``~/.aws/credentials``,
+        ``~/.aws/config``, EC2 IMDS). Lets ``botocore.exceptions.BotoCoreError``
+        subclasses (e.g., ``ProfileNotFound``) propagate when boto3 itself
+        rejects the environment.
         """
         session = boto3.Session(region_name=self.default_region)
         if session.get_credentials() is None:
-            raise ValueError(
+            raise AwsConfigError(
                 "AWS credentials not configured. Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
                 "configure ~/.aws/credentials, set AWS_PROFILE, or attach an EC2 instance role."
             )
@@ -166,14 +175,14 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         """Return the AMI ID to use for the given region.
 
         Priority: ``default_ami_id`` (explicit override) > per-region map. Raises
-        ``ValueError`` when neither is set.
+        ``AwsConfigError`` (a ``ValueError``) when neither is set.
         """
         if self.default_ami_id:
             return self.default_ami_id
         ami = self.default_ami_by_region.get(region)
         if ami:
             return ami
-        raise ValueError(
+        raise AwsConfigError(
             f"No AMI configured for region {region!r}. Set default_ami_id or add an entry to "
             "default_ami_by_region (Debian 12 amd64 AMIs are typically what you want; see the "
             "Debian AMI finder at https://wiki.debian.org/Cloud/AmazonEC2Image)."

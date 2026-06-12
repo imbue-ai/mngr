@@ -65,11 +65,24 @@ def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsPr
     pointed ``[providers.aws]`` at a non-AWS backend), fall back to class
     defaults rather than erroring -- the operator command's CLI options
     (``--region`` / ``--vpc-id`` / ``--sg-name``) can still drive an
-    AWS-targeted run.
+    AWS-targeted run. A warning is emitted in this case so the user notices
+    their ``--provider`` selection did not have the intended effect (a silent
+    fallback to class defaults would otherwise land the SG in
+    ``default_region`` / no VPC with no visible signal). The missing-block
+    case is silent because that is the expected first-run shape.
     """
     config = mngr_ctx.config.providers.get(ProviderInstanceName(provider_name))
     if isinstance(config, AwsProviderConfig):
         return config
+    if config is not None:
+        logger.warning(
+            "Provider {!r} is configured but is not an AWS backend (got {}); "
+            "falling back to AwsProviderConfig class defaults. Pass "
+            "--region / --vpc-id / --sg-name to override, or point --provider "
+            "at an AWS-backed block.",
+            provider_name,
+            type(config).__name__,
+        )
     return AwsProviderConfig()
 
 
@@ -260,10 +273,13 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
     with `mngr destroy <agent>` so a running agent is never stranded. With no
-    instances present, deletes the auto-created security group (name taken from
-    the resolved `[providers.<--provider>]` block, or overridden by `--sg-name`;
-    default `mngr-aws`). Idempotent: a no-op (exit 0) when the security group
-    is already gone.
+    instances present, deletes the auto-created security group. The name comes
+    from `--sg-name` if supplied; otherwise from the resolved
+    `[providers.<--provider>]` block's `security_group.name` when that block
+    configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
+    or configured with an `ExistingSecurityGroup` -- which carries an `id`
+    rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
+    (exit 0) when the security group is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
     ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are

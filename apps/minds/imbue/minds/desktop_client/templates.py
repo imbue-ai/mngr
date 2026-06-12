@@ -12,7 +12,6 @@ so neither callers nor tests have to know the templates moved from raw
 Jinja2 macros + ``{% extends %}`` to JinjaX components.
 """
 
-import hashlib
 import html
 import os
 from collections.abc import Mapping
@@ -27,6 +26,8 @@ from jinjax import Catalog
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.agent_creator import AgentCreationInfo
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupEncryptionMethod
 from imbue.minds.primitives import BackupProvider
@@ -85,7 +86,13 @@ _INPUT_BASE: Final[str] = (
 # stroke-linejoin=round). The dict is the single source of truth -- to
 # add or swap an icon, edit one entry here.
 _ICONS_24: Final[Mapping[str, str]] = {
-    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    # lucide ``menu`` (Figma node 559-5101): three horizontal lines, used by
+    # the titlebar button that opens the floating workspace menu.
+    "menu": (
+        '<line x1="4" y1="6" x2="20" y2="6"/>'
+        '<line x1="4" y1="12" x2="20" y2="12"/>'
+        '<line x1="4" y1="18" x2="20" y2="18"/>'
+    ),
     "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
     "back": '<polyline points="15 18 9 12 15 6"/>',
     "forward": '<polyline points="9 6 15 12 9 18"/>',
@@ -109,6 +116,12 @@ _ICONS_24: Final[Mapping[str, str]] = {
         '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
         '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
     ),
+    # Figma "Space switcher menu" open-in-new arrow (node 560-5109): a bare
+    # diagonal arrow-up-right for the "open in new window" affordance on
+    # workspace rows. Mirrors the sidebar's open-in-new glyph (8x8 in a 16px
+    # frame) scaled to this 24px viewBox (span 6-18); the shaft runs
+    # corner-to-corner while the arrowhead legs stop short (7/8 of the span).
+    "arrow-up-right": '<path d="M18 16.5V6H7.5"/><path d="M18 6L6 18"/>',
 }
 
 # 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
@@ -154,36 +167,6 @@ def _build_catalog() -> Catalog:
 CATALOG: Final[Catalog] = _build_catalog()
 
 
-# -- Per-workspace identity color --
-# See docs on workspace_accent() for why OKLCH + fixed L/C + SHA-256-derived
-# hue. Mirrored on the JS side in static/workspace_accent.js (the shared
-# window.mindsAccent helper consumed by chrome.js and sidebar.js).
-
-# Lightness percent and chroma for the OKLCH workspace accent. Fixed across
-# all workspaces so the only axis of variation is the hue. The accent fills
-# the full-width titlebar (not just a small swatch), so a light /
-# low-saturation tone is needed to read as chrome rather than a saturated
-# highlight.
-_WORKSPACE_L: Final[int] = 85
-_WORKSPACE_C: Final[float] = 0.08
-
-
-@pure
-def workspace_accent(agent_id: str) -> str:
-    """Deterministically map an agent id to a CSS OKLCH color.
-
-    Uses a fixed lightness and chroma (a light, low-saturation tone that
-    reads as a chrome surface across the full-width titlebar) so every
-    workspace accent sits at the same readable level, and only the hue
-    varies. Full 360 degree hue range means collisions are effectively
-    impossible, and OKLCH's perceptual uniformity means close hashes
-    still read as visibly different colors.
-    """
-    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()
-    hue = int.from_bytes(digest[:4], "big") % 360
-    return f"oklch({_WORKSPACE_L}% {_WORKSPACE_C} {hue})"
-
-
 # -- Page renderers --
 
 
@@ -195,6 +178,7 @@ def render_landing_page(
     is_discovering: bool = False,
     agent_names: dict[str, str] | None = None,
     destroying_status_by_agent_id: dict[str, str] | None = None,
+    agent_accents: dict[str, str] | None = None,
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
 ) -> str:
@@ -210,6 +194,11 @@ def render_landing_page(
 
     agent_names maps agent ID strings to human-readable workspace names.
 
+    agent_accents maps agent ID strings to ``#rrggbb`` workspace accent
+    hexes (the stored color label, resolved by the caller). Agents without
+    an entry -- including the whole map being None -- render their homepage
+    tile with the default workspace color.
+
     destroying_status_by_agent_id maps agent ID strings to one of
     ``"running"``/``"failed"`` for agents whose detached destroy subprocess
     is currently in flight (running) or exited without removing the agent
@@ -222,12 +211,18 @@ def render_landing_page(
     with auto-refresh instead of the empty state. This is used when the
     envelope-stream consumer hasn't completed initial agent discovery yet.
     """
-    agent_accents = {str(aid): workspace_accent(str(aid)) for aid in accessible_agent_ids}
+    # Workspaces without an entry in agent_accents (caller didn't supply
+    # one, or supplied a partial map) fall back to the default workspace
+    # color so the homepage tile still paints with something readable.
+    effective_accents: dict[str, str] = {}
+    supplied = agent_accents or {}
+    for aid in accessible_agent_ids:
+        effective_accents[str(aid)] = supplied.get(str(aid), DEFAULT_WORKSPACE_COLOR)
     shutdown_capable_agent_id_strings = [str(aid) for aid in (shutdown_capable_agent_ids or ())]
     return CATALOG.render(
         "pages.Landing",
         agent_ids=accessible_agent_ids,
-        agent_accents=agent_accents,
+        agent_accents=effective_accents,
         mngr_forward_origin=mngr_forward_origin,
         telegram_enabled=telegram_status_by_agent_id is not None,
         telegram_status_by_agent_id=telegram_status_by_agent_id or {},
@@ -300,6 +295,7 @@ def render_create_form(
     error_message: str = "",
     region_options_by_launch_mode: Mapping[str, Sequence[str]] | None = None,
     region_selected_by_launch_mode: Mapping[str, str] | None = None,
+    color: str = DEFAULT_WORKSPACE_COLOR,
 ) -> str:
     """Render the agent creation form page.
 
@@ -317,6 +313,13 @@ def render_create_form(
     ``host_name`` is the value of the form's "Name" field; it drives the
     host name on the resulting workspace. (The agent itself is always
     named ``system-services``.)
+
+    ``color`` is the ``#rrggbb`` hex preselected in the form's palette
+    picker: the matching swatch renders checked and the hidden ``color``
+    input the form POSTs carries it. Callers pass the
+    suggested-unused-palette pick; it defaults to
+    ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care about color
+    (e.g. some tests) can omit it.
     """
     effective_url = git_url if git_url else _operator_workspace_default("MINDS_WORKSPACE_GIT_URL", _FALLBACK_GIT_URL)
     effective_name = (
@@ -363,6 +366,8 @@ def render_create_form(
             key: list(value) for key, value in (region_options_by_launch_mode or {}).items()
         },
         region_selected_by_launch_mode=dict(region_selected_by_launch_mode or {}),
+        color=color,
+        palette=WORKSPACE_PALETTE,
     )
 
 
@@ -1087,7 +1092,8 @@ def render_chrome_page(
     workspace links that target the plugin's port directly.
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
-    and sidebar are handled by separate WebContentsViews.
+    is handled by a separate WebContentsView, and the sidebar page is loaded into
+    the shared modal WebContentsView when opened.
     """
     return CATALOG.render(
         "pages.Chrome",
@@ -1099,18 +1105,41 @@ def render_chrome_page(
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
-    """Render the standalone sidebar page for the Electron sidebar WebContentsView.
+def render_sidebar_page(
+    mngr_forward_origin: str = "",
+    trigger_x: int = 0,
+    trigger_y: int = 0,
+    trigger_w: int = 0,
+    trigger_h: int = 38,
+    offset_x: int = -2,
+    offset_y: int = 2,
+) -> str:
+    """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
+
+    Position is driven entirely by the caller. The chrome view (which owns the
+    trigger button) passes the button's viewport-relative rect (``trigger_x``,
+    ``trigger_y``, ``trigger_w``, ``trigger_h``) plus a caller-chosen offset
+    (``offset_x``, ``offset_y``). The menu's top-left lands at the trigger's
+    bottom-left + offset. The chrome view and the modal view share window
+    coordinate space, so the rect translates directly. Defaults (no query
+    params) anchor a 38px-tall element at the top-left of the window,
+    nudged 2px left and 2px below it -- right for the titlebar's first button.
     """
     return CATALOG.render(
         "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
+        trigger_x=trigger_x,
+        trigger_y=trigger_y,
+        trigger_w=trigger_w,
+        trigger_h=trigger_h,
+        offset_x=offset_x,
+        offset_y=offset_y,
     )
 
 
@@ -1159,6 +1188,8 @@ def render_workspace_settings(
     servers: Sequence[str],
     telegram_state: str | None = None,
     is_leased_imbue_cloud: bool = False,
+    current_color: str = DEFAULT_WORKSPACE_COLOR,
+    is_stale: bool = False,
 ) -> str:
     """Render the workspace settings page.
 
@@ -1172,6 +1203,15 @@ def render_workspace_settings(
     Imbue Cloud; the account section then shows the bound account with a
     disabled Disassociate control and no association controls.
 
+    ``current_color`` is the workspace's stored color hex (``#rrggbb``),
+    used to pre-select a palette swatch / pre-fill the hex input.
+    Defaults to ``DEFAULT_WORKSPACE_COLOR`` so callers that don't care
+    about color (e.g. some tests) can omit it.
+
+    ``is_stale`` reflects the workspace's provider-health flag from the
+    SSE workspace payload; when True the color picker controls are
+    disabled with a hint that the workspace is currently unreachable.
+
     Interactivity for the setup flow lives in ``static/workspace_settings.js``,
     which reads the agent id from the page's ``data-agent-id`` attribute.
     """
@@ -1184,6 +1224,9 @@ def render_workspace_settings(
         servers=servers,
         telegram_state=telegram_state,
         is_leased_imbue_cloud=is_leased_imbue_cloud,
+        current_color=current_color,
+        is_stale=is_stale,
+        palette=WORKSPACE_PALETTE,
     )
 
 
