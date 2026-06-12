@@ -17,12 +17,41 @@ Task tool invocations are routed through a mngr-managed proxy subagent.
 This lets you `mngr connect` to subagents, observe their progress, and
 the parent still receives a normally-shaped `tool_result`.
 
-## Modes
+## Enabling the plugin (disabled by default)
 
-The plugin has two modes, selected via mngr config:
+Unlike most mngr plugins -- which load unless you explicitly disable them
+-- this plugin is **opt-in: disabled by default**. It does nothing until a
+config layer explicitly turns it on:
 
 ```toml
 [plugins.claude_subagent_proxy]
+enabled = true
+```
+
+This inverted default exists because the plugin is **very experimental and
+breaks a lot of other tooling**: it intercepts Claude Code's built-in
+`Task` tool and reroutes subagent execution, which interferes with stop
+hooks, plan mode, permission round-trips, and other plugins (see the
+warning above and "Deferred / out-of-scope" below). It is too disruptive
+to be on for every Claude agent by default, so it must be turned on
+deliberately.
+
+The opt-in is enforced in mngr core via the `OPT_IN_PLUGINS` set in
+`libs/mngr/imbue/mngr/config/pre_readers.py`: the plugin's name is listed
+there, so `read_disabled_plugins()` reports it as disabled unless a config
+layer sets `enabled = true`. Setting it to `enabled = true` reuses the
+exact same `[plugins.<name>] enabled` key as the normal enable/disable
+mechanism, just with the default flipped; later config layers (project,
+local) can re-disable it the usual way (`enabled = false`).
+
+## Modes
+
+Once enabled, the plugin has two modes, selected via mngr config (both keys
+live under the same table, so set them together):
+
+```toml
+[plugins.claude_subagent_proxy]
+enabled = true   # required: the plugin is disabled by default (see above).
 mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
                  # via a Haiku dispatcher (the original behavior).
 # mode = "DENY"  # alternative: deny Task calls with a short skill-pointer

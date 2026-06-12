@@ -1,4 +1,4 @@
-"""End-to-end tests for the ``permissions`` extension's ``available`` endpoints.
+"""End-to-end tests for the ``permissions`` extension's ``available`` endpoint.
 
 The extension is a Node ESM module that cannot be imported from Python,
 so this follows the same pattern as ``permission_requests_test.py`` and
@@ -6,11 +6,12 @@ so this follows the same pattern as ``permission_requests_test.py`` and
 extension's default export, mount it on an HTTP server, and hit it with
 ``urllib``.
 
-These tests focus on ``GET /permissions/available`` and ``GET
-/permissions/available/<service_name>``, asserting that the catalog they
-serve (backed by the bundled ``services.json``) carries detent's
-per-schema descriptions -- the scope-level ``description`` and each
-permission's ``{name, description}`` -- end to end.
+These tests focus on ``GET /permissions/available/<service_name>``
+(the per-service catalog endpoint -- the bare collection endpoint is not
+served), asserting that the catalog it serves (backed by the bundled
+``services.json``) carries detent's per-schema descriptions -- the
+scope-level ``description`` and each permission's ``{name, description}``
+-- end to end.
 
 Tests skip cleanly when Node is unavailable, mirroring the sibling
 extension test modules.
@@ -174,31 +175,8 @@ def _assert_entry_well_formed(entry: object) -> None:
         assert isinstance(permission_dict.get("description", ""), str)
 
 
-def test_available_collection_exposes_descriptions(node_extension: str) -> None:
-    """``GET /permissions/available`` returns scope and per-permission descriptions."""
-    status, payload = _get_json(f"{node_extension}/permissions/available")
-
-    assert status == 200
-    catalog = _as_dict(payload)
-    assert len(catalog) > 0
-    for entries in catalog.values():
-        entry_list = _as_list(entries)
-        assert len(entry_list) > 0
-        for entry in entry_list:
-            _assert_entry_well_formed(entry)
-
-    # Pin a concrete service so the test fails loudly if descriptions ever
-    # stop flowing through: Slack's scope and its read-all permission both
-    # carry a non-empty summary.
-    slack_entry = _as_dict(_as_list(catalog["slack"])[0])
-    _as_nonempty_str(slack_entry["description"])
-    slack_permissions = [_as_dict(p) for p in _as_list(slack_entry["permissions"])]
-    slack_read_all = next(p for p in slack_permissions if p["name"] == "slack-read-all")
-    _as_nonempty_str(slack_read_all["description"])
-
-
 def test_available_for_service_exposes_descriptions(node_extension: str) -> None:
-    """``GET /permissions/available/<service>`` returns the same description-bearing entries."""
+    """``GET /permissions/available/<service>`` returns description-bearing entries."""
     status, payload = _get_json(f"{node_extension}/permissions/available/slack")
 
     assert status == 200
@@ -206,7 +184,15 @@ def test_available_for_service_exposes_descriptions(node_extension: str) -> None
     assert len(entries) > 0
     for entry in entries:
         _assert_entry_well_formed(entry)
-    _as_nonempty_str(_as_dict(entries[0])["description"])
+
+    # Pin Slack concretely so the test fails loudly if descriptions ever
+    # stop flowing through: its scope and its read-all permission both
+    # carry a non-empty summary.
+    slack_entry = _as_dict(entries[0])
+    _as_nonempty_str(slack_entry["description"])
+    slack_permissions = [_as_dict(p) for p in _as_list(slack_entry["permissions"])]
+    slack_read_all = next(p for p in slack_permissions if p["name"] == "slack-read-all")
+    _as_nonempty_str(slack_read_all["description"])
 
 
 def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
