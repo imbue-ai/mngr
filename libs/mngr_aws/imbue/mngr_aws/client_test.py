@@ -7,6 +7,7 @@ requests and canned responses.
 """
 
 from collections.abc import Iterator
+from typing import Any
 
 import boto3
 import pytest
@@ -85,6 +86,33 @@ def auto_sg_client() -> Iterator[tuple[AwsVpsClient, Stubber]]:
         yield client, stubber
     finally:
         stubber.deactivate()
+
+
+def _make_stubbed_client(**client_kwargs: Any) -> tuple[AwsVpsClient, Stubber]:
+    """Build a ``_StubbedAwsVpsClient`` + (inactive) ``Stubber``, overriding client kwargs.
+
+    Shared spine for the ``create_instance`` variants that need a non-default
+    client field (``terminate_on_shutdown`` / ``iam_instance_profile``). Unlike
+    the ``stubbed_client`` fixture it does not activate the stubber: the caller
+    queues its ``run_instances`` stub and activates so the per-test
+    ``expected_params`` stay explicit.
+    """
+    session = boto3.Session(
+        aws_access_key_id="AKIATEST",
+        aws_secret_access_key="secret",
+        region_name="us-east-1",
+    )
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-test12345",
+        security_group=ExistingSecurityGroup(id="sg-test"),
+        stubbed_ec2_client=ec2,
+        **client_kwargs,
+    )
+    return client, stubber
 
 
 # =============================================================================
@@ -258,21 +286,7 @@ def test_create_instance_no_spot_omits_instance_market_options(
 
 def test_create_instance_terminate_on_shutdown_sets_terminate_behavior() -> None:
     """terminate_on_shutdown=True flips InstanceInitiatedShutdownBehavior to 'terminate'."""
-    session = boto3.Session(
-        aws_access_key_id="AKIATEST",
-        aws_secret_access_key="secret",
-        region_name="us-east-1",
-    )
-    ec2 = session.client("ec2", region_name="us-east-1")
-    stubber = Stubber(ec2)
-    client = _StubbedAwsVpsClient(
-        session=session,
-        region="us-east-1",
-        ami_id="ami-test12345",
-        security_group=ExistingSecurityGroup(id="sg-test"),
-        terminate_on_shutdown=True,
-        stubbed_ec2_client=ec2,
-    )
+    client, stubber = _make_stubbed_client(terminate_on_shutdown=True)
     stubber.add_response(
         "run_instances",
         {"Instances": [{"InstanceId": "i-ephemeral"}]},
@@ -305,21 +319,7 @@ def test_create_instance_terminate_on_shutdown_sets_terminate_behavior() -> None
 
 def test_create_instance_attaches_explicit_iam_instance_profile() -> None:
     """An explicit iam_instance_profile is attached as IamInstanceProfile={"Name": ...}."""
-    session = boto3.Session(
-        aws_access_key_id="AKIATEST",
-        aws_secret_access_key="secret",
-        region_name="us-east-1",
-    )
-    ec2 = session.client("ec2", region_name="us-east-1")
-    stubber = Stubber(ec2)
-    client = _StubbedAwsVpsClient(
-        session=session,
-        region="us-east-1",
-        ami_id="ami-test12345",
-        security_group=ExistingSecurityGroup(id="sg-test"),
-        iam_instance_profile="custom-profile",
-        stubbed_ec2_client=ec2,
-    )
+    client, stubber = _make_stubbed_client(iam_instance_profile="custom-profile")
     stubber.add_response(
         "run_instances",
         {"Instances": [{"InstanceId": "i-profile"}]},
