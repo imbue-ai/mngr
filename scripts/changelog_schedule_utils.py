@@ -1,20 +1,22 @@
 """Shared identifiers + plugin-disable args for the changelog-consolidation schedule.
 
-``changelog_deploy.sh`` (which deploys the trigger) and
-``scripts/release.py`` (which prints an on-demand invocation when the
-pre-release gate fires) need to agree on three things: the
-``--disable-plugin <name>`` list passed to ``mngr schedule …`` calls,
-the schedule's deployed provider, and the trigger / namespace
+Three consumers need to agree on how to address this schedule:
+``changelog_deploy.sh`` (which deploys it), the ``changelog-trigger``
+justfile recipe (which runs it on demand), and ``scripts/release.py``
+(whose pre-release gate names it when blocking). They must share the
+same ``--disable-plugin <name>`` list passed to ``mngr schedule …``
+calls, the schedule's deployed provider, and the trigger / namespace
 identifiers. This module is the source of truth.
 
 Python callers (``release.py``) import the constants and helpers
-directly. The shell script reads them through this module's CLI:
+directly. The shell consumers (the deploy script and the justfile
+recipe) read them through this module's CLI:
 ``--print-disable-plugin-args`` for the disable list and
 ``--print-provider`` for the provider. ``TRIGGER_NAME`` and
-``MNGR_ROOT_NAME`` are still duplicated as bash literals in
-``changelog_deploy.sh`` because that script needs them before any
-``uv run python`` invocation; those two literals must be kept in sync
-with the constants here by hand.
+``MNGR_ROOT_NAME`` are still duplicated as bash literals in those two
+shell consumers because they need the values before any ``uv run
+python`` invocation; those literals must be kept in sync with the
+constants here by hand.
 """
 
 import argparse

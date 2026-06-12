@@ -31,9 +31,9 @@ set -euo pipefail
 #                        or "full" to run the agent once during deploy.
 #
 # The provider is read from the shared `PROVIDER` constant in
-# scripts/changelog_consolidation_trigger.py so release.py's printed
-# on-demand command targets the same deployment. To change providers,
-# edit that constant and re-run this script.
+# scripts/changelog_schedule_utils.py so the `changelog-trigger` justfile
+# recipe's on-demand command targets the same deployment. To change
+# providers, edit that constant and re-run this script.
 #
 # To trigger a fire on demand and read its JSON outcome (status, with pr_url on
 # success or notes on failure):
@@ -50,7 +50,7 @@ TRIGGER_NAME="changelog-consolidation"
 # Pacific regardless of where this deploy script runs).
 SCHEDULE="0 0 * * *"
 TIMEZONE="America/Los_Angeles"
-PROVIDER=$(uv run python "${REPO_ROOT}/scripts/changelog_consolidation_trigger.py" --print-provider)
+PROVIDER=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
 # Use an isolated mngr config namespace so we don't load the repo's
@@ -73,9 +73,9 @@ done
 export IS_SANDBOX=1
 
 # Compute --disable-plugin args via the shared helper so the deploy and
-# the on-demand trigger (scripts/release.py) stay in sync about which
-# plugins must be disabled around `mngr schedule` invocations.
-DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/changelog_consolidation_trigger.py" --print-disable-plugin-args)
+# the on-demand trigger (the `changelog-trigger` justfile recipe) stay in
+# sync about which plugins must be disabled around `mngr schedule` invocations.
+DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-disable-plugin-args)
 
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.

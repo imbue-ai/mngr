@@ -36,18 +36,14 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Final
-from typing import TextIO
 
 import httpx
 import semver
 import tomlkit
 from changelog_consolidate import pending_changelog_entries
-from changelog_consolidation_trigger import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
-from changelog_consolidation_trigger import PROVIDER as CHANGELOG_PROVIDER
-from changelog_consolidation_trigger import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
-from changelog_consolidation_trigger import disable_plugin_args as changelog_disable_plugin_args
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
+from changelog_schedule_utils import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
 from tomlkit.items import Array
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
@@ -609,40 +605,6 @@ def _pluralize_entry(count: int) -> str:
     return "entry" if count == 1 else "entries"
 
 
-def _print_on_demand_consolidation_command(file: TextIO) -> None:
-    """Print the one-liner that triggers an on-demand consolidation run.
-
-    Equivalent to the example invocation in ``changelog_deploy.sh``'s
-    header so the user can copy-paste it directly. Uses the shared
-    constants and helper so the disable-plugin list stays in sync with
-    the deploy script. The deploy script's header inlines that list as
-    ``$DISABLE_PLUGIN_ARGS``; this helper expands it onto its own line
-    because the resolved value is long.
-
-    The provider is the shared ``CHANGELOG_PROVIDER`` constant, so the
-    printed command targets the same provider the schedule was deployed
-    against; changing providers requires editing the constant and
-    redeploying the schedule together.
-
-    ``file`` is the stream to write to (forwarded to ``print``). The
-    caller in the gate's error path passes ``sys.stderr`` so the
-    on-demand command lands on the same stream as the surrounding error
-    message.
-    """
-    disable_args = " ".join(changelog_disable_plugin_args())
-    print(f"  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME={CHANGELOG_MNGR_ROOT_NAME} \\", file=file)
-    # Only emit a continuation + third line when there are disable-plugin
-    # args to print. Otherwise the command would end with a trailing
-    # backslash followed by a whitespace-only line, which makes the
-    # copy-paste form malformed (the empty line terminates the
-    # continuation and the leading spaces become a stray empty command).
-    if disable_args:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER} \\", file=file)
-        print(f"    {disable_args}", file=file)
-    else:
-        print(f"    uv run mngr schedule run {CHANGELOG_TRIGGER_NAME} --provider {CHANGELOG_PROVIDER}", file=file)
-
-
 def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -> bool:
     """Block a release until pending changelog entries are consolidated.
 
@@ -655,8 +617,8 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
 
     Returns ``True`` if the release may proceed (no pending entries, or
     ``dry_run`` is set), ``False`` if the caller must abort. After
-    consolidating (waiting for the nightly cron or running the on-demand
-    one-liner this prints), the user re-runs ``release.py``.
+    consolidating (waiting for the nightly cron or running ``just
+    changelog-trigger`` on demand), the user re-runs ``release.py``.
 
     ``dry_run`` swaps the error for a warning so ``release.py --dry-run``
     can still preview what would be released.
@@ -693,7 +655,7 @@ def _gate_release_on_pending_changelog_entries(repo_root: Path, dry_run: bool) -
     print("trigger it on demand instead (opens a PR you can merge before re-running", file=sys.stderr)
     print("this script), run:", file=sys.stderr)
     print(file=sys.stderr)
-    _print_on_demand_consolidation_command(file=sys.stderr)
+    print("  just changelog-trigger", file=sys.stderr)
     print(file=sys.stderr)
     return False
 

@@ -826,6 +826,13 @@ list-pool-hosts:
 destroy-pool-host pool_host_id *extra_args:
     uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
 
+# Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
+# --minor mngr`, or `just release --watch`. See scripts/release.py's header for
+# the full interface.
+# Selectively bump and publish changed packages to PyPI.
+release *args:
+    uv run scripts/release.py {{args}}
+
 # Requires GH_TOKEN and ANTHROPIC_API_KEY in the environment; set
 # CHANGELOG_VERIFY=quick|full to run the agent once during deploy. Idempotent:
 # removes any existing schedule before recreating, so this is also how you
@@ -834,3 +841,20 @@ destroy-pool-host pool_host_id *extra_args:
 # (Re)deploy the nightly changelog-consolidation schedule from current source.
 changelog-deploy:
     bash scripts/changelog_deploy.sh
+
+# Opens a PR (which you can merge before re-running a blocked release) by
+# running the same agent the schedule runs nightly. Reads the provider +
+# plugin-disable args from scripts/changelog_schedule_utils.py; the trigger
+# name and mngr namespace are kept in sync with that module by hand, as in
+# changelog_deploy.sh.
+# Trigger an on-demand changelog-consolidation run to consolidate pending entries.
+changelog-trigger:
+    #!/bin/bash
+    set -ueo pipefail
+    # Isolated mngr config namespace (mirrors changelog_deploy.sh) so we don't
+    # load the repo's .mngr/settings.toml, whose plugins won't import here.
+    export MNGR_ROOT_NAME="mngr-changelog-schedule"
+    unset MNGR_HOST_DIR MNGR_PREFIX
+    provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
+    disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
+    uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args

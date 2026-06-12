@@ -2,11 +2,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.changelog_consolidation_trigger import PROVIDER
-from scripts.changelog_consolidation_trigger import _ENABLED_PLUGINS
-from scripts.changelog_consolidation_trigger import disable_plugin_args
+from scripts.changelog_schedule_utils import PROVIDER
+from scripts.changelog_schedule_utils import _ENABLED_PLUGINS
+from scripts.changelog_schedule_utils import disable_plugin_args
 
-_SCRIPT_PATH = Path(__file__).resolve().parent / "changelog_consolidation_trigger.py"
+_SCRIPT_PATH = Path(__file__).resolve().parent / "changelog_schedule_utils.py"
 
 
 def test_disable_plugin_args_returns_paired_flags() -> None:
