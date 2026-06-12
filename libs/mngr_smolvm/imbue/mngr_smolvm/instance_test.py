@@ -153,6 +153,11 @@ def test_parse_build_args_rejects_missing_value() -> None:
         _parse_build_args(("--image-archive",))
 
 
+def test_parse_build_args_rejects_empty_inline_value() -> None:
+    with pytest.raises(MngrError, match="requires a PATH"):
+        _parse_build_args(("--dockerfile=",))
+
+
 def test_reset_caches(smolvm_provider: SmolvmProviderInstance) -> None:
     # Should not raise
     smolvm_provider.reset_caches()

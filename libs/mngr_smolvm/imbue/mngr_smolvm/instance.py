@@ -139,6 +139,8 @@ def _parse_build_args(build_args: tuple[str, ...]) -> _ParsedBuildArgs:
                 "(supported: --image-archive PATH, --from PATH, --dockerfile PATH)"
             )
         if separator == "=":
+            if not inline_value:
+                raise MngrError(f"{flag} requires a PATH argument")
             values_by_flag[flag] = Path(inline_value)
             idx += 1
         else:
