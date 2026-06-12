@@ -6,6 +6,7 @@ from typing import Any
 from typing import cast
 
 import pytest
+from paramiko import SSHException
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
 
@@ -14,6 +15,7 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import _is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
@@ -382,3 +384,30 @@ def test_ensure_connected_classifies_unrelated_connect_errors_as_connection_erro
     # the concrete type to confirm we did NOT promote a generic connectivity
     # failure to a trust failure.
     assert not isinstance(excinfo.value, HostAuthenticationError)
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (OSError("Socket is closed"), True),
+        (OSError("No such file or directory"), False),
+        (SSHException("SSH session not active"), True),
+        (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
+        (ValueError("not transient"), False),
+    ],
+    ids=["socket-closed", "other-os-error", "ssh-exception", "eof-error", "timeout-error", "non-os-error"],
+)
+def test_is_transient_ssh_error_classifies_timeout_as_transient(exception: BaseException, expected: bool) -> None:
+    """Regression: ``TimeoutError`` from pyinfra's ``read_output_buffers`` must be classified transient.
+
+    pyinfra raises a bare ``TimeoutError`` (Python builtin) when an SSH
+    command's response doesn't arrive within the per-command read
+    timeout -- for example, when the remote sshd is reloaded mid-read
+    during cloud-init. Without TimeoutError in the transient set, the
+    retry loop didn't fire and the exception propagated all the way out
+    of host creation. ``TimeoutError`` is an ``OSError`` subclass on
+    Python 3, so the classifier's ordering matters: the TimeoutError
+    branch must precede the narrow "Socket is closed" OSError check.
+    """
+    assert _is_transient_ssh_error(exception) is expected

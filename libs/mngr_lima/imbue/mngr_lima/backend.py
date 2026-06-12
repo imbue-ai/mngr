@@ -64,19 +64,13 @@ Run 'limactl start --help' for the full list.
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         """Build a Lima provider instance.
 
         Lima installation and version checks are deferred to first use,
         not performed here. This allows the provider to be registered in
         environments where limactl is not installed (e.g. CI).
-
-        ``is_for_host_creation`` is ignored: the Lima backend has no one-time
-        bootstrap resources to gate on (compare the Modal backend, which uses
-        this flag to authorize creating a missing per-user env).
         """
-        del is_for_host_creation
         if not isinstance(config, LimaProviderConfig):
             raise MngrError(f"Expected LimaProviderConfig, got {type(config).__name__}")
 

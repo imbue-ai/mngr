@@ -261,8 +261,8 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
         host_name=HostName("hello"),
         region="lhr",
     )
-    # Vultr takes the region as the --vps-region build arg.
-    assert "--vps-region=lhr" in command
+    # Vultr takes the region as the --vultr-region build arg.
+    assert "--vultr-region=lhr" in command
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
@@ -283,7 +283,7 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
         region="US-WEST-OR",
     )
     joined = " ".join(command)
-    assert "region=" not in joined and "vps-region" not in joined
+    assert "region=" not in joined and "vultr-region" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:

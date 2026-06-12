@@ -553,7 +553,7 @@ def _create_single_pool_host(
         # Per-bake region: the ``ovh`` create template does NOT bake one
         # in, so every host can land in a different OVH datacenter.
         "-b",
-        f"--vps-datacenter={region}",
+        f"--ovh-datacenter={region}",
     ]
 
     pool_create_env: dict[str, str] = {}

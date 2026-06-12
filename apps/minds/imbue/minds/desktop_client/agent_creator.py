@@ -650,7 +650,7 @@ def _build_mngr_create_command(
             # settings). It is a hard placement requirement: the VPS is created
             # in exactly this region.
             if region:
-                mngr_command.extend(["-b", f"--vps-region={region}"])
+                mngr_command.extend(["-b", f"--vultr-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -983,7 +983,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
         # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
-        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        # (-b --vultr-region=); the command builder ignores it for DOCKER/LIMA.
         region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,

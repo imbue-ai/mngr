@@ -90,6 +90,26 @@ _DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL
 _SECRET_ENV_VARS: Final[tuple[str, ...]] = ("DEPOT_TOKEN",)
 _SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b(" + "|".join(_SECRET_ENV_VARS) + r")=(?:'[^']*'|\S+)")
 
+_DEPOT_TOKEN_REQUIRED_MESSAGE: Final[str] = (
+    "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
+    "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
+    "or set builder=DOCKER."
+)
+
+
+def ensure_depot_token_available(builder: DockerBuilder) -> None:
+    """Raise ``MngrError`` if ``builder`` is DEPOT but DEPOT_TOKEN is absent.
+
+    Used both as a create-host preflight -- so a missing token fails fast,
+    before a (billable) VPS is provisioned and cloud-init runs, rather than at
+    the build step -- and at build time as the last line of defense. A DEPOT
+    build is the only thing that needs the token; callers gate this on whether
+    a build will actually happen (a plain image pull does not need it).
+    """
+    if builder is DockerBuilder.DEPOT and not os.environ.get("DEPOT_TOKEN"):
+        raise MngrError(_DEPOT_TOKEN_REQUIRED_MESSAGE)
+
+
 # Absolute path on the outer where rsync stashes partial files between
 # attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
 # partial-transfer state never gets included in the docker build context
@@ -1013,14 +1033,9 @@ def build_image_on_outer(
     forwards DEPOT_PROJECT_ID when set, and runs ``depot build --load``.
     """
     if builder is DockerBuilder.DEPOT:
-        depot_token = os.environ.get("DEPOT_TOKEN", "")
+        ensure_depot_token_available(builder)
+        depot_token = os.environ["DEPOT_TOKEN"]
         depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
-        if not depot_token:
-            raise MngrError(
-                "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
-                "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
-                "or set builder=DOCKER."
-            )
         args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
         quoted = " ".join(shlex.quote(a) for a in args)
         env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
