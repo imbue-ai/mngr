@@ -18,7 +18,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.host_dir import read_default_host_dir
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.errors import MngrError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
@@ -437,7 +438,7 @@ def _discover_plugin_hooks_files() -> list[Path]:
     # Per-agent plugin caches live under <host_dir>/agents/<id>/plugin/claude/anthropic/plugins/.
     # `read_default_host_dir` resolves MNGR_HOST_DIR (explicit override) or
     # falls back to ~/.mngr -- so we honor user-customized host dirs.
-    host_agents_root = read_default_host_dir() / "agents"
+    host_agents_root = get_agents_root_dir(read_default_host_dir())
     if host_agents_root.is_dir():
         try:
             candidates.extend(host_agents_root.glob("*/plugin/claude/anthropic/plugins/**/hooks/hooks.json"))

@@ -25,7 +25,7 @@ and how the agent receives the answer.
    service name and a one-paragraph rationale, then ends its turn and goes
    idle.
 4. **Desktop notifies the user.** The desktop client tails the agent's
-   request events file via `mngr events --follow`, adds a card to the
+   request events file via `mngr event --follow`, adds a card to the
    inbox drawer, and surfaces a notification.
 5. **User opens the dialog.** Clicking the card opens
    `/inbox?selected=<event_id>` in a **modal overlay** over the current
@@ -49,8 +49,8 @@ and how the agent receives the answer.
    * A small **"Adjust"** link, rendered inside the permission list, reveals
      the full **editor view**, which exposes a checkbox per [Detent](https://github.com/imbue-ai/detent)
      permission schema available for that scope. The available schemas
-     are fetched from the latchkey gateway's `GET /permissions/available`
-     endpoint and cached in process for the lifetime of the desktop
+     are read from the bundled `services.json` catalog (shipped with
+     mngr_latchkey) and cached in process for the lifetime of the desktop
      client. The checkbox inputs always exist in the page (the editor is
      merely hidden by default), so the simple view's Approve still
      submits the pre-checked set.
@@ -187,9 +187,10 @@ The catalog of latchkey services (display name + scope schema + the
 permission schemas the dialog offers) lives alongside the latchkey
 gateway extension at
 [`libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/extensions/services.json)
-and is fetched at desktop-client runtime via the gateway's
-`GET /permissions/available` endpoint. Each service maps to a *list* of
-scope entries (a single service may expose more than one detent scope).
+and is read directly at desktop-client runtime by
+`imbue.mngr_latchkey.services_catalog.ServicesCatalog`. Each service maps
+to a *list* of scope entries (a single service may expose more than one
+detent scope).
 Each entry has the shape:
 
 * `scope` -- the detent scope schema the service owns; used as the rule

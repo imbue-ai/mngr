@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 65% to 70% to match the coverage CI already measures (~74%).
+
 ## 2026-06-09
 
 Updated an internal test to construct `EventsTarget` with its new single `host` field (replacing
