@@ -4,8 +4,8 @@ from typing import Literal
 from pydantic import BaseModel
 from pydantic import Field
 
-from imbue.mngr.cli.model_schema import render_annotation
-from imbue.mngr.cli.model_schema import walk_model_fields
+from imbue.mngr.utils.model_schema import render_annotation
+from imbue.mngr.utils.model_schema import walk_model_fields
 
 
 def test_render_annotation_plain_class_uses_short_name() -> None:
