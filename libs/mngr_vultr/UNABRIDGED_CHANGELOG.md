@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced a direct ValueError raise in Vultr provider config with a dedicated custom exception type.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 60% to 70% to match the coverage CI already measures (~72%).

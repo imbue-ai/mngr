@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Replaced a direct `ValueError` raise in Vultr provider config with a dedicated custom exception type.
+
 ## [v0.1.5] - 2026-06-08
 
 ## [v0.1.4] - 2026-06-05

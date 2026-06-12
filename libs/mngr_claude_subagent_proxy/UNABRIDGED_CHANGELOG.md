@@ -4,6 +4,17 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+The `claude_subagent_proxy` plugin is now **disabled by default** and must be explicitly opted into. It only loads when a config layer sets:
+
+```toml
+[plugins.claude_subagent_proxy]
+enabled = true
+```
+
+This inverts the usual plugin default (load-unless-disabled) because the plugin is very experimental and interferes with a lot of other tooling -- it intercepts Claude Code's built-in `Task` tool. The README documents the new opt-in requirement and behavior.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 66% to 70% to match the coverage CI already measures (~71%).

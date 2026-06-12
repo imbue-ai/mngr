@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Replaced direct `ValueError` raises in constrained `primitives` types and the `RegexPattern` validator with dedicated `InvalidPrimitiveValueError` / `InvalidRegexPatternError` exception types.
+
+### Fixed
+
+- Fixed: `PREVENT_BUILTIN_EXCEPTION_RAISES` ratchet regex now matches the common `raise ValueError("literal")` and `raise OSError()` forms (a trailing `\b` after the opening paren previously required the first argument to start with a word character). Test files are also now excluded from the ratchet, consistent with tests legitimately raising built-in exceptions to simulate error conditions.
+
 ## [v0.1.19] - 2026-06-05
 
 ### Added

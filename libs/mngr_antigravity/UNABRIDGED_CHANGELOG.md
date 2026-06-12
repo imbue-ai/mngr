@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Strengthened the two-space-indent assertions in `antigravity_config_test.py`. The
+previous `assert "  " in serialized` checks could not distinguish two-space from
+four-space (or wider) indentation, so they did not actually verify the format the
+serializers promise. They now assert that a top-level key line begins with exactly
+two spaces.
+
 ## 2026-06-08
 
 Fixed the antigravity onboarding seed so it also skips agy's first-run NUX for users authenticated through an enterprise account. The seed now marks `enterpriseOnboardingComplete` as `True` (previously `False`), which was leaving enterprise-authenticated users stuck in the enterprise onboarding flow on their first message.

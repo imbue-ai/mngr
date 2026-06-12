@@ -8,6 +8,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: Canonical justfile recipes for pool-host operations: `just bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra flags]`, `just list-pool-hosts`, and `just destroy-pool-host <id>`. These are thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI, which resolves OVH creds, the management SSH key, and the staging/production host_pool DSN from the activated tier's Vault entries automatically — no hand-exported secrets.
+- Added: `minds-justfile` skill that routes any minds task (app, pool hosts, environments, deployments, tests) through the root justfile, and directs adding a recipe when one is missing.
+- Added: `blueprint/workspace-color-picker/plan-workspace-color-picker.md` describing the workspace color-picker feature (12-color palette plus optional custom hex in workspace settings; implementation lives in `apps/minds/`).
 - Added: `blueprint/claude-stream-buffer/plan-claude-stream-buffer.md` — design plan for approximate Claude response streaming via the mngr tmux session (implemented in `imbue-mngr-claude` and `imbue-mngr-robinhood`).
 - Added: New direct dependencies recorded in `uv.lock` to support the minds WebDAV file-server mount: `wsgidav` and `a2wsgi`.
 - Added: Daily TMR cron at 08:00 UTC via a new `TMR (scheduled)` workflow that gates on a prior periodic PR (`tmr-periodic` label, 4-day window) and invokes the main `TMR` workflow via `workflow_call`; manual `workflow_dispatch` runs are unaffected by the gate.
@@ -39,6 +42,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: Clarified in `CLAUDE.md` that release tests do *not* run in CI (unlike acceptance tests), so anyone developing or modifying release tests must run them locally to verify them.
 - Changed: `just minds-start` and `just minds-build` now select the Node version pinned in `apps/minds/.nvmrc` (via nvm) before launching, so they no longer fail with `ERR_PNPM_UNSUPPORTED_ENGINE` when the shell's default Node has drifted off the pin. It never auto-installs Node, erroring with an actionable hint when nvm or the pinned version is missing.
 - Changed: `just forward-system-interface` now writes the Cloudflare tunnel token to `runtime/secrets/cloudflare_tunnel.env` (one of the per-secret env files in the `runtime/secrets/` directory) instead of the old single `runtime/secrets` file, matching the directory-based secrets layout the FCT runner and minds now use.
 - Changed: Removed `.minds/template/paid-accounts.sh` and folded `MINDS_PAID_ADMIN_KEY` + `MINDS_PAID_LIST_CACHE_TTL_SECONDS` into `.minds/template/supertokens.sh`, reflecting the move of paid-user tracking from a Modal-secret allowlist to database tables. The vault-environments spec's service list is updated accordingly.
@@ -94,11 +98,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Removed
 
+- Removed: Broken `cleanup-pool-hosts` justfile recipe: it sourced the long-gone `.minds/<env>/neon.sh` shell files (secrets are in Vault now) and was redundant with the connector's hourly release-cleanup cron. The new `destroy-pool-host` recipe is the env/Vault-aware single-host replacement.
 - Removed: Unused `libs/flexmux/` project and all references (justfile recipes, `EXCLUDED_RATCHET_PROJECTS` exclusions, `uv.lock` workspace member).
 - Removed: `test_no_dependencies_younger_than_two_weeks` (and its `_FRESHNESS_EXEMPT_PACKAGES` / `_lock_package_upload_time` helpers) from `test_meta_ratchets.py`; the cooldown is now enforced at lock time via `[tool.uv] exclude-newer`, so the time-relative test is redundant.
 
 ### Fixed
 
+- Fixed: `just test-acceptance` recipe — its marker expression was `-m "no release"` (a pytest syntax error since `no` is not an operator) that failed at collection; it is now `-m "not release"`.
+- Fixed: Removed a duplicated forever-claude-template worktree-existence check block in `just minds-start`.
 - Fixed: TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline, so a failed run is no longer reported as successful when `pipefail` fails to propagate the left-side failure.
 - Fixed: Added a `**/tmr-report/` pattern to the root `.gitignore` so the test-orchestrator run-report directory is no longer flagged as an untracked change (the existing `**/tmr_*/` pattern used an underscore and did not match the dash-named directory).
 

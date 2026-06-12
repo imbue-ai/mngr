@@ -8,12 +8,15 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Added
 
+- Added: New `OPT_IN_PLUGINS` set in the config pre-reader for plugins that are **disabled by default** and must be explicitly enabled with `[plugins.<name>] enabled = true` (reusing the same `enabled` config key). The first opt-in plugin is `claude_subagent_proxy`, which is very experimental and breaks other tooling.
+- Added: New `DockerRuntimeNotRegisteredError` (a typed `MngrError`) raised by the docker provider when the configured `docker_runtime` (e.g. `runsc` for gVisor) is not registered with the Docker daemon, instead of letting Docker's raw exit-125 `ProcessError` propagate. The new error renders as a clean message naming the runtime and provider, with `user_help_text` pointing at the fix (install the runtime, or set `docker_runtime=runc` via `mngr config set` / the `MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME` env var); `mngr create --format jsonl` emits `error_class: "DockerRuntimeNotRegisteredError"` so callers can branch on the type.
 - Added: Cross-plugin file-preservation API letting plugins declare a single list of paths to preserve, executed uniformly against either an online host or a stopped host's volume.
 - Added: SSH provider documentation page covering host config (`address`/`port`/`user`/`key_file`/`known_hosts_file`), the `NAME@HOST.PROVIDER` form for running an agent on a configured host, and the provider's limitations (no host creation/snapshots/tags).
 - Added: `mngr usage --preserved` / `--no-preserved` flags documented on `mngr usage` and `mngr usage wait` in the regenerated CLI reference (behavior implemented in the `mngr_usage` plugin).
 
 ### Changed
 
+- Changed: Replaced direct built-in exception raises (`ValueError`/`RuntimeError`) in config key resolution, docker provider config validation, and agent discovery with dedicated custom exception types.
 - Changed: Read-only commands (`mngr list`, `mngr gc`, `mngr cleanup`, and cross-provider discovery) no longer create a Docker singleton state container when none exists; the Docker backend now treats the provider as empty and skips it, mirroring how the Modal backend skips a non-existent environment. Only `mngr create` (which passes `is_for_host_creation=True`) still creates the state container; behavior for existing Docker hosts is unchanged.
 - Changed: `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider is unavailable; other selected providers still run to completion and the unavailable provider is reported in the summary. Empty providers (e.g. a fresh Modal per-user environment) remain silently skipped, and the automatic post-destroy gc path (which uses `--all-providers` and tolerates skips) is unaffected.
 - Changed: Event journals are now read through a unified host file-read interface instead of shelling out `find`/`cat` over SSH; host reads are byte-exact, removing the prior trailing-newline workaround.

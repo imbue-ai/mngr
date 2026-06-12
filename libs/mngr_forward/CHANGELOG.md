@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Hardened reverse SSH tunnel teardown so a half-dead connection no longer orphans the forwarded port on the remote sshd (which made the next run's port forward request get denied). `SSHTunnelManager.cleanup()` now attempts to cancel each reverse port forward unconditionally instead of skipping the cancel when the connection looks inactive, and every tunnel SSH connection now sends periodic keepalives so an idle reverse tunnel does not silently die unnoticed.
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

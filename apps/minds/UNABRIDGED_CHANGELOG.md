@@ -4,6 +4,196 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+The file-sharing permission dialog now accepts `~` / `~/...` notation for the current user's home directory when editing the path to share. The path is expanded to an absolute home-directory path (mirroring the gateway), the client-side within-roots check and Approve gating expand it too, and `~user` notation for another user's home is rejected with a clear error.
+
+Pool-host docs now point at the canonical `minds pool create` flow (via the
+new `just bake-pool-host` / `just list-pool-hosts` / `just destroy-pool-host`
+recipes) instead of the low-level `mngr imbue_cloud admin pool create` recipe
+with hand-exported OVH creds and a hand-passed `--management-public-key-file`.
+The env-aware wrapper derives the management SSH key + OVH credentials from the
+activated tier's Vault entries automatically; for staging/production it also
+resolves the host_pool DSN from Vault.
+
+`minds pool {create,list,destroy}` now resolve the staging/production host_pool
+DSN from `secrets/minds/<tier>/neon.DATABASE_URL` themselves (alongside the OVH
+creds and management key they already read from Vault), so the commands work on
+those tiers without a hand-passed `--database-url` even when invoked directly.
+An explicit `--database-url` still wins, and dev/ci continue to auto-resolve the
+DSN from their per-env `secrets.toml`.
+
+Did a broader accuracy pass over the minds docs, fixing things that had drifted
+since the Vultr->OVH pool migration:
+
+- Replaced stale Vultr references in the pool / env-teardown flows with OVH
+  (environments.md, vault-setup.md, host-pool-setup.md). Vultr mentions that
+  describe the CLOUD launch mode are left as-is -- that mode still uses
+  `--template vultr`.
+
+- Corrected the Modal app names in vault-setup.md (`llm-<tier>` / `rsc-<tier>`,
+  not `litellm-proxy-<tier>` / `remote-service-connector-<tier>`).
+
+- Fixed the `minds run` config-resolution description in design.md and
+  overview.md: there is no implicit `client.toml` fallback -- `minds run`
+  refuses to start when neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH`
+  is set.
+
+- Fixed the Electron backend invocation in desktop-app.md (`run`, not
+  `forward`, and it passes `--config-file`).
+
+- Dropped the stale `--id <id>` flag from the `mngr create` examples
+  (design.md, user_story.md) -- minds reads the agent id back from the
+  `created` JSONL event.
+
+- Corrected `minds` -> `minds run` (user_story.md), `mngr events` -> `mngr
+  event` (latchkey-permissions.md), the spurious `kv/` Vault path prefix
+  (host-pool-setup.md), and the broken `apps/minds/scripts/install.sh` install
+  snippet in the README (replaced with the real from-source dev flow).
+
+Pending permission requests whose originating agent's host can no longer be resolved (for example, after the agent's workspace has been shut down) are now hidden from the desktop client inbox instead of rendering with raw agent ids. The request is left untouched on the gateway, so it reappears in the inbox if the workspace comes back. The inbox badge count and the rendered cards are driven off the same filter, so they stay in agreement.
+
+## 2026-06-11
+
+Replace the SHA-derived per-workspace accent with a user-pickable palette + custom hex.
+
+- Workspaces now ship with one of 12 named palette colors (in picker order: `confusion`, `courage`, `envy`, `peace`, `belonging`, `energy`, `strength`, `comfort`, `inspiration`, `clarity`, then the two neutrals `indifference` and `white`) or an arbitrary `#rrggbb` hex chosen by the user. The previous SHA-from-agent-id OKLCH hue is gone.
+
+- A palette-only picker is added to the **Create** form at the top, above the launch / AI provider configuration. The selected color is written as an mngr `color=<hex>` label on the new primary agent at create time -- no follow-up write.
+
+- A fuller picker is added to **Workspace settings** above the Account section: the same 12 swatches plus an always-visible hex input that accepts lenient forms (`#fff`, `fff`, `#ffffff`, `ffffff`, any case) and normalizes to `#rrggbb` lowercase on save. Save is implicit -- a swatch pick saves immediately; a typed hex saves on blur. Inline errors cover invalid hex, the workspace being unreachable, and the underlying `mngr label` shell-out failing. Picker controls disable when the workspace's provider is in error state.
+
+- Titlebar text / nav icons / account button now use a **WCAG relative luminance** contrast picker server-side, so legibility holds across the full hex range -- previously a fixed black-on-light assumption. The foreground RGB triple is emitted as `accent_fg` on each SSE workspaces payload entry; the client just drops it into a CSS variable.
+
+- Color edits propagate live: the settings POST endpoint shells out to `mngr label <agent> -l color=<hex>` (CLI merge semantics, so concurrent writes against other label keys don't clobber each other), updates the resolver's snapshot optimistically, and fires the SSE wake-up so the chrome / sidebar / homepage tile repaint within one tick.
+
+- Workspaces created before the picker shipped that still have no `color` label render as `confusion` (`#0b292b`, the default) until the user picks something. The first save persists the choice as an on-disk mngr label.
+
+- Sidebar item spines on the dark sidebar (`bg-zinc-900`) currently paint the stored hex unchanged; dark palette entries (`indifference`, `confusion`, `courage`, `envy`) read as low-contrast spines on that surface. A separate PR will rework the sidebar treatment to address this.
+
+The sidebar is now a floating menu: dark panel with rounded corners,
+shadow, and a colored dot per workspace, matching the Figma "Space switcher
+menu" design. In Electron the page loads into the shared modal
+WebContentsView (transparent background), so the panel reads as a floating
+overlay above the workspace content. Each row's accent is shown by the dot
+alone -- the old left-edge vertical accent stripe (carried over from the
+docked sidebar) is removed as redundant.
+
+Every workspace row reveals its per-workspace settings gear on hover (and
+in Electron, an "Open in new window" button alongside it); the current
+workspace's row shows those icons at all times. Two new rows at the bottom
+of the menu: "New workspace"
+(navigates to /create) and "Manage account(s)" / "Log in" (replaces the
+account button that used to sit in the titlebar). The titlebar no longer
+shows the account button.
+
+The sidebar behaves like a modal: clicking anywhere outside the menu (or
+pressing Escape) closes it. The menu's height comes from its own flex
+layout -- no JS measurement or per-bundle bounds math.
+
+Each window now hosts three WebContentsView surfaces instead of four:
+chrome (titlebar), content (workspace), and a single shared overlay used
+by both the sidebar and the inbox. The sidebar URL (/_chrome/sidebar) is
+loaded into the same modalView that hosts /inbox, so dismissal,
+titlebar-drag suppression, transparent background, and Escape handling
+all come from the existing modal infrastructure.
+
+The menu's position is now driven entirely by the call site, not by an
+inferred ``is_mac`` flag. The chrome page reads the trigger button's
+``getBoundingClientRect`` and passes the rect + a caller-chosen offset
+through; the menu anchors at ``trigger.bottom-left + offset`` regardless
+of where the trigger lives. In Electron that goes over IPC into
+``/_chrome/sidebar``'s query string (``trigger_x`` / ``trigger_y`` /
+``trigger_w`` / ``trigger_h`` / ``offset_x`` / ``offset_y``); in browser
+mode chrome.js sets the inline panel's ``style.left`` / ``style.top``
+directly. The panel uses ``py-1.5`` (vertical padding only) so the
+row's ``px-2`` lines up exactly with the trigger button's icon offset
+inside its ``w-8`` shell -- icon columns line up automatically. Moving
+or restyling the trigger button in the future requires no template
+changes.
+
+An incoming permission request no longer yanks the open menu away. Now
+that the sidebar and the inbox share one overlay view, auto-opening the
+inbox is gated on no modal already being visible (previously it only
+checked whether the *inbox* was open, so it would load the inbox over an
+open sidebar). When a menu is up, the request surfaces via the live
+titlebar badge instead, and auto-opens once the menu is dismissed and
+the next request arrives.
+
+On macOS the titlebar's left padding grew from 72px to 76px so the first
+titlebar button's hover highlight clears the window's traffic lights with
+a little more breathing room. The workspace menu follows automatically
+(it anchors to that button's measured position), so no menu-side change
+was needed.
+
+The menu's internal spacing was tightened to a uniform grid: 4px padding
+on all four sides of the panel, 2px between every entry, and 2px above
+and below the divider line (the line is now a bare full-width rule that
+takes its spacing from the panel's row gap rather than its own padding).
+
+The menu is anchored 2px left of and 2px below the trigger button's
+bottom-left corner (anchor offset (-2, 2)). Its background is a flat pure
+black for now (was the dark-teal #0b292b) while the color treatment is
+being iterated on.
+
+The workspace row is now a single shared builder
+(window.mindsSidebarRow.buildRow) rather than markup duplicated across
+the Electron menu (sidebar.js) and the browser menu (chrome.js). The row
+carries no outer positioning -- spacing is the parent container's flex
+gap -- so it composes cleanly wherever it's dropped in. The styleguide's
+"Sidebar items" sample renders through that same builder, so the catalog
+can't drift from the live menu.
+
+The workspace menu is now 280px wide (was 244px).
+
+Each workspace row's action icons -- the settings gear and (in Electron)
+the "open in new window" arrow -- are now always visible rather than
+revealed on hover. The open-in-new icon is the lucide arrow-up-right
+diagonal arrow (matching the Figma "Space switcher menu"), replacing the
+older external-link box glyph.
+
+The landing page's workspace rows gain the same "open in new window"
+arrow, placed just left of the settings gear. In the desktop app it
+opens (or focuses) a dedicated window for that workspace; in a plain
+browser it opens the workspace in a new tab.
+
+The titlebar button that opens the workspace menu now uses a hamburger
+"menu" glyph (three horizontal lines) instead of the old panel-left
+sidebar glyph (Figma node 559-5101). The ICONS_24 catalog entry was
+renamed sidebar -> menu accordingly.
+
+The settings gear inside the floating workspace menu rows is rendered
+smaller (Figma node 560-5111) so it reads as a lighter secondary action
+next to the workspace name, rather than competing with it.
+
+Workspace rows now use the same hover highlight (``bg-white/10``) as the
+"New workspace" and account rows at the bottom of the menu, so the whole
+menu responds to hover consistently. The per-row action icons (open in
+new window, settings) keep their glyph sizes but sit in larger 24x24
+buttons, giving a bigger, easier click target.
+
+The shared Card component's row layouts (``row`` / ``row-spread``) now use
+a tighter ``gap-1.5`` (6px) between children instead of ``gap-3`` (12px),
+so the landing-page workspace rows, account rows, and settings rows pack
+their badges and action icons more closely.
+
+The desktop client's latchkey services catalog (`ServicesCatalog` / `ServicePermissionInfo`) moved to `imbue.mngr_latchkey.services_catalog` and now reads the bundled `services.json` directly instead of fetching it from the running gateway's `GET /permissions/available` endpoint.
+
+This removes the catalog's dependency on gateway liveness for what is static package data, and lets the same catalog serve both the desktop permission dialog and the server-side credential-sync path. The gateway client's now-unused `get_available_services` method (and its `AvailableServiceEntry` wire model) were removed; the client is otherwise unchanged and still drives the live `permission-requests` and `permissions` extensions.
+
+Replaced direct ValueError/RuntimeError raises in deploy-lifecycle config validation, the forward-CLI envelope stream consumer, and Telegram credential extraction with dedicated custom exception types.
+
+The Electron workspace-creation e2e driver (`create_workspace_via_electron`) now
+fails fast when creation fails. It previously only waited for the workspace-ready
+redirect, so any `mngr create` failure (e.g. an unregistered docker runtime) made
+the driver block for the full 10-minute navigation budget before timing out with
+an opaque Playwright error. It now races the workspace-ready URL against the
+create flow's failure view (`#failure-view`), raising `WorkspaceCreationFailedError`
+with the surfaced `#error-message` text the moment creation fails -- turning a
+silent 10-minute hang into an immediate, diagnosable failure. This affects only the
+e2e test/snapshot path, not the shipped app (which already surfaces the failure
+view to users).
+
 ## 2026-06-11
 
 agent_creator: clone_git_repo + checkout_branch now accept commit SHAs in addition to branch and tag names. Implementation switches from `git clone --single-branch --branch <ref>` to `git init && git fetch origin <ref> && git checkout -B <name> FETCH_HEAD`, which is uniform across all three input shapes. Non-shallow, mirror-pushable, no behavior change for existing branch/tag inputs.

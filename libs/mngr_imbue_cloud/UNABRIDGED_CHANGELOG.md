@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced direct ValueError/RuntimeError raises in build-arg parsing and host provisioning with dedicated custom exception types.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 19% to 45% to match the coverage CI already measures (~50%).

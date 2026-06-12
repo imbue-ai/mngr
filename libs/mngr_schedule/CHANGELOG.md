@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: Replaced direct `ValueError` raises in modal deploy upload-spec parsing with a dedicated `UploadSpecError` exception type.
+
 ## [v0.1.1] - 2026-06-08
 
 ### Fixed

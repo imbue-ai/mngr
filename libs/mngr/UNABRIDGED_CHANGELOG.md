@@ -4,6 +4,24 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced direct built-in exception raises (ValueError/RuntimeError) in config key resolution, docker provider config validation, and agent discovery with dedicated custom exception types.
+
+Added an `OPT_IN_PLUGINS` set to the config pre-reader (`config/pre_readers.py`) for plugins that are **disabled by default** and must be explicitly enabled with `[plugins.<name>] enabled = true`. This inverts the normal default (plugins load unless explicitly disabled) for the listed plugins, reusing the same `enabled` config key. The first opt-in plugin is `claude_subagent_proxy`, which is very experimental and breaks other tooling.
+
+The docker provider now raises a typed, actionable `DockerRuntimeNotRegisteredError`
+when the configured `docker_runtime` (e.g. `runsc` for gVisor) is not registered
+with the Docker daemon, instead of letting Docker's raw exit-125 `ProcessError`
+propagate. The old behavior surfaced the entire `docker run` command line with the
+real cause ("unknown or invalid runtime name: runsc") buried inside it and no
+guidance. The new error renders as a clean message naming the runtime and provider,
+with `user_help_text` pointing at the fix (install the runtime, or set
+`docker_runtime=runc` via `mngr config set` / the
+`MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME` env var). Because it is an `MngrError`
+subclass, `mngr create --format jsonl` now emits `error_class:
+"DockerRuntimeNotRegisteredError"` so callers can branch on the type.
+
 ## 2026-06-10
 
 Added the `log_warnings` loguru-capture fixture to the shared plugin test helper (`register_plugin_test_fixtures` in `imbue.mngr.utils.plugin_testing`), so plugin test suites that register the standard fixtures can assert on emitted warnings without defining their own copy. The capture logic lives in a single `capture_log_warnings()` context manager in `imbue.mngr.utils.testing`, which both that fixture and mngr's own `conftest.py` `log_warnings` fixture delegate to. (Affects test infrastructure only.)
