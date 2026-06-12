@@ -8,12 +8,12 @@ from uuid import uuid4
 
 import psutil
 import pytest
+from loguru import logger
 from pydantic import PrivateAttr
 from watchdog.events import FileModifiedEvent
 from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.logging import RotatingLineWriter
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -29,7 +29,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
-from imbue.mngr_latchkey.core import _GatewayLogWriter
+from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
@@ -44,22 +44,25 @@ from imbue.mngr_latchkey.testing import FakeLatchkey
 _POLL_INTERVAL_SECONDS = 0.05
 
 
-def test_gateway_log_writer_timestamps_and_rotates(tmp_path: Path) -> None:
-    """The gateway log callback timestamps each captured line and rotates by size."""
-    log_path = tmp_path / "latchkey_gateway.log"
-    writer = _GatewayLogWriter(
-        writer=RotatingLineWriter(path=log_path, max_size_bytes=200, max_rotated_count=2),
-    )
-    for i in range(100):
-        writer(f"gateway line {i}", is_stdout=True)
-    writer.writer.close()
+def test_gateway_output_is_routed_through_loguru() -> None:
+    """Gateway output lines are emitted as structured loguru events (not a raw file).
 
-    lines = log_path.read_text().splitlines()
-    assert lines, "expected the live log file to contain captured lines"
-    # Each captured line carries a UTC receipt timestamp prefix (ends with Z).
-    assert lines[-1].split(" ", 1)[0].endswith("Z")
-    rotated = [p for p in tmp_path.iterdir() if p.name.startswith("latchkey_gateway.log.")]
-    assert 0 < len(rotated) <= 2
+    This is what folds the gateway's otherwise-unstructured output into the
+    supervisor's standard rotating, timestamped JSONL log.
+    """
+    captured: list[tuple[str, str]] = []
+
+    def _sink(message: object) -> None:
+        record = message.record  # ty: ignore[unresolved-attribute]
+        captured.append((record["level"].name, record["message"]))
+
+    handler_id = logger.add(_sink, level="DEBUG", format="{message}")
+    try:
+        _log_gateway_output_line("hello from the gateway\n", is_stdout=True)
+    finally:
+        logger.remove(handler_id)
+
+    assert ("DEBUG", "[latchkey gateway] hello from the gateway") in captured
 
 
 # The previous on-disk gateway-record tests went away when the record
@@ -1179,9 +1182,9 @@ def test_remote_state_watch_handler_routes_credential_and_permission_changes(
         event_handler.dispatch(FileModifiedEvent(str(permissions_path)))
         assert handler._synced == [(host_id_str, True, False)]
 
-        # An unrelated path (e.g. the gateway log) is ignored.
+        # An unrelated path (e.g. the forward supervisor record) is ignored.
         handler._synced.clear()
-        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_gateway.log")))
+        event_handler.dispatch(FileModifiedEvent(str(tmp_path / "mngr_latchkey" / "latchkey_forward.json")))
         assert handler._synced == []
 
         # A permissions file for an unknown host is ignored.

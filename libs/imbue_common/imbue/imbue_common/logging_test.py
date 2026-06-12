@@ -10,16 +10,13 @@ from typing import Any
 
 from loguru import logger
 
-from imbue.imbue_common.logging import RotatingLineWriter
 from imbue.imbue_common.logging import _build_flat_log_dict
 from imbue.imbue_common.logging import _format_arg_value
-from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.logging import make_jsonl_file_sink
-from imbue.imbue_common.logging import rotate_file_if_too_large
 from imbue.imbue_common.logging import setup_logging
 from imbue.imbue_common.logging import trace_span
 
@@ -470,137 +467,6 @@ def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
     # Should have rotated files with timestamp-based names (events.jsonl.TIMESTAMP)
     rotated_files = [f for f in tmp_path.iterdir() if f.name.startswith("events.jsonl.") and f.name != "events.jsonl"]
     assert len(rotated_files) >= 1
-
-
-def test_make_jsonl_file_sink_cleans_up_rotated_files_for_custom_filename(tmp_path: Path) -> None:
-    """Rotated copies of a non-``events.jsonl`` file must be pruned, not leaked.
-
-    Regression guard: cleanup used to be hard-coded to the ``events.jsonl``
-    rotated-file pattern, so a custom ``--log-file`` name accumulated rotated
-    copies forever.
-    """
-    log_file = tmp_path / "latchkey_forward_events.jsonl"
-    sink = make_jsonl_file_sink(
-        file_path=str(log_file),
-        event_type="mngr",
-        event_source="test",
-        command=None,
-        max_size_bytes=100,
-        max_rotated_count=2,
-    )
-
-    handler_id = logger.add(sink, level="TRACE", format="{message}")
-    try:
-        for i in range(40):
-            logger.info("message number {}", i)
-    finally:
-        logger.remove(handler_id)
-
-    rotated = [f for f in tmp_path.iterdir() if f.name.startswith("latchkey_forward_events.jsonl.")]
-    assert 0 < len(rotated) <= 2
-
-
-# =============================================================================
-# Tests for cleanup_old_rotated_files / rotate_file_if_too_large
-# =============================================================================
-
-
-def test_cleanup_old_rotated_files_respects_custom_base_name(tmp_path: Path) -> None:
-    """Only rotated copies of the given base name are pruned; others are left alone."""
-    for ts in ("20240101000000000001", "20240101000000000002", "20240101000000000003"):
-        (tmp_path / f"gateway.log.{ts}").write_text("x")
-    # A different base name and the live file must survive.
-    (tmp_path / "gateway.log").write_text("live")
-    (tmp_path / "events.jsonl.20240101000000000009").write_text("other")
-
-    cleanup_old_rotated_files(tmp_path, max_rotated_count=1, base_name="gateway.log")
-
-    remaining = sorted(p.name for p in tmp_path.iterdir())
-    assert remaining == [
-        "events.jsonl.20240101000000000009",
-        "gateway.log",
-        "gateway.log.20240101000000000003",
-    ]
-
-
-def test_rotate_file_if_too_large_rotates_when_over_threshold(tmp_path: Path) -> None:
-    path = tmp_path / "raw.log"
-    path.write_bytes(b"a" * 500)
-
-    assert rotate_file_if_too_large(path, max_size_bytes=100) is True
-    rotated = [p for p in tmp_path.iterdir() if p.name.startswith("raw.log.")]
-    assert len(rotated) == 1
-    assert rotated[0].stat().st_size == 500
-    assert not path.exists()
-
-
-def test_rotate_file_if_too_large_is_noop_when_small_or_absent(tmp_path: Path) -> None:
-    path = tmp_path / "raw.log"
-    path.write_bytes(b"a" * 50)
-    assert rotate_file_if_too_large(path, max_size_bytes=100) is False
-    assert path.stat().st_size == 50
-
-    missing = tmp_path / "missing.log"
-    assert rotate_file_if_too_large(missing, max_size_bytes=100) is False
-
-
-# =============================================================================
-# Tests for RotatingLineWriter
-# =============================================================================
-
-
-def test_rotating_line_writer_timestamps_and_appends_lines(tmp_path: Path) -> None:
-    log_file = tmp_path / "gateway.log"
-    writer = RotatingLineWriter(path=log_file, max_size_bytes=1_000_000)
-    writer.write_line("first line")
-    # The trailing newline is normalized so exactly one is written.
-    writer.write_line("second line\n")
-    writer.close()
-
-    lines = log_file.read_text().splitlines()
-    assert len(lines) == 2
-    assert lines[0].endswith(" first line")
-    assert lines[1].endswith(" second line")
-    # Each line is prefixed with a parseable ISO-8601 UTC nanosecond timestamp.
-    stamp = lines[0].split(" ", 1)[0]
-    assert stamp.endswith("Z")
-    datetime.strptime(stamp[:26], "%Y-%m-%dT%H:%M:%S.%f")
-
-
-def test_rotating_line_writer_can_disable_timestamps(tmp_path: Path) -> None:
-    log_file = tmp_path / "raw.log"
-    writer = RotatingLineWriter(path=log_file, is_timestamped=False)
-    writer.write_line("plain line")
-    writer.close()
-    assert log_file.read_text() == "plain line\n"
-
-
-def test_rotating_line_writer_rotates_and_prunes_by_size(tmp_path: Path) -> None:
-    log_file = tmp_path / "gateway.log"
-    writer = RotatingLineWriter(
-        path=log_file,
-        max_size_bytes=200,
-        max_rotated_count=2,
-        is_timestamped=False,
-    )
-    for i in range(100):
-        writer.write_line(f"line {i} with some padding text")
-    writer.close()
-
-    rotated = [p for p in tmp_path.iterdir() if p.name.startswith("gateway.log.")]
-    # Rotation happened and pruning kept at most max_rotated_count copies.
-    assert 0 < len(rotated) <= 2
-    assert log_file.exists()
-
-
-def test_rotating_line_writer_opens_lazily(tmp_path: Path) -> None:
-    """Constructing a writer must not create the file until a line is written."""
-    log_file = tmp_path / "gateway.log"
-    writer = RotatingLineWriter(path=log_file)
-    assert not log_file.exists()
-    writer.write_line("now it exists")
-    writer.close()
-    assert log_file.is_file()
 
 
 # =============================================================================

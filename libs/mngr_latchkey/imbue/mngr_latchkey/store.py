@@ -64,10 +64,14 @@ from imbue.mngr.primitives import HostId
 # upstream ``latchkey`` CLI writes under ``LATCHKEY_DIRECTORY``.
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
-_GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
-_FORWARD_EVENTS_LOG_FILENAME: Final[str] = "latchkey_forward_events.jsonl"
+# The forward supervisor's structured log lives in its own subdirectory and is
+# named ``events.jsonl`` so it shares the standard mngr JSONL-sink layout
+# (``<dir>/events.jsonl`` plus ``events.jsonl.<rotation_timestamp>`` siblings),
+# which is also what ``make_jsonl_file_sink`` prunes its rotated copies against.
+_FORWARD_LOG_SUBDIR_NAME: Final[str] = "forward_logs"
+_EVENTS_LOG_FILENAME: Final[str] = "events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
@@ -82,14 +86,6 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
     :attr:`Latchkey.plugin_data_dir` for the in-class accessor.
     """
     return latchkey_directory / PLUGIN_DATA_SUBDIR_NAME
-
-
-# -- Gateway info --------------------------------------------------------------
-
-
-def gateway_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the shared gateway subprocess."""
-    return data_dir / _GATEWAY_LOG_FILENAME
 
 
 # -- Forward supervisor info ---------------------------------------------------
@@ -188,10 +184,9 @@ def forward_log_path(data_dir: Path) -> Path:
     This file holds whatever the detached process writes to its real
     stdout/stderr file descriptors (human-format console log lines, plus any
     pre-logging tracebacks or Click error messages). Its fd is handed straight
-    to the subprocess, so it cannot be rotated mid-write; callers rotate it at
-    (re)spawn time via :func:`imbue.imbue_common.logging.rotate_file_if_too_large`.
-    For the process's own structured, timestamped, in-run-rotated log see
-    :func:`forward_events_log_path`.
+    to the subprocess, so it cannot be rotated mid-write and is intentionally
+    left unrotated. For the process's own structured, timestamped, in-run-rotated
+    log see :func:`forward_events_log_path`.
     """
     return data_dir / _FORWARD_LOG_FILENAME
 
@@ -201,13 +196,15 @@ def forward_events_log_path(data_dir: Path) -> Path:
 
     Companion to :func:`forward_log_path`: where that file captures the raw
     stdout/stderr of the detached process, this one receives the process's own
-    structured loguru events (nanosecond timestamps, level, message, ...),
-    size-rotated by :func:`imbue.imbue_common.logging.make_jsonl_file_sink`. The
-    forward process is pointed at it via ``--log-file`` so its structured log is
-    co-located with the rest of the plugin's files instead of mixed into the
-    shared host-dir events stream.
+    structured loguru events (nanosecond timestamps, level, message, ...) -- and
+    the shared ``latchkey gateway`` subprocess's output, which the supervisor
+    routes through loguru. It is the standard mngr JSONL log, size-rotated by
+    :func:`imbue.imbue_common.logging.make_jsonl_file_sink` (rotated copies
+    pruned), and the forward process is pointed at it via ``--log-file`` so its
+    structured log is co-located with the rest of the plugin's files instead of
+    mixed into the shared host-dir events stream.
     """
-    return data_dir / _FORWARD_EVENTS_LOG_FILENAME
+    return data_dir / _FORWARD_LOG_SUBDIR_NAME / _EVENTS_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:

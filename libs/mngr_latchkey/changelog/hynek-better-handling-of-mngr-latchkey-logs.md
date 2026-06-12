@@ -1,9 +1,7 @@
-`mngr latchkey forward` logs are now rotated and have observable timestamps, matching the core minds logs.
+`mngr latchkey forward` now has a structured, rotated, timestamped log, reusing the standard mngr/minds JSONL logging rather than the previous unrotated, untimestamped files.
 
-- The supervisor now writes a structured, co-located log at `<latchkey_directory>/mngr_latchkey/latchkey_forward_events.jsonl` (one flat JSON object per line with a nanosecond timestamp), rotated by size. This is the log to read when you need to observe timing.
+- The supervisor now writes its structured log to `<latchkey_directory>/mngr_latchkey/forward_logs/events.jsonl` (one flat JSON object per line with a nanosecond timestamp, size-rotated with rotated copies pruned). Read this when you need to observe timing.
 
-- The raw `latchkey_forward.log` capture is now rotated at (re)spawn time so it can no longer grow without bound across supervisor restarts.
+- The shared `latchkey gateway` subprocess's output is now routed through loguru (each line at DEBUG, prefixed with `[latchkey gateway]`) into that same structured log, so it is timestamped and rotated like the rest of the logs instead of accumulating in the separate, unrotated `latchkey_gateway.log`. That separate file is no longer written.
 
-- `latchkey_gateway.log` (the shared `latchkey gateway` subprocess's output, which we do control) is now size-rotated, and each captured line is prefixed with a UTC receipt timestamp so the timing of the gateway's otherwise-unstructured output is observable.
-
-- Documented the three log files in the README.
+- The raw `latchkey_forward.log` capture is left as an unrotated catch-all for console output and pre-logging tracebacks (its file descriptor is handed straight to the detached process, so it cannot be rotated mid-write).

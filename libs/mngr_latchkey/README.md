@@ -75,23 +75,23 @@ CLI flag > env var > settings.toml > built-in default.
 ### Logs
 
 `mngr latchkey forward` writes its logs under the plugin data directory
-(`<latchkey_directory>/mngr_latchkey/`). All of them are size-rotated
-(rotated copies are named `<name>.<timestamp>`, oldest pruned):
+(`<latchkey_directory>/mngr_latchkey/`):
 
-- `latchkey_forward_events.jsonl` -- the supervisor's own **structured**
-  log: one flat JSON object per line with a nanosecond `timestamp`,
-  `level`, `message`, and source location. Read this when you need to
-  observe timing. Rotated mid-run by the standard mngr file sink.
+- `forward_logs/events.jsonl` -- the supervisor's **structured** log,
+  written via the standard mngr/minds JSONL sink: one flat JSON object
+  per line with a nanosecond `timestamp`, `level`, `message`, and source
+  location, size-rotated (rotated copies `events.jsonl.<timestamp>`,
+  oldest pruned). Read this when you need to observe timing. The shared
+  `latchkey gateway` subprocess's output is routed through the same log
+  (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
+  timestamped and rotated too rather than living in a separate unrotated
+  file.
 
 - `latchkey_forward.log` -- the raw stdout/stderr capture of the detached
   supervisor process (human-format console lines plus any pre-logging
   tracebacks). Its file descriptor is handed straight to the process, so
-  it is rotated at (re)spawn time rather than mid-run.
-
-- `latchkey_gateway.log` -- the shared `latchkey gateway` subprocess's
-  raw output. Latchkey's output is not structured, so each captured line
-  is prefixed with a UTC receipt timestamp to make its timing
-  observable; the file is rotated by size as it grows.
+  it cannot be rotated mid-write and is left as an unrotated catch-all;
+  the structured `events.jsonl` above is the one to read for timing.
 
 ## Embedding
 

@@ -15,7 +15,6 @@ from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import forward_log_path
-from imbue.mngr_latchkey.store import gateway_log_path
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
 from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
@@ -34,16 +33,13 @@ from imbue.mngr_latchkey.store import update_forward_info_gateway_port
 # ``forward_supervisor_test.py`` and below.
 
 
-def test_gateway_log_path_is_top_level(tmp_path: Path) -> None:
-    path = gateway_log_path(tmp_path)
-    assert path == tmp_path / "latchkey_gateway.log"
-
-
-def test_forward_log_paths_are_distinct_and_top_level(tmp_path: Path) -> None:
+def test_forward_log_paths_are_distinct(tmp_path: Path) -> None:
     raw = forward_log_path(tmp_path)
     structured = forward_events_log_path(tmp_path)
     assert raw == tmp_path / "latchkey_forward.log"
-    assert structured == tmp_path / "latchkey_forward_events.jsonl"
+    # Named ``events.jsonl`` under a dedicated subdir so the standard mngr JSONL
+    # sink prunes its rotated copies (``events.jsonl.<timestamp>``).
+    assert structured == tmp_path / "forward_logs" / "events.jsonl"
     assert raw != structured
 
 
