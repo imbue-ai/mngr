@@ -59,7 +59,28 @@ ssh_keys:
     -----END OPENSSH PRIVATE KEY-----
   ed25519_public: ssh-ed25519 AAAATESTKEY comment
 ssh_pwauth: false
+# Cloud-init disables root SSH by default (``disable_root: true``), which
+# prefixes root's authorized_keys with a ``no-port-forwarding,no-X11-forwarding,
+# no-agent-forwarding,no-pty,command="echo 'Please login as the user...'"``
+# wrapper. mngr_vps_docker SSHes in as root and runs interactive shell-y
+# commands via pyinfra, so that wrapper would silently break every poll.
+# Set to false so root's authorized_keys takes the keys verbatim.
+disable_root: false
 runcmd:
+  # Some cloud images install the provider-side SSH key into the default
+  # user's authorized_keys (e.g. AWS Debian AMIs use 'admin', AL2/AL2023
+  # use 'ec2-user', Ubuntu uses 'ubuntu') rather than root's. mngr_vps_docker
+  # SSHes in as root (see ``_make_outer_for_vps_ip``), so without this
+  # copy the provisioning poll loop would hang trying to authenticate.
+  # Vultr / OVH put the key on root directly so this is a no-op there.
+  # Paired with ``disable_root: false`` above so cloud-init doesn't prefix
+  # root's keys with a ``no-pty,command="echo 'Please login as ...'"``
+  # wrapper that would silently break every poll command. Runs before the
+  # shared host-setup steps so root SSH becomes reachable while the long
+  # apt/Docker installs are still in flight.
+  - mkdir -p /root/.ssh && chmod 0700 /root/.ssh
+  - for u in admin ec2-user ubuntu debian fedora centos; do if [ -f "/home/$u/.ssh/authorized_keys" ]; then cat "/home/$u/.ssh/authorized_keys" >> /root/.ssh/authorized_keys; fi; done
+  - touch /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys
   - |
       set -e
       export DEBIAN_FRONTEND=noninteractive
@@ -117,12 +138,55 @@ def test_generate_cloud_init_installs_pinned_docker() -> None:
         install_gvisor_runtime=False,
     )
     # Pinned install via the official Docker apt repo (not the unpinned get.docker.com script).
-    assert "get.docker.com" not in result
     assert "download.docker.com/linux/debian" in result
     assert f"docker-ce={PINNED_DOCKER_APT_VERSION}" in result
     assert "--allow-downgrades" in result
     assert "systemctl enable docker" in result
     assert "systemctl start docker" in result
+    # The slow installer-script approach must NOT come back -- it was the
+    # root cause of the EC2 lifecycle test hitting the 300s subprocess
+    # timeout on the ``mngr create`` flow.
+    assert "get.docker.com" not in result
+
+
+def test_generate_cloud_init_forwards_ssh_key_to_root() -> None:
+    """Regression: AMIs whose cloud image installs the provider SSH key on the
+    default user (admin / ec2-user / ubuntu / etc.) instead of root would make
+    mngr's root-targeted SSH hang (we connect as root per ``ssh_user="root"``
+    in ``mngr_vps_docker.instance._make_outer_for_vps_ip``). cloud-init's
+    runcmd copies the default user's authorized_keys into ``/root/.ssh``
+    before mngr's provisioning poll loop runs, so root SSH always works.
+
+    Vultr / OVH already install the key on root directly so this is a no-op
+    there -- but emitting the shell on every provider is cheaper than
+    branching in Python by provider.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+    )
+    assert "/root/.ssh/authorized_keys" in result
+    assert "admin" in result
+    assert "ec2-user" in result
+    assert "ubuntu" in result
+
+
+def test_generate_cloud_init_disables_root_lockout() -> None:
+    """Cloud-init defaults to ``disable_root: true``, which prefixes root's
+    authorized_keys with a ``no-port-forwarding,no-X11-forwarding,no-agent-
+    forwarding,no-pty,command="echo 'Please login as the user ...'"``
+    wrapper. mngr_vps_docker SSHes in as root and runs shell-y pyinfra
+    commands via that account, so the wrapper would silently break every
+    poll. The generated cloud-init must set ``disable_root: false`` so the
+    forwarded key lands without the wrapper.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+    )
+    assert "disable_root: false" in result
 
 
 def test_generate_cloud_init_creates_ready_marker() -> None:
@@ -141,6 +205,52 @@ def test_generate_cloud_init_deletes_existing_keys() -> None:
         install_gvisor_runtime=False,
     )
     assert "ssh_deletekeys: true" in result
+
+
+def test_generate_cloud_init_no_shutdown_by_default() -> None:
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+    )
+    assert "shutdown -P" not in result
+
+
+def test_generate_cloud_init_with_auto_shutdown_adds_shutdown_command() -> None:
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+        auto_shutdown_seconds=42 * 60,
+    )
+    assert "shutdown -P +42" in result
+
+
+def test_generate_cloud_init_rounds_sub_minute_shutdown_up_to_whole_minutes() -> None:
+    """`shutdown -P` takes whole minutes, so seconds round up (and never to 0)."""
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+        auto_shutdown_seconds=90,
+    )
+    assert "shutdown -P +2" in result
+
+
+def test_generate_cloud_init_with_auto_shutdown_appears_in_runcmd() -> None:
+    """The shutdown entry must be inside the runcmd block, not loose YAML."""
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+        auto_shutdown_seconds=15 * 60,
+    )
+    runcmd_index = result.index("runcmd:")
+    shutdown_index = result.index("shutdown -P +15")
+    assert runcmd_index < shutdown_index
+    # The shutdown line is a list item under runcmd (starts with "  - ").
+    line = next(line for line in result.splitlines() if "shutdown -P" in line)
+    assert line.lstrip().startswith("- shutdown -P")
 
 
 def test_generate_cloud_init_omits_gvisor_install_by_default() -> None:

@@ -1405,9 +1405,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1446,9 +1444,7 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _RaisingDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1491,9 +1487,8 @@ class _EmptyProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del config, mngr_ctx, is_for_host_creation
+        del config, mngr_ctx
         raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 
