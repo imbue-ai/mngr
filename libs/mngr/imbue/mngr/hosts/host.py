@@ -277,8 +277,8 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
-# tmux set-titles-string mngr forwards to the outer terminal tab: session name
-# then the pane title, e.g. 'mngr-foo  Fix the bug'.
+# Format tmux uses for the outer terminal's tab title (set-titles-string):
+# session name then pane title, e.g. 'mngr-foo  Fix the bug'.
 _TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
 
 # Default tmux window dimensions used when the agent does not specify its own.
