@@ -4,6 +4,16 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 65% to 70% to match the coverage CI already measures (~74%).
+
+## 2026-06-09
+
+Updated an internal test to construct `EventsTarget` with its new single `host` field (replacing
+the former `online_host`) after the events API was migrated to read through the unified host
+file-read interface. No behavior change to the orchestrator itself.
+
 ## 2026-06-08
 
 - Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr robinhood` CLI -- a drop-in `claude -p` replacement -- documented with `uv tool install imbue-mngr-robinhood`). It will be offered for first publication to PyPI on the next release, so those documented install instructions stop 404-ing. Its stale `imbue-mngr==0.2.8` / `imbue-mngr-claude==0.2.8` pins are realigned to the current `0.2.10`. No runtime change.

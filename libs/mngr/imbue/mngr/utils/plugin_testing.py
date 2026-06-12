@@ -15,7 +15,6 @@ from uuid import uuid4
 import pluggy
 import pytest
 from click.testing import CliRunner
-from loguru import logger
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -41,6 +40,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import isolate_git
 from imbue.mngr.utils.testing import isolate_tmux_server
@@ -78,6 +78,17 @@ def register_test_placeholder_agent_type() -> None:
 def cli_runner() -> CliRunner:
     """Create a Click CLI runner for testing CLI commands."""
     return CliRunner()
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with mngr/conftest.py's identically-named fixture).
+    """
+    with capture_log_warnings() as messages:
+        yield messages
 
 
 @pytest.fixture(autouse=True)
@@ -308,25 +319,6 @@ def mngr_transcript_lib_sh() -> str:
     return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
 
 
-@pytest.fixture
-def log_warnings() -> Generator[list[str], None, None]:
-    """Capture loguru warning messages for assertion in tests.
-
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
-    """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
-        yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
-
-
 def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     """Register common plugin test fixtures into the given namespace.
 
@@ -340,6 +332,7 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["cli_runner"] = cli_runner
     namespace["local_host"] = local_host
     namespace["local_provider"] = local_provider
+    namespace["log_warnings"] = log_warnings
     namespace["mngr_test_id"] = mngr_test_id
     namespace["mngr_test_prefix"] = mngr_test_prefix
     namespace["mngr_test_root_name"] = mngr_test_root_name
@@ -349,7 +342,6 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["project_config_dir"] = project_config_dir
     namespace["setup_git_config"] = setup_git_config
     namespace["setup_test_mngr_env"] = setup_test_mngr_env
-    namespace["log_warnings"] = log_warnings
     namespace["stub_mngr_log_sh"] = stub_mngr_log_sh
     namespace["temp_config"] = temp_config
     namespace["temp_git_repo"] = temp_git_repo

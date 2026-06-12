@@ -39,6 +39,7 @@ from imbue.mngr.utils.deps import CORE_DEPS
 from imbue.mngr.utils.env_utils import looks_like_mngr_test_container_name
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import worker_docker_state_prefixes
@@ -169,6 +170,17 @@ def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
     """Provide an active ConcurrencyGroup for tests that construct MngrContext directly."""
     with ConcurrencyGroup(name="test") as cg:
         yield cg
+
+
+@pytest.fixture()
+def log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages for assertion in tests.
+
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with plugin_testing.py's identically-named fixture).
+    """
+    with capture_log_warnings() as messages:
+        yield messages
 
 
 # =============================================================================

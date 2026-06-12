@@ -22,6 +22,7 @@ from telethon.sync import TelegramClient
 from imbue.imbue_common.logging import log_span
 from imbue.minds.errors import TelegramBotCreationError
 from imbue.minds.errors import TelegramCredentialError
+from imbue.minds.errors import TelegramCredentialExtractionError
 from imbue.minds.telegram.data_types import TELEGRAM_WEB_URL
 from imbue.minds.telegram.data_types import TelegramBotCredentials
 from imbue.minds.telegram.data_types import TelegramUserCredentials
@@ -85,7 +86,7 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
 
         main_match = re.search(r"(main\.[a-f0-9]+\.js)", html)
         if not main_match:
-            raise ValueError("Could not find main bundle in Telegram Web HTML")
+            raise TelegramCredentialExtractionError("Could not find main bundle in Telegram Web HTML")
 
         main_js_url = TELEGRAM_WEB_URL + main_match.group(1)
         with urllib.request.urlopen(main_js_url, timeout=_HTTP_TIMEOUT_SECONDS) as resp:
@@ -108,7 +109,7 @@ def fetch_telegram_web_api_credentials() -> tuple[int, str]:
             if cred_match:
                 return int(cred_match.group(1)), cred_match.group(2)
 
-        raise ValueError("Credential pattern not found in any bundle chunk")
+        raise TelegramCredentialExtractionError("Credential pattern not found in any bundle chunk")
 
     except (urllib.error.URLError, OSError, ValueError) as exc:
         logger.warning(

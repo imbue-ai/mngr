@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 60% to 70% to match the coverage CI already measures (~72%).
+
 ## 2026-06-08
 
 Tests now isolate $HOME the same way as every other mngr plugin: the project

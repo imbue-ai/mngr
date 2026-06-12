@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -13,6 +13,19 @@
 
     var healthStatusByAgent = {};
 
+    // Server-seeded mind container liveness. ``mindLivenessByAgent`` maps agent id
+    // -> 'RUNNING' | 'STOPPED' | 'UNKNOWN'; only shutdown-capable minds (those on a
+    // provider whose host minds can stop/start -- docker/lima today) appear, and
+    // they are the only rows that get Start/Stop controls.
+    var mindLivenessByAgent = {{ mind_liveness_by_agent_id | tojson }};
+    // While a Start/Stop the user issued is in flight, the row shows an optimistic
+    // transient ('STARTING'/'STOPPING'); this maps agent id -> the target state
+    // ('RUNNING'/'STOPPED') so an interim ``workspaces`` push (still carrying the
+    // pre-action liveness) does not clobber the transient back. Cleared once the
+    // authoritative state reaches the target or the action fails.
+    var pendingMindActionByAgent = {};
+    var isElectronShell = navigator.userAgent.indexOf('Electron') !== -1;
+
     function getRow(agentId) {
       return document.querySelector('[data-agent-id="' + (window.CSS && CSS.escape ? CSS.escape(agentId) : agentId) + '"]');
     }
@@ -20,6 +33,11 @@
     function applyRowHealth(agentId, status) {
       var row = getRow(agentId);
       if (!row) return;
+      // A stopped container has no server to be unhealthy; suppress the health
+      // badge entirely so it doesn't compete with the "Stopped" state badge.
+      if (mindLivenessByAgent[agentId] === 'STOPPED') {
+        status = 'healthy';
+      }
       var badge = row.querySelector('.landing-health-badge');
       if (!badge) return;
       if (status === 'stuck') {
@@ -55,6 +73,136 @@
       var ret = row.dataset.defaultHref || '';
       window.location = '/agents/' + encodeURIComponent(agentId)
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+    };
+
+    window.landingOpenInNewWindow = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      if (isElectronShell) {
+        // Route through the content relay -> main process, which opens (or
+        // focuses) a dedicated window for this workspace. Same channel the
+        // sidebar's open-in-new arrow uses.
+        window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
+      } else {
+        // Plain browser: no native windows, so open the workspace URL in a
+        // new tab instead.
+        window.open(row.dataset.defaultHref, '_blank', 'noopener');
+      }
+    };
+
+    // -- Mind Start / Stop controls --
+
+    // Apply a (possibly transient) liveness label to a shutdown-capable row: swap
+    // which of the Start / Stop buttons is shown and set the status badge.
+    // Transient 'STARTING' / 'STOPPING' are client-only optimistic labels set on
+    // click; the authoritative 'RUNNING' / 'STOPPED' / 'UNKNOWN' arrive folded
+    // into the ``workspaces`` SSE payload.
+    function applyMindLiveness(agentId, state) {
+      mindLivenessByAgent[agentId] = state;
+      var row = getRow(agentId);
+      if (!row) return;
+      var startBtn = row.querySelector('.landing-start-btn');
+      var stopBtn = row.querySelector('.landing-stop-btn');
+      var badge = row.querySelector('.landing-mind-state-badge');
+      var showStart = state === 'STOPPED';
+      var showStop = state === 'RUNNING';
+      // Toggle inline display rather than a ``.hidden`` class: the button base
+      // class is ``inline-flex``, which beats ``.hidden`` on equal specificity,
+      // so a class-based hide would leave both buttons visible.
+      if (startBtn) startBtn.style.display = showStart ? '' : 'none';
+      if (stopBtn) stopBtn.style.display = showStop ? '' : 'none';
+      if (badge) {
+        var text = '';
+        var tone = 'bg-zinc-100 text-zinc-700';
+        if (state === 'STOPPED') { text = 'Stopped'; tone = 'bg-zinc-100 text-zinc-700'; }
+        else if (state === 'UNKNOWN') { text = 'Status unknown'; tone = 'bg-zinc-100 text-zinc-500'; }
+        else if (state === 'STOPPING') { text = 'Stopping…'; tone = 'bg-amber-100 text-amber-800'; }
+        else if (state === 'STARTING') { text = 'Starting…'; tone = 'bg-amber-100 text-amber-800'; }
+        badge.textContent = text;
+        badge.className = 'landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium ' + tone;
+        // Inline display again (the base class is inline-flex, so a .hidden
+        // class wouldn't hide the empty RUNNING-state badge).
+        badge.style.display = text ? '' : 'none';
+      }
+      // Re-evaluate the health badge: a freshly-stopped row must drop any
+      // "Server not responding" badge it was showing.
+      applyRowHealth(agentId, healthStatusByAgent[agentId] || 'healthy');
+    }
+
+    // Apply an authoritative liveness (from the ``workspaces`` SSE payload),
+    // honouring any in-flight optimistic action: while a Start/Stop is pending,
+    // an interim payload still carrying the pre-action state is ignored so it
+    // doesn't flicker the transient back; once the payload reaches the target
+    // state the pending guard clears and the real state shows.
+    function applyAuthoritativeMindLiveness(agentId, state) {
+      var pendingTarget = pendingMindActionByAgent[agentId];
+      if (pendingTarget) {
+        if (state !== pendingTarget) return;
+        delete pendingMindActionByAgent[agentId];
+      }
+      applyMindLiveness(agentId, state);
+    }
+
+    window.landingStartClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      pendingMindActionByAgent[agentId] = 'RUNNING';
+      applyMindLiveness(agentId, 'STARTING');
+      // The endpoint is synchronous: it resolves only once the host has actually
+      // started (or failed), so a non-ok response is a real failure to revert.
+      fetch('/api/agents/' + encodeURIComponent(agentId) + '/start-host', { method: 'POST' })
+        .then(function (response) {
+          if (response.ok) {
+            applyAuthoritativeMindLiveness(agentId, 'RUNNING');
+          } else {
+            console.error('Start for', agentId, 'returned HTTP', response.status);
+            delete pendingMindActionByAgent[agentId];
+            applyMindLiveness(agentId, 'STOPPED');
+          }
+        })
+        .catch(function (err) {
+          console.error('Start for', agentId, 'failed:', err);
+          delete pendingMindActionByAgent[agentId];
+          applyMindLiveness(agentId, 'STOPPED');
+        });
+    };
+
+    window.landingStopClick = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      var name = row.dataset.mindName || agentId;
+      // In the desktop shell, route through the relay so the main process can
+      // show a native confirmation dialog and issue the stop itself (no in-page
+      // optimistic flip -- the user may still cancel that dialog, and the result
+      // arrives over the SSE). In a plain browser there is no shell, so confirm
+      // in-page and stop via fetch with an optimistic transient.
+      if (isElectronShell) {
+        window.postMessage({ type: 'minds:confirm-stop-mind', agentId: agentId, name: name }, '*');
+        return;
+      }
+      var ok = window.confirm('Stop "' + name + '"? Its agents will stop and its services become inaccessible. '
+        + 'Data is preserved and you can start it again.');
+      if (!ok) return;
+      pendingMindActionByAgent[agentId] = 'STOPPED';
+      applyMindLiveness(agentId, 'STOPPING');
+      fetch('/api/agents/' + encodeURIComponent(agentId) + '/stop-host', { method: 'POST' })
+        .then(function (response) {
+          if (response.ok) {
+            applyAuthoritativeMindLiveness(agentId, 'STOPPED');
+          } else {
+            console.error('Stop for', agentId, 'returned HTTP', response.status);
+            delete pendingMindActionByAgent[agentId];
+            applyMindLiveness(agentId, 'RUNNING');
+          }
+        })
+        .catch(function (err) {
+          console.error('Stop for', agentId, 'failed:', err);
+          delete pendingMindActionByAgent[agentId];
+          applyMindLiveness(agentId, 'RUNNING');
+        });
     };
 
     var pendingToggleClickedAtByProvider = {};
@@ -133,7 +281,7 @@
         // handle the tight padding + flex layout. Keep this string in
         // sync with Card.jinja's class output when extending the
         // primitive.
-        row.className = 'minds-card flex items-center gap-3 px-4 py-2.5';
+        row.className = 'minds-card flex items-center gap-1.5 px-4 py-2.5';
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
@@ -367,7 +515,13 @@
         if (differs) {
           es.close();
           location.reload();
+          return;
         }
+        // Same set of rows: apply each shutdown-capable mind's liveness in place
+        // (it rides the workspace entry now, not a separate event).
+        data.workspaces.forEach(function (w) {
+          if (w.liveness) applyAuthoritativeMindLiveness(w.id, w.liveness);
+        });
       };
       es.onerror = function () {
         if (!es) return;
@@ -376,6 +530,10 @@
         setTimeout(connect, 5000);
       };
     }
+    // Reconcile each row with its server-seeded liveness before the SSE opens.
+    Object.keys(mindLivenessByAgent).forEach(function (agentId) {
+      applyMindLiveness(agentId, mindLivenessByAgent[agentId]);
+    });
     connect();
   })();
 </script>
@@ -394,9 +552,16 @@
           {# Precompute row-local strings so the Card invocation stays readable.
              JinjaX component attributes are literal strings by default; the
              ':' prefix turns one into a Python expression. #}
-          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "oklch(85% 0.08 230)") ~ ";" %}
+          {% set accent_style = "--workspace-accent: " ~ agent_accents.get(agent_id | string, "#0b292b") ~ ";" %}
           {% set goto_href = mngr_forward_origin ~ "/goto/" ~ agent_id ~ "/" %}
           {% set destroying_href = "/destroying/" ~ agent_id %}
+          {% set supports_shutdown = (agent_id | string) in shutdown_capable_agent_ids %}
+          {% set mind_state = mind_liveness_by_agent_id.get(agent_id | string, "UNKNOWN") %}
+          {# Inline display (not a ``.hidden`` class) controls which control shows:
+             the button base class is ``inline-flex`` and would win over ``.hidden``.
+             JinjaX evaluates ``:``-prefixed attrs as Python, so precompute here. #}
+          {% set start_btn_style = "" if mind_state == "STOPPED" else "display:none" %}
+          {% set stop_btn_style = "" if mind_state == "RUNNING" else "display:none" %}
           {% if destroying_status %}
             <Card tag="a" layout="row" interactive
                   extra="accent-spine relative overflow-hidden"
@@ -418,16 +583,48 @@
                   :style="accent_style"
                   :data-agent-id="agent_id"
                   :data-default-href="goto_href"
+                  :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
+              <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium" style="display:none"></span>
               <span class="landing-health-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium"></span>
+              {% if supports_shutdown %}
+                {# Shutdown-capable (docker/lima) minds get container Start/Stop
+                   instead of the recovery-only Restart button; JS toggles which is shown.
+                   Visibility is driven by inline ``display`` (not a ``.hidden``
+                   class) because the button base class is ``inline-flex``, which
+                   would otherwise win and show both buttons. #}
+                <Button variant="ghost" size="icon"
+                        extra="landing-start-btn"
+                        :style="start_btn_style"
+                        onclick="event.stopPropagation(); window.landingStartClick(this)"
+                        title="Start mind"
+                        aria-label="Start mind">
+                  <Icon24 name="play" />
+                </Button>
+                <Button variant="ghost" size="icon"
+                        extra="landing-stop-btn"
+                        :style="stop_btn_style"
+                        onclick="event.stopPropagation(); window.landingStopClick(this)"
+                        title="Stop mind"
+                        aria-label="Stop mind">
+                  <Icon24 name="stop" />
+                </Button>
+              {% else %}
+                <Button variant="ghost" size="icon"
+                        onclick="event.stopPropagation(); window.landingRestartClick(this)"
+                        title="Restart workspace"
+                        aria-label="Restart workspace">
+                  <Icon24 name="restart" />
+                </Button>
+              {% endif %}
               <Button variant="ghost" size="icon"
-                      onclick="event.stopPropagation(); window.landingRestartClick(this)"
-                      title="Restart workspace"
-                      aria-label="Restart workspace">
-                <Icon24 name="restart" />
+                      onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
+                      title="Open in new window"
+                      aria-label="Open workspace in new window">
+                <Icon24 name="arrow-up-right" />
               </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
