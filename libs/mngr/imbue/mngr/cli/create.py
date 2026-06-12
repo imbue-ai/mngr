@@ -37,9 +37,9 @@ from imbue.mngr.api.find import ResolvedHostLocationAddress
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.api.find import get_host_from_list_by_id
-from imbue.mngr.api.find import get_local_online_host
 from imbue.mngr.api.find import resolve_host_location_address
 from imbue.mngr.api.gc import register_generated_source_dir
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import NEW_AGENT_LOCATION
 from imbue.mngr.cli.common_opts import add_common_options
@@ -1388,12 +1388,12 @@ def _resolve_source_location(
                 "or specify --from to set the source explicitly."
             )
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
-        online_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
+        online_host = get_local_host(mngr_ctx)
         return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Git URL: clone to a managed directory and treat as a local path
     if is_git_url(opts.source):
-        online_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
+        online_host = get_local_host(mngr_ctx)
         clones_base = online_host.host_dir / "clones"
         positional_hint = (
             str(opts.positional_name.name) if opts.positional_name and opts.positional_name.name else None
@@ -1414,7 +1414,7 @@ def _resolve_source_location(
     if parsed.agent is None and parsed.host is None:
         source_path = str(parsed.path) if parsed.path is not None else os.getcwd()
         _check_source_does_not_contain_state_dir(Path(source_path), mngr_ctx)
-        online_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
+        online_host = get_local_host(mngr_ctx)
         return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=Path(source_path)))
 
     # Need full resolution across providers
@@ -1436,7 +1436,7 @@ def _resolve_target_host(
     resolved_target_host: OnlineHostInterface | NewHostOptions
     if target_host is None:
         # No host specified, use the local provider's default host
-        resolved_target_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
+        resolved_target_host = get_local_host(mngr_ctx)
     elif isinstance(target_host, DiscoveredHost):
         provider = get_provider_instance(target_host.provider_name, mngr_ctx)
         host = provider.get_host(target_host.host_id)

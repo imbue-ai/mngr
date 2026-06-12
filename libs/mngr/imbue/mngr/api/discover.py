@@ -17,7 +17,6 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostLocationAddress
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -215,51 +214,6 @@ def discover_by_address(
         mngr_ctx,
         provider_names=provider_names,
         agent_identifiers=(str(address.agent),),
-        include_destroyed=include_destroyed,
-        reset_caches=reset_caches,
-    )
-
-    if address.host is None:
-        return dict(agents_by_host), providers
-
-    constraint: HostAddress = address.host
-    filtered = {
-        host_ref: agent_refs
-        for host_ref, agent_refs in agents_by_host.items()
-        if constraint.matches(HostAddress(host=host_ref.host_name, provider=host_ref.provider_name))
-    }
-    return filtered, providers
-
-
-def discover_by_host_location_address(
-    address: HostLocationAddress,
-    mngr_ctx: MngrContext,
-    include_destroyed: bool = False,
-    reset_caches: bool = False,
-) -> tuple[dict[DiscoveredHost, list[DiscoveredAgent]], list[BaseProviderInstance]]:
-    """Discover hosts and agents scoped by a single :class:`HostLocationAddress`.
-
-    The address's provider (if any) narrows discovery so we skip irrelevant
-    providers; the agent name/ID (if any) feeds the discovery event-stream
-    optimization. After discovery, results are filtered by the address's full
-    host/provider constraint.
-
-    Callers that already know the address has neither agent nor host should
-    short-circuit and skip discovery -- this helper assumes at least one of
-    the two is set (otherwise it performs an unnecessary full scan).
-    """
-    provider_names: tuple[str, ...] | None = None
-    if address.host is not None and address.host.provider is not None:
-        provider_names = (str(address.host.provider),)
-
-    agent_identifiers: tuple[str, ...] | None = None
-    if address.agent is not None:
-        agent_identifiers = (str(address.agent),)
-
-    agents_by_host, providers = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=agent_identifiers,
         include_destroyed=include_destroyed,
         reset_caches=reset_caches,
     )

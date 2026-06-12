@@ -11,8 +11,8 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import discover_by_address
-from imbue.mngr.api.discover import discover_by_host_location_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundError
@@ -251,23 +251,6 @@ def resolve_host_location_address(
     )
 
 
-def get_local_online_host(
-    mngr_ctx: MngrContext,
-    *,
-    is_start_desired: bool,
-) -> OnlineHostInterface:
-    """Return the local provider's only host, starting it if it's offline.
-
-    Shared helper for callers that already know the location is purely local
-    (no agent, no remote host) and want to skip the cost of querying every
-    provider.
-    """
-    provider = get_provider_instance(LOCAL_PROVIDER_NAME, mngr_ctx)
-    host = provider.get_host(HostName(LOCAL_HOST_NAME))
-    online_host, _ = ensure_host_started(host, is_start_desired=is_start_desired, provider=provider)
-    return online_host
-
-
 def resolve_host_location(
     parsed: HostLocationAddress,
     mngr_ctx: MngrContext,
@@ -294,10 +277,23 @@ def resolve_host_location(
     if parsed.agent is None and parsed.host is None:
         if parsed.path is None:
             raise UserInputError("Location must include an agent, a host, or a path")
-        online_host = get_local_online_host(mngr_ctx, is_start_desired=is_start_desired)
-        return ResolvedHostLocationAddress(location=HostLocation(host=online_host, path=parsed.path))
+        return ResolvedHostLocationAddress(location=HostLocation(host=get_local_host(mngr_ctx), path=parsed.path))
 
-    agents_by_host, _providers = discover_by_host_location_address(parsed, mngr_ctx)
+    # Narrow discovery to the address's provider (when pinned) and feed the
+    # event-stream optimization with the agent name/ID (when present).
+    provider_names: tuple[str, ...] | None = None
+    if parsed.host is not None and parsed.host.provider is not None:
+        provider_names = (str(parsed.host.provider),)
+    agent_identifiers: tuple[str, ...] | None = None
+    if parsed.agent is not None:
+        agent_identifiers = (str(parsed.agent),)
+    agents_by_host, _providers = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
+        include_destroyed=False,
+        reset_caches=False,
+    )
     return resolve_host_location_address(
         parsed,
         agents_by_host,
