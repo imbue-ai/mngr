@@ -55,7 +55,14 @@ class SubagentProxyMode(UpperCaseStrEnum):
 
 
 class SubagentProxyPluginConfig(PluginConfig):
-    """Configuration for the mngr_claude_subagent_proxy plugin."""
+    """Configuration for the mngr_claude_subagent_proxy plugin.
+
+    This plugin is opt-in: it is DISABLED by default and only loads when a
+    config layer explicitly sets ``[plugins.claude_subagent_proxy] enabled =
+    true`` (enforced by ``OPT_IN_PLUGINS`` in mngr's config pre-reader). It is
+    very experimental and breaks a lot of other tooling, so it must be turned
+    on deliberately rather than relied upon by default.
+    """
 
     mode: SubagentProxyMode = Field(
         default=SubagentProxyMode.PROXY,

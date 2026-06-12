@@ -45,7 +45,7 @@ def test_backend_build_args_help_mentions_aws_specific_args() -> None:
     assert "default_ami_id" in help_text
 
 
-def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None) -> AwsProvider:
+def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None) -> AwsProvider:
     """Construct an AwsProvider with the given auto-shutdown setting.
 
     Uses a plain boto3 Session and a placeholder AMI: this helper is only
@@ -55,7 +55,7 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_minutes: int | None)
     config = AwsProviderConfig(
         backend=AWS_BACKEND_NAME,
         default_ami_id="ami-placeholder",
-        auto_shutdown_minutes=auto_shutdown_minutes,
+        auto_shutdown_seconds=auto_shutdown_seconds,
     )
     client = AwsVpsClient(
         session=boto3.Session(region_name=config.default_region),
@@ -81,7 +81,7 @@ def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber
     ``describe_instances`` response (the tag-based lookup that resolves a
     stopped instance) without any real AWS call.
     """
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_minutes=60)
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_seconds=3600)
     session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
     ec2 = session.client("ec2", region_name="us-east-1")
     stubber = Stubber(ec2)
@@ -390,15 +390,15 @@ def test_compact_agent_tag_value_none_when_id_and_name_alone_exceed_limit(
 def test_validate_provider_args_under_pytest_raises_when_unset(
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """The pre-create hook fires when auto_shutdown_minutes is None (the config default).
+    """The pre-create hook fires when auto_shutdown_seconds is None (the config default).
 
-    Regression: a release test that forgets to set auto_shutdown_minutes on
+    Regression: a release test that forgets to set auto_shutdown_seconds on
     the AWS provider config would silently launch instances with no self-
     termination safety net. The hook must abort the launch before any
     EC2 API call so the leak window is zero.
     """
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=None)
-    with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=None)
+    with pytest.raises(MngrError, match="auto_shutdown_seconds"):
         provider._validate_provider_args_for_create()
 
 
@@ -406,7 +406,7 @@ def test_validate_provider_args_under_pytest_accepts_positive(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Properly configured tests pass the hook and proceed to instance creation."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     # No exception raised.
     provider._validate_provider_args_for_create()
 
@@ -415,8 +415,8 @@ def test_validate_provider_args_under_pytest_raises_when_zero(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Zero (and negatives) are explicitly rejected, not silently treated as unset."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=0)
-    with pytest.raises(MngrError, match="auto_shutdown_minutes"):
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=0)
+    with pytest.raises(MngrError, match="auto_shutdown_seconds"):
         provider._validate_provider_args_for_create()
 
 
@@ -427,7 +427,7 @@ def test_validate_provider_args_under_pytest_raises_when_zero(
 
 def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
     """No build args -> region / instance-type come from the provider config; ami override stays None."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(None)
     assert parsed.region == provider.aws_config.default_region
     assert parsed.plan == provider.aws_config.default_instance_type
@@ -438,7 +438,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
 
 def test_parse_build_args_accepts_aws_ami_override(temp_mngr_ctx: MngrContext) -> None:
     """`--aws-ami=ami-XYZ` lands on ami_id_override; other fields keep their defaults."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(["--aws-ami=ami-0123abcd"])
     assert parsed.ami_id_override == "ami-0123abcd"
     assert parsed.region == provider.aws_config.default_region
@@ -449,7 +449,7 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
     temp_mngr_ctx: MngrContext,
 ) -> None:
     """Each AWS-prefixed knob is peeled off; the remainder forwards to docker verbatim."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(
         [
             "--aws-region=us-west-2",
@@ -471,28 +471,28 @@ def test_parse_build_args_extracts_all_aws_knobs_plus_docker_passthrough(
 
 def test_parse_build_args_spot_defaults_false(temp_mngr_ctx: MngrContext) -> None:
     """Without --aws-spot, the parsed object reports spot=False (default on-demand)."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     parsed = provider._parse_build_args(None)
     assert parsed.spot is False
 
 
 def test_parse_build_args_rejects_aws_spot_with_value(temp_mngr_ctx: MngrContext) -> None:
     """``--aws-spot`` is presence-only; passing a value (e.g. ``--aws-spot=true``) raises."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="presence-only flag"):
         provider._parse_build_args(["--aws-spot=true"])
 
 
 def test_parse_build_args_rejects_unknown_aws_flag(temp_mngr_ctx: MngrContext) -> None:
     """A typo / unknown --aws-* flag raises with the valid-args list, not silently forwarded."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="Unknown aws build arg.*--aws-bogus"):
         provider._parse_build_args(["--aws-bogus=foo"])
 
 
 def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext) -> None:
     """A caller still using --vps-region= gets the migration error pointing at the new name."""
-    provider = _build_provider(temp_mngr_ctx, auto_shutdown_minutes=60)
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
     with pytest.raises(MngrError, match="no longer supported"):
         provider._parse_build_args(["--vps-region=us-east-1"])
 

@@ -419,7 +419,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Default no-op. Subclasses override to enforce provider-specific
         pre-create invariants (e.g. AWS's pytest-only "must have
-        auto_shutdown_minutes set" guard) at the natural moment in the
+        auto_shutdown_seconds set" guard) at the natural moment in the
         lifecycle, instead of piggy-backing on a property accessor.
         """
 
@@ -879,7 +879,7 @@ class VpsDockerProvider(BaseProviderInstance):
         Returns (vps_instance_id, vps_ip).
         """
         # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
-        # have auto_shutdown_minutes set" guard). Runs before the VPS-create
+        # have auto_shutdown_seconds set" guard). Runs before the VPS-create
         # API call so a failed check never leaves a billable VPS behind; the
         # SSH key uploaded by ``create_host`` above is cleaned up by that
         # function's except block on raise.
@@ -890,7 +890,7 @@ class VpsDockerProvider(BaseProviderInstance):
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
             install_gvisor_runtime=self.config.install_gvisor_runtime,
-            auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
         )
 
         logger.log(
@@ -1543,14 +1543,14 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
-    def _get_effective_auto_shutdown_minutes(self) -> int | None:
-        """Return the auto-shutdown TTL (in minutes) to inject into cloud-init.
+    def _get_effective_auto_shutdown_seconds(self) -> int | None:
+        """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
 
         Subclasses can override this to add provider-specific escape hatches
         (e.g., a test-only env-var that forces a TTL regardless of project
         config). The base implementation simply returns the configured value.
         """
-        return self.config.auto_shutdown_minutes
+        return self.config.auto_shutdown_seconds
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH-reachable hostnames for VPSes owned by this provider instance.

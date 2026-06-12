@@ -35,7 +35,7 @@ def test_default_config_values() -> None:
     assert config.associate_public_ip is True
     assert config.root_volume_size_gb == 30
     assert config.root_volume_type == "gp3"
-    assert config.auto_shutdown_minutes is None
+    assert config.auto_shutdown_seconds is None
 
 
 def test_backend_name_defaults_to_aws() -> None:

@@ -54,6 +54,18 @@ def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
     assert "{{" not in html
 
 
+def test_render_landing_page_has_open_in_new_window_button_before_settings() -> None:
+    # Each workspace row carries an "open in new window" arrow to the LEFT of
+    # the settings gear. It calls window.landingOpenInNewWindow, which relays
+    # to the main process in Electron (or opens a new tab in a browser).
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert "window.landingOpenInNewWindow(this)" in html
+    # The diagonal shaft of the open-in-new arrow (Figma node 560-5109).
+    assert '<path d="M18 6L6 18"/>' in html
+    # It sits before the settings button within the row.
+    assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
+
+
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
@@ -407,17 +419,16 @@ def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
     assert 'id="page-title" class="titlebar-title' in html
 
 
-def test_render_chrome_page_account_button_uses_titlebar_account_class() -> None:
+def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
+    # The titlebar no longer carries an account button (``id="user-btn"``); the
+    # "Manage account(s)" / "Log in" entry now lives in the floating sidebar
+    # alongside the workspace list and the "New workspace" CTA. The titlebar
+    # accent color therefore doesn't have to repaint the account button -- the
+    # sidebar's own dark background is constant.
     html = render_chrome_page()
-    assert 'id="user-btn"' in html
-    # ``.titlebar-account`` carries the accent-aware foreground; the old
-    # hard-coded ``text-zinc-400`` / ``hover:bg-white/5`` recipe is gone.
-    btn_open = html.index('id="user-btn"')
-    btn_close = html.index(">", btn_open)
-    btn_tag = html[btn_open:btn_close]
-    assert "titlebar-account" in btn_tag
-    assert "text-zinc-400" not in btn_tag
-    assert "hover:bg-white/5" not in btn_tag
+    assert 'id="user-btn"' not in html
+    assert 'id="sidebar-account"' in html
+    assert 'id="sidebar-account-label"' in html
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
@@ -456,6 +467,61 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
+    # The floating-menu wrapper id. The sidebar runs inside the shared
+    # modal WebContentsView, which covers the full window content area and
+    # acts as a modal: sidebar.js compares click targets against
+    # ``#sidebar-menu`` to distinguish clicks inside the floating panel
+    # (let the menu's own handlers run) from clicks on the transparent
+    # backdrop outside it (dismiss the modal). Renaming or dropping this id
+    # breaks the click-outside-to-close behavior.
+    assert 'id="sidebar-menu"' in html
+    # SidebarBottom.jinja is rendered inside the floating menu in both
+    # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
+    # into the shared modal WebContentsView in Electron). It carries the
+    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
+    # label is updated dynamically by sidebar.js from /auth/api/status.
+    assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-account"' in html
+    assert 'id="sidebar-account-label"' in html
+
+
+def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
+    """The floating menu's left/top come from the caller's trigger rect
+    + offset (caller passes the trigger button's viewport-relative rect
+    and a chosen offset; the menu anchors at trigger.bottom-left + offset).
+    The chrome view and the modal view share window coordinate space, so
+    the rect translates directly. This replaces an earlier ``is_mac``
+    branch -- the position is now driven by call-site geometry rather
+    than baked into a server template.
+
+    Trigger rect (72, 0, 32, 28) is roughly the macOS sidebar-toggle
+    button (traffic-light-shifted titlebar with a w-8 h-7 button). A
+    non-default offset (0, 8) is passed here to prove the value flows
+    through: the menu anchors at left=72+0=72, top=0+28+8=36."""
+    html = render_sidebar_page(
+        trigger_x=72,
+        trigger_y=0,
+        trigger_w=32,
+        trigger_h=28,
+        offset_x=0,
+        offset_y=8,
+    )
+    assert "left:72px" in html
+    assert "top:36px" in html
+
+    # Defaults (no caller args) anchor a 38px-tall element at the top-left,
+    # nudged 2px left (offset_x=-2 -> 0 + -2) and 2px below it
+    # (offset_y=2 -> 0 + 38 + 2) -- right shape for "open the sidebar from
+    # the first titlebar button" without any caller customization.
+    html_default = render_sidebar_page()
+    assert "left:-2px" in html_default
+    assert "top:40px" in html_default
+
+
+def test_render_sidebar_page_menu_width_is_280px() -> None:
+    html = render_sidebar_page()
+    assert "w-[280px]" in html
+    assert "w-[244px]" not in html
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
@@ -1046,7 +1112,6 @@ def test_tokens_css_defines_titlebar_utility_classes() -> None:
     assert ".titlebar-title" in css
     assert ".titlebar-btn" in css
     assert ".titlebar-btn-danger" in css
-    assert ".titlebar-account" in css
     # All of them read --titlebar-fg with an alpha for hierarchy.
     assert "var(--titlebar-fg" in css
 
@@ -1117,12 +1182,16 @@ def test_card_row_spread_layout_adds_justify_between() -> None:
     html = CATALOG.render("Card", layout="row-spread", _content="x")
     assert "justify-between" in html
     assert "items-center" in html
+    assert "gap-1.5" in html
 
 
 def test_card_row_layout_omits_justify_between() -> None:
     html = CATALOG.render("Card", layout="row", _content="x")
     assert "items-center" in html
     assert "justify-between" not in html
+    # Row children sit at a tight gap-1.5 (6px), not the old gap-3.
+    assert "gap-1.5" in html
+    assert "gap-3" not in html
 
 
 def test_card_tight_padding_uses_px4_py25() -> None:
@@ -1235,6 +1304,25 @@ def test_icon24_size_axis() -> None:
     for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
         html = CATALOG.render("Icon24", name="home", size=size)
         assert css_class in html
+
+
+def test_icon24_renders_arrow_up_right() -> None:
+    # The diagonal open-in-new arrow (Figma node 560-5109) backs the
+    # "open in new window" affordance on workspace rows (landing page + sidebar).
+    html = CATALOG.render("Icon24", name="arrow-up-right")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<path d="M18 16.5V6H7.5"/>' in html
+    assert '<path d="M18 6L6 18"/>' in html
+
+
+def test_icon24_renders_menu() -> None:
+    # The lucide ``menu`` glyph (three horizontal lines) is the titlebar
+    # button that opens the floating workspace menu.
+    html = CATALOG.render("Icon24", name="menu")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<line x1="4" y1="6" x2="20" y2="6"/>' in html
+    assert '<line x1="4" y1="12" x2="20" y2="12"/>' in html
+    assert '<line x1="4" y1="18" x2="20" y2="18"/>' in html
 
 
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:

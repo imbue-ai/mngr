@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 66% to 70% to match the coverage CI already measures (~71%).
+
 ## 2026-06-09
 
 Updated the destroyed-agent fallback to read the preserved common transcript from its new

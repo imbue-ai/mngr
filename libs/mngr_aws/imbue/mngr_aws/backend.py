@@ -193,27 +193,27 @@ class AwsProvider(VpsDockerProvider):
         return self.aws_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Refuse to create an EC2 instance under pytest without auto_shutdown_minutes set.
+        """Refuse to create an EC2 instance under pytest without auto_shutdown_seconds set.
 
         Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
         when ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible
         for configuring the safety net that bounds leaked cost if pytest
         itself is killed. For AWS, that net is cloud-init ``shutdown -P +N``
-        (the ``auto_shutdown_minutes`` time cap). Its effect depends on
+        (the ``auto_shutdown_seconds`` time cap). Its effect depends on
         ``terminate_on_shutdown``: with the release-test default of ``True``
         the instance self-terminates at the cap (self-cleaning); with ``False``
         (resumable idle-stop) it self-stops, and the conftest session-end
-        scanner reaps it. Either way ``auto_shutdown_minutes`` must be set, so
+        scanner reaps it. Either way ``auto_shutdown_seconds`` must be set, so
         fail closed here rather than risk an unbounded leak.
         """
         if "PYTEST_CURRENT_TEST" not in os.environ:
             return
-        minutes = self._get_effective_auto_shutdown_minutes()
-        if not (minutes and minutes > 0):
+        seconds = self._get_effective_auto_shutdown_seconds()
+        if not (seconds and seconds > 0):
             raise MngrError(
                 "Refusing to create EC2 instance during pytest without "
-                "auto_shutdown_minutes set on the AWS provider config. "
-                "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
+                "auto_shutdown_seconds set on the AWS provider config. "
+                "Set [providers.<instance>] auto_shutdown_seconds = <N> in "
                 "the project settings.toml so cloud-init schedules "
                 "'shutdown -P +N' and the instance is bounded (terminated or "
                 "stopped per terminate_on_shutdown) even if pytest is killed."
@@ -237,6 +237,19 @@ class AwsProvider(VpsDockerProvider):
         ami_override, args = extract_single_value_arg(args, "--aws-ami=")
         spot, args = extract_presence_flag(args, "--aws-spot")
         git_depth, args = extract_git_depth(args)
+        # FIXME: this allowlist only covers the per-host knobs wired up so far.
+        # Other AwsProviderConfig fields could plausibly be exposed as per-host
+        # build args but are not yet (today they are settings.toml-only):
+        #   --aws-subnet=            (subnet_id)
+        #   --aws-vpc=               (vpc_id)
+        #   --aws-security-group=    (security_group; existing id or auto-create name)
+        #   --aws-ssh-cidr=          (allowed_ssh_cidrs; repeatable)
+        #   --aws-iam-profile=       (iam_instance_profile)
+        #   --aws-root-volume-size=  (root_volume_size_gb)
+        #   --aws-root-volume-type=  (root_volume_type)
+        #   --aws-associate-public-ip / --aws-no-associate-public-ip (associate_public_ip)
+        #   --aws-eip                (planned, when the destroy-path lifecycle work lands)
+        # Add the corresponding extract_* parse and this allowlist entry together.
         valid_args = (
             "--aws-region=",
             "--aws-instance-type=",

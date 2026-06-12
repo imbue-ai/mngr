@@ -2,7 +2,7 @@
 
 AWS provider backend plugin for mngr. Runs agents in Docker containers on Amazon EC2 instances.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults and the IAM permission set may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_minutes` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but AWS-specific defaults may change. Treat the security defaults (see "AWS-specific configuration" below) as a starting point: review the security group, AMI choice, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -97,8 +97,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `root_volume_size_gb` | `30` | Root EBS volume size. |
 | `root_volume_type` | `gp3` | Root EBS volume type. |
 | `iam_instance_profile` | `None` | Optional IAM instance profile name attached to launched instances. mngr's idle self-stop does **not** need one (the watcher powers the host off rather than calling the EC2 API), so this is a pure operator escape hatch for your own roles. |
-| `terminate_on_shutdown` | `false` | Sets EC2 `InstanceInitiatedShutdownBehavior`. `false` (default) → `stop`: an OS shutdown (the idle watcher powering the host off, or the `auto_shutdown_minutes` time cap) **stops** the instance, so it is resumable via `mngr start` with its EBS volume intact (a stopped instance costs only EBS until reaped by `mngr destroy` or GC). `true` → `terminate`: an OS shutdown **terminates** the instance (ephemeral / self-cleaning; the release tests use `true` so a leaked instance auto-destroys at the time cap). |
-| `auto_shutdown_minutes` | `None` | When set, cloud-init schedules `shutdown -P +N` so the OS halts itself after N minutes. Whether that stops or terminates the instance is governed by `terminate_on_shutdown` (default `stop`, i.e. resumable). Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `terminate_on_shutdown` | `false` | Sets EC2 `InstanceInitiatedShutdownBehavior`. `false` (default) → `stop`: an OS shutdown (the idle watcher powering the host off, or the `auto_shutdown_seconds` time cap) **stops** the instance, so it is resumable via `mngr start` with its EBS volume intact (a stopped instance costs only EBS until reaped by `mngr destroy` or GC). `true` → `terminate`: an OS shutdown **terminates** the instance (ephemeral / self-cleaning; the release tests use `true` so a leaked instance auto-destroys at the time cap). |
+| `auto_shutdown_seconds` | `None` | When set, cloud-init schedules `shutdown -P` so the OS halts itself after about this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts, with a floor of 1 minute). Whether that stops or terminates the instance is governed by `terminate_on_shutdown` (default `stop`, i.e. resumable). A hard max-lifetime cap, distinct from the activity-based `default_idle_timeout`. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## One-time setup: `mngr aws prepare`
 
@@ -185,9 +185,9 @@ Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
 2. A `pytest_sessionfinish` hook in `imbue/mngr_aws/conftest.py` scans for any test-tagged EC2 instance older than 1 hour at session end, force-terminates leaks, and fails the session.
-3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_minutes = 60` and `terminate_on_shutdown = true`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs. (The one resumable-idle-stop test overrides `terminate_on_shutdown = false` so its idle poweroff stops, not terminates, the instance — it relies on the session-end leak scanner to reap any leak.)
+3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.aws] auto_shutdown_seconds = 3600` and `terminate_on_shutdown = true`. This propagates to cloud-init as `shutdown -P +60` on every test instance; combined with `InstanceInitiatedShutdownBehavior=terminate` (from `terminate_on_shutdown = true`), the instance auto-terminates 60 minutes after boot even if pytest is killed before any cleanup runs. (The one resumable-idle-stop test overrides `terminate_on_shutdown = false` so its idle poweroff stops, not terminates, the instance — it relies on the session-end leak scanner to reap any leak.)
 
-Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_minutes` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
+Production code enforces this: `AwsProvider._validate_provider_args_for_create` refuses to launch an EC2 instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_seconds` is configured (positive). Mirrors the pattern used by `mngr_modal.backend._create_environment`. Independently, `AwsVpsClient.create_instance` tags every pytest-launched instance with `mngr-pytest-launched=true` (constant `AWS_PYTEST_LAUNCHED_TAG`); the conftest session-end scanner filters on that tag, so leaked test instances are found regardless of the agent / host name shape.
 
 ## Future improvements
 

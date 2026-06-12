@@ -1386,7 +1386,7 @@ def test_chrome_page_includes_sidebar_toggle(tmp_path: Path) -> None:
     response = client.get("/_chrome")
     assert response.status_code == 200
     assert "sidebar-toggle" in response.text
-    assert "sidebar-panel" in response.text
+    assert "sidebar-menu" in response.text
 
 
 def test_chrome_sidebar_page_renders(tmp_path: Path) -> None:

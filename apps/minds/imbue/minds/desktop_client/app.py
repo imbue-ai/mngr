@@ -219,6 +219,34 @@ def _get_mngr_forward_origin(request: Request) -> str:
     return f"http://localhost:{port}"
 
 
+def _get_is_mac(request: Request) -> bool:
+    """Return True if the request's User-Agent indicates macOS.
+
+    Used by templates that gate macOS-specific styling (traffic-light
+    padding, hidden window controls).
+    """
+    user_agent = request.headers.get("user-agent", "")
+    return "Macintosh" in user_agent or "Mac OS" in user_agent
+
+
+def _int_query_param(request: Request, name: str, default: int) -> int:
+    """Read a single integer query param with a fallback when missing or invalid.
+
+    Used by routes that take optional numeric layout hints from the caller
+    (e.g. the sidebar's trigger-anchor params packed into the URL by
+    chrome.js). Lives at module level rather than as a closure inside the
+    handler because the codebase forbids inline functions (see
+    `check_inline_functions` in test_ratchets.py).
+    """
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # -- Auth helpers --
 
 
@@ -2026,8 +2054,7 @@ def _handle_chrome_page(
     shows an empty state for unauthenticated users; the SSE stream populates it
     after authentication.
     """
-    user_agent = request.headers.get("user-agent", "")
-    is_mac = "Macintosh" in user_agent or "Mac OS" in user_agent
+    is_mac = _get_is_mac(request)
 
     authenticated = _is_authenticated(cookies=request.cookies, auth_store=auth_store)
     initial_workspaces = _build_workspace_list(backend_resolver) if authenticated else []
@@ -2042,8 +2069,24 @@ def _handle_chrome_page(
 
 
 def _handle_chrome_sidebar(request: Request) -> Response:
-    """Serve the standalone sidebar page for the Electron sidebar WebContentsView."""
-    html = render_sidebar_page(mngr_forward_origin=_get_mngr_forward_origin(request))
+    """Serve the standalone sidebar page loaded into the shared modal WebContentsView.
+
+    Position params (``trigger_x`` / ``trigger_y`` / ``trigger_w`` / ``trigger_h``
+    / ``offset_x`` / ``offset_y``) come from the caller (chrome.js packs the
+    sidebar-toggle button's getBoundingClientRect + a caller-chosen offset into
+    the URL). Missing or unparseable params fall back to render_sidebar_page's
+    defaults (a 38px-tall element at the top-left of the window, nudged 2px
+    left and 2px below it).
+    """
+    html = render_sidebar_page(
+        mngr_forward_origin=_get_mngr_forward_origin(request),
+        trigger_x=_int_query_param(request, "trigger_x", 0),
+        trigger_y=_int_query_param(request, "trigger_y", 0),
+        trigger_w=_int_query_param(request, "trigger_w", 0),
+        trigger_h=_int_query_param(request, "trigger_h", 38),
+        offset_x=_int_query_param(request, "offset_x", -2),
+        offset_y=_int_query_param(request, "offset_y", 2),
+    )
     return HTMLResponse(content=html)
 
 

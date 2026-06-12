@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 50% to 65% to match the coverage CI already measures (~67%).
+
 ## 2026-06-09
 
 Offline hosts produced by this provider are now readable: the offline-host
