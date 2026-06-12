@@ -7,6 +7,7 @@ from typing import cast
 
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
@@ -168,6 +169,32 @@ def _cleanup_failed_worktree_create(
         delete_git_branch(created_branch_name, source_repo_path, cg)
 
 
+def _unwrap_provisioning_user_error(group: ConcurrencyExceptionGroup) -> MngrError | None:
+    """Return the single user-facing MngrError a ConcurrencyExceptionGroup wraps, if any.
+
+    ``host.provision_agent`` runs provisioning inside a ConcurrencyGroup whose
+    ``__exit__`` re-raises any error that escapes the ``with`` block wrapped in a
+    ConcurrencyExceptionGroup. A user-input mistake surfaced during provisioning
+    (e.g. an unknown ``--adopt-session`` ID raising UserInputError) is therefore no
+    longer a ClickException by the time it reaches the CLI, so it would be reported
+    as an "Unexpected error" with a full traceback instead of a clean ``Error: ...``
+    message.
+
+    This recovers the underlying MngrError when the group wraps exactly one such
+    error (recursing through nesting). Returns None otherwise, so a group carrying
+    multiple distinct failures or a genuine non-user-facing bug keeps its full
+    traceback.
+    """
+    if len(group.exceptions) != 1:
+        return None
+    inner = group.exceptions[0]
+    if isinstance(inner, ConcurrencyExceptionGroup):
+        return _unwrap_provisioning_user_error(inner)
+    if isinstance(inner, MngrError):
+        return inner
+    return None
+
+
 @log_call
 def create(
     source_location: HostLocation,
@@ -325,7 +352,17 @@ def create(
                 with log_span("Calling on_before_provisioning hooks"):
                     mngr_ctx.pm.hook.on_before_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
                 with log_span("Provisioning agent {}", agent.name):
-                    host.provision_agent(agent, agent_options, mngr_ctx)
+                    # provision_agent runs inside a ConcurrencyGroup, whose __exit__
+                    # re-wraps any escaping error in a ConcurrencyExceptionGroup. Unwrap
+                    # a lone user-facing MngrError (e.g. a bad --adopt-session ID) so it
+                    # surfaces as a clean CLI error rather than an "Unexpected error".
+                    try:
+                        host.provision_agent(agent, agent_options, mngr_ctx)
+                    except ConcurrencyExceptionGroup as group:
+                        user_error = _unwrap_provisioning_user_error(group)
+                        if user_error is not None:
+                            raise user_error from group
+                        raise
                 with log_span("Calling on_after_provisioning hooks"):
                     mngr_ctx.pm.hook.on_after_provisioning(agent=agent, host=host, mngr_ctx=mngr_ctx)
 
