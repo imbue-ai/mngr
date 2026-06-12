@@ -13,6 +13,7 @@ from loguru import logger
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -285,7 +286,7 @@ def _get_agent_state_dir(agent: AgentInterface, host: OnlineHostInterface) -> Pa
     Mirrors the convention in host.py:_get_agent_state_dir and
     base_agent.py:_get_agent_dir.
     """
-    return host.host_dir / "agents" / str(agent.id)
+    return get_agent_state_dir_path(host.host_dir, agent.id)
 
 
 def provision_mngr_on_host(

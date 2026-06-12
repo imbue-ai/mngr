@@ -80,15 +80,43 @@ OUTER_HELPER_SERVICE_PATH: Final[Path] = Path("/etc/systemd/system/snapshot_help
 OUTER_HELPER_ENV_PATH: Final[Path] = Path("/etc/mngr-snapshot-helper.env")
 OUTER_HELPER_SERVICE_NAME: Final[str] = "snapshot_helper.service"
 
-# Idempotent install: skip if depot already on PATH, otherwise download to
-# /usr/local/bin via depot.dev's official installer. Run once per build (cheap
-# no-op when already present); avoids needing a separate provisioning step.
-_DEPOT_INSTALL_CMD: Final[str] = "command -v depot >/dev/null 2>&1 || curl -fsSL https://depot.dev/install-cli.sh | sh"
+# Resolve the depot CLI at run time, preferring a copy already on PATH so an
+# existing install is respected. depot.dev's installer drops the CLI at
+# $HOME/.depot/bin, which is not on a non-interactive shell's PATH, so we fall
+# back to that absolute location and install there only when nothing is found.
+# The remote shell captures the result in $DEPOT_BIN (so $HOME expands to the
+# connecting user's home), and the same value drives both the install check and
+# the invocation below.
+_DEPOT_RESOLVE_AND_INSTALL: Final[str] = (
+    'DEPOT_BIN="$(command -v depot || echo "$HOME/.depot/bin/depot")"; '
+    'test -x "$DEPOT_BIN" || curl -fsSL https://depot.dev/install-cli.sh | sh'
+)
+_DEPOT_BIN: Final[str] = '"$DEPOT_BIN"'
 
 # Env-var assignments whose values are secrets and must be redacted before any
 # remote command string ends up in logs or exception messages.
 _SECRET_ENV_VARS: Final[tuple[str, ...]] = ("DEPOT_TOKEN",)
 _SECRET_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"\b(" + "|".join(_SECRET_ENV_VARS) + r")=(?:'[^']*'|\S+)")
+
+_DEPOT_TOKEN_REQUIRED_MESSAGE: Final[str] = (
+    "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
+    "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
+    "or set builder=DOCKER."
+)
+
+
+def ensure_depot_token_available(builder: DockerBuilder) -> None:
+    """Raise ``MngrError`` if ``builder`` is DEPOT but DEPOT_TOKEN is absent.
+
+    Used both as a create-host preflight -- so a missing token fails fast,
+    before a (billable) VPS is provisioned and cloud-init runs, rather than at
+    the build step -- and at build time as the last line of defense. A DEPOT
+    build is the only thing that needs the token; callers gate this on whether
+    a build will actually happen (a plain image pull does not need it).
+    """
+    if builder is DockerBuilder.DEPOT and not os.environ.get("DEPOT_TOKEN"):
+        raise MngrError(_DEPOT_TOKEN_REQUIRED_MESSAGE)
+
 
 # Absolute path on the outer where rsync stashes partial files between
 # attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
@@ -1013,20 +1041,15 @@ def build_image_on_outer(
     forwards DEPOT_PROJECT_ID when set, and runs ``depot build --load``.
     """
     if builder is DockerBuilder.DEPOT:
-        depot_token = os.environ.get("DEPOT_TOKEN", "")
+        ensure_depot_token_available(builder)
+        depot_token = os.environ["DEPOT_TOKEN"]
         depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
-        if not depot_token:
-            raise MngrError(
-                "builder=DEPOT requires DEPOT_TOKEN in the agent's environment. "
-                "Set DEPOT_TOKEN (and DEPOT_PROJECT_ID if no depot.json is on the VPS), "
-                "or set builder=DOCKER."
-            )
         args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
         quoted = " ".join(shlex.quote(a) for a in args)
         env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
         if depot_project_id:
             env["DEPOT_PROJECT_ID"] = depot_project_id
-        remote_cmd = f"{_DEPOT_INSTALL_CMD} && depot {quoted}"
+        remote_cmd = f"{_DEPOT_RESOLVE_AND_INSTALL} && {_DEPOT_BIN} {quoted}"
         run_env: Mapping[str, str] | None = env
     else:
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
@@ -1054,6 +1077,75 @@ def build_image_on_outer(
     return tag
 
 
+def _clone_build_context_for_self_contained_git(local_context: Path, git_depth: int | None) -> Path | None:
+    """Clone a local git build context into a temp dir for a self-contained .git.
+
+    Returns the clone path (a ``repo/`` subdir of a fresh temp dir; the caller
+    uploads it and removes ``clone.parent`` once the build finishes), or
+    ``None`` when ``local_context`` is not a git repo and ``git_depth`` does not
+    force a clone -- in which case the caller uploads the context verbatim.
+
+    Cloning is what keeps host-specific git state out of the image. Two shapes
+    of ``.git`` matter:
+      - a linked worktree's ``.git`` is a gitlink *file* pointing at the
+        primary repo's admin dir -- unusable as a standalone repo in the image;
+      - a primary checkout's ``.git`` is a directory that also holds a
+        ``worktrees/`` admin dir registering the operator's *other* worktree
+        branches as checked out. Baked into the image, those registrations make
+        the post-build mirror-push seed (``git push +refs/heads/*`` into
+        ``/code/mngr``) fail with "refusing to update checked out branch".
+    A fresh ``git clone`` carries neither. The operator's working tree
+    (committed + uncommitted) is then overlaid back on top, since ``git clone``
+    alone only carries committed files at HEAD.
+    """
+    git_marker = local_context / ".git"
+    is_worktree = git_marker.is_file()
+    is_checkout = git_marker.is_dir()
+    is_git_repo = is_worktree or is_checkout
+    if not (is_git_repo or git_depth is not None):
+        return None
+
+    if is_worktree:
+        clone_reason = "worktree"
+    elif is_checkout:
+        clone_reason = "checkout"
+    else:
+        clone_reason = f"--git-depth={git_depth}"
+    logger.log(LogLevel.BUILD.value, "Cloning build context locally ({})...", clone_reason, source="vps")
+
+    clone_root = Path(tempfile.mkdtemp(prefix="mngr-vps-build-"))
+    clone_target = clone_root / "repo"
+    clone_cmd = ["git", "clone"]
+    if git_depth is not None:
+        clone_cmd.extend(["--depth", str(git_depth)])
+    # Use file:// so --depth is honored for local repos
+    clone_cmd.extend([f"file://{local_context}", str(clone_target)])
+    clone_cg = ConcurrencyGroup(name="git-clone-build-context")
+    # The caller only learns about (and cleans up) the temp dir once we return
+    # it, so clean up ourselves if we fail before returning.
+    cloned_ok = False
+    try:
+        with translate_outer_concurrency_errors("clone the build context"), clone_cg:
+            clone_result = clone_cg.run_process_to_completion(
+                command=clone_cmd,
+                is_checked_after=False,
+                timeout=120.0,
+            )
+            if clone_result.returncode != 0:
+                raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
+            # Overlay the working tree (committed + uncommitted edits, e.g. a
+            # locally-rsynced ``vendor/mngr/``) on top of the fresh clone; the
+            # clone alone rolls the context back to HEAD. A depth-only clone of a
+            # bare repo has no working tree to overlay.
+            if is_git_repo:
+                rsync_worktree_over_clone(local_context, clone_target, cg=clone_cg)
+        cloned_ok = True
+    finally:
+        if not cloned_ok:
+            shutil.rmtree(clone_root, ignore_errors=True)
+    return clone_target
+
+
 def build_image_on_outer_from_build_args(
     outer: OuterHostInterface,
     cg: ConcurrencyGroup,
@@ -1067,10 +1159,16 @@ def build_image_on_outer_from_build_args(
     """Build a Docker image on the outer from the provided build args. Returns the image tag.
 
     Uploads the build context (if a local path is referenced) to the outer
-    and runs docker build there. If the local build context is a git worktree,
-    clones it into a temp directory first so the .git directory is
-    self-contained. If git_depth is specified, the clone uses --depth and
-    always creates a temp clone (even for non-worktree repos).
+    and runs docker build there. If the local build context is a git repo
+    (either a linked worktree, whose ``.git`` is a gitlink file, or a normal
+    checkout, whose ``.git`` is a directory), clones it into a temp directory
+    first so the ``.git`` baked into the image is self-contained -- a fresh
+    clone carries neither a worktree gitlink nor a primary checkout's
+    ``.git/worktrees/`` admin (which registers *other* branches as checked
+    out and would make the post-build mirror-push seed fail with "refusing to
+    update checked out branch"). The operator's working tree (including
+    uncommitted edits) is overlaid back on top of the clone. If git_depth is
+    specified, the clone uses --depth.
     """
     build_tag = f"mngr-build-{host_id}"
     remote_build_dir = f"/tmp/mngr-build-{host_id.get_uuid().hex}"
@@ -1087,44 +1185,16 @@ def build_image_on_outer_from_build_args(
         else:
             non_context_args.append(arg)
 
-    # If the build context is a git worktree or --git-depth is set,
-    # clone into a temp directory to get a standalone .git directory.
+    # If the build context is a local git repo (or --git-depth is set), clone
+    # it so the .git baked into the image is self-contained -- see
+    # _clone_build_context_for_self_contained_git for why.
     local_clone_dir: Path | None = None
     if context_args:
         local_context = Path(context_args[-1]).resolve()
-        is_worktree = (local_context / ".git").is_file()
-        if is_worktree or git_depth is not None:
-            local_clone_dir = Path(tempfile.mkdtemp(prefix="mngr-vps-build-"))
-            clone_reason = "worktree" if is_worktree else f"--git-depth={git_depth}"
-            logger.log(
-                LogLevel.BUILD.value,
-                "Cloning build context locally ({})...",
-                clone_reason,
-                source="vps",
-            )
-            clone_cmd = ["git", "clone"]
-            if git_depth is not None:
-                clone_cmd.extend(["--depth", str(git_depth)])
-            # Use file:// so --depth is honored for local repos
-            clone_target = local_clone_dir / "repo"
-            clone_cmd.extend([f"file://{local_context}", str(clone_target)])
-            clone_cg = ConcurrencyGroup(name="git-clone-build-context")
-            with translate_outer_concurrency_errors("clone the build context"), clone_cg:
-                clone_result = clone_cg.run_process_to_completion(
-                    command=clone_cmd,
-                    is_checked_after=False,
-                    timeout=120.0,
-                )
-                if clone_result.returncode != 0:
-                    raise MngrError(f"Failed to clone build context: {clone_result.stderr.strip()}")
-                # Overlay the worktree's working tree on top of the fresh clone
-                # so uncommitted edits (e.g. a locally-rsynced ``vendor/mngr/``
-                # or any in-flight FCT edits the operator hasn't committed yet)
-                # actually reach the docker build. ``git clone`` alone only
-                # carries committed files, which silently rolls the build
-                # context back to HEAD.
-                if is_worktree:
-                    rsync_worktree_over_clone(local_context, clone_target, cg=clone_cg)
+        clone_target = _clone_build_context_for_self_contained_git(local_context, git_depth)
+        if clone_target is not None:
+            # clone_target is <tempdir>/repo; remove the whole tempdir on exit.
+            local_clone_dir = clone_target.parent
             context_args[-1] = str(clone_target)
 
     try:

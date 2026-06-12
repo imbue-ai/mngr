@@ -1,0 +1,3 @@
+Updated the auto-generated `mngr create` docs for the `--adopt-session` option: a bare session ID is now searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents.
+
+Internal: added `get_agents_root_dir(host_dir)` as the single source of truth for the agents-state root directory, defined alongside `get_agent_state_dir_path` in `imbue.mngr.hosts.common` (a low-level module importable without circular-import issues). Consolidated the previously hand-written `host_dir / "agents"[ / str(agent_id)]` path constructions across the codebase to route through these two helpers. No behavior change.

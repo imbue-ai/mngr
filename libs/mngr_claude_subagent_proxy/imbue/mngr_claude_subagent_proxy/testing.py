@@ -62,15 +62,18 @@ class FakeHost(BaseFakeHost):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         self.executed_commands.append(command)
-        # check=False to mirror the real OnlineHostInterface contract: a non-zero
-        # exit is reported via CommandResult.success, not raised. Callers that care
-        # (e.g. check_settings_local_gitignored) branch on .success.
+        # shell=True so the plugin's shell-using commands (``mkdir -p``, and the
+        # ``sh -c '<resolve-symlinks>'`` the gitignore guard runs) work.
+        # check=False (subprocess default) and an honored ``cwd`` mirror the real
+        # OnlineHostInterface: a non-zero exit is reported via ``success`` rather
+        # than raising, and commands run in the requested directory (the gitignore
+        # guard depends on both).
         completed = subprocess.run(
             command,
             shell=True,
-            check=False,
             capture_output=True,
             text=True,
+            cwd=cwd,
             timeout=timeout_seconds,
         )
         return CommandResult(

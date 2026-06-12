@@ -11,7 +11,7 @@
 #
 # This file is the transcript-scoping *set* only; it does NOT pick the agent's
 # main conversation for resume (its lines include subagents). Resume reads
-# root_conversation, written by set_active_marker.sh. See
+# root_conversation, written by statusline.sh. See
 # AntigravityAgent.assemble_command and CONVERSATION_IDS_FILENAME.
 #
 # The file name is kept in sync with CONVERSATION_IDS_FILENAME in
@@ -58,7 +58,7 @@ fi
 # Append each distinct id once. Order/recency does not matter: the only
 # consumer is stream_transcript.sh, which reads the unique set (`sort -u`). The
 # agent's main conversation for resume is tracked separately in
-# root_conversation by set_active_marker.sh. `grep -qxF` is a whole-line fixed
+# root_conversation by statusline.sh. `grep -qxF` is a whole-line fixed
 # match; on a missing file it returns non-zero, so the first id is appended.
 if ! grep -qxF "$conv_id" "$ids_file" 2>/dev/null; then
     printf '%s\n' "$conv_id" >> "$ids_file"

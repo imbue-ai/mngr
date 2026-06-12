@@ -27,6 +27,7 @@ from imbue.mngr_claude_subagent_proxy.data_types import SubagentProxyPluginConfi
 from imbue.mngr_claude_subagent_proxy.plugin import CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME
 from imbue.mngr_claude_subagent_proxy.plugin import SubagentProxyChildConfig
 from imbue.mngr_claude_subagent_proxy.plugin import UnguardedProjectStopHookError
+from imbue.mngr_claude_subagent_proxy.plugin import UnignoredProxyArtifactError
 from imbue.mngr_claude_subagent_proxy.plugin import UnsupportedSubagentHookError
 from imbue.mngr_claude_subagent_proxy.plugin import _guard_user_stop_hooks_in_project_settings
 from imbue.mngr_claude_subagent_proxy.plugin import cascade_destroy_recorded_children
@@ -92,10 +93,12 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
     assert any(entry.get("matcher") == "Agent" for entry in hooks["PostToolUse"])
     assert "SessionStart" in hooks
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy" / "proxy.md"
     assert proxy_md.exists()
     proxy_content = proxy_md.read_text()
     assert "model: haiku" in proxy_content
+    # Discovery hinges on the frontmatter name, not the path; pin it.
+    assert "name: mngr-proxy" in proxy_content
 
     python_prefix = "uv run python -m imbue.mngr_claude_subagent_proxy.hooks."
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
@@ -424,7 +427,7 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
     children don't have the ``MNGR_CLAUDE_SUBAGENT_PROXY_CHILD`` env var.
 
     No PostToolUse hook (the deny hook never runs mngr create itself),
-    no mngr-proxy.md agent definition.
+    no mngr-proxy/proxy.md agent definition.
     """
     ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
     agent = FakeAgent(AgentId.generate(), work_dir, ClaudeAgentConfig(), name=AgentName("reviewer"))
@@ -455,7 +458,7 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
 def test_deny_mode_does_not_write_proxy_agent_definition(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """In DENY mode, the mngr-proxy.md agent definition is NOT written.
+    """In DENY mode, the mngr-proxy/proxy.md agent definition is NOT written.
 
     The Haiku dispatcher is part of PROXY mode only. Writing it in deny
     mode would dirty the worktree with a file the user never invokes.
@@ -465,14 +468,12 @@ def test_deny_mode_does_not_write_proxy_agent_definition(
 
     _provision(agent, fake_host, ctx)
 
-    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy.md"
+    proxy_md = work_dir / ".claude" / "agents" / "mngr-proxy" / "proxy.md"
     assert not proxy_md.exists()
 
 
-def test_deny_mode_writes_mngr_subagents_skill(
-    work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
-) -> None:
-    """DENY mode provisions the ``mngr-subagents`` Claude skill at .claude/skills/.
+def test_deny_mode_writes_mngr_proxy_skill(work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext) -> None:
+    """DENY mode provisions the ``mngr-proxy`` Claude skill at .claude/skills/.
 
     The skill carries the verbose context (when to use, how to parse
     subagent_wait output, how to inspect a running subagent, etc.) so
@@ -483,12 +484,12 @@ def test_deny_mode_writes_mngr_subagents_skill(
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    skill_path = work_dir / ".claude" / "skills" / "mngr-proxy" / "SKILL.md"
     assert skill_path.is_file()
     body = skill_path.read_text()
     # Frontmatter wires the skill into Claude Code's skill-discovery mechanism.
     assert body.startswith("---\n")
-    assert "name: mngr-subagents" in body
+    assert "name: mngr-proxy" in body
     assert "description:" in body
     # Body must teach the explicit two-command spawn-and-wait protocol --
     # this is the single source of truth for how Claude delegates work
@@ -509,7 +510,7 @@ def test_deny_mode_writes_mngr_subagents_skill(
     assert "run_in_background" in body
 
 
-def test_proxy_mode_does_not_write_mngr_subagents_skill(
+def test_proxy_mode_does_not_write_mngr_proxy_skill(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
     """PROXY mode does NOT write the deny-mode skill.
@@ -523,8 +524,70 @@ def test_proxy_mode_does_not_write_mngr_subagents_skill(
 
     _provision(agent, fake_host, ctx)
 
-    skill_path = work_dir / ".claude" / "skills" / "mngr-subagents" / "SKILL.md"
+    skill_path = work_dir / ".claude" / "skills" / "mngr-proxy" / "SKILL.md"
     assert not skill_path.exists()
+
+
+def test_proxy_agent_definition_refuses_unignored_git_worktree(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """PROXY provisioning aborts if the agent-definition path is not gitignored.
+
+    Writing it would surface as an unstaged change in the tracked worktree.
+    The error must point at the subdirectory to gitignore and the repo-scope
+    disable command, and the artifact must not be written.
+    """
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    with pytest.raises(UnignoredProxyArtifactError) as exc_info:
+        _provision(agent, fake_host, None)
+
+    message = str(exc_info.value)
+    assert str(Path(".claude") / "agents" / "mngr-proxy" / "proxy.md") in message
+    # The remediation points at the whole mngr-proxy/ subdir, not just the file.
+    assert f"{Path('.claude') / 'agents' / 'mngr-proxy'}/" in message
+    assert "mngr config set --scope project" in message
+    assert f"plugins.{CLAUDE_SUBAGENT_PROXY_PLUGIN_NAME}.enabled false" in message
+    assert not (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").exists()
+
+
+def test_proxy_agent_definition_written_when_claude_dir_gitignored(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """A broad .claude/ ignore covers the artifact, so provisioning writes it."""
+    (temp_git_repo / ".gitignore").write_text(".claude/\n")
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    _provision(agent, fake_host, None)
+
+    assert (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").is_file()
+
+
+def test_proxy_agent_definition_written_when_subdir_gitignored(temp_git_repo: Path, fake_host: FakeHost) -> None:
+    """Ignoring exactly the mngr-proxy/ subdir (what the error suggests) is accepted.
+
+    Pins the file-vs-directory subtlety: the guard runs before the directory
+    exists, and the suggested trailing-slash directory rule does not match the
+    not-yet-existing directory path -- but it does match the file under it,
+    which is what the guard checks. If this regression test ever fails, the
+    error message would be telling users to add a rule that the guard rejects.
+    """
+    (temp_git_repo / ".gitignore").write_text(".claude/agents/mngr-proxy/\n")
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig())
+
+    _provision(agent, fake_host, None)
+
+    assert (temp_git_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md").is_file()
+
+
+def test_deny_skill_refuses_unignored_git_worktree(
+    temp_git_repo: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
+) -> None:
+    """DENY provisioning aborts if the skill path is not gitignored."""
+    ctx = _ctx_with_plugin_config(temp_mngr_ctx, SubagentProxyPluginConfig(mode=SubagentProxyMode.DENY))
+    agent = FakeAgent(AgentId.generate(), temp_git_repo, ClaudeAgentConfig(), name=AgentName("reviewer"))
+
+    with pytest.raises(UnignoredProxyArtifactError) as exc_info:
+        _provision(agent, fake_host, ctx)
+
+    assert str(Path(".claude") / "skills" / "mngr-proxy" / "SKILL.md") in str(exc_info.value)
+    assert not (temp_git_repo / ".claude" / "skills" / "mngr-proxy" / "SKILL.md").exists()
 
 
 def test_deny_mode_skips_project_stop_hook_check(

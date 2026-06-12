@@ -66,14 +66,7 @@ Example configuration in mngr.toml:
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build an SSH provider instance.
-
-        ``is_for_host_creation`` is ignored: the SSH backend has no one-time
-        backend resources to bootstrap.
-        """
-        del is_for_host_creation
         if not isinstance(config, SSHProviderConfig):
             raise ConfigStructureError(f"Expected SSHProviderConfig, got {type(config).__name__}")
         host_dir = config.host_dir

@@ -1178,7 +1178,7 @@ def test_construct_modal_provider_disables_itself_when_env_missing_and_not_creat
             config,
             modal_mngr_ctx,
             modal,
-            is_for_host_creation=False,
+            is_environment_creation_allowed=False,
         )
 
     # Verify the read-flow path did NOT create the Modal env behind our back.
@@ -1189,8 +1189,8 @@ def test_construct_modal_provider_bootstraps_env_when_for_host_creation(
     modal_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
 ) -> None:
     """The create-host path is the one place that *is* allowed to bootstrap a
-    missing Modal environment. ``is_for_host_creation=True`` opts in: the
-    backend calls ``_create_environment`` and construction succeeds.
+    missing Modal environment. ``is_environment_creation_allowed=True`` opts
+    in: the backend calls ``_create_environment`` and construction succeeds.
     """
     modal = _NoAutoCreateModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
     config = ModalProviderConfig(
@@ -1206,7 +1206,7 @@ def test_construct_modal_provider_bootstraps_env_when_for_host_creation(
         config,
         modal_mngr_ctx,
         modal,
-        is_for_host_creation=True,
+        is_environment_creation_allowed=True,
     )
 
     assert isinstance(instance, ModalProviderInstance)

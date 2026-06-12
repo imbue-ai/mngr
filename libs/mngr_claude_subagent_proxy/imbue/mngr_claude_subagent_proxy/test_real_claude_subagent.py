@@ -338,7 +338,7 @@ def _mngr_subprocess_env_deny_mode(
     Adds ``mode = "DENY"`` to the ``[plugins.claude_subagent_proxy]`` table the
     base settings already create (which also enables the opt-in plugin). With
     this setting, on_after_provisioning installs only the PreToolUse:Agent deny
-    hook; no PostToolUse, SessionStart reaper, mngr-proxy.md, or stop-hook
+    hook; no PostToolUse, SessionStart reaper, mngr-proxy/proxy.md, or stop-hook
     guarding.
     """
     return _build_mngr_subprocess_env(
@@ -942,8 +942,8 @@ def test_plan_mode_propagates_to_subagent(
 #
 # In deny mode the plugin replaces its proxy machinery with a single
 # PreToolUse:Agent hook that DENIES the Task tool with a short
-# skill-pointer reason directing Claude at the `mngr-subagents` skill.
-# The skill (installed at `.claude/skills/mngr-subagents/SKILL.md`)
+# skill-pointer reason directing Claude at the `mngr-proxy` skill.
+# The skill (installed at `.claude/skills/mngr-proxy/SKILL.md`)
 # teaches the two-command `mngr create` + `subagent_wait` protocol
 # Claude is expected to run itself via Bash; the copy-pasteable commands
 # live in the skill, not in the deny reason.
@@ -996,11 +996,11 @@ def test_deny_mode_intercepts_task_with_deny_reason(
        hook plus the shared SessionStart reaper (the same label-driven
        ``hooks/reap.py`` PROXY uses), and crucially does NOT have the
        PROXY-only spawn / cleanup hooks.
-    2. ``.claude/agents/mngr-proxy.md`` is NOT written (no Haiku
+    2. ``.claude/agents/mngr-proxy/proxy.md`` is NOT written (no Haiku
        dispatcher needed in deny mode).
     3. When the parent Claude agent calls Task, the parent's transcript
        contains the deny-reason text (``deny mode`` /
-       ``mngr-subagents``) -- proving both that the model attempted
+       ``mngr-proxy``) -- proving both that the model attempted
        Task (else the PreToolUse hook would not have fired) and that
        our deny hook returned the expected short skill-pointer reason.
     4. **Claude follows the skill protocol and successfully spawns a
@@ -1056,8 +1056,8 @@ def test_deny_mode_intercepts_task_with_deny_reason(
             "Parent's managed settings STILL contain the cleanup hook in deny mode."
         )
 
-        # mngr-proxy.md is the Haiku dispatcher; deny mode does not need it.
-        proxy_md = _source_repo / ".claude" / "agents" / "mngr-proxy.md"
+        # mngr-proxy/proxy.md is the Haiku dispatcher; deny mode does not need it.
+        proxy_md = _source_repo / ".claude" / "agents" / "mngr-proxy" / "proxy.md"
         assert not proxy_md.exists(), (
             f"Deny mode wrote the Haiku-dispatcher agent definition at {proxy_md}. "
             f"It should not be written -- there is no Haiku to dispatch to in deny mode."
@@ -1095,7 +1095,7 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         transcript = _agent_transcript_text(final_parent, temp_host_dir)
         deny_reason_markers = [
             "deny mode",
-            "mngr-subagents",
+            "mngr-proxy",
         ]
         missing = [m for m in deny_reason_markers if m not in transcript]
         assert not missing, (
@@ -1143,7 +1143,7 @@ def test_deny_mode_intercepts_task_with_deny_reason(
         assert children_by_label, (
             f"Parent {parent_name!r} (id={agent_id!r}) did not spawn any child mngr "
             f"agent carrying labels.{PARENT_ID_LABEL}=<parent_id>. Either Claude did "
-            f"not follow the mngr-subagents skill after the Task deny, or it spawned "
+            f"not follow the mngr-proxy skill after the Task deny, or it spawned "
             f"a child without the parent-id label (skill bug). DENY mode's user-visible "
             f"promise is that Claude can delegate via mngr after the deny -- failing "
             f"this assertion means the feature is broken end-to-end even though the "

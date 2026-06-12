@@ -88,12 +88,17 @@ def make_modal_provider_real(
         user_id=user_id_override,
     )
     # Acceptance fixtures always need to bootstrap the per-session Modal env,
-    # so pass is_for_host_creation=True to authorize env creation.
-    instance = ModalProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("modal-test"),
+    # so call bootstrap_for_host_creation before build_provider_instance.
+    instance_name = ProviderInstanceName("modal-test")
+    ModalProviderBackend.bootstrap_for_host_creation(
+        name=instance_name,
         config=config,
         mngr_ctx=mngr_ctx,
-        is_for_host_creation=True,
+    )
+    instance = ModalProviderBackend.build_provider_instance(
+        name=instance_name,
+        config=config,
+        mngr_ctx=mngr_ctx,
     )
     if not isinstance(instance, ModalProviderInstance):
         raise ConfigStructureError(f"Expected ModalProviderInstance, got {type(instance).__name__}")

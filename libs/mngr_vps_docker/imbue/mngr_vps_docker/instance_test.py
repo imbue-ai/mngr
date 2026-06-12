@@ -1,10 +1,19 @@
 """Tests for VPS Docker provider instance utilities."""
 
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
+from typing import cast
 
 import pytest
+from pydantic import ConfigDict
+from pydantic import Field
 
+from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_vps_docker.container_setup import emit_docker_build_output
@@ -12,94 +21,206 @@ from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps_docker.container_setup import resolve_dockerfile_paths
+from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import _parse_build_args
+from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
+from imbue.mngr_vps_docker.instance import extract_presence_flag
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 
 _DEFAULT_REGION = "ewr"
 _DEFAULT_PLAN = "vc2-1c-1gb"
-_DEFAULT_OS_ID = 2136
 
 
-def _parse_with_defaults(build_args: list[str] | None) -> ParsedVpsBuildOptions:
-    return _parse_build_args(
+def _parse_with_vultr_defaults(build_args: list[str] | None) -> ParsedVpsBuildOptions:
+    """Most parser tests run under the Vultr prefix because it's the simplest case."""
+    return parse_vps_build_args(
         build_args,
+        provider_prefix="vultr",
         default_region=_DEFAULT_REGION,
         default_plan=_DEFAULT_PLAN,
-        default_os_id=_DEFAULT_OS_ID,
+        plan_arg_name="plan",
     )
 
 
 def test_parse_build_args_defaults_when_none() -> None:
-    parsed = _parse_with_defaults(None)
+    parsed = _parse_with_vultr_defaults(None)
     assert parsed.region == "ewr"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
     assert parsed.git_depth is None
 
 
 def test_parse_build_args_defaults_when_empty() -> None:
-    parsed = _parse_with_defaults([])
+    parsed = _parse_with_vultr_defaults([])
     assert parsed.region == "ewr"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
 
 
-def test_parse_build_args_vps_region() -> None:
-    parsed = _parse_with_defaults(["--vps-region=lax"])
+def test_parse_build_args_vultr_region() -> None:
+    parsed = _parse_with_vultr_defaults(["--vultr-region=lax"])
     assert parsed.region == "lax"
     assert parsed.plan == "vc2-1c-1gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ()
 
 
-def test_parse_build_args_vps_plan() -> None:
-    parsed = _parse_with_defaults(["--vps-plan=vc2-2c-4gb"])
+def test_parse_build_args_vultr_plan() -> None:
+    parsed = _parse_with_vultr_defaults(["--vultr-plan=vc2-2c-4gb"])
     assert parsed.plan == "vc2-2c-4gb"
 
 
-def test_parse_build_args_vps_os() -> None:
-    parsed = _parse_with_defaults(["--vps-os=9999"])
-    assert parsed.os_id == 9999
-
-
 def test_parse_build_args_docker_args_passthrough() -> None:
-    parsed = _parse_with_defaults(["--file=Dockerfile", "."])
+    parsed = _parse_with_vultr_defaults(["--file=Dockerfile", "."])
     assert parsed.region == "ewr"
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 
 def test_parse_build_args_mixed_vps_and_docker() -> None:
-    parsed = _parse_with_defaults(
-        ["--vps-plan=vc2-2c-4gb", "--file=Dockerfile", "--vps-region=lax", "."],
+    parsed = _parse_with_vultr_defaults(
+        ["--vultr-plan=vc2-2c-4gb", "--file=Dockerfile", "--vultr-region=lax", "."],
     )
     assert parsed.region == "lax"
     assert parsed.plan == "vc2-2c-4gb"
-    assert parsed.os_id == 2136
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 
 
-def test_parse_build_args_all_vps_overrides() -> None:
-    parsed = _parse_with_defaults(
-        ["--vps-region=sjc", "--vps-plan=vc2-4c-8gb", "--vps-os=1234"],
+def test_parse_build_args_all_vultr_overrides() -> None:
+    parsed = _parse_with_vultr_defaults(
+        ["--vultr-region=sjc", "--vultr-plan=vc2-4c-8gb"],
     )
     assert parsed.region == "sjc"
     assert parsed.plan == "vc2-4c-8gb"
-    assert parsed.os_id == 1234
     assert parsed.docker_build_args == ()
 
 
-def test_parse_build_args_rejects_unknown_vps_arg() -> None:
-    with pytest.raises(MngrError, match="Unknown VPS build arg.*--vps-regiom"):
-        _parse_with_defaults(["--vps-regiom=ewr"])
+def test_parse_build_args_rejects_unknown_vultr_arg() -> None:
+    with pytest.raises(MngrError, match="Unknown vultr build arg.*--vultr-regiom"):
+        _parse_with_vultr_defaults(["--vultr-regiom=ewr"])
+
+
+def test_parse_build_args_rejects_dropped_vps_prefix_with_migration_hint() -> None:
+    """The old shared --vps-* prefix raises a migration error pointing at the new per-provider name."""
+    with pytest.raises(MngrError, match="no longer supported.*--vultr-region=.*--vultr-plan="):
+        _parse_with_vultr_defaults(["--vps-region=ewr"])
+
+
+def test_parse_build_args_rejects_dropped_vps_os_arg() -> None:
+    """--vps-os= used to override the Vultr OS id / OVH image name; now rejected with a guiding error.
+
+    The error must mention the per-provider config field that replaced it
+    (default_os_id / default_image_name / default_ami_id), not just say
+    "unknown arg".
+    """
+    with pytest.raises(MngrError, match="no longer supported.*default_os_id.*default_image_name.*default_ami_id"):
+        _parse_with_vultr_defaults(["--vps-os=9999"])
+
+
+def test_parse_build_args_rejects_vps_image_arg_with_guidance() -> None:
+    """The dedicated error also catches a plausible alternative spelling (--vps-image=)."""
+    with pytest.raises(MngrError, match="no longer supported"):
+        _parse_with_vultr_defaults(["--vps-image=debian-12"])
+
+
+def test_parse_build_args_rejects_vps_ami_arg_with_guidance() -> None:
+    """And catches the AWS-flavoured spelling (--vps-ami=)."""
+    with pytest.raises(MngrError, match="no longer supported"):
+        _parse_with_vultr_defaults(["--vps-ami=ami-0123abcd"])
 
 
 def test_parse_build_args_git_depth() -> None:
-    parsed = _parse_with_defaults(["--git-depth=1", "--file=Dockerfile", "."])
+    parsed = _parse_with_vultr_defaults(["--git-depth=1", "--file=Dockerfile", "."])
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_parse_build_args_aws_prefix_uses_instance_type_arg_name() -> None:
+    """When provider_prefix='aws' and plan_arg_name='instance-type', --aws-instance-type= drives plan."""
+    parsed = parse_vps_build_args(
+        ["--aws-region=us-east-1", "--aws-instance-type=t3.medium"],
+        provider_prefix="aws",
+        default_region="us-west-2",
+        default_plan="t3.small",
+        plan_arg_name="instance-type",
+    )
+    assert parsed.region == "us-east-1"
+    assert parsed.plan == "t3.medium"
+
+
+def test_parse_build_args_aws_rejects_aws_plan() -> None:
+    """`--aws-plan=` is not the AWS arg name; it's `--aws-instance-type=`. The error should be specific."""
+    with pytest.raises(MngrError, match="Unknown aws build arg.*--aws-plan"):
+        parse_vps_build_args(
+            ["--aws-plan=t3.medium"],
+            provider_prefix="aws",
+            default_region="us-east-1",
+            default_plan="t3.small",
+            plan_arg_name="instance-type",
+        )
+
+
+# =============================================================================
+# extract_presence_flag (composable helper for boolean opt-in flags)
+# =============================================================================
+
+
+def test_extract_presence_flag_returns_false_when_absent() -> None:
+    """Default behavior: no occurrence -> (False, args verbatim)."""
+    present, remaining = extract_presence_flag(["--file=Dockerfile", "."], "--aws-spot")
+    assert present is False
+    assert remaining == ["--file=Dockerfile", "."]
+
+
+def test_extract_presence_flag_returns_true_and_strips_when_present() -> None:
+    """Bare flag occurrence -> (True, args with flag removed)."""
+    present, remaining = extract_presence_flag(
+        ["--file=Dockerfile", "--aws-spot", "."],
+        "--aws-spot",
+    )
+    assert present is True
+    assert remaining == ["--file=Dockerfile", "."]
+
+
+def test_extract_presence_flag_rejects_value_bearing_form() -> None:
+    """``--aws-spot=anything`` -> error (clearer than silently accepting either form)."""
+    with pytest.raises(MngrError, match="presence-only flag"):
+        extract_presence_flag(["--aws-spot=true"], "--aws-spot")
+
+
+# =============================================================================
+# MinimalVpsDockerProvider._parse_build_args (no-provisioning, no-prefix shape)
+# =============================================================================
+
+
+def test_minimal_vps_docker_provider_parse_build_args_empty() -> None:
+    """No build args -> no git_depth, no docker args; region/plan defaults are unused sentinels."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(None)
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ()
+
+
+def test_minimal_vps_docker_provider_parse_build_args_extracts_git_depth() -> None:
+    """--git-depth=N is consumed and surfaced separately; not forwarded to docker."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(["--git-depth=1", "--file=Dockerfile", "."])
+    assert parsed.git_depth == 1
+    assert parsed.docker_build_args == ("--file=Dockerfile", ".")
+
+
+def test_minimal_vps_docker_provider_parse_build_args_passes_through_unknown() -> None:
+    """Docker flags and positional args pass through verbatim."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    parsed = minimal._parse_build_args(["--build-arg=FOO=bar", "--no-cache", "."])
+    assert parsed.git_depth is None
+    assert parsed.docker_build_args == ("--build-arg=FOO=bar", "--no-cache", ".")
+
+
+def test_minimal_vps_docker_provider_parse_build_args_rejects_dropped_vps_prefix() -> None:
+    """A caller still using --vps-* gets a clear migration error rather than silently forwarding to docker."""
+    minimal = MinimalVpsDockerProvider.model_construct()
+    with pytest.raises(MngrError, match="no longer supported"):
+        minimal._parse_build_args(["--vps-region=ewr"])
 
 
 def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:
@@ -193,58 +314,64 @@ _HOST_ID = HostId.generate()
 
 def test_build_vps_tags_emits_baseline_when_extras_empty() -> None:
     """No MNGR_VPS_EXTRA_TAGS -> just the two always-on tags."""
-    assert build_vps_tags(_HOST_ID, "vultr", "") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=vultr",
-    ]
+    assert build_vps_tags(_HOST_ID, "vultr", "") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "vultr",
+    }
 
 
 def test_build_vps_tags_appends_single_extra() -> None:
-    """One ``key=value`` extra tag is appended verbatim."""
-    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=vultr",
-        "minds_env=dev-josh",
-    ]
+    """One ``key=value`` extra tag is merged in."""
+    assert build_vps_tags(_HOST_ID, "vultr", "minds_env=dev-josh") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "vultr",
+        "minds_env": "dev-josh",
+    }
 
 
 def test_build_vps_tags_appends_multiple_comma_separated_extras() -> None:
-    """Comma-separated extras are split + appended in order."""
-    assert build_vps_tags(_HOST_ID, "vultr", "a=1,b=2,c=3") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=vultr",
-        "a=1",
-        "b=2",
-        "c=3",
-    ]
+    """Comma-separated extras are split + merged in."""
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,b=2,c=3") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "vultr",
+        "a": "1",
+        "b": "2",
+        "c": "3",
+    }
 
 
 def test_build_vps_tags_strips_whitespace_around_extras() -> None:
     """Whitespace around each comma-separated entry is trimmed."""
-    assert build_vps_tags(_HOST_ID, "vultr", " a=1 , b=2 ") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=vultr",
-        "a=1",
-        "b=2",
-    ]
+    assert build_vps_tags(_HOST_ID, "vultr", " a=1 , b=2 ") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "vultr",
+        "a": "1",
+        "b": "2",
+    }
 
 
 def test_build_vps_tags_skips_blank_entries_from_trailing_commas() -> None:
     """Trailing / doubled commas don't emit empty tags."""
-    assert build_vps_tags(_HOST_ID, "vultr", "a=1,,b=2,") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=vultr",
-        "a=1",
-        "b=2",
-    ]
+    assert build_vps_tags(_HOST_ID, "vultr", "a=1,,b=2,") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "vultr",
+        "a": "1",
+        "b": "2",
+    }
 
 
 def test_build_vps_tags_uses_provided_provider_name() -> None:
     """The provider name is interpolated, not hard-coded."""
-    assert build_vps_tags(_HOST_ID, "ovh", "") == [
-        f"mngr-host-id={_HOST_ID}",
-        "mngr-provider=ovh",
-    ]
+    assert build_vps_tags(_HOST_ID, "ovh", "") == {
+        "mngr-host-id": str(_HOST_ID),
+        "mngr-provider": "ovh",
+    }
+
+
+def test_build_vps_tags_rejects_entry_without_equals() -> None:
+    """Extras missing an ``=`` separator are an error, not silently dropped."""
+    with pytest.raises(MngrError, match="Invalid VPS extra tag"):
+        build_vps_tags(_HOST_ID, "vultr", "bare-tag")
 
 
 def test_redact_secret_env_replaces_known_var_value() -> None:
@@ -320,3 +447,179 @@ def test_emit_docker_build_output_drops_whitespace_only_lines() -> None:
         emit_docker_build_output("   ")
         emit_docker_build_output("\n")
     assert log_output.getvalue() == ""
+
+
+# =============================================================================
+# _wait_for_cloud_init_marker
+# =============================================================================
+
+
+class _ScriptedOuter(MutableModel):
+    """Outer host whose ``execute_idempotent_command`` is driven by a callable.
+
+    ``responder`` is invoked on each call with the issued command and returns
+    either a ``CommandResult`` (used as the return value) or raises an
+    exception (propagated to the caller). This lets one test mix exceptions
+    and successful responses in any order.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    responder: Callable[[str], CommandResult] = Field(description="Per-call responder")
+    call_count: int = Field(default=0, description="Number of execute_idempotent_command calls observed")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Any = None,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.call_count += 1
+        return self.responder(command)
+
+
+def _scripted_outer(responder: Callable[[str], CommandResult]) -> tuple[OuterHostInterface, _ScriptedOuter]:
+    """Build a ``_ScriptedOuter`` typed as ``OuterHostInterface``.
+
+    Returns the stub typed as the interface (for the helper under test) plus
+    the concrete stub (for the test to introspect call_count).
+    """
+    stub = _ScriptedOuter(responder=responder)
+    return cast(OuterHostInterface, stub), stub
+
+
+class _VirtualClock(MutableModel):
+    """Injectable clock/sleeper pair backed by a single float counter.
+
+    ``now()`` returns the current virtual time. ``sleep(seconds)`` advances
+    virtual time by ``seconds`` (clamped to a positive minimum so timeouts
+    are still reached when callers pass ``0.0``). Combined, these let tests
+    fully control the elapsed-time logic of poll loops without any real
+    sleeps.
+    """
+
+    elapsed_seconds: float = Field(default=0.0, description="Current virtual time in seconds")
+
+    def now(self) -> float:
+        return self.elapsed_seconds
+
+    def sleep(self, seconds: float) -> None:
+        self.elapsed_seconds += max(seconds, 0.001)
+
+
+def test_wait_for_cloud_init_marker_returns_when_marker_appears() -> None:
+    """Returns immediately on the first poll where /var/run/mngr-ready exists."""
+
+    def responder(_command: str) -> CommandResult:
+        return CommandResult(stdout="", stderr="", success=True)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 1
+
+
+def test_wait_for_cloud_init_marker_keeps_polling_while_marker_missing() -> None:
+    """Keeps polling as long as the marker is missing; returns once it appears."""
+    poll_count = 0
+
+    def responder(_command: str) -> CommandResult:
+        nonlocal poll_count
+        poll_count += 1
+        success = poll_count >= 3
+        return CommandResult(stdout="", stderr="", success=success)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 3
+
+
+def test_wait_for_cloud_init_marker_swallows_transient_connection_errors() -> None:
+    """Per-poll ``HostConnectionError`` must NOT abort the wait loop.
+
+    Regression test for the cloud-init bootstrap reliability fix: while
+    cloud-init restarts sshd to apply the MaxSessions/MaxStartups tuning,
+    an in-flight ``execute_idempotent_command`` can surface as
+    ``HostConnectionError``. The wait loop should swallow it, sleep, and
+    retry until the marker appears or ``timeout_seconds`` is exhausted.
+    """
+    poll_count = 0
+
+    def responder(_command: str) -> CommandResult:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            raise HostConnectionError("connection reset during sshd reload")
+        if poll_count == 2:
+            return CommandResult(stdout="", stderr="", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    _wait_for_cloud_init_marker(
+        outer,
+        timeout_seconds=10.0,
+        poll_interval_seconds=0.0,
+        clock=clock.now,
+        sleeper=clock.sleep,
+    )
+    assert stub.call_count == 3
+
+
+def test_wait_for_cloud_init_marker_raises_mngr_error_on_timeout() -> None:
+    """When the marker never appears within the timeout, raise ``MngrError``."""
+
+    def responder(_command: str) -> CommandResult:
+        return CommandResult(stdout="", stderr="", success=False)
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    with pytest.raises(MngrError, match="Cloud-init did not complete"):
+        _wait_for_cloud_init_marker(
+            outer,
+            timeout_seconds=10.0,
+            poll_interval_seconds=1.0,
+            clock=clock.now,
+            sleeper=clock.sleep,
+        )
+    # The virtual clock advances by 1.0s per sleep, so the loop runs ~10 times.
+    assert stub.call_count >= 1
+
+
+def test_wait_for_cloud_init_marker_raises_on_persistent_connection_error() -> None:
+    """If every poll raises ``HostConnectionError`` until the timeout, raise ``MngrError``.
+
+    The connection errors are absorbed per-poll, so the failure mode after
+    exhausting the timeout budget is the normal "did not complete" error,
+    not a leaked ``HostConnectionError``.
+    """
+
+    def responder(_command: str) -> CommandResult:
+        raise HostConnectionError("sshd never recovered")
+
+    outer, stub = _scripted_outer(responder)
+    clock = _VirtualClock()
+    with pytest.raises(MngrError, match="Cloud-init did not complete"):
+        _wait_for_cloud_init_marker(
+            outer,
+            timeout_seconds=10.0,
+            poll_interval_seconds=1.0,
+            clock=clock.now,
+            sleeper=clock.sleep,
+        )
+    assert stub.call_count >= 2

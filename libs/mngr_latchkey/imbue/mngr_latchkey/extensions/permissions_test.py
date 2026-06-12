@@ -195,6 +195,27 @@ def test_available_for_service_exposes_descriptions(node_extension: str) -> None
     _as_nonempty_str(slack_read_all["description"])
 
 
+def test_available_injects_any_permission_for_every_scope(node_extension: str) -> None:
+    """The catch-all ``any`` permission is injected at index 0 of every scope.
+
+    A service whose catalog lists at least one permission (Slack) and a
+    service whose catalog lists none (Linear) must both surface ``any``
+    as the first available permission, so a caller can always request
+    unrestricted access under a known scope.
+    """
+    for service in ("slack", "linear"):
+        status, payload = _get_json(f"{node_extension}/permissions/available/{service}")
+        assert status == 200, service
+        entries = _as_list(payload)
+        assert len(entries) > 0, service
+        for entry in entries:
+            permissions = [_as_dict(p) for p in _as_list(_as_dict(entry)["permissions"])]
+            assert permissions[0]["name"] == "any", service
+            # ``any`` appears exactly once even if the catalog ever lists it.
+            assert [p["name"] for p in permissions].count("any") == 1, service
+            _as_nonempty_str(permissions[0]["description"])
+
+
 def test_available_for_unknown_service_returns_404(node_extension: str) -> None:
     status, _ = _get_json(f"{node_extension}/permissions/available/not-a-real-service")
 
