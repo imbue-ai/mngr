@@ -3567,9 +3567,6 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
     rather than being wrapped in a ConcurrencyExceptionGroup and reported mid-provisioning
     as an "Unexpected error".
     """
-    # At least one projects dir must exist so resolution reports "not found" rather than
-    # "no projects directory found".
-    (Path.home() / ".claude" / "projects" / "some-project").mkdir(parents=True)
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
@@ -3578,6 +3575,8 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
     )
+    # Pin config-dir resolution to the isolated test HOME (~/.claude) so the search is
+    # deterministic even when CLAUDE_CONFIG_DIR is set (e.g. inside an mngr agent).
     with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
         with pytest.raises(UserInputError, match="Session nonexistent-session not found"):
             on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
