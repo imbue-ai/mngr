@@ -69,6 +69,9 @@ from imbue.mngr_smolvm.host_store import SmolvmMachineConfig
 from imbue.mngr_smolvm.provisioning import allocate_free_tcp_port
 from imbue.mngr_smolvm.provisioning import build_shutdown_script
 from imbue.mngr_smolvm.provisioning import build_ssh_provisioning_script
+from imbue.mngr_smolvm.smolvm_cli import check_smolvm_data_disk_support
+from imbue.mngr_smolvm.smolvm_cli import check_smolvm_installed
+from imbue.mngr_smolvm.smolvm_cli import check_smolvm_version
 from imbue.mngr_smolvm.smolvm_cli import smolvm_machine_create
 from imbue.mngr_smolvm.smolvm_cli import smolvm_machine_delete
 from imbue.mngr_smolvm.smolvm_cli import smolvm_machine_exec
@@ -103,31 +106,42 @@ class _ParsedBuildArgs(FrozenModel):
 
     image_archive: Path | None = Field(default=None, description="Path to a docker-save image archive")
     from_pack: Path | None = Field(default=None, description="Path to an existing .smolmachine sidecar")
+    dockerfile: Path | None = Field(default=None, description="Path to a Dockerfile to build and import")
 
 
 @pure
 def _parse_build_args(build_args: tuple[str, ...]) -> _ParsedBuildArgs:
-    """Parse the provider build args (--image-archive PATH, --from PATH)."""
-    image_archive: Path | None = None
-    from_pack: Path | None = None
+    """Parse the provider build args (--image-archive PATH, --from PATH, --dockerfile PATH).
+
+    Each flag accepts its value either as a separate argument or inline as
+    ``--flag=value`` (the form template ``build_arg`` lists typically use).
+    """
+    values_by_flag: dict[str, Path] = {}
+    known_flags = ("--image-archive", "--from", "--dockerfile")
     idx = 0
     while idx < len(build_args):
         arg = build_args[idx]
-        if arg == "--image-archive":
-            if idx + 1 >= len(build_args):
-                raise MngrError("--image-archive requires a PATH argument")
-            image_archive = Path(build_args[idx + 1])
-            idx += 2
-        elif arg == "--from":
-            if idx + 1 >= len(build_args):
-                raise MngrError("--from requires a PATH argument")
-            from_pack = Path(build_args[idx + 1])
-            idx += 2
+        flag, separator, inline_value = arg.partition("=")
+        if flag not in known_flags:
+            raise MngrError(
+                f"Unsupported smolvm build arg: {arg} "
+                "(supported: --image-archive PATH, --from PATH, --dockerfile PATH)"
+            )
+        if separator == "=":
+            values_by_flag[flag] = Path(inline_value)
+            idx += 1
         else:
-            raise MngrError(f"Unsupported smolvm build arg: {arg} (supported: --image-archive PATH, --from PATH)")
-    if image_archive is not None and from_pack is not None:
-        raise MngrError("--image-archive and --from are mutually exclusive")
-    return _ParsedBuildArgs(image_archive=image_archive, from_pack=from_pack)
+            if idx + 1 >= len(build_args):
+                raise MngrError(f"{flag} requires a PATH argument")
+            values_by_flag[flag] = Path(build_args[idx + 1])
+            idx += 2
+    if len(values_by_flag) > 1:
+        raise MngrError("--image-archive, --from, and --dockerfile are mutually exclusive")
+    return _ParsedBuildArgs(
+        image_archive=values_by_flag.get("--image-archive"),
+        from_pack=values_by_flag.get("--from"),
+        dockerfile=values_by_flag.get("--dockerfile"),
+    )
 
 
 class SmolvmProviderInstance(BaseProviderInstance):
@@ -154,9 +168,6 @@ class SmolvmProviderInstance(BaseProviderInstance):
         """
         if self._smolvm_checked:
             return
-        from imbue.mngr_smolvm.smolvm_cli import check_smolvm_installed
-        from imbue.mngr_smolvm.smolvm_cli import check_smolvm_version
-
         check_smolvm_installed(self.name, self.config.smolvm_command)
         check_smolvm_version(
             self.mngr_ctx.concurrency_group,
@@ -168,8 +179,6 @@ class SmolvmProviderInstance(BaseProviderInstance):
 
     def _ensure_data_disk_support(self) -> None:
         """Check the btrfs data-disk capability (only needed in the non-exposed layout)."""
-        from imbue.mngr_smolvm.smolvm_cli import check_smolvm_data_disk_support
-
         check_smolvm_data_disk_support(self.mngr_ctx.concurrency_group, self.name, self.config.smolvm_command)
 
     @property
@@ -480,6 +489,60 @@ class SmolvmProviderInstance(BaseProviderInstance):
         output_path.unlink(missing_ok=True)
         return sidecar_path
 
+    def _pack_from_dockerfile_cached(self, dockerfile: Path) -> Path:
+        """Build a Dockerfile with docker, export the image, and pack it.
+
+        The cache key is the built image's content id, so unchanged builds
+        (docker's own layer cache makes the build itself cheap) skip the
+        export and pack steps entirely. Requires docker on the host.
+        """
+        if not dockerfile.exists():
+            raise MngrError(f"Dockerfile not found: {dockerfile}")
+        context_dir = dockerfile.resolve().parent
+        with log_span("Building docker image from {}", dockerfile):
+            build_result = self.mngr_ctx.concurrency_group.run_process_to_completion(
+                ["docker", "build", "-q", "-f", str(dockerfile.resolve()), str(context_dir)],
+                timeout=3600.0,
+                is_checked_after=False,
+            )
+        if build_result.returncode != 0:
+            raise MngrError(f"docker build failed: {build_result.stderr.strip()}")
+        image_id = build_result.stdout.strip()
+        image_id_hex = image_id.removeprefix("sha256:")
+        if not image_id_hex:
+            raise MngrError("docker build produced no image id")
+
+        self._packs_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = self._packs_dir / f"{image_id_hex}.smolmachine"
+        if sidecar_path.exists():
+            logger.debug("Using cached pack for image {}: {}", image_id_hex[:12], sidecar_path)
+            return sidecar_path
+
+        archive_path = self._packs_dir / f"{image_id_hex}.tar"
+        try:
+            with log_span("Exporting docker image {} to archive", image_id_hex[:12]):
+                save_result = self.mngr_ctx.concurrency_group.run_process_to_completion(
+                    ["docker", "save", image_id, "-o", str(archive_path)],
+                    timeout=1800.0,
+                    is_checked_after=False,
+                )
+            if save_result.returncode != 0:
+                raise MngrError(f"docker save failed: {save_result.stderr.strip()}")
+            output_path = self._packs_dir / image_id_hex
+            with log_span("Packing docker image {}", image_id_hex[:12]):
+                smolvm_pack_create_from_archive(
+                    self.mngr_ctx.concurrency_group,
+                    self.config.smolvm_command,
+                    archive_path,
+                    output_path,
+                )
+            if not sidecar_path.exists():
+                raise MngrError(f"pack create did not produce expected sidecar: {sidecar_path}")
+            output_path.unlink(missing_ok=True)
+        finally:
+            archive_path.unlink(missing_ok=True)
+        return sidecar_path
+
     # =========================================================================
     # Core Lifecycle Methods
     # =========================================================================
@@ -521,6 +584,8 @@ class SmolvmProviderInstance(BaseProviderInstance):
         from_pack: Path | None = parsed_build_args.from_pack
         if parsed_build_args.image_archive is not None:
             from_pack = self._pack_from_archive_cached(parsed_build_args.image_archive)
+        if parsed_build_args.dockerfile is not None:
+            from_pack = self._pack_from_dockerfile_cached(parsed_build_args.dockerfile)
         image_reference = str(image) if image is not None and from_pack is None else None
 
         # Pre-generate the keys recorded in known_hosts and injected into the

@@ -69,6 +69,9 @@ PERMISSIONS_PREFERENCES_REMOTE_PATH: Final[str] = "/mngr/code/runtime/memory/per
 EXPECTED_CREATION_DURATION_SECONDS_BY_LAUNCH_MODE: Final[dict[LaunchMode, float]] = {
     LaunchMode.DOCKER: 30.0,
     LaunchMode.LIMA: 600.0,
+    # smolvm boots in well under a second; the budget is dominated by the
+    # image import (docker save -> pack) on a cold cache.
+    LaunchMode.SMOLVM: 120.0,
     LaunchMode.CLOUD: 300.0,
     LaunchMode.IMBUE_CLOUD: 30.0,
 }

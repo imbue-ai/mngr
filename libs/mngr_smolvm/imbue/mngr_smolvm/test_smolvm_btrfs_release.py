@@ -27,6 +27,8 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_smolvm.config import SmolvmProviderConfig
+from imbue.mngr_smolvm.instance import SmolvmProviderInstance
 
 pytestmark = [pytest.mark.release, pytest.mark.smolvm]
 
@@ -71,9 +73,6 @@ def test_smolvm_btrfs_host_full_lifecycle(
     monkeypatch.setenv("XDG_CACHE_HOME", str(short_state_dir / "cache"))
     monkeypatch.setenv("XDG_DATA_HOME", str(short_state_dir / "data"))
 
-    from imbue.mngr_smolvm.config import SmolvmProviderConfig
-    from imbue.mngr_smolvm.instance import SmolvmProviderInstance
-
     config = SmolvmProviderConfig(
         smolvm_command=os.environ.get("MNGR_SMOLVM_COMMAND", "smolvm"),
         is_host_data_volume_exposed=False,
@@ -86,7 +85,7 @@ def test_smolvm_btrfs_host_full_lifecycle(
         mngr_ctx=temp_mngr_ctx,
         config=config,
     )
-    host_name = HostName(f"rt-{uuid.uuid4().hex[:10]}")
+    host_name = HostName(f"rt-{uuid.uuid4().hex}")
 
     host = provider.create_host(name=host_name)
     try:

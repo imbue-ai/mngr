@@ -132,6 +132,12 @@ def test_parse_build_args_from_pack() -> None:
     assert str(parsed.from_pack) == "/tmp/x.smolmachine"
 
 
+def test_parse_build_args_dockerfile_inline_form() -> None:
+    parsed = _parse_build_args(("--dockerfile=Dockerfile",))
+    assert parsed.dockerfile is not None
+    assert str(parsed.dockerfile) == "Dockerfile"
+
+
 def test_parse_build_args_rejects_both_sources() -> None:
     with pytest.raises(MngrError, match="mutually exclusive"):
         _parse_build_args(("--image-archive", "/tmp/img.tar", "--from", "/tmp/x.smolmachine"))

@@ -45,7 +45,9 @@ Supported build arguments for the smolvm provider:
                         .smolmachine pack (cached by content hash) and the
                         machine is created from it.
   --from PATH           Create the host from an existing .smolmachine pack.
-When neither is given, the host runs the --image OCI reference (pulled from a
+  --dockerfile PATH     Build the Dockerfile with docker, export the image,
+                        and create the host from it (cached by image id).
+When none is given, the host runs the --image OCI reference (pulled from a
 registry), or a bare Alpine VM when no image is specified at all.
 """
 

@@ -38,6 +38,7 @@ class LaunchMode(UpperCaseStrEnum):
     DOCKER = auto()
     CLOUD = auto()
     LIMA = auto()
+    SMOLVM = auto()
     IMBUE_CLOUD = auto()
 
 
