@@ -25,7 +25,7 @@ This is the unified spec for running mngr hosts (and ultimately minds workspaces
 
 See the provider README (`libs/mngr_smolvm/README.md`) for the user-facing surface. Key decisions:
 
-- Default host (no `--image`): bare VM mode -- the Alpine agent rootfs only, with mngr base packages (sshd, tmux, git, rsync, jq) apk-installed at provision time. Re-provisioning runs on every start (idempotent) because sshd does not survive a VM stop.
+- Default host (no `--image`): bare VM mode -- the Alpine agent rootfs only, with mngr base packages (sshd, tmux, git, rsync, jq, curl) apk-installed at provision time. Re-provisioning runs on every start (idempotent) because sshd does not survive a VM stop.
 - Resource defaults mirror lima: 4 CPUs / 4 GiB / 100 GiB sparse btrfs data disk. `start_args` pass through to `smolvm machine create`; `build_args` select the image source.
 - SSH ports are allocated per host at create time and persist on the host record (smolvm pins port forwards in its machine record). Networking is always on with full egress; egress filters can be applied via pass-through start args (`--allow-cidr`, `--allow-host`).
 - Tests: unit tests run everywhere; the release test (`test_smolvm_btrfs_release.py`) skips cleanly without /dev/kvm or a data-disk-capable smolvm build and drives the full lifecycle (~8 s) on developer machines.

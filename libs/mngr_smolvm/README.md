@@ -12,7 +12,7 @@ smolvm microVM provider backend plugin for mngr. Runs agents in smolvm machines 
 ## How it works
 
 - Each mngr host is a smolvm machine named `mngr-<host>`. With no `--image`, the host is a bare Alpine VM; with `--image`, the OCI image runs as the workload container. `--image-archive PATH` (a `docker save` tarball) is converted to a cached `.smolmachine` pack and used directly, so locally built images work without a registry.
-- mngr provisions sshd inside the guest over the smolvm exec channel (installing openssh, tmux, git, rsync, jq via apk/apt on first boot), injects a pre-generated host key and its client key, and connects over a forwarded localhost port.
+- mngr provisions sshd inside the guest over the smolvm exec channel (installing openssh, tmux, git, rsync, jq, curl via apk/apt on first boot), injects a pre-generated host key and its client key, and connects over a forwarded localhost port.
 - Storage layouts: the default exposes host_dir to the host machine via virtiofs (offline file reads work while the VM is stopped); the btrfs layout (`is_host_data_volume_exposed=false`) mounts a smolvm-managed btrfs data disk at host_dir for consistent, unprivileged snapshots inside the guest.
 - Idle hosts stop themselves: the shutdown script touches `/run/smolvm/poweroff` and the smolvm guest agent syncs and powers the VM off.
 
