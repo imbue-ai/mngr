@@ -244,7 +244,7 @@ def test_prevent_bare_tmux_targets() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    rc.check_if_elif_without_else(_DIR, snapshot(1))
+    rc.check_if_elif_without_else(_DIR, snapshot(0))
 
 
 def test_prevent_inline_functions() -> None:

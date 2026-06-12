@@ -141,15 +141,16 @@ def _parse_build_args(build_args: tuple[str, ...]) -> _ParsedBuildArgs:
                 "(supported: --image-archive PATH, --from PATH, --dockerfile PATH)"
             )
         if separator == "=":
-            if not inline_value:
-                raise MngrError(f"{flag} requires a PATH argument")
-            values_by_flag[flag] = Path(inline_value)
-            idx += 1
+            # An empty inline value ("--flag=") resolves to None and is rejected below.
+            raw_value: str | None = inline_value or None
+            consumed_args = 1
         else:
-            if idx + 1 >= len(build_args):
-                raise MngrError(f"{flag} requires a PATH argument")
-            values_by_flag[flag] = Path(build_args[idx + 1])
-            idx += 2
+            raw_value = build_args[idx + 1] if idx + 1 < len(build_args) else None
+            consumed_args = 2
+        if raw_value is None:
+            raise MngrError(f"{flag} requires a PATH argument")
+        values_by_flag[flag] = Path(raw_value)
+        idx += consumed_args
     if len(values_by_flag) > 1:
         raise MngrError("--image-archive, --from, and --dockerfile are mutually exclusive")
     return _ParsedBuildArgs(
