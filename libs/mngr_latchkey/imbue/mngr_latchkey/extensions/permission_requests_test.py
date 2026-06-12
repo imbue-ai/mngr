@@ -370,9 +370,7 @@ def test_file_sharing_pattern_matches_percent_encoded_request_path(
     # ``urllib.parse.quote`` with ``safe='/'`` reproduces the WHATWG
     # path-percent-encode set for these characters (space -> %20,
     # non-ASCII -> UTF-8 %XX), matching what detent sees on the request.
-    encoded_path = urllib.parse.quote(
-        f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}", safe="/"
-    )
+    encoded_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}", safe="/")
     raw_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
     # The encoded request path matches; the raw (literal-space) path does
     # not -- the request never arrives un-encoded, and matching it would
@@ -427,9 +425,7 @@ def test_post_expands_tilde_home_path_in_file_sharing(
     assert requested_name not in schemas
     # The WebDAV pattern matches the percent-encoded expanded path.
     path_pattern = re.compile(schemas[expanded_name]["properties"]["path"]["pattern"])
-    encoded_webdav_path = urllib.parse.quote(
-        f"{_FILE_SHARING_PROXY_PATH_PREFIX}{expanded_path}", safe="/"
-    )
+    encoded_webdav_path = urllib.parse.quote(f"{_FILE_SHARING_PROXY_PATH_PREFIX}{expanded_path}", safe="/")
     assert path_pattern.fullmatch(encoded_webdav_path), encoded_webdav_path
 
 

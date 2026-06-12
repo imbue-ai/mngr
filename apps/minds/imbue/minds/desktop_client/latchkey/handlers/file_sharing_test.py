@@ -492,9 +492,7 @@ def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
     inbox = RequestInbox().add_request(event)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(
-        f"/requests/{event.event_id}/grant", data={"file_path": "~/Documents/Shared"}
-    )
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~/Documents/Shared"})
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["outcome"] == "GRANTED"
@@ -530,9 +528,7 @@ def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
     inbox = RequestInbox().add_request(event)
     client = _build_authenticated_client(tmp_path, handler, inbox)
 
-    response = client.post(
-        f"/requests/{event.event_id}/grant", data={"file_path": "~otheruser/secret.txt"}
-    )
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~otheruser/secret.txt"})
     assert response.status_code == 400
     assert "~user" in response.json()["error"]
     assert gateway_called is False
