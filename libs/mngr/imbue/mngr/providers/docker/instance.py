@@ -782,17 +782,22 @@ kill -TERM 1
 
         No-op when the image is absent -- the host used a pulled `--image`
         (no such tag), or the tag was already removed (destroy_host runs
-        before delete_host). When the image IS present, any removal failure
-        propagates so it is visible rather than silently leaking the image.
-        Snapshot images are independent `docker commit` images that retain
-        the underlying layers, so removing this tag does not break snapshot
-        restore.
+        before delete_host). A removal conflict (a container still references
+        the image -- per-host build images deduplicate to one image id across
+        hosts that build the identical default Dockerfile) is logged and
+        skipped rather than propagated, so best-effort cleanup never aborts a
+        destroy/GC run. Snapshot images are independent `docker commit` images
+        that retain the underlying layers, so removing this tag does not break
+        snapshot restore.
         """
         tag = self._build_image_tag(host_id)
         if not self._docker_client.images.list(name=tag):
             logger.trace("No build image to remove for host {}", host_id)
             return
-        self._docker_client.images.remove(tag)
+        try:
+            self._docker_client.images.remove(tag)
+        except docker.errors.DockerException as e:
+            logger.warning("Could not remove build image {} (still in use?): {}", tag, e)
 
     def _build_image(self, build_args: Sequence[str], tag: str) -> str:
         """Build a Docker image using the configured builder (docker or depot)."""
