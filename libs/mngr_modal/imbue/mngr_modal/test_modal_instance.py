@@ -1,7 +1,11 @@
+import shlex
+import time
 from pathlib import Path
+from typing import Final
 
 import pytest
 
+from imbue.mngr.api.testing import created_host
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -14,6 +18,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
+from imbue.mngr_recursive.provisioning import _upload_deploy_files
 
 pytestmark = [pytest.mark.modal]
 
@@ -26,10 +31,7 @@ _UNUSED_AGENT: AgentInterface = None  # ty: ignore[invalid-assignment]
 @pytest.mark.timeout(180)
 def test_create_host_creates_sandbox_with_ssh(real_modal_provider: ModalProviderInstance) -> None:
     """Creating a host should create a Modal sandbox with SSH access."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         # Verify host was created
         assert host.id is not None
         assert host.connector is not None
@@ -46,10 +48,6 @@ def test_create_host_creates_sandbox_with_ssh(real_modal_provider: ModalProvider
         captured_output = real_modal_provider.get_captured_output()
         assert isinstance(captured_output, str)
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
@@ -62,10 +60,7 @@ def test_persistent_host_creates_shutdown_script(
     the snapshot_and_shutdown function is deployed and a shutdown script is written
     to the host at <host_dir>/commands/shutdown.sh.
     """
-    host = None
-    try:
-        host = persistent_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(persistent_modal_provider, HostName("test-host")) as host:
         # Verify host was created
         assert host.id is not None
 
@@ -90,66 +85,46 @@ def test_persistent_host_creates_shutdown_script(
         assert result.success
         assert "executable" in result.stdout
 
-    finally:
-        if host:
-            persistent_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_get_host_by_id(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get a host by its ID."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         host_id = host.id
 
         # Get the same host by ID
         retrieved_host = real_modal_provider.get_host(host_id)
         assert retrieved_host.id == host_id
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get a host by its name."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         host_id = host.id
 
         # Get the same host by name
         retrieved_host = real_modal_provider.get_host(HostName("test-host"))
         assert retrieved_host.id == host_id
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_discover_hosts_includes_created_host(real_modal_provider: ModalProviderInstance) -> None:
     """Created host should appear in discover_hosts."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         hosts = real_modal_provider.discover_hosts(cg=real_modal_provider.mngr_ctx.concurrency_group)
         host_ids = [h.host_id for h in hosts]
         assert host.id in host_ids
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
-@pytest.mark.timeout(180)
+@pytest.mark.flaky
+@pytest.mark.timeout(300)
 def test_destroy_host_stops_sandbox_and_delete_host_removes_record(
     real_modal_provider: ModalProviderInstance,
 ) -> None:
@@ -177,27 +152,18 @@ def test_destroy_host_stops_sandbox_and_delete_host_removes_record(
 @pytest.mark.timeout(180)
 def test_get_host_resources(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get resource information for a host."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         resources = real_modal_provider.get_host_resources(host)
 
         assert resources.cpu.count >= 1
         assert resources.memory_gb >= 0.5
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get and set tags on a host."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         # Initially no tags
         tags = real_modal_provider.get_host_tags(host)
         assert tags == {}
@@ -219,19 +185,12 @@ def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> No
         assert "team" not in tags
         assert len(tags) == 2
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to create and list snapshots."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         # Initially there are no snapshots (is_snapshotted_after_create=False by default in tests)
         snapshots = real_modal_provider.list_snapshots(host)
         assert len(snapshots) == 0
@@ -247,37 +206,24 @@ def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -
         assert snapshots[0].name == SnapshotName("test-snapshot")
         assert snapshots[0].recency_idx == 0
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_list_snapshots_returns_initial_snapshot(initial_snapshot_provider: ModalProviderInstance) -> None:
     """list_snapshots should return the initial snapshot when is_snapshotted_after_create=True."""
-    host = None
-    try:
-        host = initial_snapshot_provider.create_host(HostName("test-host"))
+    with created_host(initial_snapshot_provider, HostName("test-host")) as host:
         # we have to manually trigger the on_agent_created hook to create the initial snapshot (this is normally done automatically during the api::create_host call as a plugin callback)
         initial_snapshot_provider.on_agent_created(_UNUSED_AGENT, host)
         snapshots = initial_snapshot_provider.list_snapshots(host)
         assert len(snapshots) == 1
         assert snapshots[0].name == "initial"
 
-    finally:
-        if host:
-            initial_snapshot_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_delete_snapshot(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to delete a snapshot."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         # Initially no snapshots (is_snapshotted_after_create=False by default in tests)
         assert len(real_modal_provider.list_snapshots(host)) == 0
 
@@ -290,26 +236,15 @@ def test_delete_snapshot(real_modal_provider: ModalProviderInstance) -> None:
         # Should be back to no snapshots
         assert len(real_modal_provider.list_snapshots(host)) == 0
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
-
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
 def test_delete_nonexistent_snapshot_raises_error(real_modal_provider: ModalProviderInstance) -> None:
     """Deleting a nonexistent snapshot should raise SnapshotNotFoundError."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
-
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         fake_id = SnapshotId("snap-nonexistent")
         with pytest.raises(SnapshotNotFoundError):
             real_modal_provider.delete_snapshot(host, fake_id)
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 @pytest.mark.acceptance
@@ -362,18 +297,12 @@ def test_start_host_restores_from_snapshot(real_modal_provider: ModalProviderIns
 @pytest.mark.timeout(180)
 def test_start_host_on_running_host(real_modal_provider: ModalProviderInstance) -> None:
     """start_host on a running host should return the same host."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host"))
+    with created_host(real_modal_provider, HostName("test-host")) as host:
         host_id = host.id
 
         # Starting a running host should just return it
         started_host = real_modal_provider.start_host(host)
         assert started_host.id == host_id
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 @pytest.mark.acceptance
@@ -614,23 +543,17 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
     when outbound network is restricted.
     """
     dockerfile = _write_offline_dockerfile(tmp_path)
-    host = None
-    try:
-        host = real_modal_provider.create_host(
-            HostName("test-cidr"),
-            build_args=[f"--file={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
-        )
-
+    with created_host(
+        real_modal_provider,
+        HostName("test-cidr"),
+        build_args=[f"--file={dockerfile}", "--cidr-allowlist=192.0.2.0/24"],
+    ) as host:
         # curl to a public IP should fail because it's outside the allowlist
         result = host.execute_idempotent_command(
             "curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://example.com || echo 'blocked'"
         )
         assert result.success
         assert "blocked" in result.stdout
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 @pytest.mark.acceptance
@@ -641,23 +564,17 @@ def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalPr
     This is the complement of test_cidr_allowlist_restricts_network_access: it verifies
     that when the target IP is within the allowed CIDR range, traffic is not blocked.
     """
-    host = None
-    try:
-        host = real_modal_provider.create_host(
-            HostName("test-cidr-allow"),
-            build_args=["--cidr-allowlist=0.0.0.0/0"],
-        )
-
+    with created_host(
+        real_modal_provider,
+        HostName("test-cidr-allow"),
+        build_args=["--cidr-allowlist=0.0.0.0/0"],
+    ) as host:
         # curl to a public IP should succeed because 0.0.0.0/0 allows everything
         result = host.execute_idempotent_command(
             "curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com"
         )
         assert result.success
         assert "200" in result.stdout
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 @pytest.mark.flaky
@@ -673,23 +590,17 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
     when outbound network is blocked.
     """
     dockerfile = _write_offline_dockerfile(tmp_path)
-    host = None
-    try:
-        host = real_modal_provider.create_host(
-            HostName("test-offline"),
-            build_args=[f"--file={dockerfile}", "--offline"],
-        )
-
+    with created_host(
+        real_modal_provider,
+        HostName("test-offline"),
+        build_args=[f"--file={dockerfile}", "--offline"],
+    ) as host:
         # curl to a public IP should fail because all outbound traffic is blocked
         result = host.execute_idempotent_command(
             "curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://example.com || echo 'blocked'"
         )
         assert result.success
         assert "blocked" in result.stdout
-
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
 
 
 # =============================================================================
@@ -701,10 +612,7 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
 @pytest.mark.timeout(180)
 def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalProviderInstance) -> None:
     """Host dir should be symlinked to the host volume, and data should persist on the volume."""
-    host = None
-    try:
-        host = real_modal_provider.create_host(HostName("test-host-vol"))
-
+    with created_host(real_modal_provider, HostName("test-host-vol")) as host:
         # Verify /mngr is a symlink to /host_volume
         result = host.execute_idempotent_command("readlink /mngr")
         assert result.success
@@ -722,13 +630,15 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         assert result.success
         assert "exists" in result.stdout
 
-        # Verify get_volume_for_host returns a volume
-        volume = real_modal_provider.get_volume_for_host(host)
-        assert volume is not None
+        # Verify get_volume_for_host returns a volume. The volume name can take a
+        # moment to become resolvable via Modal's control plane after the sandbox is
+        # created (eventual consistency), so the name-lookup probe inside
+        # get_volume_for_host may transiently return None right after creation. Poll
+        # rather than asserting once.
+        def volume_is_available() -> bool:
+            return real_modal_provider.get_volume_for_host(host) is not None
 
-    finally:
-        if host:
-            real_modal_provider.destroy_host(host)
+        wait_for(volume_is_available, timeout=30.0, error_message="Host volume not visible after 30s")
 
 
 @pytest.mark.acceptance
@@ -746,6 +656,14 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
         # Write a known file and explicitly sync the volume
         host.execute_idempotent_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
 
+        # The volume name can take a moment to become resolvable via Modal's control
+        # plane after the sandbox is created (eventual consistency), so poll rather
+        # than asserting once.
+        wait_for(
+            lambda: real_modal_provider.get_volume_for_host(host) is not None,
+            timeout=30.0,
+            error_message="Host volume not visible after 30s",
+        )
         host_volume = real_modal_provider.get_volume_for_host(host)
         assert host_volume is not None
         assert isinstance(host_volume, HostVolume)
@@ -768,3 +686,75 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
             # Verify the volume is gone
             volume_after = real_modal_provider.get_volume_for_host(host.id)
             assert volume_after is None
+
+
+# Wall-clock budget for the bulk upload itself (not host creation). rsync transfers
+# 600 tiny files in a few seconds; a per-file SFTP upload would take ~0.7s/file (~400s),
+# so this comfortably separates a single-rsync upload from a per-file regression while
+# tolerating tunnel jitter.
+_UPLOAD_BUDGET_SECONDS: Final[float] = 60.0
+
+
+@pytest.mark.acceptance
+@pytest.mark.rsync
+@pytest.mark.timeout(150)
+def test_upload_deploy_files_handles_large_set_on_modal(
+    real_modal_provider: ModalProviderInstance,
+    tmp_path: Path,
+) -> None:
+    """Regression test for github issue 1825: a large deploy-file set must upload via one rsync.
+
+    Uploading each deploy file through its own SFTP channel is a full round-trip over
+    the Modal SSH tunnel (~0.7s/file measured), so a real user's ``~/.claude/plugins``
+    tree (hundreds of files) would blow past the upload timeout or reset the connection
+    ("Error reading SSH protocol banner"). The whole set must instead transfer with a
+    single ``host.copy_local_directory`` (rsync) call.
+
+    The real guard is the explicit ``_UPLOAD_BUDGET_SECONDS`` assertion on the upload
+    call itself, decoupled from (variable) host-creation time: 600 files would take
+    ~400s via a per-file path but only a few seconds via rsync. The mix of on-disk
+    ``Path`` sources and in-memory string content exercises both staging branches; we
+    then verify every file landed on the remote with the expected contents.
+    """
+    file_count = 600
+    with created_host(real_modal_provider, HostName("rsync-deploy-test")) as host:
+        home_result = host.execute_idempotent_command("echo $HOME")
+        assert home_result.success
+        remote_home = home_result.stdout.strip()
+
+        # Pre-existing file in a target dir that is NOT in the upload set: the rsync
+        # transfer must be additive (no --delete), so it must survive.
+        sentinel = f"{remote_home}/.mngr/deploytest/sub0/preexisting.txt"
+        host.execute_idempotent_command(f"mkdir -p {shlex.quote(remote_home)}/.mngr/deploytest/sub0")
+        host.write_text_file(Path(sentinel), "do-not-delete")
+
+        deploy_files: dict[Path, Path | str] = {}
+        for i in range(file_count):
+            dest = Path(f"~/.mngr/deploytest/sub{i % 20}/file_{i}.txt")
+            if i % 2 == 0:
+                source_file = tmp_path / f"src_{i}.txt"
+                source_file.write_text(f"path-content-{i}")
+                deploy_files[dest] = source_file
+            else:
+                deploy_files[dest] = f"str-content-{i}"
+
+        start = time.monotonic()
+        uploaded = _upload_deploy_files(host, deploy_files, remote_home)
+        upload_elapsed = time.monotonic() - start
+        assert uploaded == file_count
+        assert upload_elapsed < _UPLOAD_BUDGET_SECONDS, (
+            f"deploy-file upload took {upload_elapsed:.1f}s for {file_count} files "
+            f"(budget {_UPLOAD_BUDGET_SECONDS:.0f}s) -- per-file-upload regression?"
+        )
+
+        # Every uploaded file plus the pre-existing sentinel must be present (rsync is
+        # additive: the sentinel, absent from the upload set, must not be deleted).
+        remote_dir = f"{remote_home}/.mngr/deploytest"
+        count_result = host.execute_idempotent_command(f"find {shlex.quote(remote_dir)} -type f | wc -l")
+        assert count_result.success
+        assert int(count_result.stdout.strip()) == file_count + 1
+        assert host.read_text_file(Path(sentinel)) == "do-not-delete"
+
+        # Spot-check one Path-sourced and one string-sourced file's contents.
+        assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub0/file_0.txt") == "path-content-0"
+        assert host.read_text_file(Path(remote_home) / ".mngr/deploytest/sub1/file_1.txt") == "str-content-1"

@@ -28,10 +28,11 @@ from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -44,6 +45,7 @@ from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
+from imbue.mngr.uv_tool import get_installed_plugin_package_names
 
 _DEFAULT_HUMAN_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
     "name",
@@ -73,6 +75,9 @@ _HEADER_LABELS: Final[dict[str, str]] = {
 # documented for CEL; the underlying attribute is host.provider_name.
 _FIELD_ALIASES: Final[dict[str, str]] = {
     "host.provider": "host.provider_name",
+    # `project` is the documented short form for the project label, mirroring
+    # the `--project` filter flag; the underlying data lives in labels.project.
+    "project": "labels.project",
 }
 
 
@@ -201,12 +206,16 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
         cli_group = ctx.parent.command
         registered_agent_types = list_registered_agent_types()
+        topic_names = sorted(get_all_topics().keys())
+        installed_plugin_packages = get_installed_plugin_package_names()
         mngr_ctx.concurrency_group.start_new_thread(
             target=write_cli_completions_cache,
             kwargs={
                 "cli_group": cli_group,
                 "mngr_ctx": mngr_ctx,
                 "registered_agent_types": registered_agent_types,
+                "topic_names": topic_names,
+                "installed_plugin_packages": installed_plugin_packages,
             },
             name="completion-cache-writer",
             is_checked=False,
@@ -712,7 +721,13 @@ def _run_list_iteration(params: _ListIterationParams, ctx: click.Context) -> Non
         elif params.output_opts.output_format == OutputFormat.HUMAN:
             write_human_line("No agents found")
         elif params.output_opts.output_format == OutputFormat.JSON:
-            emit_final_json({"agents": [], "errors": result.errors})
+            # Route through `_emit_json_output` so errors get pydantic-dumped to
+            # JSON-friendly dicts; passing raw ErrorInfo objects to
+            # `json.dumps` crashes with "Object of type ProviderErrorInfo is
+            # not JSON serializable", which is what made `mngr list --on-error
+            # continue --format json` hard-fail whenever discovery hit a
+            # broken host.
+            _emit_json_output([], result.errors)
         else:
             # JSONL is handled above with streaming, so this should be unreachable
             raise AssertionError(f"Unexpected output format: {params.output_opts.output_format}")
@@ -745,19 +760,19 @@ def _emit_json_output(agents: list[AgentDetails], errors: list[ErrorInfo]) -> No
         "agents": agents_data,
         "errors": errors_data,
     }
-    emit_final_json(output_data)
+    write_json_line(output_data)
 
 
 def _emit_jsonl_agent(agent: AgentDetails) -> None:
     """Emit a single agent as a JSONL line (streaming callback)."""
     agent_data = agent.model_dump(mode="json")
-    emit_final_json(agent_data)
+    write_json_line(agent_data)
 
 
 def _emit_jsonl_error(error: ErrorInfo) -> None:
     """Emit a single error as a JSONL line (streaming callback)."""
     error_data = {"event": "error", **error.model_dump(mode="json")}
-    emit_final_json(error_data)
+    write_json_line(error_data)
 
 
 def _emit_human_output(

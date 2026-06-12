@@ -32,7 +32,6 @@ from enum import auto
 from pathlib import Path
 
 from fastapi import Request
-from fastapi.responses import HTMLResponse
 from fastapi.responses import Response
 from loguru import logger
 from pydantic import Field
@@ -45,8 +44,6 @@ from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayCl
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.templates import render_predefined_permission_dialog
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissionRequestEvent
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -61,6 +58,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -70,6 +69,7 @@ class GrantOutcome(UpperCaseStrEnum):
     GRANTED = auto()
     DENIED = auto()
     NEEDS_MANUAL_CREDENTIALS = auto()
+    FAILED = auto()
 
 
 class GrantResult(FrozenModel):
@@ -78,15 +78,16 @@ class GrantResult(FrozenModel):
     outcome: GrantOutcome = Field(description="Which branch the grant flow took.")
     message: str = Field(
         description=(
-            "Plain-text user/agent-facing message. For ``GRANTED``/``DENIED`` it has "
+            "Plain-text user/agent-facing message. For ``GRANTED`` it has "
             "already been delivered to the agent via ``mngr message``; for "
-            "``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user."
+            "``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user "
+            "(the request stays pending, so the agent is not notified)."
         ),
     )
     response_event: RequestResponseEvent | None = Field(
         description=(
             "The freshly-appended response event when the request was resolved. "
-            "``None`` for ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
+            "``None`` for ``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` because the request stays pending."
         ),
     )
     set_credentials_example: str | None = Field(
@@ -116,8 +117,8 @@ def _format_denied_message(service_display_name: str) -> str:
 def _format_auth_failed_message(service_display_name: str, detail: str) -> str:
     suffix = f" Reason: {detail}" if detail else ""
     return (
-        f"Your permission request for {service_display_name} could not be completed because the user's "
-        f"sign-in flow did not finish.{suffix} Do not retry yet; report this to the user."
+        f"Sign-in to {service_display_name} did not complete, so the permission could not be "
+        f"granted at the moment.{suffix}"
     )
 
 
@@ -199,22 +200,38 @@ def _resolve_host_id(
         return None
 
 
-def _render_unknown_scope_page(request_id: str, scope: str) -> Response:
-    """Render a deny-only page when the requested scope isn't in the catalog.
+def _render_unknown_scope_fragment(request_id: str, scope: str) -> str:
+    """Render a deny-only detail fragment when the requested scope isn't in the catalog.
 
     No catalog entry means we have no permissions to offer the user; the
-    only sensible action is to send the request straight to deny.
+    only action that makes sense from here is Deny. Shaped to share the
+    inbox shell's deny submission JS: the fragment emits a
+    ``#permissions-form`` whose ``action`` targets ``/requests/<id>/grant``
+    so the shell's ``submitPermissionDeny`` helper (which rewrites
+    ``/grant`` to ``/deny``) auto-advances the inbox after the user clicks
+    Deny. There is no Approve button and no ``name="permissions"`` input
+    because no permissions are on offer; the form's action URL is only
+    used as the deny URL template.
     """
-    body = (
-        "<!DOCTYPE html><html><body><h1>Unknown scope</h1>"
-        f"<p>The agent requested permissions under scope <code>{html_module.escape(scope)}</code>, "
-        "but this scope is not in the latchkey gateway's permission catalog. The request can only "
-        "be denied from here.</p>"
-        f'<form method="POST" action="/requests/{html_module.escape(request_id, quote=True)}/deny">'
-        '<button type="submit">Deny</button></form>'
-        "</body></html>"
+    escaped_scope = html_module.escape(scope)
+    escaped_request_id = html_module.escape(request_id, quote=True)
+    return (
+        '<div class="permissions-detail">'
+        '<h1 class="text-xl font-semibold text-zinc-900 leading-tight">Unknown scope</h1>'
+        '<p class="mt-2 text-zinc-600">'
+        f"The agent requested permissions under scope <code>{escaped_scope}</code>, "
+        "but this scope is not in the latchkey service catalog. "
+        "The request can only be denied from here."
+        "</p>"
+        '<form id="permissions-form" method="POST" '
+        f'action="/requests/{escaped_request_id}/grant" class="mt-6">'
+        '<div class="flex gap-2 mt-5 justify-end">'
+        '<button type="button" onclick="submitPermissionDeny()" '
+        'class="inline-flex items-center justify-center px-3.5 py-2 rounded-md font-medium text-sm '
+        'bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 cursor-pointer">Deny</button>'
+        "</div></form>"
+        "</div>"
     )
-    return HTMLResponse(content=body, status_code=200)
 
 
 class LatchkeyPermissionGrantHandler(RequestEventHandler):
@@ -231,12 +248,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
     * ``mngr message`` has been attempted (failures logged).
 
-    When ``grant`` returns ``GrantOutcome.DENIED`` (failed browser sign-in):
+    When ``grant`` returns ``GrantOutcome.FAILED`` (the browser sign-in
+    flow -- including the one-off ``latchkey auth browser-prepare`` step --
+    did not complete):
 
     * ``latchkey_permissions.json`` is unchanged.
-    * A ``DENIED`` response event has been appended (the agent is told the
-      reason via the message, not via a distinct status).
-    * ``mngr message`` has been attempted.
+    * No response event has been written; the request stays pending so a
+      fresh Approve click can retry the sign-in. A failed approval is a
+      transient failure, not a denial -- it is surfaced to the user in the
+      dialog rather than recorded as a resolution.
+    * No ``mngr message`` has been sent (the agent stays blocked, waiting).
 
     When ``grant`` returns ``GrantOutcome.NEEDS_MANUAL_CREDENTIALS`` (the
     service has no valid credentials and latchkey doesn't expose a browser
@@ -255,8 +276,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     latchkey: Latchkey = Field(description="Latchkey wrapper used to probe credentials and run sign-in flows.")
     services_catalog: ServicesCatalog = Field(
         description=(
-            "Lazy in-memory snapshot of the latchkey services catalog fetched from the "
-            "gateway's ``/permissions/available`` endpoint. Empty when the fetch failed."
+            "Lazy in-memory snapshot of the latchkey services catalog, read from the bundled "
+            "``services.json`` data file that ships with mngr_latchkey."
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")
@@ -345,21 +366,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             )
             is_success, detail = self.latchkey.auth_browser(service_info.name)
             if not is_success:
-                # No separate AUTH_FAILED status: a failed sign-in is
-                # surfaced as DENIED with a distinct message so the agent
-                # can tell the user something went wrong.
-                message = _format_auth_failed_message(service_info.display_name, detail)
-                response_event = self._write_response_and_notify(
-                    request_event_id=request_event_id,
-                    agent_id=agent_id,
-                    scope=service_info.scope,
-                    status=RequestStatus.DENIED,
-                    message=message,
-                )
+                # The browser sign-in (or its one-off ``auth
+                # browser-prepare`` step) did not complete. Treat this as a
+                # FAILED approval, not a denial: leave the request pending
+                # (no response event, gateway record untouched, agent not
+                # notified) so a fresh Approve click can retry, and surface
+                # the reason to the user in the dialog.
                 return GrantResult(
-                    outcome=GrantOutcome.DENIED,
-                    message=message,
-                    response_event=response_event,
+                    outcome=GrantOutcome.FAILED,
+                    message=_format_auth_failed_message(service_info.display_name, detail),
+                    response_event=None,
                     set_credentials_example=None,
                 )
 
@@ -397,9 +413,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Append a DENIED response and notify the agent. Returns ``(message, response_event)``.
 
         ``scope`` is the Detent scope schema the request was filed under;
-        it goes into the response event so the inbox can dedupe the
-        response against the original request. ``display_name`` is the
-        human-readable service name shown in the agent-facing message.
+        it goes into the response event for informational purposes (the
+        inbox joins responses to requests on ``request_event_id``).
+        ``display_name`` is the human-readable service name shown in the
+        agent-facing message.
         """
         message = _format_denied_message(display_name)
         response_event = self._write_response_and_notify(
@@ -420,7 +437,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return "permission"
 
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        """Friendly service name for the requests-panel card.
+        """Friendly service name for the inbox list card.
 
         Falls back to the raw scope schema when no catalog entry matches
         (or when the event is somehow not a latchkey permission request,
@@ -431,22 +448,22 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         info = self.services_catalog.get_by_scope(req_event.scope)
         return info.display_name if info is not None else req_event.scope
 
-    def render_request_page(
+    def render_request_detail_fragment(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
-    ) -> Response:
-        """Render the dialog HTML for a latchkey permission request.
+    ) -> str:
+        """Render the inbox right-pane fragment for a latchkey permission request.
 
-        Falls back to a deny-only page when the requested service is not
-        in the catalog, since there are no permissions to offer.
+        Falls back to a deny-only fragment when the requested service is
+        not in the catalog, since there are no permissions to offer.
         """
         if not isinstance(req_event, LatchkeyPredefinedPermissionRequestEvent):
-            return HTMLResponse(content="<p>Unsupported request type</p>", status_code=500)
+            return "<p>Unsupported request type</p>"
         service_info = self.services_catalog.get_by_scope(req_event.scope)
         if service_info is None:
-            return _render_unknown_scope_page(
+            return _render_unknown_scope_fragment(
                 request_id=str(req_event.event_id),
                 scope=req_event.scope,
             )
@@ -470,7 +487,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             or not latchkey_service_info.auth_options
         )
 
-        rendered = render_predefined_permission_dialog(
+        return render_predefined_permission_dialog(
             agent_id=req_event.agent_id,
             request_id=str(req_event.event_id),
             ws_name=ws_name,
@@ -480,7 +497,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             will_open_browser=will_open_browser,
             mngr_forward_origin=mngr_forward_origin,
         )
-        return HTMLResponse(content=rendered)
 
     async def apply_grant_request(
         self,
@@ -539,7 +555,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
         # The grant call may have appended a response event to
         # ~/.minds/events/requests/events.jsonl; mirror it into the
-        # in-memory inbox so the requests panel reflects the resolution
+        # in-memory inbox so the inbox modal reflects the resolution
         # without needing a desktop-client restart. The manual-credentials
         # branch leaves the request pending, so there is nothing to mirror.
         if grant_result.response_event is not None:
@@ -711,11 +727,11 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         """Mirror the on-disk response event into the in-memory inbox.
 
         The on-disk event-sourcing log is the source of truth; this update
-        is just so the requests panel doesn't show the resolved request as
+        is just so the inbox modal doesn't show the resolved request as
         still pending until the next desktop-client restart.
 
-        Also wakes the chrome SSE so the new ``request_count`` is pushed
-        right away -- otherwise the panel would keep showing the resolved
+        Also wakes the chrome SSE so the new ``requests`` payload is pushed
+        right away -- otherwise the inbox would keep showing the resolved
         card for up to 30s while the SSE poll waits for its next tick.
         """
         inbox: RequestInbox | None = request.app.state.request_inbox

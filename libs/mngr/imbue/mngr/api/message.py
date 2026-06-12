@@ -16,7 +16,6 @@ from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import ensure_host_started
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
@@ -252,7 +251,7 @@ def _send_message_to_agent(
 ) -> None:
     """Send a message to a single agent.
 
-    Called from a worker thread. Known errors (BaseMngrError) are recorded in
+    Called from a worker thread. Known errors (MngrError) are recorded in
     `result`; in ABORT mode they are also re-raised so the ConcurrencyGroup
     propagates them.
     """
@@ -280,7 +279,7 @@ def _send_message_to_agent(
             result.successful_agents.append(agent_name)
         if on_success:
             on_success(agent_name)
-    except BaseMngrError as e:
+    except MngrError as e:
         error_msg = str(e)
         with result_lock:
             result.failed_agents.append((agent_name, error_msg))

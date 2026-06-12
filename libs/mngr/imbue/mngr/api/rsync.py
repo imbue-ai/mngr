@@ -32,6 +32,7 @@ from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.deps import RSYNC
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 
 # (user, hostname, port, private_key_path) -- matches OnlineHostInterface.get_ssh_connection_info().
@@ -173,6 +174,9 @@ def _do_rsync(
         if remote_host.is_local:
             rsync_cmd = _build_rsync_command(source_str, destination_str, extra_args, ssh_transport=None)
         else:
+            # rsync to a remote host uses the ssh binary as its transport (-e ssh);
+            # ssh is optional, so surface a clear error if it's absent.
+            SSH.require()
             ssh_info = remote_host.get_ssh_connection_info()
             assert ssh_info is not None, "Remote host must provide SSH connection info"
             user, hostname, port, key_path = ssh_info

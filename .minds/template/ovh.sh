@@ -6,9 +6,10 @@
 # used by ``mngr imbue_cloud admin pool create`` when provisioning OVH
 # pool hosts.
 #
-# These credentials are NOT pushed to Modal -- the connector's runtime
-# never needs to mutate OVH directly (the pool ssh key under `pool-ssh`
-# is what gets pushed). They are read only by the operator's machine
+# These credentials ARE pushed to Modal as the `ovh-<env>` secret:
+# the remote_service_connector's release route and its hourly cleanup
+# cron make signed OVH calls at runtime to strip per-lease tags and
+# cancel released VPSes. They are also read by the operator's machine
 # during deploy/destroy.
 #
 # Fill the values in a *copy* of this file (not this file), push to

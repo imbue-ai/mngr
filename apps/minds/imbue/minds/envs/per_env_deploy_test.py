@@ -52,9 +52,9 @@ def test_compute_per_env_overrides_does_not_override_unrelated_services() -> Non
     """Services other than neon / litellm / supertokens / litellm-connector are untouched.
 
     The dev-tier deploy reads tier-shared values for everything else
-    (``cloudflare``, ``paid-accounts``, ``pool-ssh``) straight from
-    Vault. The override dict only exists for keys we genuinely need to
-    rewrite at deploy time.
+    (``cloudflare``, ``pool-ssh``) straight from Vault. The override
+    dict only exists for keys we genuinely need to rewrite at deploy
+    time.
     """
     overrides = compute_per_env_overrides(
         DevEnvName("dev-josh"),

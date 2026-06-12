@@ -27,7 +27,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import unset_imbue_cloud_provider_for_account
-from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -39,6 +38,8 @@ from imbue.minds.desktop_client.templates_auth import render_forgot_password_pag
 from imbue.minds.desktop_client.templates_auth import render_settings_page
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
+from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 
 
 class AuthBackendError(RuntimeError):
@@ -237,22 +238,33 @@ def _store_session_from_auth_result(
 
 
 def _bounce_forward_observe(request: Request) -> None:
-    """Bounce the ``mngr forward`` plugin's observe child so a freshly-written
-    provider entry takes effect within the same minds session.
+    """Bounce the single discovery observer so a freshly-written provider entry
+    takes effect within the same minds session.
 
-    Sends ``SIGHUP`` to the plugin via ``EnvelopeStreamConsumer.bounce_observe()``;
-    per-agent event subprocesses, SSH tunnels, and the FastAPI app on the
-    plugin side stay alive (the plugin's SIGHUP handler only restarts
-    ``mngr observe``). No-op if the consumer hasn't been attached yet.
+    Sends ``SIGHUP`` to the detached ``mngr latchkey forward`` supervisor via
+    ``LatchkeyForwardSupervisor.bounce()``, restarting only its ``mngr observe``
+    child (the shared gateway, reverse tunnels, and per-agent state stay up). Its
+    next snapshot is written to the shared discovery log that minds' ``mngr forward
+    --observe-via-file`` tails, so no separate ``mngr forward`` bounce is needed.
 
-    ``app.state.envelope_stream_consumer`` is always set (to either the
-    consumer or ``None``) by ``create_desktop_client``, so direct attribute
-    access is safe — no defensive ``getattr`` required.
+    ``app.state.latchkey_forward_supervisor`` is always set (to either the object
+    or ``None``) by ``create_desktop_client``, so direct attribute access is safe.
     """
-    envelope_stream_consumer = request.app.state.envelope_stream_consumer
-    if envelope_stream_consumer is None:
+    bounce_latchkey_forward_supervisor(request.app.state.latchkey_forward_supervisor)
+
+
+def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | None) -> None:
+    """Bounce the detached ``mngr latchkey forward`` supervisor's observe child.
+
+    No-op when no supervisor handle is available (e.g. tests). ``bounce()``
+    starts the supervisor if none is currently running.
+    """
+    if supervisor is None:
         return
-    envelope_stream_consumer.bounce_observe()
+    try:
+        supervisor.bounce()
+    except (OSError, RuntimeError, LatchkeyError) as e:
+        logger.warning("Failed to bounce mngr latchkey forward: {}", e)
 
 
 def _auth_error_response(exc: AuthBackendError | ImbueCloudCliError) -> Response:
@@ -498,7 +510,7 @@ def _run_oauth_subprocess(
     session_store: MultiAccountSessionStore,
     minds_config: MindsConfig | None,
     output_format: OutputFormat,
-    envelope_stream_consumer: EnvelopeStreamConsumer | None,
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
     connector_url: str,
 ) -> None:
     """Run ``mngr imbue_cloud auth oauth <provider>`` in a background thread.
@@ -508,10 +520,11 @@ def _run_oauth_subprocess(
     state directory. We then mirror the resulting account identity into
     ``MultiAccountSessionStore`` so the desktop UI can render it, register
     a ``[providers.imbue_cloud_<slug>]`` entry (force-enabled, even if the
-    user previously clicked Disable on it in the providers panel), and
-    bounce the ``mngr forward`` plugin's observe child so the new provider
-    config is picked up immediately -- mirroring what the email/password
-    ``_store_session_from_auth_result`` path does for non-OAuth signins.
+    user previously clicked Disable on it in the providers panel), and bounce
+    the detached ``mngr latchkey forward`` supervisor (the single discovery
+    observer) so the new provider config is picked up immediately -- mirroring
+    what the email/password ``_store_session_from_auth_result`` path does for
+    non-OAuth signins.
     """
     try:
         result = imbue_cloud_cli.auth_oauth(account="", provider_id=provider_id)
@@ -536,8 +549,7 @@ def _run_oauth_subprocess(
         connector_url=connector_url,
         force_enable=True,
     ):
-        if envelope_stream_consumer is not None:
-            envelope_stream_consumer.bounce_observe()
+        bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
 
     emit_event(
         "auth_success",
@@ -579,7 +591,7 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
     session_store = _get_session_store(request)
     output_format = _get_output_format(request)
     minds_config: MindsConfig | None = request.app.state.minds_config
-    envelope_stream_consumer: EnvelopeStreamConsumer | None = request.app.state.envelope_stream_consumer
+    latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = request.app.state.latchkey_forward_supervisor
     root_cg: ConcurrencyGroup | None = request.app.state.root_concurrency_group
     if imbue_cloud_cli is None:
         return _json_response({"status": "ERROR", "error": "imbue_cloud_cli is not configured"}, 503)
@@ -602,7 +614,7 @@ def _handle_oauth_redirect(provider_id: str, request: Request) -> Response:
             "session_store": session_store,
             "minds_config": minds_config,
             "output_format": output_format,
-            "envelope_stream_consumer": envelope_stream_consumer,
+            "latchkey_forward_supervisor": latchkey_forward_supervisor,
             "connector_url": _get_connector_url(request),
         },
         name=f"imbue-cloud-oauth-{provider_id}",

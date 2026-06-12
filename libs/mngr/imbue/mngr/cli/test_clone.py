@@ -14,7 +14,8 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
-@pytest.mark.flaky
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_clone_creates_agent_from_source(
     cli_runner: CliRunner,
     create_test_agent,

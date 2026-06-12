@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-tutor"
-version = "0.2.9"
+version = "0.2.12"
 description = "Interactive tutorial plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.9",
+    "imbue-mngr==0.2.12",
     "click>=8.0",
     "click-option-group>=0.5.6",
 ]
@@ -68,4 +68,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 95

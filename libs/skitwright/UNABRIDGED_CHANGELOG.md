@@ -4,6 +4,14 @@ Full, unedited changelog entries for the `skitwright` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 92% to 95% to match the coverage CI already measures (~100%), and removed the now-obsolete comment referencing per-package offload coverage drift (the offload bug that caused that drift has since been fixed).
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

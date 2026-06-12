@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from ovh.exceptions import APIError as OvhApiError
 from supertokens_python.recipe.emailpassword.interfaces import ConsumePasswordResetTokenOkResult
 from supertokens_python.recipe.emailpassword.interfaces import EmailAlreadyExistsError
 from supertokens_python.recipe.emailpassword.interfaces import SignInOkResult as EPSignInOkResult
@@ -30,6 +31,8 @@ from supertokens_python.types.base import AccountInfoInput
 
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import ForwardingCtx
+from imbue.remote_service_connector.app import R2BucketNotEmptyError
+from imbue.remote_service_connector.app import R2BucketNotFoundError
 
 
 class FakeCloudflareOps:
@@ -46,6 +49,13 @@ class FakeCloudflareOps:
         self._next_record_id = 1
         self._next_access_app_id = 1
         self._next_policy_id = 1
+        # R2 state
+        self.account_id = "test-account"
+        self.buckets: dict[str, dict[str, Any]] = {}
+        # Per-bucket object lists; tests append to mark a bucket non-empty.
+        self.bucket_objects: dict[str, list[str]] = {}
+        self.account_tokens: dict[str, dict[str, Any]] = {}
+        self._next_r2_token_id = 1
 
     def create_tunnel(self, name: str) -> dict[str, Any]:
         tunnel_id = f"tunnel-{self._next_tunnel_id}"
@@ -171,6 +181,91 @@ class FakeCloudflareOps:
 
     def delete_service_token(self, token_id: str) -> None:
         pass
+
+    # -- R2 bucket + token operations --
+
+    def create_bucket(self, name: str) -> dict[str, Any]:
+        if name in self.buckets:
+            raise CloudflareApiError(status_code=400, errors=[{"message": f"bucket already exists: {name}"}])
+        bucket = {"name": name}
+        self.buckets[name] = bucket
+        self.bucket_objects.setdefault(name, [])
+        return bucket
+
+    def list_buckets(self, name_contains: str = "") -> list[dict[str, Any]]:
+        return [bucket for name, bucket in self.buckets.items() if name_contains in name]
+
+    def delete_bucket(self, name: str) -> None:
+        if name not in self.buckets:
+            raise R2BucketNotFoundError(name)
+        if self.bucket_objects.get(name):
+            raise R2BucketNotEmptyError(name)
+        del self.buckets[name]
+        self.bucket_objects.pop(name, None)
+
+    def create_bucket_token(self, bucket_name: str, access: str, token_name: str) -> dict[str, Any]:
+        token_id = f"r2tok-{self._next_r2_token_id}"
+        self._next_r2_token_id += 1
+        self.account_tokens[token_id] = {
+            "id": token_id,
+            "name": token_name,
+            "bucket_name": bucket_name,
+            "access": access,
+        }
+        return {"id": token_id, "value": f"token-value-{token_id}"}
+
+    def delete_bucket_token(self, token_id: str) -> None:
+        self.account_tokens.pop(token_id, None)
+
+
+class InMemoryKeyStore:
+    """In-memory KeyStore implementation for testing the bucket-key endpoints."""
+
+    def __init__(self) -> None:
+        # access_key_id -> stored row dict
+        self.keys_by_access_key_id: dict[str, dict[str, Any]] = {}
+        self._created_counter = 0
+
+    def add_key(
+        self, access_key_id: str, owner_user_id: str, bucket_name: str, access: str, alias: str | None
+    ) -> None:
+        self._created_counter += 1
+        self.keys_by_access_key_id[access_key_id] = {
+            "access_key_id": access_key_id,
+            "owner_user_id": owner_user_id,
+            "bucket_name": bucket_name,
+            "access": access,
+            "alias": alias,
+            "created_at": f"2026-01-01T00:00:{self._created_counter:02d}+00:00",
+        }
+
+    def list_keys(self, owner_user_id: str, bucket_name: str | None = None) -> list[dict[str, Any]]:
+        rows = [r for r in self.keys_by_access_key_id.values() if r["owner_user_id"] == owner_user_id]
+        if bucket_name is not None:
+            rows = [r for r in rows if r["bucket_name"] == bucket_name]
+        return sorted(rows, key=lambda r: r["created_at"])
+
+    def get_key(self, access_key_id: str) -> dict[str, Any] | None:
+        row = self.keys_by_access_key_id.get(access_key_id)
+        return dict(row) if row is not None else None
+
+    def delete_key(self, access_key_id: str) -> None:
+        self.keys_by_access_key_id.pop(access_key_id, None)
+
+    def delete_keys_for_bucket(self, owner_user_id: str, bucket_name: str) -> list[dict[str, Any]]:
+        removed = [
+            r
+            for r in self.keys_by_access_key_id.values()
+            if r["owner_user_id"] == owner_user_id and r["bucket_name"] == bucket_name
+        ]
+        for row in removed:
+            del self.keys_by_access_key_id[row["access_key_id"]]
+        return removed
+
+
+def make_fake_key_store() -> InMemoryKeyStore:
+    """Construct an empty in-memory KeyStore for tests."""
+    return InMemoryKeyStore()
 
 
 class FakeForwardingCtx(ForwardingCtx):
@@ -770,6 +865,7 @@ class FakePoolRow:
     status: str
     version: str
     attributes: dict[str, Any] | None
+    region: str | None
     leased_to_user: str | None
     leased_at: str | None
     released_at: str | None
@@ -810,6 +906,7 @@ def _make_pool_row(
     leased_to_user: str | None = None,
     leased_at: str | None = None,
     host_name: str | None = None,
+    region: str | None = None,
 ) -> FakePoolRow:
     row = FakePoolRow()
     row.host_id = host_id
@@ -829,6 +926,7 @@ def _make_pool_row(
     row.leased_at = leased_at
     row.released_at = None
     row.attributes = None
+    row.region = region
     return row
 
 
@@ -847,28 +945,36 @@ class FakeCursor:
         if "from pool_hosts" in query_lower and "status = 'available'" in query_lower:
             # The connector serialises the request attributes via json.dumps
             # before passing them to the SQL bind parameter, so we always get
-            # a JSON string here.
+            # a JSON string here. A hard ``region`` (WHERE clause), if present,
+            # follows it in the param tuple.
             raw = params[0]
             requested = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            for row in self._backend.pool_rows:
-                if row.status != "available":
-                    continue
-                row_attrs = _row_attributes(row)
-                if not _attributes_contain(row_attrs, requested):
-                    continue
+            # A hard ``region`` bind param, when present, always immediately
+            # follows the attributes JSON param (index 0), so its index is 1.
+            hard_region: str | None = None
+            if "and region = %s" in query_lower:
+                hard_region = params[1]
+            candidate_rows = [
+                row
+                for row in self._backend.pool_rows
+                if row.status == "available"
+                and _attributes_contain(_row_attributes(row), requested)
+                and (hard_region is None or row.region == hard_region)
+            ]
+            if candidate_rows:
+                chosen = candidate_rows[0]
                 self._results = [
                     (
-                        row.host_id,
-                        row.vps_address,
-                        row.ssh_port,
-                        row.ssh_user,
-                        row.container_ssh_port,
-                        row.agent_id,
-                        row.host_id_str,
-                        row_attrs,
+                        chosen.host_id,
+                        chosen.vps_address,
+                        chosen.ssh_port,
+                        chosen.ssh_user,
+                        chosen.container_ssh_port,
+                        chosen.agent_id,
+                        chosen.host_id_str,
+                        _row_attributes(chosen),
                     )
                 ]
-                break
 
         elif "update pool_hosts set status = 'leased'" in query_lower:
             # Lease SQL now also writes the user-supplied host_name on the
@@ -891,15 +997,21 @@ class FakeCursor:
             # Release endpoint: lookup by id. The connector stringifies
             # the UUID before passing it as a bind param (psycopg2 can't
             # adapt Python ``UUID`` directly), so accept either form.
-            # Returns ``(leased_to_user, status)`` so the route can
-            # distinguish 'already-released' (idempotent 200) from
-            # 'leased' (proceed with update) without a second SELECT.
+            # Returns ``(leased_to_user, status, vps_instance_id)`` so the
+            # route can distinguish already-released / removing / leased and
+            # has the service name needed for the OVH cancel.
             raw_host_id = params[0]
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    self._results = [(row.leased_to_user, row.status)]
+                    self._results = [(row.leased_to_user, row.status, row.vps_instance_id)]
                     break
+
+        elif "select id, vps_instance_id from pool_hosts where status = 'removing'" in query_lower:
+            # Cleanup sweep: every row still marked 'removing'.
+            for row in self._backend.pool_rows:
+                if row.status == "removing":
+                    self._results.append((row.host_id, row.vps_instance_id))
 
         elif (
             "from pool_hosts" in query_lower and "status = 'leased'" in query_lower and "leased_to_user" in query_lower
@@ -923,14 +1035,51 @@ class FakeCursor:
                         )
                     )
 
-        elif "update pool_hosts set status = 'released'" in query_lower:
+        elif "update pool_hosts set status = 'removing'" in query_lower:
             raw_host_id = params[0]
             host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
             for row in self._backend.pool_rows:
                 if row.host_id == host_id:
-                    row.status = "released"
+                    row.status = "removing"
                     row.released_at = "2026-01-02T00:00:00+00:00"
                     break
+
+        elif "from paid_emails" in query_lower and "select 1" in query_lower:
+            entry = self._backend.paid_emails.get(params[0])
+            if entry is not None and entry["is_paid"]:
+                self._results = [(1,)]
+
+        elif "from paid_domains" in query_lower and "select 1" in query_lower:
+            entry = self._backend.paid_domains.get(params[0])
+            if entry is not None and entry["is_paid"]:
+                self._results = [(1,)]
+
+        elif "from paid_emails" in query_lower and "select email" in query_lower:
+            self._results = self._backend.list_paid_entries(
+                self._backend.paid_emails, paid_only="is_paid = true" in query_lower
+            )
+
+        elif "from paid_domains" in query_lower and "select domain" in query_lower:
+            self._results = self._backend.list_paid_entries(
+                self._backend.paid_domains, paid_only="is_paid = true" in query_lower
+            )
+
+        elif "insert into paid_emails" in query_lower:
+            self._backend.activate_paid_entry(self._backend.paid_emails, params[0])
+
+        elif "insert into paid_domains" in query_lower:
+            self._backend.activate_paid_entry(self._backend.paid_domains, params[0])
+
+        elif "update paid_emails set is_paid = false" in query_lower:
+            self._backend.deactivate_paid_entry(self._backend.paid_emails, params[0])
+
+        elif "update paid_domains set is_paid = false" in query_lower:
+            self._backend.deactivate_paid_entry(self._backend.paid_domains, params[0])
+
+        elif query_lower.startswith("delete from pool_hosts where id"):
+            raw_host_id = params[0]
+            host_id = UUID(raw_host_id) if isinstance(raw_host_id, str) else raw_host_id
+            self._backend.pool_rows = [r for r in self._backend.pool_rows if r.host_id != host_id]
 
         else:
             pass
@@ -984,14 +1133,88 @@ def _make_fake_connection(backend: "FakePoolBackend") -> FakeConnection:
     return conn
 
 
+class FakeOvhOps:
+    """In-memory fake implementing the OvhOps protocol for testing.
+
+    Records tag deletions and cancellations so tests can assert the cleanup
+    chain ran. ``resources`` backs ``list_vps_resources`` (used by the runbook
+    tag-scan). Set ``fail_on_cancel`` to simulate a flaky OVH cancel.
+    """
+
+    def __init__(self) -> None:
+        self.deleted_tags: list[tuple[str, str]] = []
+        self.cancelled: list[str] = []
+        self.resources: list[Any] = []
+        self.fail_on_cancel: bool = False
+
+    def delete_tag(self, urn: str, key: str) -> None:
+        self.deleted_tags.append((urn, key))
+
+    def set_delete_at_expiration(self, service_name: str, delete_at_expiration: bool) -> None:
+        if self.fail_on_cancel:
+            raise OvhApiError(f"simulated OVH cancel failure for {service_name}")
+        self.cancelled.append(service_name)
+
+    def list_vps_resources(self) -> list[Any]:
+        return list(self.resources)
+
+
+_PAID_ENTRY_CREATED_AT = "2026-01-01T00:00:00+00:00"
+_PAID_ENTRY_UPDATED_AT = "2026-01-02T00:00:00+00:00"
+
+
 class FakePoolBackend:
-    """In-memory pool database replacement for testing host pool endpoints."""
+    """In-memory pool database replacement for testing host pool + paid-list endpoints."""
 
     pool_rows: list[FakePoolRow]
     append_key_calls: list[tuple[str, int, str, str, str]]
+    ovh_ops: FakeOvhOps
+    # Paid-list stores: value -> {"is_paid", "created_at", "updated_at"}.
+    paid_domains: dict[str, dict[str, Any]]
+    paid_emails: dict[str, dict[str, Any]]
+
+    def add_paid_domain(self, domain: str, is_paid: bool = True) -> None:
+        """Seed a paid-domains row (lowercased), defaulting to active."""
+        self.paid_domains[domain.lower()] = {
+            "is_paid": is_paid,
+            "created_at": _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def add_paid_email(self, email: str, is_paid: bool = True) -> None:
+        """Seed a paid-emails row (lowercased), defaulting to active."""
+        self.paid_emails[email.lower()] = {
+            "is_paid": is_paid,
+            "created_at": _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def list_paid_entries(self, store: dict[str, dict[str, Any]], paid_only: bool) -> list[tuple[Any, ...]]:
+        """Return ``(value, is_paid, created_at, updated_at)`` rows, sorted by value."""
+        return [
+            (value, entry["is_paid"], entry["created_at"], entry["updated_at"])
+            for value, entry in sorted(store.items())
+            if entry["is_paid"] or not paid_only
+        ]
+
+    def activate_paid_entry(self, store: dict[str, dict[str, Any]], value: str) -> None:
+        """Upsert ``value`` to is_paid=true, keeping created_at on reactivation."""
+        existing = store.get(value)
+        store[value] = {
+            "is_paid": True,
+            "created_at": existing["created_at"] if existing else _PAID_ENTRY_CREATED_AT,
+            "updated_at": _PAID_ENTRY_UPDATED_AT,
+        }
+
+    def deactivate_paid_entry(self, store: dict[str, dict[str, Any]], value: str) -> None:
+        """Soft-delete ``value`` (is_paid=false). No-op when absent."""
+        existing = store.get(value)
+        if existing is not None:
+            existing["is_paid"] = False
+            existing["updated_at"] = _PAID_ENTRY_UPDATED_AT
 
     def install_on_app_module(self, app_mod: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Swap DB and SSH functions on the app module with fakes.
+        """Swap DB, SSH, and OVH functions on the app module with fakes.
 
         Uses the same single-loop-setattr pattern as FakeSuperTokensBackend to
         minimize the test-patching ratchet count.
@@ -999,12 +1222,16 @@ class FakePoolBackend:
         fakes: dict[str, Any] = {
             "_get_pool_db_connection": self.get_connection,
             "_append_authorized_key": self.append_authorized_key,
+            "_get_ovh_ops": self.get_ovh_ops,
         }
         for name, fake in fakes.items():
             monkeypatch.setattr(app_mod, name, fake)
 
     def get_connection(self) -> FakeConnection:
         return _make_fake_connection(self)
+
+    def get_ovh_ops(self) -> FakeOvhOps:
+        return self.ovh_ops
 
     def append_authorized_key(
         self,
@@ -1027,6 +1254,7 @@ class FakePoolBackend:
         agent_id: str = "agent-abc123",
         host_id_str: str = "host-xyz",
         host_name: str | None = None,
+        region: str | None = None,
     ) -> FakePoolRow:
         """Add an available host to the in-memory pool."""
         row = _make_pool_row(
@@ -1039,6 +1267,7 @@ class FakePoolBackend:
             container_ssh_port=container_ssh_port,
             version=version,
             host_name=host_name,
+            region=region,
         )
         self.pool_rows.append(row)
         return row
@@ -1074,10 +1303,40 @@ class FakePoolBackend:
         self.pool_rows.append(row)
         return row
 
+    def add_removing_host(
+        self,
+        host_id: UUID,
+        version: str,
+        leased_to_user: str = "some-user",
+        vps_address: str = "203.0.113.10",
+        agent_id: str = "agent-abc123",
+        host_id_str: str = "host-xyz",
+    ) -> FakePoolRow:
+        """Add a host already marked 'removing' (an interrupted release) to the pool."""
+        row = _make_pool_row(
+            host_id=host_id,
+            vps_address=vps_address,
+            agent_id=agent_id,
+            host_id_str=host_id_str,
+            ssh_port=22,
+            ssh_user="root",
+            container_ssh_port=2222,
+            version=version,
+            status="removing",
+            leased_to_user=leased_to_user,
+            leased_at="2026-01-01T00:00:00+00:00",
+        )
+        row.released_at = "2026-01-02T00:00:00+00:00"
+        self.pool_rows.append(row)
+        return row
+
 
 def make_fake_pool_backend() -> FakePoolBackend:
-    """Construct an empty in-memory pool backend."""
+    """Construct an empty in-memory pool backend (no pool rows, empty paid lists)."""
     backend = FakePoolBackend()
     backend.pool_rows = []
     backend.append_key_calls = []
+    backend.paid_domains = {}
+    backend.paid_emails = {}
+    backend.ovh_ops = FakeOvhOps()
     return backend

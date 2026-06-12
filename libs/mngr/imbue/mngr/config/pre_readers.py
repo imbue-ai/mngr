@@ -251,12 +251,33 @@ def read_default_command(command_name: str) -> str | None:
 
 # --- Disabled plugins pre-reader ---
 
+# Plugins that are DISABLED by default and must be explicitly opted into with
+# ``[plugins.<name>] enabled = true`` in a config layer to load. This inverts
+# the normal default (plugins load unless explicitly disabled): an opt-in
+# plugin is treated as disabled whenever config does not set it to enabled.
+#
+# The set is hardcoded here in mngr core -- not declared by the plugin itself --
+# because plugin blocking happens *before* setuptools entry points are loaded
+# (see ``create_plugin_manager``), so the plugin module is not importable at the
+# point we must decide whether to block it. Add a plugin's registry name here to
+# make it opt-in; nothing else changes, since opting in reuses the same
+# ``enabled`` config key as the normal enable/disable mechanism.
+#
+# ``claude_subagent_proxy`` is opt-in because it is very experimental and breaks
+# a lot of other tooling (it intercepts Claude Code's built-in Task tool); see
+# that plugin's README for details.
+OPT_IN_PLUGINS: Final[frozenset[str]] = frozenset({"claude_subagent_proxy"})
+
 
 def read_disabled_plugins() -> frozenset[str]:
     """Return the set of plugin names disabled across all config layers.
 
     Reads user, project, and local config files for [plugins.<name>]
     sections with enabled = false.  Later layers override earlier ones.
+
+    Plugins in :data:`OPT_IN_PLUGINS` are disabled-by-default: they are
+    included in the result unless a config layer explicitly sets their
+    ``enabled = true``.
 
     The project root is resolved from MNGR_PROJECT_CONFIG_DIR or the cwd's git
     worktree root.
@@ -272,4 +293,7 @@ def read_disabled_plugins() -> frozenset[str]:
             enabled_value = plugin_section.get("enabled")
             if enabled_value is not None:
                 merged[plugin_name] = bool(enabled_value)
-    return frozenset(name for name, is_enabled in merged.items() if not is_enabled)
+    disabled = {name for name, is_enabled in merged.items() if not is_enabled}
+    # Opt-in plugins are disabled unless a config layer explicitly enabled them.
+    disabled |= {name for name in OPT_IN_PLUGINS if merged.get(name) is not True}
+    return frozenset(disabled)

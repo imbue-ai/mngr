@@ -58,6 +58,16 @@ _OVH_POST_DELIVERY_TASK_DRAIN_TIMEOUT_SECONDS: float = 600.0
 # the recycle path and to defend against a task slipping in after the
 # initial wait.
 _OVH_REBUILD_PREFLIGHT_DRAIN_SECONDS: float = 180.0
+# How long to keep retrying the /rebuild POST itself when OVH rejects it with
+# "...running tasks on the VPS". The task listing that
+# wait_for_no_active_tasks polls is eventually consistent: it can report no
+# active tasks while OVH still refuses the rebuild because the post-delivery
+# deliverVm task is in flight. OVH's own rejection of the action is therefore
+# the authoritative signal, so we re-drain and retry the POST until it takes.
+# deliverVm runs ~1-2min, so 300s is ample headroom.
+_OVH_REBUILD_START_RETRY_TIMEOUT_SECONDS: float = 300.0
+# Substring identifying OVH's in-flight-task rejection of a mutating action.
+_OVH_RUNNING_TASKS_ERROR_MARKER: str = "running tasks"
 
 
 def order_and_wait_for_vps(
@@ -182,7 +192,7 @@ def order_and_wait_for_vps(
                 requested_datacenter=datacenter,
             )
             return service_name
-        except (MngrError, VpsApiError, VpsProvisioningError):
+        except MngrError:
             _safe_delete_cart(client, cart_id)
             raise
 
@@ -230,7 +240,7 @@ def _set_configuration(
 def _safe_delete_cart(client: OvhVpsClient, cart_id: str) -> None:
     try:
         client.call_api("DELETE", f"/order/cart/{cart_id}")
-    except (VpsApiError, MngrError) as e:
+    except MngrError as e:
         logger.debug("Failed to clean up OVH cart {}: {}", cart_id, e)
 
 
@@ -504,12 +514,15 @@ def rebuild_vps_with_public_key(
     not generate or email a root password, and waits for the rebuild
     task to reach a terminal state.
 
-    OVH rejects ``/rebuild`` with HTTP 400 if any task is in flight on
-    the VPS, so we first drain any active tasks. In the fresh-order path
-    ``order_and_wait_for_vps`` already waited; this call is the canonical
-    chokepoint that also protects the recycle path.
+    OVH rejects ``/rebuild`` with "Action not available while there are
+    running tasks on the VPS" if any task is in flight. We drain active
+    tasks first, but the task listing the drain polls is eventually
+    consistent and can report an empty list while OVH still refuses the
+    action, so the POST is retried (re-draining each round) until OVH
+    accepts it -- OVH's rejection of the action is the authoritative
+    signal that a task is still in flight. Protects both the fresh-order
+    and recycle paths.
     """
-    client.wait_for_no_active_tasks(service_name, timeout_seconds=_OVH_REBUILD_PREFLIGHT_DRAIN_SECONDS)
     body: Mapping[str, Any] = {
         "imageId": image_id,
         "publicSshKey": public_ssh_key,
@@ -517,8 +530,46 @@ def rebuild_vps_with_public_key(
         "installRTM": False,
     }
     with log_span("OVH rebuild on {} (image_id={})", service_name, image_id):
-        task = client.call_api("POST", f"/vps/{service_name}/rebuild", **body)
-        task_id = int((task or {}).get("id", 0))
+        task = _post_rebuild_retrying_in_flight_task(client, service_name, body)
+        task_id = int(task.get("id", 0))
         if not task_id:
             raise VpsProvisioningError(f"OVH /vps/{service_name}/rebuild returned no task id: {task!r}")
         client.wait_for_task(service_name, task_id, timeout_seconds=task_timeout_seconds)
+
+
+def _post_rebuild_retrying_in_flight_task(
+    client: OvhVpsClient,
+    service_name: str,
+    body: Mapping[str, Any],
+) -> dict[str, Any]:
+    """``POST /vps/{s}/rebuild``, retrying while OVH reports an in-flight task.
+
+    Each attempt first drains the (eventually-consistent) task listing,
+    then issues the rebuild. On OVH's in-flight-task rejection it sleeps,
+    re-drains, and retries until ``_OVH_REBUILD_START_RETRY_TIMEOUT_SECONDS``
+    elapses; any other API error propagates immediately. Returns the
+    rebuild task payload once OVH accepts the call.
+    """
+    deadline = time.monotonic() + _OVH_REBUILD_START_RETRY_TIMEOUT_SECONDS
+    attempt = 0
+    last_error: VpsApiError | None = None
+    while time.monotonic() < deadline:
+        attempt += 1
+        client.wait_for_no_active_tasks(service_name, timeout_seconds=_OVH_REBUILD_PREFLIGHT_DRAIN_SECONDS)
+        try:
+            return dict(client.call_api("POST", f"/vps/{service_name}/rebuild", **body) or {})
+        except VpsApiError as e:
+            if _OVH_RUNNING_TASKS_ERROR_MARKER not in str(e).lower():
+                raise
+            last_error = e
+            logger.warning(
+                "OVH /rebuild on {} rejected by an in-flight task (attempt {}); re-draining and retrying: {}",
+                service_name,
+                attempt,
+                e,
+            )
+            time.sleep(client.task_poll_interval)
+    raise VpsProvisioningError(
+        f"OVH /vps/{service_name}/rebuild still rejected with an in-flight-task error after "
+        f"{_OVH_REBUILD_START_RETRY_TIMEOUT_SECONDS}s ({attempt} attempt(s)); last error: {last_error}"
+    )

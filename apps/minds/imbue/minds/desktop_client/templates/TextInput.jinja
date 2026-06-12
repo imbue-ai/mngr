@@ -1,0 +1,26 @@
+{#def name, value="", placeholder="", type="text", required=false, extra="", radius="md", autocomplete="", minlength=0 #}
+{#
+  Styled <input>. Matches the focus-ring token used across the app. Usage:
+    <TextInput name="email" type="email" placeholder="you@example.com" required />
+
+  ``radius`` is "md" (the in-workspace default) or "lg" (the auth cards
+  use the larger radius). ``autocomplete`` and ``minlength`` are
+  pass-throughs for forms that need them.
+
+  Any other HTML attribute (id=, readonly, data-*, onclick=) flows
+  through via JinjaX's ``attrs`` passthrough. The visual shell
+  (border, padding, text size, focus ring) comes from the shared
+  ``INPUT_BASE`` catalog global (see templates.py) so TextInput,
+  Select and Textarea share one source of truth for the focus token.
+#}
+{%- set _cls = "w-full " ~ INPUT_BASE ~ " rounded-" ~ radius ~ " " ~ extra -%}
+<input {{ attrs.render(
+  type=type,
+  name=name,
+  value=value,
+  placeholder=placeholder,
+  required=required,
+  autocomplete=autocomplete or False,
+  minlength=minlength or False,
+  classes=_cls,
+) }}>

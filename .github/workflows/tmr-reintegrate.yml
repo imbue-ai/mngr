@@ -46,9 +46,9 @@ jobs:
           mkdir -p tmr-report
           # The yolo agent type is synthesized inline (same as in tmr.yml).
           # The reintegrate path doesn't launch testing agents (it discovers
-          # already-launched ones by the tmr_run_name label), so --provider /
-          # --use-snapshot are unused. The integrator runs locally on the
-          # runner and uses ANTHROPIC_API_KEY directly.
+          # already-launched ones by the tmr_run_name label), so --provider
+          # is unused. The integrator runs locally on the runner and uses
+          # ANTHROPIC_API_KEY directly.
           uv run --project libs/mngr_tmr mngr tmr -vv \
             -S 'agent_types.yolo.parent_type="claude"' \
             -S 'agent_types.yolo.cli_args=["--dangerously-skip-permissions"]' \
@@ -68,7 +68,7 @@ jobs:
 
       - name: Upload HTML report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tmr-report
           path: tmr-report/
