@@ -1,5 +1,5 @@
 ---
-name: mngr-subagents
+name: mngr-proxy
 description: How to delegate work to a mngr-managed subagent via Bash on this agent. The native Task tool is disabled in favor of mngr; this skill explains the protocol for spawning a subagent and capturing its reply so you can continue your turn.
 ---
 
