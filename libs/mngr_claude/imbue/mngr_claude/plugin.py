@@ -178,8 +178,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
       * every preserved agent's ``projects/`` dir (preserve_sessions_on_destroy)
 
       All of these dirs are searched; a session ID matching in more than one is
-      rejected as ambiguous (the user must pass the full ``.jsonl`` path). The dir
-      order above is the order used when listing dirs in error messages.
+      rejected as ambiguous (the user must pass the full ``.jsonl`` path).
 
     Returns (session_id, source_project_dir).
     """
