@@ -1,0 +1,7 @@
+Fix the `macos_launch` cold-launch smoke test to match the redesigned welcome splash.
+
+- The `macos-launch.spec.js` Playwright smoke test (the `macos_launch` job in `minds-launch-to-msg.yml`, run on a vanilla `macos-latest` runner with no auth state) was asserting the old login screen: a `Create` link or a `Log in` **button**. The welcome screen was redesigned to a "Welcome to Minds" splash where `Sign Up` / `Log In` are now **links** (`ButtonLink` -> `<a>`) and there is a `Continue without an account` button. The stale `getByRole('button', { name: /^log in$/i })` selector matched nothing, so the test timed out at 120s and failed the whole launch-to-first-message run even though the app launched fine and the real `launch_to_msg` job (which auths via one-time code and drives the logged-in UI) passed.
+
+- The smoke test now accepts any of: the logged-in home `Create` link, the welcome splash `Log In` link, or the `Continue without an account` button. Any one proves the cold-launch path completed.
+
+- Updated `test/e2e/README.md` to describe the new welcome-splash landing state and to point at the current workflow (`minds-launch-to-msg.yml` `macos_launch` job, twice-daily schedule + dispatch) instead of the retired `minds-macos-launch.yml`.

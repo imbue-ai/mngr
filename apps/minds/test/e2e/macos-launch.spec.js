@@ -3,8 +3,9 @@
 // A successful launch can land on either:
 //   - the projects list / home (when the runner has prior auth state, like
 //     a logged-in dev machine), where a "Create" link is visible, or
-//   - the login screen (vanilla macos-latest CI runner with no auth state),
-//     where a "Log in" button is visible.
+//   - the welcome / login splash (vanilla macos-latest CI runner with no
+//     auth state), which renders a "Log In" link and a "Continue without
+//     an account" button.
 //
 // Either landing proves the cold-launch path completed: Electron came up,
 // the Python backend bound its port, and the chrome iframe rendered.
@@ -12,15 +13,16 @@
 
 const { test, expect } = require('./fixtures');
 
-test('main window launches to a usable state (Create or Log in)', async ({ mindsApp }, testInfo) => {
+test('main window launches to a usable state (Create or Welcome)', async ({ mindsApp }, testInfo) => {
   const { mainWindow, app, pickContentWindow } = mindsApp;
-  // Either auth path is fine -- racing both with `.or()` so we don't
+  // Either auth path is fine -- racing them with `.or()` so we don't
   // burn a full timeout per state if the runner happens to be in the
   // logged-in one.
   const createLink = mainWindow.getByRole('link', { name: /^create$/i });
-  const loginBtn = mainWindow.getByRole('button', { name: /^log in$/i });
+  const loginLink = mainWindow.getByRole('link', { name: /^log in$/i });
+  const skipAccountBtn = mainWindow.getByRole('button', { name: /continue without an account/i });
   try {
-    await expect(createLink.or(loginBtn).first())
+    await expect(createLink.or(loginLink).or(skipAccountBtn).first())
       .toBeVisible({ timeout: 2 * 60 * 1000 });
   } finally {
     // Always attach a final main-window screenshot. The shared
