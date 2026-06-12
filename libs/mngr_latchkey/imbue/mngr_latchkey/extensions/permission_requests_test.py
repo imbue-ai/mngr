@@ -383,6 +383,121 @@ def test_file_sharing_pattern_matches_percent_encoded_request_path(
         assert not path_pattern.fullmatch(raw_path), raw_path
 
 
+@pytest.mark.parametrize(
+    ("requested_path", "expanded_path"),
+    [
+        ("~", "/home/example"),
+        ("~/", "/home/example/"),
+        ("~/Documents/shared.txt", "/home/example/Documents/shared.txt"),
+        ("~/My Documents/data.txt", "/home/example/My Documents/data.txt"),
+    ],
+)
+def test_post_expands_tilde_home_path_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+    requested_path: str,
+    expanded_path: str,
+) -> None:
+    """A ``~`` / ``~/...`` path expands to the current user's home directory.
+
+    The fixture pins ``HOME=/home/example`` (Node's ``homedir()``), so
+    the grant must be stored and built against the expanded absolute
+    path -- the persisted payload, the per-file schema name, and the
+    WebDAV pattern all use the expanded form rather than the ``~``
+    shorthand.
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "wants something in the home directory",
+            "type": "file-sharing",
+            "payload": {"path": requested_path, "access": "READ"},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The persisted payload carries the expanded absolute path, not the
+    # ``~`` shorthand the agent supplied.
+    assert parsed["payload"]["path"] == expanded_path
+    expanded_name = _file_sharing_permission_name(expanded_path, "READ")
+    requested_name = _file_sharing_permission_name(requested_path, "READ")
+    schemas = parsed["effect"]["schemas"]
+    assert expanded_name in schemas
+    assert requested_name not in schemas
+    # The WebDAV pattern matches the percent-encoded expanded path.
+    path_pattern = re.compile(schemas[expanded_name]["properties"]["path"]["pattern"])
+    encoded_webdav_path = urllib.parse.quote(
+        f"{_FILE_SHARING_PROXY_PATH_PREFIX}{expanded_path}", safe="/"
+    )
+    assert path_pattern.fullmatch(encoded_webdav_path), encoded_webdav_path
+
+
+def test_post_rejects_tilde_user_notation_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """``~user`` (another user's home) cannot be resolved here and is rejected."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "~otheruser/secret.txt", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    message = json.loads(body)["error"]
+    assert "~user" in message
+
+
+def test_post_rejects_tilde_traversal_in_file_sharing(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """``~/../...`` must not escape the home directory via expansion."""
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "~/../etc/passwd", "access": "READ"},
+        },
+    )
+    assert status == 400, body
+    assert "traversal" in json.loads(body)["error"].lower()
+
+
+def test_approve_with_tilde_path_override_expands_home(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A ``~``-prefixed path edited into the approve dialog expands to home."""
+    base_url, _latchkey_directory, permissions_config_path = node_extension
+    create_status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs a file",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/requested.txt", "access": "READ"},
+        },
+    )
+    assert create_status == 201
+    request_id = json.loads(create_body)["request_id"]
+
+    approve_status, approve_body = _post_json(
+        f"{base_url}/permission-requests/approve/{request_id}",
+        {"path": "~/Documents/Shared"},
+    )
+    assert approve_status == 200, approve_body
+    applied = json.loads(permissions_config_path.read_text())
+    expanded_name = _file_sharing_permission_name("/home/example/Documents/Shared", "READ")
+    assert applied["rules"] == [{_FILE_SHARING_SCOPE_NAME: [expanded_name]}]
+    assert expanded_name in applied["schemas"]
+
+
 def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(
     node_extension: tuple[str, Path, Path],
 ) -> None:

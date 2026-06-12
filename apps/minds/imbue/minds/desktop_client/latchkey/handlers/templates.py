@@ -76,6 +76,7 @@ def render_file_sharing_permission_dialog(
     access: str,
     access_human_label: str,
     allowed_roots_json: str = "[]",
+    home_dir: str = "",
     mngr_forward_origin: str = "",
 ) -> str:
     """Render the file-sharing permission detail fragment.
@@ -95,6 +96,10 @@ def render_file_sharing_permission_dialog(
     instant client-side feedback (and disable Approve) when the edited
     path falls outside them, mirroring the server-side check.
 
+    ``home_dir`` is the absolute home directory; the dialog embeds it so
+    the inbox shell can expand a leading ``~`` / ``~/`` the user types
+    before the within-roots check, mirroring the server-side expansion.
+
     ``mngr_forward_origin`` is the bare origin of the ``mngr forward`` plugin;
     the workspace link in the fragment points at ``{mngr_forward_origin}/goto/<agent>/``.
     """
@@ -108,6 +113,7 @@ def render_file_sharing_permission_dialog(
         access=access,
         access_human_label=access_human_label,
         allowed_roots_json=allowed_roots_json,
+        home_dir=home_dir,
         display_name=file_path,
         mngr_forward_origin=mngr_forward_origin,
     )
