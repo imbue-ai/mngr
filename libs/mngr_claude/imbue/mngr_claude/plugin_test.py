@@ -32,8 +32,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -3709,6 +3709,92 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     expected_project_name = encode_claude_project_dir_name(agent.work_dir)
     dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
     assert (dest_project_dir / "abc123-def456.jsonl").exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_preserved_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against a destroyed agent's preserved session files."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Mirror the on-disk layout that preserve_sessions_on_destroy produces:
+    # <local_host_dir>/preserved/<name>--<id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    preserved_project_dir = (
+        local_host_dir
+        / "preserved"
+        / "old-agent--00000000-0000-0000-0000-000000000001"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    preserved_project_dir.mkdir(parents=True)
+    target_session_id = "preserved-session-id"
+    (preserved_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against another live local mngr agent's per-agent config dir."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Another live agent's session lives under its per-agent state dir:
+    # <local_host_dir>/agents/<other-id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    other_agent_project_dir = (
+        local_host_dir
+        / "agents"
+        / "11111111-1111-1111-1111-111111111111"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    other_agent_project_dir.mkdir(parents=True)
+    target_session_id = "live-mngr-session-id"
+    (other_agent_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
 
 
 # =============================================================================
