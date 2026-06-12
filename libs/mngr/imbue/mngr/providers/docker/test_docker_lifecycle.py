@@ -181,7 +181,7 @@ def test_remove_build_image_tolerates_container_still_referencing_it(
     # A unique image (label keyed on host_id) so build_tag is its only tag --
     # otherwise images.remove would just untag and never hit the conflict.
     dockerfile = io.BytesIO(f"FROM busybox:latest\nLABEL mngr.test={host_id}\nCMD sleep 600\n".encode())
-    image, _ = client.images.build(fileobj=dockerfile, tag=build_tag, rm=True)
+    client.images.build(fileobj=dockerfile, tag=build_tag, rm=True)
     container = client.containers.create(build_tag, name=f"{build_tag}-container")
     try:
         docker_provider._remove_build_image(host_id)
