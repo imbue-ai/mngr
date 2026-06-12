@@ -27,6 +27,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -122,7 +123,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     def _get_agent_dir(self) -> Path:
         """Get the agent's state directory path."""
-        return self.host.host_dir / "agents" / str(self.id)
+        return get_agent_state_dir_path(self.host.host_dir, self.id)
 
     def _get_data_path(self) -> Path:
         """Get the path to the agent's data.json file."""
