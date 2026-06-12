@@ -27,7 +27,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentNameOrId
-from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
@@ -141,7 +140,7 @@ def _filter_all_agents(
 
 
 @pure
-def _filter_one_agent(
+def filter_one_agent(
     agent: AgentNameOrId,
     resolved_host: DiscoveredHost | None,
     agents_by_host: Mapping[DiscoveredHost, Sequence[DiscoveredAgent]],
@@ -215,7 +214,7 @@ def resolve_host_location_address(
     resolved_agent: DiscoveredAgent | None = None
     if parsed.agent is not None:
         with log_span("Resolving agent reference"):
-            resolved_host, resolved_agent = _filter_one_agent(parsed.agent, resolved_host, agents_by_host)
+            resolved_host, resolved_agent = filter_one_agent(parsed.agent, resolved_host, agents_by_host)
 
     with log_span("Getting host interface from provider"):
         if resolved_host is None:
@@ -547,101 +546,6 @@ def _post_filter_matches_by_addresses(
     return filtered
 
 
-@pure
-def _required_providers_for_targets(
-    addresses: Sequence[AgentOrHostAddress],
-) -> tuple[ProviderInstanceName, ...] | None:
-    """Return the providers a discovery call can be restricted to for these targets.
-
-    Returns the deduped tuple only when every address (agent or host) pins a
-    provider, since a single un-pinned address could live on any provider.
-    Empty input returns ``None`` (no addresses, no narrowing).
-    """
-    providers: set[ProviderInstanceName] = set()
-    for addr in addresses:
-        if isinstance(addr, AgentAddress):
-            provider = addr.host.provider if addr.host is not None else None
-        else:
-            provider = addr.provider
-        if provider is None:
-            return None
-        providers.add(provider)
-    if not providers:
-        return None
-    return tuple(sorted(providers))
-
-
-@pure
-def _agent_identifiers_for_targets(
-    addresses: Sequence[AgentOrHostAddress],
-) -> tuple[str, ...] | None:
-    """Return agent identifiers usable for the discovery event-stream optimization.
-
-    The discovery event stream only knows about agents, so we can only feed it
-    identifiers when *every* address is an :class:`AgentAddress` -- otherwise
-    a host-only address could live on a provider not covered by any agent
-    identifier and would be silently skipped.
-    """
-    identifiers: list[str] = []
-    for addr in addresses:
-        if not isinstance(addr, AgentAddress):
-            return None
-        identifiers.append(str(addr.agent))
-    return tuple(identifiers) if identifiers else None
-
-
-def find_host_and_agent_targets(
-    addresses: Sequence[AgentOrHostAddress],
-    mngr_ctx: MngrContext,
-    *,
-    include_destroyed: bool = False,
-) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-    """Resolve a mixed sequence of agent and host addresses to their target hosts.
-
-    Each :class:`AgentAddress` contributes one ``(host, agent)`` pair: the
-    agent is resolved uniquely (raising on ambiguity via
-    :func:`_filter_one_agent`) and appended under its host. Each
-    :class:`HostAddress` contributes every matching host with an empty agent
-    list; if a host is also referenced by an agent address, the agent stays
-    in that host's list.
-
-    Discovery is narrowed to the addresses' providers when every address pins
-    one, and to the agent identifiers (via the discovery event stream) when
-    every address is an :class:`AgentAddress`.
-    """
-    provider_names = _required_providers_for_targets(addresses)
-    agent_identifiers: tuple[str, ...] | None = None
-    if provider_names is None:
-        agent_identifiers = _agent_identifiers_for_targets(addresses)
-
-    agents_by_host, _ = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=tuple(str(p) for p in provider_names) if provider_names is not None else None,
-        agent_identifiers=agent_identifiers,
-        include_destroyed=include_destroyed,
-        reset_caches=False,
-    )
-
-    all_hosts = list(agents_by_host.keys())
-    result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-
-    for addr in addresses:
-        if isinstance(addr, AgentAddress):
-            host_constraint: DiscoveredHost | None = None
-            if addr.host is not None:
-                host_constraint = filter_one_host(addr.host, all_hosts)
-            host_ref, agent_ref = _filter_one_agent(addr.agent, host_constraint, agents_by_host)
-            result.setdefault(host_ref, []).append(agent_ref)
-        else:
-            matches = filter_all_hosts(addr, all_hosts)
-            if not matches:
-                raise UserInputError(f"Agent or host not found: {addr}")
-            for host_ref in matches:
-                result.setdefault(host_ref, [])
-
-    return result
-
-
 def find_one_agent_and_agents_by_host(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -662,13 +566,13 @@ def find_one_agent_and_agents_by_host(
 
     Raises :class:`UserInputError` if the host constraint matches no hosts.
     Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
-    agent cannot be resolved (see :func:`_filter_one_agent`).
+    agent cannot be resolved (see :func:`filter_one_agent`).
     """
     agents_by_host, _providers = discover_by_address(address, mngr_ctx, include_destroyed=False)
     if not agents_by_host and address.host is not None:
         raise UserInputError(f"No hosts found matching {address.host}")
 
-    host_ref, agent_ref = _filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
+    host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host
 
 

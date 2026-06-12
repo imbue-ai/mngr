@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 from typing import assert_never
 
@@ -5,7 +6,11 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
-from imbue.mngr.api.find import find_host_and_agent_targets
+from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.find import filter_all_hosts
+from imbue.mngr.api.find import filter_one_agent
+from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import parse_agent_or_host_addresses_or_raise
 from imbue.mngr.cli.common_opts import add_common_options
@@ -24,14 +29,19 @@ from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.data_types import SnapshotInfo
-from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 
@@ -79,9 +89,98 @@ class SnapshotDestroyCliOptions(CommonCliOptions):
 # =============================================================================
 
 
-def _agent_names_of(agent_refs: list[DiscoveredAgent]) -> list[str]:
-    """Project a list of DiscoveredAgent into bare agent-name strings for output."""
-    return [str(a.agent_name) for a in agent_refs]
+@pure
+def _required_providers_for_targets(
+    addresses: Sequence[AgentOrHostAddress],
+) -> tuple[ProviderInstanceName, ...] | None:
+    """Return the providers a discovery call can be restricted to for these targets.
+
+    Returns the deduped tuple only when every address (agent or host) pins a
+    provider, since a single un-pinned address could live on any provider.
+    Empty input returns ``None`` (no addresses, no narrowing).
+    """
+    providers: set[ProviderInstanceName] = set()
+    for addr in addresses:
+        if isinstance(addr, AgentAddress):
+            provider = addr.host.provider if addr.host is not None else None
+        else:
+            provider = addr.provider
+        if provider is None:
+            return None
+        providers.add(provider)
+    if not providers:
+        return None
+    return tuple(sorted(providers))
+
+
+@pure
+def _agent_identifiers_for_targets(
+    addresses: Sequence[AgentOrHostAddress],
+) -> tuple[str, ...] | None:
+    """Return agent identifiers usable for the discovery event-stream optimization.
+
+    The discovery event stream only knows about agents, so we can only feed it
+    identifiers when *every* address is an :class:`AgentAddress` -- otherwise
+    a host-only address could live on a provider not covered by any agent
+    identifier and would be silently skipped.
+    """
+    identifiers: list[str] = []
+    for addr in addresses:
+        if not isinstance(addr, AgentAddress):
+            return None
+        identifiers.append(str(addr.agent))
+    return tuple(identifiers) if identifiers else None
+
+
+def _find_snapshot_targets(
+    addresses: Sequence[AgentOrHostAddress],
+    mngr_ctx: MngrContext,
+) -> dict[DiscoveredHost, list[AgentName]]:
+    """Resolve a mixed sequence of agent and host addresses to their target hosts.
+
+    Each :class:`AgentAddress` contributes one ``(host, agent_name)`` pair: the
+    agent is resolved uniquely (raising on ambiguity via
+    :func:`filter_one_agent`) and its name appended under its host. Each
+    :class:`HostAddress` contributes every matching host with an empty name
+    list; if a host is also referenced by an agent address, the agent name
+    stays in that host's list. The agent names are kept purely for display
+    in the per-host snapshot result -- snapshots operate at the host level.
+
+    Discovery is narrowed to the addresses' providers when every address pins
+    one, and to the agent identifiers (via the discovery event stream) when
+    every address is an :class:`AgentAddress`.
+    """
+    provider_names = _required_providers_for_targets(addresses)
+    agent_identifiers: tuple[str, ...] | None = None
+    if provider_names is None:
+        agent_identifiers = _agent_identifiers_for_targets(addresses)
+
+    agents_by_host, _ = discover_hosts_and_agents(
+        mngr_ctx,
+        provider_names=tuple(str(p) for p in provider_names) if provider_names is not None else None,
+        agent_identifiers=agent_identifiers,
+        include_destroyed=False,
+        reset_caches=False,
+    )
+
+    all_hosts = list(agents_by_host.keys())
+    result: dict[DiscoveredHost, list[AgentName]] = {}
+
+    for addr in addresses:
+        if isinstance(addr, AgentAddress):
+            host_constraint: DiscoveredHost | None = None
+            if addr.host is not None:
+                host_constraint = filter_one_host(addr.host, all_hosts)
+            host_ref, agent_ref = filter_one_agent(addr.agent, host_constraint, agents_by_host)
+            result.setdefault(host_ref, []).append(agent_ref.agent_name)
+        else:
+            matches = filter_all_hosts(addr, all_hosts)
+            if not matches:
+                raise UserInputError(f"Agent or host not found: {addr}")
+            for host_ref in matches:
+                result.setdefault(host_ref, [])
+
+    return result
 
 
 def _check_create_future_options(opts: SnapshotCreateCliOptions) -> None:
@@ -372,7 +471,7 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    targets = find_host_and_agent_targets(addresses, mngr_ctx)
+    targets = _find_snapshot_targets(addresses, mngr_ctx)
 
     if not targets:
         emit_info("No hosts found to snapshot", output_opts.output_format)
@@ -383,10 +482,9 @@ def _snapshot_create_impl(ctx: click.Context, **kwargs: Any) -> None:
     created: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
 
-    for host_ref, agent_refs in targets.items():
+    for host_ref, agent_names in targets.items():
         host_id_str = str(host_ref.host_id)
         provider_name = host_ref.provider_name
-        agent_names = _agent_names_of(agent_refs)
         try:
             provider = get_provider_instance(provider_name, mngr_ctx)
             if not provider.supports_snapshots:
@@ -464,7 +562,7 @@ def snapshot_list(ctx: click.Context, **kwargs: Any) -> None:
             raise click.UsageError("Must specify at least one agent or host (use '-' to read from stdin)")
         return
 
-    targets = find_host_and_agent_targets(addresses, mngr_ctx)
+    targets = _find_snapshot_targets(addresses, mngr_ctx)
 
     if not targets:
         emit_info("No hosts found", output_opts.output_format)
@@ -544,7 +642,7 @@ def snapshot_destroy(ctx: click.Context, **kwargs: Any) -> None:
     if opts.snapshots and opts.all_snapshots:
         raise click.UsageError("Cannot specify both --snapshot and --all-snapshots")
 
-    targets = find_host_and_agent_targets(addresses, mngr_ctx)
+    targets = _find_snapshot_targets(addresses, mngr_ctx)
 
     if not targets:
         emit_info("No hosts found", output_opts.output_format)
