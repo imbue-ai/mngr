@@ -11,6 +11,7 @@ from imbue.mngr_smolvm.constants import DEFAULT_HOST_DATA_DISK_SIZE_GB
 from imbue.mngr_smolvm.constants import DEFAULT_MEMORY_MIB
 from imbue.mngr_smolvm.constants import MINIMUM_SMOLVM_VERSION
 from imbue.mngr_smolvm.constants import SMOLVM_BACKEND_NAME
+from imbue.mngr_smolvm.constants import SSH_CONNECT_TIMEOUT_SECONDS
 
 
 class SmolvmProviderConfig(ProviderInstanceConfig):
@@ -86,7 +87,7 @@ class SmolvmProviderConfig(ProviderInstanceConfig):
         description="Minimum required smolvm version as (major, minor, patch)",
     )
     ssh_connect_timeout: float = Field(
-        default=120.0,
+        default=SSH_CONNECT_TIMEOUT_SECONDS,
         description="Timeout in seconds for waiting for SSH to be ready on the VM",
     )
     vm_start_timeout_seconds: float = Field(
