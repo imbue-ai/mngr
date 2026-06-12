@@ -120,14 +120,10 @@ const REQUEST_TYPE_PREDEFINED = 'predefined';
 const REQUEST_TYPE_FILE_SHARING = 'file-sharing';
 const VALID_REQUEST_TYPES = new Set([REQUEST_TYPE_PREDEFINED, REQUEST_TYPE_FILE_SHARING]);
 
-// Detent's catch-all *permission* schema. It matches every request, so a
-// rule like ``{"linear-api": ["any"]}`` grants all access under that
-// scope. The ``services.json`` catalog never lists it explicitly (every
-// scope implicitly admits it), so it is always a valid permission under
-// any known scope -- including scopes whose enumerated ``permissions``
-// list is empty (e.g. Linear). The ``permissions`` extension surfaces it
-// as an always-available option, so a request naming it must be accepted
-// here too.
+// Detent's catch-all permission schema. The ``services.json``
+// catalog never lists it explicitly (every scope implicitly
+// admits it), so it is always a valid permission under any
+// known scope.
 const ALWAYS_AVAILABLE_PERMISSION = 'any';
 
 // Names and constants used when generating the ``effect`` for a
@@ -423,9 +419,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
  * deployment bug and surfaces as HTTP 500.
  *
  * Each scope's set is seeded with the catch-all ``any`` permission,
- * which every scope implicitly admits even when the catalog enumerates
- * none (e.g. Linear), so a request naming ``any`` is always accepted
- * under a known scope.
+ * which every scope implicitly admits.
  *
  * A service value is an array of scope entries, and each entry's
  * ``permissions`` are ``{name, description}`` objects; only the

@@ -191,8 +191,7 @@ consume the stream and approve/delete on resolution.
     `{"scope": "...", "permissions": ["...", ...]}`. The scope must be
     one named in the bundled `services.json` catalog, and each
     permission must be either one the catalog lists for that scope or
-    the catch-all `any` (always valid under any known scope, including
-    scopes that enumerate no permissions, like Linear).
+    the catch-all `any`.
   * `"file-sharing"` -- single-file access through the `minds-api-proxy`
     extension, with payload `{"path": "<absolute-path>"}`. The path
     must be absolute and free of `..` segments.
@@ -281,11 +280,11 @@ root is rejected with HTTP 403.
   catalog entries for `<service_name>` (e.g. `slack`, `google-gmail`)
   as an array, using the same value shape, or 404 if the service is
   unknown. The catch-all `any` permission is always injected at index 0
-  of every scope's `permissions` array (even when the catalog lists
-  none, as for Linear), so a caller can always request unrestricted
-  access under a known scope. This endpoint is backed by a
-  `services.json` file (keyed by raw service name) that ships alongside
-  the extension; the path query parameter is not consulted.
+  of every scope's `permissions` array, so a caller can always
+  request unrestricted access under a known scope. This endpoint
+  is backed by a `services.json` file (keyed by raw service name)
+  that ships alongside the extension; the path query parameter
+  is not consulted.
 * `GET /permissions/rules?path=<file>&rule_key=<scope>` returns the
   rule for `<scope>`, or 404 if absent.
 * `POST /permissions/rules?path=<file>&rule_key=<scope>` with a JSON

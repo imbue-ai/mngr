@@ -23,12 +23,11 @@
  *       ``{name, description}`` objects -- the Detent permission-schema
  *       name plus its own plain-English summary -- that may be granted
  *       under the scope). The catch-all ``any`` permission is always
- *       injected at index 0 of every scope's ``permissions`` array (even
- *       when the catalog lists none, as for Linear), so a caller can
- *       always request unrestricted access under a known scope. Returns
- *       404 when the service is unknown. Backed by the ``services.json``
- *       file that ships alongside this extension, which is keyed by raw
- *       service name.
+ *       injected at index 0 of every scope's ``permissions`` array, so
+ *       a caller can *       always request unrestricted access under
+ *       a known scope. Returns 404 when the service is unknown. Backed
+ *       by the ``services.json`` file that ships alongside this extension,
+ *       which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -87,15 +86,10 @@ const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 // Detent's catch-all *permission* schema. It matches every request, so a
 // rule like ``{"linear-api": ["any"]}`` grants all access under that
 // scope. The ``services.json`` catalog never lists it explicitly (every
-// scope implicitly admits it), so a scope whose ``permissions`` array is
-// empty (e.g. Linear) would otherwise look as though there is nothing to
-// ask for. We inject ``any`` as an always-available option so a caller
-// can always request unrestricted access under a known scope. This
-// mirrors the desktop dialog (``services_catalog._service_info_from_entry``),
-// which prepends the same option.
+// scope implicitly admits it).
 const ALWAYS_AVAILABLE_PERMISSION = 'any';
 const ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION =
-  'Unrestricted access: every request permitted under this scope. Grant only ' +
+  'Unrestricted access: every request permitted under this scope. Use only ' +
   'when no narrower permission covers what you need.';
 
 class PermissionsExtensionError extends Error {
