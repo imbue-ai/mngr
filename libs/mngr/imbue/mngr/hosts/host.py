@@ -60,6 +60,8 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
@@ -162,12 +164,18 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
+    - TimeoutError (pyinfra read_output_buffers timeout when the remote
+      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
+      check must precede any narrower OSError handling.
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
+        return True
+    if isinstance(exception, TimeoutError):
         return True
     return False
 
@@ -197,12 +205,6 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     if client is not None:
         return client.get_transport()
     return None
-
-
-@pure
-def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
-    """Compute the state directory path for an agent given the host directory and agent ID."""
-    return host_dir / "agents" / str(agent_id)
 
 
 def install_packaged_script_on_host(
@@ -475,6 +477,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError``, so this
+                # must precede the OSError branch below. Reached when the
+                # retry decorator has exhausted its attempts on transient
+                # SSH read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e
@@ -1015,7 +1024,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
-        agents_dir = self.host_dir / "agents"
+        agents_dir = get_agents_root_dir(self.host_dir)
         if not self._is_directory(agents_dir):
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
@@ -1041,7 +1050,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         since that data is more likely to be up-to-date.
         """
         with log_span("Loading all agents from host {}", self.id):
-            agents_dir = self.host_dir / "agents"
+            agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
@@ -2499,7 +2508,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
             # Remove the agent's on-host state directory. A missing dir is benign (rm -rf
             # exits 0 with no stderr); a permission/IO error leaves local state behind.
-            state_dir = self.host_dir / "agents" / str(agent.id)
+            state_dir = get_agent_state_dir_path(self.host_dir, agent.id)
             _result, failure = self._run_classified_cleanup_command(
                 f"rm -rf '{str(state_dir)}'",
                 failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
@@ -3018,7 +3027,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_command(self, agent: AgentInterface) -> str:
         """Get the command for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError as e:
@@ -3032,7 +3041,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_additional_commands(self, agent: AgentInterface) -> list[NamedCommand]:
         """Get the additional commands for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError:
@@ -3058,7 +3067,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         Returns default (all-None) options when there is no data.json or no tmux
         block, so older agents created before this field existed behave as before.
         """
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError:
@@ -3317,7 +3326,7 @@ def _build_start_agent_shell_command(
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
-    activity_dir = host_dir / "agents" / str(agent.id) / "activity"
+    activity_dir = get_agent_state_dir_path(host_dir, agent.id) / "activity"
     activity_path = activity_dir / ActivitySource.START.value.lower()
     steps.append(f"mkdir -p {shlex.quote(str(activity_dir))}")
     activity_printf_cmd = (

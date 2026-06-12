@@ -500,6 +500,7 @@ def _build_mngr_create_command(
     imbue_cloud_fast_mode: str | None = None,
     region: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
+    color: str | None = None,
 ) -> list[str]:
     """Build the ``mngr create`` command for a freshly-provisioned workspace.
 
@@ -573,6 +574,13 @@ def _build_mngr_create_command(
             # inherits the same gateway URL / password / JWT.
             latchkey_host_env_args.extend(["--host-env", f"{key}={value}"])
 
+    color_label_args: list[str] = []
+    if color is not None:
+        # Pre-normalized by the caller (or the form POST handler) to
+        # ``#rrggbb`` lowercase; defended in depth by the same
+        # ``normalize_workspace_color`` call on the create-route side.
+        color_label_args = ["--label", f"color={color}"]
+
     mngr_command: list[str] = [
         MNGR_BINARY,
         "create",
@@ -595,6 +603,7 @@ def _build_mngr_create_command(
         *latchkey_host_env_args,
         "--label",
         "is_primary=true",
+        *color_label_args,
     ]
 
     match launch_mode:
@@ -641,7 +650,7 @@ def _build_mngr_create_command(
             # settings). It is a hard placement requirement: the VPS is created
             # in exactly this region.
             if region:
-                mngr_command.extend(["-b", f"--vps-region={region}"])
+                mngr_command.extend(["-b", f"--vultr-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -834,6 +843,7 @@ def run_mngr_create(
     anthropic_api_key: str | None = None,
     anthropic_base_url: str | None = None,
     latchkey_env: Mapping[str, str] | None = None,
+    color: str | None = None,
     *,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> tuple[AgentId, HostId]:
@@ -869,6 +879,7 @@ def run_mngr_create(
         imbue_cloud_fast_mode=imbue_cloud_fast_mode,
         region=region,
         latchkey_env=latchkey_env,
+        color=color,
     )
 
     # Build the subprocess env from the parent's env + any secrets we inject
@@ -943,6 +954,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     anthropic_api_key: str | None
     anthropic_base_url: str | None
     parent_cg: ConcurrencyGroup | None
+    color: str | None
 
 
 def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams) -> tuple[AgentId, HostId]:
@@ -971,10 +983,11 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
         # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
-        # (-b --vps-region=); the command builder ignores it for DOCKER/LIMA.
+        # (-b --vultr-region=); the command builder ignores it for DOCKER/LIMA.
         region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
+        color=params.color,
         parent_cg=params.parent_cg,
     )
 
@@ -1157,6 +1170,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
+        color: str | None = None,
     ) -> CreationId:
         """Start creating an agent from a git URL or local path in a background thread.
 
@@ -1227,6 +1241,7 @@ class AgentCreator(MutableModel):
                 anthropic_api_key,
                 on_created,
                 backup_request,
+                color,
             ),
             daemon=True,
             name="agent-creator-{}".format(creation_id),
@@ -1287,6 +1302,7 @@ class AgentCreator(MutableModel):
         anthropic_api_key: str = "",
         on_created: Callable[[AgentId], None] | None = None,
         backup_request: BackupSetupRequest | None = None,
+        color: str | None = None,
     ) -> None:
         """Background thread that resolves the repo source and creates an mngr agent.
 
@@ -1496,6 +1512,7 @@ class AgentCreator(MutableModel):
                     anthropic_api_key=effective_anthropic_api_key,
                     anthropic_base_url=effective_anthropic_base_url,
                     parent_cg=self.root_concurrency_group,
+                    color=color,
                 )
 
                 if launch_mode is LaunchMode.IMBUE_CLOUD:

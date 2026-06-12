@@ -117,6 +117,7 @@ from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
+from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
@@ -1401,7 +1402,6 @@ class ImbueCloudProvider(BaseProviderInstance):
                 vps_host_public_key=vps_host_public_key,
                 region="imbue-cloud-pool",
                 plan="imbue-cloud-pool",
-                os_id="imbue-cloud-pool",
                 image=image,
                 tags=tags,
                 build_args=passthrough_build_args,
@@ -1428,7 +1428,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         block.
         """
         vps_config = _build_delegated_vps_config(self.config)
-        return VpsDockerProvider(
+        return MinimalVpsDockerProvider(
             name=self.name,
             host_dir=self.config.host_dir,
             mngr_ctx=self.mngr_ctx,
