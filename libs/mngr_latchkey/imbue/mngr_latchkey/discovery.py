@@ -175,7 +175,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         agent_id_str = str(agent_id)
         with self._pending_lock:
             if agent_id_str in self._pending_remote_agents:
-                logger.debug("Latchkey tunnel setup already in flight for agent {}; skipping duplicate fire", agent_id)
+                # Latchkey tunnel setup already in flight; skipping duplicate fire.
                 return
             self._pending_remote_agents.add(agent_id_str)
         try:
