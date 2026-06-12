@@ -13,6 +13,10 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
+from tenacity import retry
+from tenacity import retry_if_exception_type
+from tenacity import stop_after_attempt
+from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
@@ -381,11 +385,20 @@ class SmolvmProviderInstance(BaseProviderInstance):
             )
         )
 
+    @retry(
+        retry=retry_if_exception_type(SmolvmProvisioningError),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        reraise=True,
+    )
     def _provision_ssh(self, machine_name: str, host_id: HostId) -> None:
         """Install and start sshd inside the guest via the smolvm exec channel.
 
         Idempotent: re-run on every host start to bring sshd back up after a
-        reboot (package installs are skipped when already present).
+        reboot (package installs are skipped when already present). Retried
+        with backoff because the exec channel can transiently fail right
+        after first boot of a large image, while the guest agent is still
+        staging the workload container's layers.
         """
         host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
         _client_key_path, client_public_key = self._client_ssh_keypair()
