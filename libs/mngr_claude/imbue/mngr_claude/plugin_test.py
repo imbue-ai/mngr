@@ -2865,10 +2865,10 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
 # =============================================================================
 
 
-# Flaky: provision() runs the local `claude --version` check via a real subprocess
-# (_get_local_claude_version), which intermittently exceeds the 10s pytest-timeout
-# under CI load. Retried by offload until the underlying subprocess flakiness is fixed.
-@pytest.mark.flaky
+# provision() runs the local `claude --version` check via a real subprocess
+# (_get_local_claude_version), which can exceed the default 10s pytest-timeout under
+# CI load, so this test gets a longer timeout.
+@pytest.mark.timeout(30)
 def test_provision_adds_trust_for_remote_work_dir(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
