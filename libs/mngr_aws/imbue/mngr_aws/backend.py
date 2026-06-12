@@ -684,15 +684,27 @@ class AwsProvider(VpsDockerProvider):
     # =========================================================================
 
     def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
-        """Mirror an agent's record into an EC2 tag so it survives an instance stop.
+        """Persist an agent's record on the host volume *and* mirror it into an EC2 tag.
 
-        A stopped instance's volume (where agent records normally live) is
-        unreadable, so without this a paused host would list with no agents and
-        ``mngr start <agent>`` could not resolve. Stores a compact record
-        (id, name, type, and labels when they fit the tag limit) under
-        ``mngr-agent-<agent_id>``; called on agent create and on every
+        The base ``VpsDockerProvider`` writes the agent record to the on-volume
+        host store (``agents/<id>.json``), which is the authoritative source the
+        SSH-based discovery reads for *running* hosts -- so this override must
+        keep doing that (via ``super()``) or running AWS hosts would list with no
+        agents. *Additionally*, it mirrors a compact record into an EC2 tag so a
+        *stopped* instance (whose volume is unreadable) still surfaces its agents
+        and resolves for ``mngr start``. Called on agent create and on every
         ``data.json`` update, so it is an idempotent upsert.
+
+        The on-volume write is best-effort: when the instance is stopped the base
+        raises ``HostNotFoundError`` (no reachable ``vps_ip``), in which case only
+        the tag is written -- exactly the path an offline ``mngr label`` needs.
         """
+        try:
+            super().persist_agent_data(host_id, agent_data)
+        except HostNotFoundError:
+            # Host stopped / unreachable: the on-volume store can't be written,
+            # but the tag mirror below still must be (e.g. offline `mngr label`).
+            logger.debug("Host {} unreachable; persisting agent data to EC2 tag only", host_id)
         value = self._compact_agent_tag_value(agent_data)
         if value is None:
             # _compact_agent_tag_value already logged the specific reason (missing
@@ -706,22 +718,39 @@ class AwsProvider(VpsDockerProvider):
         self.aws_client.add_tags(VpsInstanceId(instance["id"]), {f"{AGENT_TAG_PREFIX}{agent_id}": value})
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Delete the ``mngr-agent-<agent_id>`` tag when an agent is destroyed."""
+        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>`` tag.
+
+        Mirrors ``persist_agent_data``: the base removes the authoritative
+        on-volume record (best-effort -- ``HostNotFoundError`` when the instance
+        is stopped) and this override additionally drops the EC2 tag, so a
+        destroyed agent stops appearing in both running- and stopped-host
+        discovery.
+        """
+        try:
+            super().remove_persisted_agent_data(host_id, agent_id)
+        except HostNotFoundError:
+            logger.debug("Host {} unreachable; removing agent data from EC2 tag only", host_id)
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             return
         self.aws_client.remove_tags(VpsInstanceId(instance["id"]), [f"{AGENT_TAG_PREFIX}{agent_id}"])
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
-        """Return the per-agent records persisted in the instance's EC2 tags.
+        """Return the host's persisted agent records, on-volume when reachable else from tags.
 
-        Works while the instance is stopped (tags are returned by
-        ``DescribeInstances`` regardless of state), which is the whole point.
+        For a *running* host the base reads the authoritative on-volume records
+        (full agent data); for a *stopped* host the base raises
+        ``HostNotFoundError`` (the volume is unreadable), so we fall back to the
+        compact records mirrored into EC2 tags (returned by ``DescribeInstances``
+        regardless of instance state).
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is None:
-            return []
-        return self._persisted_agent_dicts_from_instance(instance)
+        try:
+            return super().list_persisted_agent_data_for_host(host_id)
+        except HostNotFoundError:
+            instance = self._find_instance_for_host(host_id)
+            if instance is None:
+                return []
+            return self._persisted_agent_dicts_from_instance(instance)
 
     def discover_hosts_and_agents(
         self,

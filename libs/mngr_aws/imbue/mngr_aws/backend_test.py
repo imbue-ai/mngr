@@ -1,6 +1,10 @@
 """Tests for AWS provider backend registration."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
 
 import boto3
 import pytest
@@ -10,6 +14,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -28,6 +34,9 @@ from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
+from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsHostConfig
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -108,6 +117,26 @@ def _describe_instances_response(instances: list[dict]) -> dict:
     return {"Reservations": [{"Instances": instances}]}
 
 
+def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
+    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
+
+    The agent-data hooks call ``super()`` first (the authoritative on-volume
+    store) and only fall back to / additionally write EC2 tags. For a *stopped*
+    host the base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding
+    such a record makes the base short-circuit immediately without any SSH or
+    discovery sweep, so these tag-path tests exercise the stopped-host fallback
+    without standing up a fake VPS.
+    """
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="myhost",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        stop_reason=HostState.STOPPED.value,
+    )
+    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
+
+
 def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
     """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id tag, no SSH."""
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
@@ -180,15 +209,19 @@ def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict
 
 
 def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext) -> None:
-    """persist_agent_data finds the instance by host tag and upserts a compact mngr-agent-<id> tag."""
+    """persist_agent_data finds the instance by host tag and upserts a compact mngr-agent-<id> tag.
+
+    Exercises the stopped-host path (the on-volume base write is unavailable, so
+    only the EC2 tag is written); the seeded ``vps_ip=None`` record makes
+    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``.
+    """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
+    _seed_stopped_host_record(provider, host_id)
     stubber.add_response(
         "describe_instances",
-        _describe_instances_response(
-            [_instance_with_tags("i-1", "running", "1.2.3.4", {"mngr-host-id": str(host_id)})]
-        ),
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
     )
     expected_value = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
     stubber.add_response(
@@ -204,6 +237,76 @@ def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext)
         )
     finally:
         stubber.deactivate()
+
+
+def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId) -> AwsProvider:
+    """Build a provider with a cached *reachable* (vps_ip set) record for ``host_id``.
+
+    Used by the running-host delegation tests: with a reachable record cached,
+    ``super().persist_agent_data`` reaches the on-volume store via
+    ``_make_outer_for_vps_ip`` instead of doing discovery / real SSH, so a test
+    can confirm the override does NOT bypass the authoritative on-volume path.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="myhost",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+        certified_host_data=certified,
+        vps_ip="1.2.3.4",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-1"),
+            region="us-east-1",
+            plan="t3.small",
+            container_name="mngr-c",
+            volume_name="mngr-vol",
+        ),
+    )
+    return provider
+
+
+class _OnVolumeReached(MngrError):
+    """Sentinel raised by the test's outer to prove the on-volume path was entered."""
+
+
+def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(temp_mngr_ctx: MngrContext) -> None:
+    """For a running (reachable) host, persist_agent_data delegates to the on-volume base path.
+
+    Regression guard: the override must compose with ``super()`` (the
+    authoritative on-volume ``agents/<id>.json`` the SSH-based discovery reads
+    for running hosts), not replace it -- otherwise running AWS hosts list with
+    no agents. We prove delegation by making the on-volume access raise a unique
+    sentinel from ``_make_outer_for_vps_ip``: it surfaces only if ``super()`` was
+    actually invoked, and -- unlike ``HostNotFoundError`` -- is *not* swallowed,
+    so a genuine running-host write failure is never silently hidden.
+    """
+    host_id = HostId.generate()
+
+    class _OuterRaisingProvider(AwsProvider):
+        @contextmanager
+        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+            # The unreachable yield below keeps this a generator function (which
+            # @contextmanager requires); the raise fires before it is ever reached.
+            raise _OnVolumeReached("on-volume persist path entered")
+            yield
+
+    base = _reachable_provider_with_record(temp_mngr_ctx, host_id)
+    provider = _OuterRaisingProvider(
+        name=base.name,
+        host_dir=base.host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=base.config,
+        vps_client=base.aws_client,
+        aws_client=base.aws_client,
+        aws_config=base.aws_config,
+    )
+    provider._host_record_cache[host_id] = base._host_record_cache[host_id]
+
+    with pytest.raises(_OnVolumeReached):
+        provider.persist_agent_data(host_id, {"id": "agent-1", "name": "a1", "type": "command"})
 
 
 def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContext) -> None:
