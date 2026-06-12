@@ -247,9 +247,12 @@ def _build_mngr_subprocess_env(
 ) -> _MngrSubprocess:
     """Shared builder for ``_mngr_subprocess_env`` and its deny-mode variant.
 
-    ``extra_settings_toml`` is appended to the per-test profile's
-    ``settings.toml`` so callers can opt in to additional plugin
-    configuration (e.g. ``[plugins.claude_subagent_proxy]\\nmode = "DENY"``).
+    The base settings already opt the (disabled-by-default) subagent_proxy
+    plugin in with ``[plugins.claude_subagent_proxy]\\nenabled = true``, so
+    ``extra_settings_toml`` is appended *inside that same table* and should
+    carry only additional keys for it (e.g. ``mode = "DENY"``), not a fresh
+    ``[plugins.claude_subagent_proxy]`` header (which would be a duplicate-table
+    TOML error).
     """
     home_dir = Path(os.environ["HOME"])
     # Safety belt: the autouse setup_test_mngr_env fixture must have set
@@ -280,9 +283,16 @@ def _build_mngr_subprocess_env(
     # is_allowed_in_pytest opts this hand-rolled profile into the pytest run (the
     # field defaults to False); it must precede the [providers.modal] section
     # since it is a top-level key.
-    settings_toml = "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n"
+    # The subagent_proxy plugin is opt-in (disabled by default), so the whole
+    # point of these tests requires explicitly enabling it here. extra_settings_toml
+    # appends further keys inside this same [plugins.claude_subagent_proxy] table.
+    settings_toml = (
+        "is_allowed_in_pytest = true\n\n"
+        "[providers.modal]\nis_enabled = false\n\n"
+        "[plugins.claude_subagent_proxy]\nenabled = true\n"
+    )
     if extra_settings_toml:
-        settings_toml += "\n" + extra_settings_toml
+        settings_toml += extra_settings_toml
     (profile_dir / "settings.toml").write_text(settings_toml)
 
     here = Path(__file__).resolve()
@@ -325,10 +335,11 @@ def _mngr_subprocess_env_deny_mode(
 ) -> _MngrSubprocess:
     """Like ``_mngr_subprocess_env`` but with subagent_proxy plugin in DENY mode.
 
-    Adds ``[plugins.claude_subagent_proxy]\\nmode = "DENY"`` to the per-test
-    profile's settings.toml. With this setting, on_after_provisioning
-    installs only the PreToolUse:Agent deny hook; no PostToolUse,
-    SessionStart reaper, mngr-proxy.md, or stop-hook guarding.
+    Adds ``mode = "DENY"`` to the ``[plugins.claude_subagent_proxy]`` table the
+    base settings already create (which also enables the opt-in plugin). With
+    this setting, on_after_provisioning installs only the PreToolUse:Agent deny
+    hook; no PostToolUse, SessionStart reaper, mngr-proxy.md, or stop-hook
+    guarding.
     """
     return _build_mngr_subprocess_env(
         tmp_path,
@@ -336,7 +347,7 @@ def _mngr_subprocess_env_deny_mode(
         mngr_test_prefix,
         mngr_test_root_name,
         _source_repo,
-        extra_settings_toml='[plugins.claude_subagent_proxy]\nmode = "DENY"\n',
+        extra_settings_toml='mode = "DENY"\n',
     )
 
 
