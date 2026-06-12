@@ -1,15 +1,17 @@
 # Agent-plugin feature parity
 
-A reference for bringing a new agent-type plugin (opencode, codex, pi-coding, or any
-future CLI) up to the level of the two mature plugins, `mngr_claude` and
-`mngr_antigravity` (`agy`). It enumerates every capability those two implement, how each
-is implemented, and -- for each dimension -- the concrete questions a new plugin author
+A reference for bringing a new agent-type plugin (opencode, codex, or any future CLI)
+up to the level of the mature plugins -- `mngr_claude`, `mngr_antigravity` (`agy`), and
+now `mngr_pi_coding`. It enumerates every capability they implement, how each is
+implemented, and -- for each dimension -- the concrete questions a new plugin author
 must answer about their target CLI.
 
 The goal: **anything you can do with a Claude agent, you should be able to do with any
-other agent.** Today `mngr_claude` is the gold standard and `mngr_antigravity` is a
-recent, near-complete port; `codex`, `opencode`, and `pi-coding` are stubs or partial
-implementations. This doc maps the target so the stubs can be brought up to scratch.
+other agent.** Today `mngr_claude` is the gold standard; `mngr_antigravity` and
+`mngr_pi_coding` are near-complete ports (pi-coding via a single in-process extension
+rather than shell hooks -- see dimension F and the transcript/lifecycle dimensions for
+how that shapes the implementation). `codex` and `opencode` are still `BaseAgent` stubs.
+This doc maps the target so the stubs can be brought up to scratch.
 
 It is descriptive, not prescriptive about future architecture: it documents what the two
 reference plugins *do*, with file:line citations, plus the gotchas they hit so the next
@@ -97,6 +99,36 @@ Capability mixins (opt in by inheritance): `HasTranscriptMixin`,
 - `on_destroy()` cleanup of any external state (global trust entries, leases, etc.).
 - The pluggy hooks for deploy, field generators, and offline preservation.
 
+### Your lever: shell hooks vs an in-process extension
+
+Before any of the dimensions below, answer one question: **what mechanism does the CLI give
+you to run your code at its lifecycle points?** It shapes every dimension downstream.
+
+- **Shell hooks** (claude, agy): the CLI invokes shell scripts on events
+  (`SessionStart`/`Stop`/`PreToolUse`/...). mngr provisions scripts into `commands/` and the
+  CLI runs them. This is the model most of this doc assumes.
+- **An in-process extension/plugin** (pi): the CLI has no shell hooks; instead it loads code
+  *into its own process* (pi loads a TypeScript module via `pi -e`). mngr provisions one
+  extension that handles every dimension at once -- marker, readiness sentinel, transcripts,
+  input injection. Many modern agent CLIs are in this camp, so expect it.
+- **Nothing** (the `BaseAgent` stubs): no event surface at all, so you can only use what the
+  tmux pane + process table afford -- which is why those stubs report WAITING forever.
+
+If your lever is an in-process extension, it brings a hazard class the shell-hook plugins
+don't have, learned the hard way on pi:
+- **It runs inside the agent's event loop, so a bug there can crash the agent.** Wrap every
+  handler so it can never throw into the CLI's loop -- *and remember async*: an unhandled
+  promise rejection from an `await`ed/fire-and-forget call escapes a synchronous try/catch
+  and, on Node's default `--unhandled-rejections=throw`, kills the process. Attach a `.catch`
+  to every promise you don't await.
+- **Module loading is fragile.** pi loads extensions via jiti; importing anything from the
+  CLI's own package can hit bare-specifier resolution failures under global installs. Import
+  only language built-ins plus locally-declared structural types; depend on nothing.
+- **You emit, rather than tail.** With structured in-process events you build the transcript
+  (and other artifacts) directly from event payloads -- no file to copy -- which is more
+  robust but means *you* own the record's shape and its idempotency across restarts (e.g.
+  seed an id counter from the existing line count so ids stay unique after a resume).
+
 ---
 
 ## Current state matrix
@@ -106,21 +138,22 @@ Y = implemented, partial = present but incomplete, - = absent.
 
 | Dimension | claude | antigravity | pi-coding | opencode | codex |
 |---|---|---|---|---|---|
-| Custom agent class | Y | Y | Y (TUI) | - (BaseAgent) | - (BaseAgent) |
-| Launch command isolation | Y | Y | partial | - | - |
-| Lifecycle marker (RUNNING/WAITING) | Y | Y | - (inherited only) | - | - |
-| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | - | - | - |
-| Readiness detection | Y (sentinel hook) | Y (TUI banner) | Y (TUI banner) | - | - |
+| Custom agent class | Y | Y | Y | - (BaseAgent) | - (BaseAgent) |
+| Launch command isolation | Y | Y | Y | - | - |
+| Lifecycle marker (RUNNING/WAITING) | Y | Y | Y (extension marker) | - | - |
+| Subagent-aware idle gating | Y (`SESSION_GUARD`) | Y (root_conversation + fullyIdle) | n/a (no in-process subagents) | - | - |
+| Readiness detection | Y (sentinel hook) | Y (TUI banner) | Y (`session_start` sentinel) | - | - |
+| Input delivery & submission | Y (tmux paste+Enter) | Y (tmux paste+Enter) | Y (extension injection) | partial (inherited) | partial (inherited) |
 | Auth / credential sharing | Y (keychain + file) | Y (token symlink) | Y (`sync_auth`) | - | - |
 | HOME / config-dir isolation | Y (`CLAUDE_CONFIG_DIR`) | Y (per-agent `$HOME`) | Y (`PI_CODING_AGENT_DIR`) | - | - |
 | Settings/resource sync | Y | Y | Y | - | - |
 | Per-agent permissions | Y | Y | - | - | - |
 | Auto-allow permissions | Y | Y | - | - | - |
-| Trust / dialog handling | Y | Y | - | - | - |
-| Onboarding NUX seed | Y | Y | - | - | - |
-| Raw transcript | Y | Y | - | - | - |
-| Common transcript | Y | Y | - | - | - |
-| Conversation resume (stop/start) | Y | Y | - | - | - |
+| Trust / dialog handling | Y | Y | Y (`trust.json` seed) | - | - |
+| Onboarding NUX seed | Y | Y | n/a (no NUX) | - | - |
+| Raw transcript | Y | Y | Y | - | - |
+| Common transcript | Y | Y | Y | - | - |
+| Conversation resume (stop/start) | Y | Y | Y (`--session`) | - | - |
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
@@ -129,9 +162,15 @@ Y = implemented, partial = present but incomplete, - = absent.
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - |
 
 Notable observations:
-- **`pi-coding` is the most advanced stub**: real TUI class, auth sync, HOME isolation,
-  install management -- but no lifecycle marker, transcripts, resume, permissions, or
-  trust handling.
+- **`pi-coding` is now a near-`antigravity`-parity port**, not a stub: lifecycle marker,
+  readiness sentinel, raw + common transcripts, conversation resume, and trust handling, on
+  top of the auth/HOME/install baseline it already had. (It needs no subagent-aware idle
+  gating: pi has no in-process subagent tool, so only one agent loop runs per process.) It carries the same deferred tail as antigravity (session preservation,
+  streaming snapshot, deploy contributions, field generators) plus per-agent permissions.
+  Two things make it the structural outlier: its entire dynamic surface is **one
+  in-process TypeScript extension** (pi has no shell hooks), and it **delivers input by
+  injection** rather than tmux keystrokes, so it subclasses `BaseAgent` directly rather
+  than `InteractiveTuiAgent` (see dimension F).
 - **`antigravity` is missing session-preservation-on-destroy, the streaming snapshot,
   deploy contributions, and field generators** relative to claude. These are the claude
   features no port has yet matched.
@@ -251,6 +290,56 @@ stable discriminator (a distinct event, an env var on the main process, a "fully
 flag, a root-vs-child conversation id)? How do you avoid both failure modes (parent goes
 idle early; parent never goes idle)?
 
+**Related failure mode -- background / detached work.** The `active` marker tracks the
+agent's *conversational turn* (the model loop), not arbitrary processes that turn spawned. A
+*foreground* tool call keeps the marker present until it returns -- including an awaited
+subagent tool (pi has no built-in subagents, but an optional third-party subagent extension,
+if installed, runs each child as a *nested process* that blocks the turn while it runs). The
+marker only flips to WAITING with work still in flight when that work is *detached* from the
+turn: the agent runs `cmd &` / `nohup` / starts a daemon, **or** the CLI offers a structured
+"run in background" tool that returns a handle *before* the task finishes (Claude Code's
+`Bash` `run_in_background` is the canonical example; pi has none -- its bash tool is
+synchronous, and pi's `usage.md` lists "background bash" among features it deliberately
+omits). For the manual-`&` case, WAITING is *correct* (the agent genuinely is idle, awaiting
+input); but a first-class background-task tool can make the agent report WAITING while a task
+it launched is still running.
+
+Note that even claude does **not** currently solve this for backgrounded bash. Its `Stop`
+hook (`wait_for_stop_hook.sh`) waits before going idle, but only for sibling *stop-hook*
+processes (the recursive-reviewer case of dimension D), which it distinguishes from
+bash-tool tasks via `/proc/<pid>/environ`: a stop hook has `CLAUDE_PROJECT_DIR` *without*
+`CLAUDECODE=1`, whereas a `CLAUDECODE=1` process is a bash-tool task and is **excluded** from
+the wait. So a still-running reviewer keeps the agent RUNNING, but a detached
+`run_in_background` bash does not -- claude's marker stays turn-scoped here too.
+
+This is the right hook to extend if you *did* want background work to count: the
+`CLAUDECODE=1` tag already present on bash-tool tasks is exactly the per-task discriminator
+that makes a descendant-liveness wait *safe* -- it distinguishes "a background task the agent
+started" from incidental children (the agent's shell, language servers, watchers). A CLI that
+exposes backgrounded work but provides **no** such discriminator cannot do a generic
+descendant-liveness check without false-RUNNING (the agent would never go idle once it
+started any long-lived child).
+
+Be careful to separate two things, because the CLIs' idle signals *do* correctly gate
+**in-loop** pending work; it is only **detached** work they miss. agy's `fullyIdle` stays
+`false` through a turn's interim Stops and the root-vs-subagent id match ignores a subagent's
+own idle ([dimension D](#d-subagent-aware-idle-gating-the-crux)), so the marker clears only on
+the root's final, everything-done Stop -- not mid-turn, and not when a subagent it launched
+finishes. pi reaches the same outcome differently: its foreground tools block the turn (and
+an optional subagent extension, if installed, runs its children as nested processes that
+likewise block), so `agent_end` fires only once the turn is fully complete. What *none* of
+the three reflects is a process the agent **detaches
+from its loop entirely** (`cmd &` / `nohup` / a CLI `run_in_background` tool that returns
+before its task finishes): that is loop/turn-scoped for claude, agy, and pi alike. So the
+honest fallback, absent a per-task tag to wait on, is to scope the marker to the agent's
+turn/loop (using whatever "fully done" signal the CLI gives -- agy's `fullyIdle:true`, pi's
+`agent_end`) and *document* that detached work is not reflected.
+
+**Questions**: Does the CLI have a `run_in_background`-style tool (one that returns before
+its work finishes)? If so, what identifies those tasks (a process tag like `CLAUDECODE=1`, a
+task registry, a completion event) so the marker can wait for them -- and is waiting even
+desired, or is turn-scoped WAITING the right semantics for your supervisor?
+
 ### E. Readiness detection
 
 How `mngr create`/start knows the agent is ready to receive the first message.
@@ -262,11 +351,57 @@ How `mngr create`/start knows the agent is ready to receive the first message.
   `InteractiveTuiAgent` banner poll on `TUI_READY_INDICATOR = "? for shortcuts"`
   (`plugin.py:323`). Note the splash banner ("Antigravity CLI ...") is deliberately *not*
   used -- it renders before OAuth completes and before the input row exists.
+- **pi-coding**: the lifecycle extension writes a `pi_session_started` sentinel from pi's
+  `session_start` event, polled by `wait_for_ready_signal` -- a real sentinel, like claude.
+  The `"pi v"` startup banner is deliberately *not* used.
+
+**The failure mode to avoid:** gating readiness on a string that prints *before* input is
+accepted (a splash/version banner) makes `create` return too early, so the first message is
+sent before the agent can process it and is silently lost. Both agy and pi hit a version of
+this -- it is why agy waits on the shortcuts row, not the splash, and why pi waits on the
+`session_start` sentinel, not the `"pi v"` banner. The banner is the tempting wrong answer
+because it appears first.
 
 **Questions**: Is there a sentinel event for "input ready"? If not, what stable TUI string
-appears only once the agent can actually accept input?
+appears only once the agent can actually accept input -- *not* a splash/version banner that
+prints earlier? When unsure, send a probe message and confirm it actually started a turn
+(dimension F) rather than trusting the readiness string alone.
 
-### F. Auth / credential sharing
+### F. Input delivery & submission confirmation
+
+How mngr gets a message *into* the running agent, and how it confirms the turn
+actually started. The base classes make this look free -- `BaseAgent.send_message`
+types literal keys and `InteractiveTuiAgent` adds paste-detection -- but it is a
+real per-CLI decision, and the "free" path is not always reliable.
+
+- **claude / antigravity**: `InteractiveTuiAgent.send_message` pastes into the tmux
+  pane and submits with Enter (`_send_enter_and_validate`). Works because both TUIs
+  reliably accept a bracketed paste + Enter.
+- **pi-coding**: tmux keystrokes proved unreliable -- pi intermittently swallowed
+  the first Enter after a paste (most often on a fresh session), with no stable
+  "input cleared" placeholder to confirm submission. So pi does **not** use the tmux
+  path at all: it subclasses `BaseAgent` (not `InteractiveTuiAgent`) and overrides
+  `send_message` to append the message to a per-agent inbox file, which the
+  lifecycle extension injects into the live session via pi's `pi.sendUserMessage`
+  API (the TUI stays attachable with `mngr connect`). If your CLI exposes a
+  programmatic input channel -- an inject API, an RPC `prompt` command, a control
+  socket -- prefer it over terminal keystroke simulation: it is more robust and
+  behaves identically on local and remote hosts.
+
+**Submission confirmation is the subtle half.** Keystrokes (or an inject call) can
+silently fail to start a turn, so you need a positive signal that the message *was*
+accepted. The dependable one is the lifecycle marker: the agent writes `active`
+(dimension C) only when it begins processing, so `send_message` can poll for the
+marker to appear as confirmation -- re-sending (if using keystrokes) until it does.
+Scraping the pane for an echoed prompt is brittle and racy; avoid it.
+
+**Questions**: Does the CLI reliably accept tmux paste + Enter, or does it drop
+keystrokes? Is there a programmatic input API (inject / RPC / socket) that bypasses
+the terminal? What is the unambiguous signal that a submitted message actually
+started a turn (a lifecycle event, the marker, a status file)? What happens for a
+steering message sent while the agent is already mid-turn?
+
+### G. Auth / credential sharing
 
 Goal: log in once, have all agents authenticated, with minimal manual steps -- across
 per-agent isolated config dirs.
@@ -291,7 +426,7 @@ per-agent isolated config dirs.
 **Gotchas**: whether the CLI writes its token **in place** vs atomic-rename decides whether
 a symlink-to-shared works (in-place: yes; rename: the symlink gets replaced by a regular
 file and sharing breaks). The macOS-keychain headache is specifically a consequence of
-**relocating `$HOME`** (see [config isolation](#g-config-dir--home-isolation)): a macOS
+**relocating `$HOME`** (see [config isolation](#h-config-dir--home-isolation)): a macOS
 keychain can't be reliably read from a relocated home, so antigravity has to lean on a
 shared *file* token instead. A CLI isolated via a config-dir env var (claude, pi) keeps the
 user's real `$HOME` and can still reach the system keychain (claude just has to mirror
@@ -303,7 +438,7 @@ in place or atomically? Does it hash the config-dir path into the credential loc
 (like Claude's keychain labels)? What's the minimal "log in once" story, and what manual
 steps remain?
 
-### G. Config dir / HOME isolation
+### H. Config dir / HOME isolation
 
 Each agent needs its own settings/permissions/transcripts, not the user's global state.
 **Strongly prefer a config-dir override env var; relocating `$HOME` is a last resort.**
@@ -326,7 +461,7 @@ gives no finer-grained lever. Do it only if your CLI has no config-dir override.
   `$HOME/.gemini` then holds settings/auth/hooks/sessions, and the fallout (no shared
   keychain, heavy caches re-downloaded) has to be patched back up by hand: the
   `ms-playwright-go` cache is symlinked to the user's real host cache, and auth falls back
-  to a shared file token (see [Auth](#f-auth--credential-sharing)). This collateral cleanup
+  to a shared file token (see [Auth](#g-auth--credential-sharing)). This collateral cleanup
   is exactly the cost of HOME relocation and the reason to avoid it.
 
 Both resolve the real host `$HOME`/OS over the host shell (not `Path.home()`/
@@ -337,7 +472,7 @@ Both resolve the real host `$HOME`/OS over the host shell (not `Path.home()`/
 does that drag in that you'll have to re-share or re-seed? Where does it store global vs
 per-project settings (you usually want to seed from the *global* scope only)?
 
-### H. Permissions
+### I. Permissions
 
 Per-agent allow/deny/ask policy, plus an auto-approve-everything escape.
 
@@ -354,7 +489,7 @@ Per-agent allow/deny/ask policy, plus an auto-approve-everything escape.
 **Questions**: Does a PreToolUse allow-decision actually suppress dialogs, or do you need a
 skip-all flag? Is there a per-resource policy format?
 
-### I. Trust / first-launch dialogs & onboarding NUX
+### J. Trust / first-launch dialogs & onboarding NUX
 
 CLIs gate first launch on a "trust this folder?" dialog and a one-time onboarding flow;
 both must be handled so the agent isn't stuck at a prompt, **without silently running on
@@ -372,16 +507,33 @@ untrusted code**.
   silent; interactive -> `click.confirm` (defaults False); non-interactive without opt-in or
   declined -> `SystemExit(1)` (clean exit). Onboarding NUX is skipped via a seeded
   `cache/onboarding.json` with all completion flags True (consumer + enterprise -- PR #2022).
+- **pi-coding** (`plugin.py`): seeds pi's per-canonical-cwd `trust.json` (`{realpath: bool}`)
+  -- the **durable** grant for the git *source repo* in the user's global
+  `~/.pi/agent/trust.json`, the **transient** grant for the per-agent workspace in the
+  per-agent dir. Same gating matrix as agy (already-trusted -> no-op;
+  `--yes`/`auto_dismiss_dialogs` -> silent; interactive -> `click.confirm`;
+  non-interactive without opt-in or declined -> `SystemExit`). pi has no onboarding NUX.
 
 **Gotchas**: trust dialogs are often keyed off an exact cwd match -- a symlinked or
 relocated workspace path must be the one seeded. Don't write transient paths to shared
 global state (they accumulate as dead entries). Hard-error (don't silently coerce) if the
-trust list exists with an unexpected shape.
+trust list exists with an unexpected shape. **Verify empirically what actually *triggers* the
+dialog** -- it is not always "the project has instructions". pi 0.79's dialog fires only on a
+`.pi` config dir in the cwd, or a `.agents/skills` dir in the cwd or any ancestor;
+`CLAUDE.md`/`AGENTS.md` do **not** trigger it (they are context files pi loads *once
+trusted*). The trust boundary guards config/extension *loading* -- a repo silently
+reconfiguring the agent or running its extension code -- **not** prompt injection from
+context files, which pi treats as accepted, unpreventable local-agent risk. (A first cut of
+the pi release test "added a CLAUDE.md to trigger the dialog" and so never triggered it,
+making the trust coverage vacuous -- caught only by reading pi's source and testing the real
+binary.)
 
-**Questions**: What gates the trust dialog, and is it keyed off an exact path? What gates
-first-run onboarding -- a file or a settings key? Consumer vs enterprise onboarding?
+**Questions**: What *exactly* triggers the trust dialog -- which files/dirs, cwd-only or any
+ancestor -- and did you confirm it against the running binary rather than the docs? Is it
+keyed off an exact (realpath) path? What gates first-run onboarding -- a file or a settings
+key -- if the CLI has one at all? Consumer vs enterprise onboarding?
 
-### J. Transcript capture (raw + common)
+### K. Transcript capture (raw + common)
 
 `mngr transcript` reads a common, agent-agnostic JSONL, auto-discovered regardless of agent
 type. Two layers, both opt-in via mixins (`interfaces/agent.py:446`):
@@ -395,7 +547,20 @@ type. Two layers, both opt-in via mixins (`interfaces/agent.py:446`):
 Both reference plugins provision streamer + converter shell scripts into `commands/` and
 launch+supervise them from a backgrounded helper (`claude_background_tasks.sh` /
 `antigravity_background_tasks.sh`), pidfile-deduped and restarted while the tmux session
-lives. Shared helpers: `agents/common_transcript.py`.
+lives. Shared helpers: `agents/common_transcript.py`. In both, the **common layer is
+*derived* from the raw stream** (the converter reads the raw JSONL), which is why the raw
+layer is foundational and always-on.
+
+**pi-coding emits the two layers *independently*, not derived.** pi has no convenient
+always-current flat session file to tail (its native store is tree-structured JSONL), so the
+lifecycle extension writes both layers directly from pi's structured `message_end` events --
+no backgrounded streamer, no separate converter. Two consequences for any structured-event
+CLI: (1) because the common record is emitted independently rather than converted from raw,
+the two can be gated separately (pi exposes `emit_raw_transcript` *and*
+`emit_common_transcript`, where claude/agy only toggle common); and (2) the "raw" layer is
+then something *you* assemble rather than copy -- pi wraps each native message verbatim in a
+thin `{type, timestamp, message}` envelope, so it stays lossless and CLI-native, just
+collected by the extension instead of tailed from a file.
 
 **Gotchas**: scope the streamer to *this agent's* conversations (antigravity reads its
 conversation-ids file). If the CLI's per-event index is conversation-scoped rather than
@@ -405,7 +570,7 @@ downstream instead (antigravity's case).
 **Questions**: Where does the CLI write transcripts, and in what schema? Are step/event
 indices globally unique? Which conversations belong to this agent (root + subagents)?
 
-### K. Conversation resume across stop/start
+### L. Conversation resume across stop/start
 
 `mngr stop` then `mngr start` should resume the prior conversation with full context, not
 start fresh. Automatic; no flag.
@@ -428,7 +593,7 @@ series: with HOME relocation, `ANTIGRAVITY_APP_DATA_DIR` -- where agy writes
 `brain/<conv_id>/...` -- points into each agent's own home, so conversations are now
 per-agent, not global. The real blocker is just that clone doesn't copy them across homes.)
 
-### L. Session preservation on destroy
+### M. Session preservation on destroy
 
 When an agent (or its host) is destroyed, its session/transcript files should be preserved
 so they're not lost. **Only `mngr_claude` implements this; no port has matched it.**
@@ -445,7 +610,7 @@ so they're not lost. **Only `mngr_claude` implements this; no port has matched i
 (`on_destroy`) and offline (`on_before_host_destroy`) path? (Claude does -- consider whether
 your agent needs the offline path or if online suffices.)
 
-### M. Streaming snapshot (live in-progress view)
+### N. Streaming snapshot (live in-progress view)
 
 An approximate live view of the agent's in-progress assistant text, for UIs that want to
 show output before a message completes. **claude-only.**
@@ -460,7 +625,7 @@ show output before a message completes. **claude-only.**
 A port only needs this if a consuming UI wants live streaming. It's the lowest-priority
 parity item.
 
-### N. Deploy / scheduling contributions
+### O. Deploy / scheduling contributions
 
 For `mngr schedule` (cloud/scheduled agents), the plugin bakes its files and env vars into
 the deployment image. **claude-only**; antigravity is *not* wired into scheduled deploys.
@@ -473,7 +638,7 @@ the deployment image. **claude-only**; antigravity is *not* wired into scheduled
 **Questions**: Does the agent need to run under `mngr schedule`? If so, which config/cred
 files and env vars must be present in the remote image?
 
-### O. Field generators (listing columns)
+### P. Field generators (listing columns)
 
 Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
 
@@ -486,7 +651,7 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
 `waiting_reason` field is a plugin-specific embellishment.
 
-### P. Installation management & version pinning
+### Q. Installation management & version pinning
 
 Check the binary is present and optionally install/pin a version.
 
@@ -496,7 +661,7 @@ Check the binary is present and optionally install/pin a version.
 - **antigravity**: none -- assumes `agy` is on PATH (and documents a PATH-shadowing caveat
   with the desktop app's bundled shim).
 
-### Q. Workspace path quirks
+### R. Workspace path quirks
 
 Some CLIs reject mngr's dotted work-dir path (`~/.mngr/worktrees/...`).
 
@@ -508,14 +673,14 @@ Some CLIs reject mngr's dotted work-dir path (`~/.mngr/worktrees/...`).
 
 **Questions**: Does the CLI accept a dotted (`~/.mngr/...`) path as its cwd/workspace?
 
-### R. Process name
+### S. Process name
 
 `get_lifecycle_state` matches the running process against `get_expected_process_name()`,
 which defaults to the command basename. Override if the binary's process name differs.
 
 - **claude**: `"claude"`. **antigravity**: `"agy"` (`plugin.py:325`). **pi-coding**: `"pi"`.
 
-### S. Extra agent subtypes
+### T. Extra agent subtypes
 
 `mngr_claude` ships task-specialized subtypes that subclass the base agent and inject a
 SKILL.md / different launch mode: `code-guardian`, `fixme-fairy` (both
@@ -523,7 +688,7 @@ SKILL.md / different launch mode: `code-guardian`, `fixme-fairy` (both
 `stdout.jsonl`). A port doesn't need these for baseline parity but the pattern
 (`SkillProvisionedAgent`, `BaseHeadlessAgent`) is available to reuse.
 
-### T. Test scaffold
+### U. Test scaffold
 
 A new plugin needs a project-level `conftest.py` calling `suppress_warnings()`,
 `register_conftest_hooks(globals())`, and `register_plugin_test_fixtures(globals())` (the
@@ -593,7 +758,18 @@ walks each step in order.
 ## New-CLI investigation checklist
 
 Before writing code, answer these about the target CLI (the answers determine almost every
-implementation choice above):
+implementation choice above). **Verify each answer against the running binary, not just docs
+or source** -- pi's trust trigger and the claude `Stop`-hook background-bash behavior both
+read differently than they behave, and a wrong assumption here silently produces vacuous
+tests or lost first messages.
+
+**Mechanism & input delivery**
+- [ ] What lever does the CLI give you for lifecycle code -- shell hooks, an in-process
+  extension, or nothing? (Shapes every dimension below; see "Your lever" above.)
+- [ ] Does it reliably accept tmux paste + Enter, or drop keystrokes? Is there a programmatic
+  input channel (an inject API, an RPC `prompt` command, a socket) to use instead?
+- [ ] What is the unambiguous signal that a submitted message actually started a turn (the
+  `active` marker, a lifecycle event) -- so `send_message` can confirm delivery?
 
 **Config & auth**
 - [ ] Is there a config-dir override env var? If not, can `$HOME` be relocated?
@@ -609,12 +785,16 @@ implementation choice above):
 - [ ] Is there a discriminator (env var on main process, fully-idle flag, root vs child id)?
 - [ ] Is there an "input ready" sentinel event, or only a TUI banner?
 - [ ] Which hooks file does it actually *execute* vs merely display? (agy had two paths.)
+- [ ] Does it have a `run_in_background`-style tool (returns before the task finishes)? If so, how are those tasks identified so the marker isn't cleared while one runs (see dimension D)?
 
 **Permissions & trust**
 - [ ] Does a PreToolUse allow-decision suppress dialogs, or is a skip-all flag required?
 - [ ] Is there a per-resource permission policy format?
-- [ ] What gates the trust dialog, and is it an exact-cwd match?
-- [ ] What gates first-run onboarding -- a file or settings key? Consumer vs enterprise?
+- [ ] What *exactly* triggers the trust dialog -- which files/dirs, cwd-only or any ancestor
+  -- confirmed against the running binary, not assumed from "the project has instructions"?
+  Is the saved decision keyed off an exact (realpath) path?
+- [ ] What gates first-run onboarding -- a file or settings key -- if the CLI has one at all?
+  Consumer vs enterprise?
 
 **Sessions & transcripts**
 - [ ] Where are transcripts written, and in what schema?
@@ -628,6 +808,13 @@ implementation choice above):
 - [ ] Is the binary on PATH, or does it need install/version management?
 - [ ] Will the agent run under `mngr schedule` (needs deploy file/env contributions)?
 
+**Packaging & distribution** (don't forget once the plugin works)
+- [ ] Registered in `PLUGIN_CATALOG` (`libs/mngr/imbue/mngr/plugin_catalog.py`) with its entry
+  point, package name, a signal check that detects the CLI binary, and `is_recommended` if it
+  should be offered by default?
+- [ ] Is the package publishable -- i.e. *not* listed in `UNPUBLISHED_PACKAGES` -- so the
+  release tooling and `mngr extras` will actually offer it?
+
 ---
 
 ## Source references
@@ -640,6 +827,7 @@ implementation choice above):
 - Plugin docs: `libs/mngr/docs/concepts/plugins.md`, `docs/concepts/agent_types.md`,
   `docs/concepts/idle_detection.md`
 - Reference plugins: `libs/mngr_claude/`, `libs/mngr_antigravity/` (the antigravity README
-  is the single best worked example -- it documents each parity decision inline)
-- Stubs: `libs/mngr_opencode/`, `libs/mngr_pi_coding/`,
+  is the single best worked example -- it documents each parity decision inline),
+  `libs/mngr_pi_coding/` (the near-complete extension-based port)
+- Stubs: `libs/mngr_opencode/`,
   `libs/mngr/imbue/mngr/agents/default_plugins/codex_agent.py`

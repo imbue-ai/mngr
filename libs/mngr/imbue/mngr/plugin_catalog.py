@@ -161,6 +161,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_PI_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="modal",

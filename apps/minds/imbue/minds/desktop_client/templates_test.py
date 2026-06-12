@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -17,7 +18,12 @@ from imbue.minds.desktop_client.templates import render_recovery_page
 from imbue.minds.desktop_client.templates import render_sharing_editor
 from imbue.minds.desktop_client.templates import render_sidebar_page
 from imbue.minds.desktop_client.templates import render_workspace_settings
-from imbue.minds.desktop_client.templates import workspace_accent
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR_NAME
+from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
+from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import OneTimeCode
@@ -48,6 +54,18 @@ def test_render_landing_page_settings_link_interpolates_agent_id() -> None:
     assert "{{" not in html
 
 
+def test_render_landing_page_has_open_in_new_window_button_before_settings() -> None:
+    # Each workspace row carries an "open in new window" arrow to the LEFT of
+    # the settings gear. It calls window.landingOpenInNewWindow, which relays
+    # to the main process in Electron (or opens a new tab in a browser).
+    html = render_landing_page(accessible_agent_ids=(_AGENT_A,))
+    assert "window.landingOpenInNewWindow(this)" in html
+    # The diagonal shaft of the open-in-new arrow (Figma node 560-5109).
+    assert '<path d="M18 6L6 18"/>' in html
+    # It sits before the settings button within the row.
+    assert html.index("window.landingOpenInNewWindow") < html.index(f"/workspace/{_AGENT_A}/settings")
+
+
 def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     html = render_workspace_settings(
         agent_id=str(_AGENT_A),
@@ -58,6 +76,86 @@ def test_render_workspace_settings_data_agent_id_interpolates() -> None:
     )
     assert f'data-agent-id="{_AGENT_A}"' in html
     assert "{{" not in html
+
+
+def test_render_workspace_settings_renders_all_palette_swatches() -> None:
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+    )
+    # All 12 swatches present, with the workspace's current color marked
+    # as the checked radio so screen readers see the selection state.
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' in html
+    assert 'aria-checked="true"' in html
+    # The hex input is pre-filled with the current saved color.
+    assert 'value="#0b292b"' in html
+    # A reachable workspace renders no disabled swatch (the counterpart
+    # of the stale test below).
+    assert "disabled></button>" not in html
+
+
+def test_render_workspace_settings_picker_disabled_when_stale() -> None:
+    """is_stale=True disables the picker controls so the user can't write
+    a label against an unreachable host (would not be observable until
+    provider recovery)."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+        is_stale=True,
+    )
+    assert 'data-is-stale="true"' in html
+    # Every swatch carries the real ``disabled`` attribute (ColorSwatch
+    # renders it last, so a disabled swatch ends ``disabled></button>``).
+    # Checking the attribute -- not just the substring "disabled" -- is
+    # required because the swatch and pill class strings contain the
+    # ``disabled:opacity-40`` utility on every render.
+    assert html.count("disabled></button>") == len(WORKSPACE_PALETTE)
+    # The hex input is disabled too: its tag ends with a standalone
+    # ``disabled`` attribute right before the closing ``>``.
+    hex_input_tag = re.search(r'<input[^>]*id="color-hex-input"[^>]*>', html)
+    assert hex_input_tag is not None
+    assert re.search(r"\sdisabled\s*>$", hex_input_tag.group(0))
+
+
+def test_render_workspace_settings_marks_no_swatch_selected_for_custom_hex() -> None:
+    """When the saved color is a custom hex (not in the palette), no
+    swatch shows as selected; the hex pill carries the value and the
+    blue selection ring class instead."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#123456",
+    )
+    assert 'value="#123456"' in html
+    assert 'aria-checked="true"' not in html
+    assert "is-selected" in html
+
+
+def test_render_workspace_settings_pill_not_selected_for_palette_color() -> None:
+    """When the saved color matches a palette entry, the swatch is the
+    selected control -- the hex pill must not also carry the ring."""
+    html = render_workspace_settings(
+        agent_id=str(_AGENT_A),
+        ws_name="ws",
+        current_account=None,
+        accounts=(),
+        servers=(),
+        current_color="#0b292b",
+    )
+    assert 'aria-checked="true"' in html
+    assert "is-selected" not in html
 
 
 def test_render_sharing_editor_workspace_link_interpolates_agent_id() -> None:
@@ -168,6 +266,30 @@ def test_render_create_form_defaults_ai_provider_to_subscription_without_account
 def test_render_create_form_omits_env_file_checkbox() -> None:
     html = render_create_form()
     assert "include_env_file" not in html
+
+
+def test_render_create_form_includes_color_picker_with_palette_swatches() -> None:
+    html = render_create_form()
+    # All 12 palette swatches present.
+    for hex_value in WORKSPACE_PALETTE.values():
+        assert f'data-color="{hex_value}"' in html
+    # Hidden input named "color" carries the default selection.
+    assert 'name="color"' in html
+    assert f'value="{DEFAULT_WORKSPACE_COLOR}"' in html
+
+
+def test_render_create_form_marks_default_color_as_checked() -> None:
+    html = render_create_form()
+    # The default ``confusion`` swatch is the only one with aria-checked=true.
+    assert html.count('aria-checked="true"') == 1
+
+
+def test_render_create_form_pre_selects_provided_color() -> None:
+    html = render_create_form(color="#cecd0c")
+    # The hidden input + the matching swatch's aria-checked carry the
+    # picked color.
+    assert 'value="#cecd0c"' in html
+    assert html.count('aria-checked="true"') == 1
 
 
 def test_render_create_form_shows_error_message_when_supplied() -> None:
@@ -297,17 +419,16 @@ def test_render_chrome_page_page_title_uses_titlebar_title_class() -> None:
     assert 'id="page-title" class="titlebar-title' in html
 
 
-def test_render_chrome_page_account_button_uses_titlebar_account_class() -> None:
+def test_render_chrome_page_account_button_lives_in_sidebar() -> None:
+    # The titlebar no longer carries an account button (``id="user-btn"``); the
+    # "Manage account(s)" / "Log in" entry now lives in the floating sidebar
+    # alongside the workspace list and the "New workspace" CTA. The titlebar
+    # accent color therefore doesn't have to repaint the account button -- the
+    # sidebar's own dark background is constant.
     html = render_chrome_page()
-    assert 'id="user-btn"' in html
-    # ``.titlebar-account`` carries the accent-aware foreground; the old
-    # hard-coded ``text-zinc-400`` / ``hover:bg-white/5`` recipe is gone.
-    btn_open = html.index('id="user-btn"')
-    btn_close = html.index(">", btn_open)
-    btn_tag = html[btn_open:btn_close]
-    assert "titlebar-account" in btn_tag
-    assert "text-zinc-400" not in btn_tag
-    assert "hover:bg-white/5" not in btn_tag
+    assert 'id="user-btn"' not in html
+    assert 'id="sidebar-account"' in html
+    assert 'id="sidebar-account-label"' in html
 
 
 def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
@@ -346,6 +467,61 @@ def test_render_sidebar_page_contains_workspace_list() -> None:
     # The interactivity (including the SSE EventSource fallback) now lives
     # in the external /_static/sidebar.js file; the template should pull it in.
     assert "/_static/sidebar.js" in html
+    # The floating-menu wrapper id. The sidebar runs inside the shared
+    # modal WebContentsView, which covers the full window content area and
+    # acts as a modal: sidebar.js compares click targets against
+    # ``#sidebar-menu`` to distinguish clicks inside the floating panel
+    # (let the menu's own handlers run) from clicks on the transparent
+    # backdrop outside it (dismiss the modal). Renaming or dropping this id
+    # breaks the click-outside-to-close behavior.
+    assert 'id="sidebar-menu"' in html
+    # SidebarBottom.jinja is rendered inside the floating menu in both
+    # Chrome.jinja (browser mode) and Sidebar.jinja (the sidebar page loaded
+    # into the shared modal WebContentsView in Electron). It carries the
+    # "New workspace" CTA and the "Manage account(s)" / "Log in" entry; the
+    # label is updated dynamically by sidebar.js from /auth/api/status.
+    assert 'id="sidebar-new-workspace"' in html
+    assert 'id="sidebar-account"' in html
+    assert 'id="sidebar-account-label"' in html
+
+
+def test_render_sidebar_page_position_tracks_trigger_anchor() -> None:
+    """The floating menu's left/top come from the caller's trigger rect
+    + offset (caller passes the trigger button's viewport-relative rect
+    and a chosen offset; the menu anchors at trigger.bottom-left + offset).
+    The chrome view and the modal view share window coordinate space, so
+    the rect translates directly. This replaces an earlier ``is_mac``
+    branch -- the position is now driven by call-site geometry rather
+    than baked into a server template.
+
+    Trigger rect (72, 0, 32, 28) is roughly the macOS sidebar-toggle
+    button (traffic-light-shifted titlebar with a w-8 h-7 button). A
+    non-default offset (0, 8) is passed here to prove the value flows
+    through: the menu anchors at left=72+0=72, top=0+28+8=36."""
+    html = render_sidebar_page(
+        trigger_x=72,
+        trigger_y=0,
+        trigger_w=32,
+        trigger_h=28,
+        offset_x=0,
+        offset_y=8,
+    )
+    assert "left:72px" in html
+    assert "top:36px" in html
+
+    # Defaults (no caller args) anchor a 38px-tall element at the top-left,
+    # nudged 2px left (offset_x=-2 -> 0 + -2) and 2px below it
+    # (offset_y=2 -> 0 + 38 + 2) -- right shape for "open the sidebar from
+    # the first titlebar button" without any caller customization.
+    html_default = render_sidebar_page()
+    assert "left:-2px" in html_default
+    assert "top:40px" in html_default
+
+
+def test_render_sidebar_page_menu_width_is_280px() -> None:
+    html = render_sidebar_page()
+    assert "w-[280px]" in html
+    assert "w-[244px]" not in html
 
 
 def test_render_recovery_page_includes_agent_id_and_return_to() -> None:
@@ -566,6 +742,7 @@ def test_render_dev_styleguide_page_surfaces_tokens_and_component_widgets() -> N
         "Window controls",
         "Sidebar items",
         "Accent spine",
+        "Color swatches",
         "Spinner",
         "Buttons",
         "Notices",
@@ -683,6 +860,34 @@ def test_button_passes_through_arbitrary_attrs() -> None:
     assert 'data-x="y"' in html
 
 
+def test_color_swatch_renders_radio_contract() -> None:
+    """The ColorSwatch component owns the markup contract the picker JS
+    selects on: role=radio, data-color, aria-label, aria-checked, the
+    .color-swatch class, and the background-color style."""
+    html = CATALOG.render("ColorSwatch", hex="#0b292b", name="confusion", selected=True, size="md")
+    assert 'role="radio"' in html
+    assert 'data-color="#0b292b"' in html
+    assert 'aria-label="confusion"' in html
+    assert 'aria-checked="true"' in html
+    assert "color-swatch" in html
+    # The style sets the swatch fill; assert the trailing-semicolon form
+    # (from ``background-color: {{ hex }};``) so the value is pinned and
+    # the trailing-comment ratchet does not misfire on the hex literal.
+    assert "#0b292b;" in html
+    # md size geometry.
+    assert "w-[34px]" in html
+    assert "h-[34px]" in html
+
+
+def test_color_swatch_unselected_and_small_and_disabled() -> None:
+    html = CATALOG.render("ColorSwatch", hex="#cecd0c", name="energy", selected=False, size="sm", disabled=True)
+    assert 'aria-checked="false"' in html
+    # sm size geometry (create form).
+    assert "w-6" in html
+    assert "h-6" in html
+    assert "disabled" in html
+
+
 def test_titlebar_button_default_is_nav_variant() -> None:
     html = CATALOG.render("TitlebarButton", _content="<svg/>")
     # nav variant => w-8 h-7 rounded-md, default tone => the .titlebar-btn
@@ -714,36 +919,190 @@ def test_titlebar_button_danger_tone_applies_red_hover() -> None:
     assert "titlebar-btn " in html
 
 
-# -- Workspace accent + titlebar tokens ----------------------------------
+# -- Workspace palette + WCAG contrast picker ----------------------------
 #
-# The accent is set per-workspace via a CSS variable on document.documentElement
-# (chrome.js) so the value is computed; the *shape* of the computation lives
-# in workspace_accent() (mirrored in static/workspace_accent.js). These tests
-# pin the OKLCH lightness / chroma at 85% / 0.08 -- a calm tone that reads as
-# chrome across the full-width titlebar -- and pin the deterministic
-# agent-id -> hue mapping that powers identity color across the app.
+# The palette is the user-pickable set of workspace colors. It lives
+# server-side only (``WORKSPACE_PALETTE`` in workspace_color.py): the
+# pickers render server-side swatches carrying data-color attributes,
+# and the SSE workspaces payload emits the resolved accent/accent_fg.
+# static/workspace_accent.js keeps just the two runtime helpers
+# (normalizeHex / pickForegroundForHex); the guard test below ensures
+# no JS palette mirror gets reintroduced.
+
+# Order is significant: the 10 chromatic colors come first, then the
+# two achromatic neutrals (indifference = black, white) grouped at the
+# end, so the picker + the create-form preselect prioritize real colors.
+_EXPECTED_PALETTE: Final[dict[str, str]] = {
+    "confusion": "#0b292b",
+    "courage": "#492222",
+    "envy": "#3c3d06",
+    "peace": "#9fbbd3",
+    "belonging": "#e8a7a8",
+    "energy": "#cecd0c",
+    "strength": "#cfc7b3",
+    "comfort": "#f5d6a0",
+    "inspiration": "#e9ecd9",
+    "clarity": "#fcefd4",
+    "indifference": "#000000",
+    "white": "#ffffff",
+}
+
+_WORKSPACE_ACCENT_JS_PATH = Path(_templates_module.__file__).resolve().parent / "static" / "workspace_accent.js"
 
 
-def test_workspace_accent_uses_85_lightness_and_0_08_chroma() -> None:
-    accent = workspace_accent(str(_AGENT_A))
-    # Match the full-width-titlebar tuning. If you bump these, also update
-    # ``ACCENT_L`` / ``ACCENT_C`` in static/workspace_accent.js so the two
-    # stay in lockstep.
-    assert accent.startswith("oklch(85% 0.08 ")
-    assert accent.endswith(")")
+def test_workspace_palette_matches_expected_entries() -> None:
+    # Pinning the exact entries *and their order* here so a stray edit to
+    # workspace_color.py (rename / typo / dropped entry / reorder) fails
+    # loudly -- order drives both the picker's render order and
+    # pick_unused_create_color's preference walk, so an order-insensitive
+    # dict comparison would let a reorder slip through.
+    assert list(WORKSPACE_PALETTE.items()) == list(_EXPECTED_PALETTE.items())
 
 
-def test_workspace_accent_is_deterministic_for_a_given_agent_id() -> None:
-    # The deterministic mapping is the whole point: an agent's identity
-    # color must not flicker across renders.
-    assert workspace_accent(str(_AGENT_A)) == workspace_accent(str(_AGENT_A))
+def test_workspace_palette_groups_neutrals_last() -> None:
+    # Order is semantic: chromatic colors first, the two achromatic
+    # neutrals (black + white) last, so the picker + create-form
+    # preselect prioritize real colors.
+    names = list(WORKSPACE_PALETTE.keys())
+    assert names[-2:] == ["indifference", "white"]
+    # ``confusion`` (the default) leads the chromatic block.
+    assert names[0] == "confusion"
 
 
-def test_workspace_accent_differs_across_distinct_agent_ids() -> None:
-    # Distinct agent ids should hash to distinct hues; with a 360-degree
-    # space and SHA-256 hashes, a collision between two specific ids is
-    # effectively impossible.
-    assert workspace_accent(str(_AGENT_A)) != workspace_accent(str(_AGENT_B))
+def test_default_workspace_color_is_confusion() -> None:
+    assert DEFAULT_WORKSPACE_COLOR_NAME == "confusion"
+    assert DEFAULT_WORKSPACE_COLOR == WORKSPACE_PALETTE["confusion"]
+    assert DEFAULT_WORKSPACE_COLOR == "#0b292b"
+
+
+def test_workspace_accent_js_has_no_palette_mirror() -> None:
+    """The palette lives server-side only (workspace_color.py) and
+    reaches the client as server-rendered swatches with data-color
+    attributes. A JS palette literal would be a second source of truth
+    to keep in sync; this guard fails if someone reintroduces one.
+    The JS file keeps only the two runtime helpers (normalizeHex /
+    pickForegroundForHex)."""
+    js_content = _WORKSPACE_ACCENT_JS_PATH.read_text()
+    assert "WORKSPACE_PALETTE" not in js_content
+    assert "normalizeHex" in js_content
+    assert "pickForegroundForHex" in js_content
+
+
+# Cases ordered: 4 dark palette entries (-> white text), 8 light palette
+# entries (-> black text), 2 mid-range customs that exercise either side
+# of the WCAG threshold.
+_PICK_FOREGROUND_CASES: Final[tuple[tuple[str, str], ...]] = (
+    ("#000000", "255 255 255"),
+    ("#0b292b", "255 255 255"),
+    ("#492222", "255 255 255"),
+    ("#3c3d06", "255 255 255"),
+    ("#9fbbd3", "0 0 0"),
+    ("#e8a7a8", "0 0 0"),
+    ("#cecd0c", "0 0 0"),
+    ("#cfc7b3", "0 0 0"),
+    ("#f5d6a0", "0 0 0"),
+    ("#e9ecd9", "0 0 0"),
+    ("#fcefd4", "0 0 0"),
+    ("#ffffff", "0 0 0"),
+    ("#808080", "0 0 0"),
+    ("#404040", "255 255 255"),
+)
+
+
+@pytest.mark.parametrize(("hex_color", "expected_foreground"), _PICK_FOREGROUND_CASES)
+def test_pick_workspace_foreground_chooses_legible_text(hex_color: str, expected_foreground: str) -> None:
+    assert pick_workspace_foreground(hex_color) == expected_foreground
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("#ffffff", "#ffffff"),
+        ("ffffff", "#ffffff"),
+        ("#FFFFFF", "#ffffff"),
+        ("FFFFFF", "#ffffff"),
+        ("#fff", "#ffffff"),
+        ("fff", "#ffffff"),
+        ("#FFF", "#ffffff"),
+        ("#0b292b", "#0b292b"),
+        ("0B292B", "#0b292b"),
+        ("  #fff  ", "#ffffff"),
+        ("\tffffff\n", "#ffffff"),
+    ],
+)
+def test_normalize_workspace_color_accepts_lenient_inputs(value: str, expected: str) -> None:
+    assert normalize_workspace_color(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "not-a-hex",
+        "#ff",
+        "#fffff",
+        "#fffffff",
+        "#xyz",
+        "#ffffff80",
+        "rgb(255, 255, 255)",
+        "ffffffff",
+    ],
+)
+def test_normalize_workspace_color_rejects_malformed_inputs(value: str) -> None:
+    assert normalize_workspace_color(value) is None
+
+
+# -- pick_unused_create_color --------------------------------------------
+#
+# The create form preselects the first palette color not already used by
+# an existing workspace, falling back to confusion when nothing is in use
+# yet or every palette entry is taken.
+
+_PALETTE_HEXES: Final[tuple[str, ...]] = tuple(WORKSPACE_PALETTE.values())
+_CONFUSION = WORKSPACE_PALETTE["confusion"]
+_INDIFFERENCE = WORKSPACE_PALETTE["indifference"]
+
+
+def test_pick_unused_create_color_defaults_to_confusion_when_none_used() -> None:
+    # No workspaces yet -> the named default (confusion, which also leads
+    # the palette).
+    assert pick_unused_create_color(set()) == _CONFUSION
+
+
+def test_pick_unused_create_color_returns_confusion_when_all_used() -> None:
+    assert pick_unused_create_color(set(_PALETTE_HEXES)) == _CONFUSION
+
+
+def test_pick_unused_create_color_returns_first_unused_in_palette_order() -> None:
+    # Confusion is used (e.g. one label-less workspace renders as confusion);
+    # the first unused palette entry in order is courage (confusion leads
+    # the chromatic block, so the next one is courage -- not a neutral).
+    assert pick_unused_create_color({_CONFUSION}) == WORKSPACE_PALETTE["courage"]
+
+
+def test_pick_unused_create_color_skips_to_next_unused() -> None:
+    # confusion + courage taken -> next chromatic palette entry is envy.
+    assert pick_unused_create_color({_CONFUSION, WORKSPACE_PALETTE["courage"]}) == WORKSPACE_PALETTE["envy"]
+
+
+def test_pick_unused_create_color_ignores_custom_colors() -> None:
+    # A custom (non-palette) color in use doesn't block any palette pick;
+    # with a custom color the set is non-empty so the first palette entry
+    # (confusion) is returned.
+    assert pick_unused_create_color({"#123456"}) == _CONFUSION
+
+
+def test_pick_unused_create_color_picks_neutrals_only_after_colors() -> None:
+    # With every chromatic color used, the first unused entry is the
+    # first neutral (indifference = black), confirming neutrals sort last.
+    chromatic = [hex_value for name, hex_value in WORKSPACE_PALETTE.items() if name not in ("indifference", "white")]
+    assert pick_unused_create_color(set(chromatic)) == _INDIFFERENCE
+
+
+def test_pick_unused_create_color_is_case_insensitive() -> None:
+    # Uppercased used colors still match palette entries.
+    used = {_CONFUSION.upper()}
+    assert pick_unused_create_color(used) == WORKSPACE_PALETTE["courage"]
 
 
 def test_tokens_css_defines_titlebar_utility_classes() -> None:
@@ -753,7 +1112,6 @@ def test_tokens_css_defines_titlebar_utility_classes() -> None:
     assert ".titlebar-title" in css
     assert ".titlebar-btn" in css
     assert ".titlebar-btn-danger" in css
-    assert ".titlebar-account" in css
     # All of them read --titlebar-fg with an alpha for hierarchy.
     assert "var(--titlebar-fg" in css
 
@@ -765,19 +1123,35 @@ def test_tokens_css_drops_page_workspace_top_stripe() -> None:
     assert ".page-workspace::before" not in css
 
 
-def test_tokens_css_accent_fallbacks_use_the_pinned_lightness_chroma() -> None:
-    """``--workspace-accent`` may not be set (e.g. the dev styleguide or
-    a sidebar item rendered before chrome.js applies the accent), in
-    which case consumers fall back to a fixed default. Pin that default
-    to the 85 / 0.08 tuning so the fallback doesn't pop visually against
-    the rest of the accent system."""
+def test_tokens_css_accent_fallback_is_default_workspace_color() -> None:
+    """``--workspace-accent`` may not be set on some surfaces (e.g. the
+    dev styleguide, or a sidebar item rendered before the SSE workspaces
+    payload arrives), so the CSS rule includes a fallback. Pin the
+    fallback to ``DEFAULT_WORKSPACE_COLOR`` (the palette's ``confusion``
+    entry) so the un-applied state matches the migration backfill /
+    create-time default."""
     css = _TOKENS_CSS_PATH.read_text()
-    # Pre-titlebar-accent values must not linger in fallbacks.
-    assert "oklch(65% 0.15" not in css
-    assert "oklch(80% 0.1" not in css
-    assert "oklch(85% 0.12" not in css
-    # All fallbacks should use the current tuning.
-    assert "oklch(85% 0.08 230)" in css
+    # Legacy OKLCH fallbacks must not linger.
+    assert "oklch(" not in css
+    # All fallbacks should use the palette default.
+    assert f"var(--workspace-accent, {DEFAULT_WORKSPACE_COLOR})" in css
+
+
+def test_no_legacy_oklch_accents_remain_in_templates_or_static() -> None:
+    """The SHA-derived OKLCH accent system is gone: workspace accents are
+    stored ``#rrggbb`` hexes, and every fallback / demo surface paints
+    the palette default. Scan the template and static-asset trees so a
+    lingering (or reintroduced) ``oklch(`` literal fails loudly; any
+    future legitimate oklch use should be a conscious decision recorded
+    by updating this guard."""
+    client_root = Path(_templates_module.__file__).resolve().parent
+    offenders = [
+        str(path.relative_to(client_root))
+        for directory in (client_root / "templates", client_root / "static")
+        for path in sorted(directory.rglob("*"))
+        if path.suffix in (".jinja", ".js", ".css") and "oklch(" in path.read_text()
+    ]
+    assert offenders == []
 
 
 def test_notice_renders_each_variant() -> None:
@@ -808,12 +1182,16 @@ def test_card_row_spread_layout_adds_justify_between() -> None:
     html = CATALOG.render("Card", layout="row-spread", _content="x")
     assert "justify-between" in html
     assert "items-center" in html
+    assert "gap-1.5" in html
 
 
 def test_card_row_layout_omits_justify_between() -> None:
     html = CATALOG.render("Card", layout="row", _content="x")
     assert "items-center" in html
     assert "justify-between" not in html
+    # Row children sit at a tight gap-1.5 (6px), not the old gap-3.
+    assert "gap-1.5" in html
+    assert "gap-3" not in html
 
 
 def test_card_tight_padding_uses_px4_py25() -> None:
@@ -926,6 +1304,25 @@ def test_icon24_size_axis() -> None:
     for size, css_class in (("sm", "w-3.5 h-3.5"), ("md", "w-4 h-4"), ("lg", "w-5 h-5")):
         html = CATALOG.render("Icon24", name="home", size=size)
         assert css_class in html
+
+
+def test_icon24_renders_arrow_up_right() -> None:
+    # The diagonal open-in-new arrow (Figma node 560-5109) backs the
+    # "open in new window" affordance on workspace rows (landing page + sidebar).
+    html = CATALOG.render("Icon24", name="arrow-up-right")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<path d="M18 16.5V6H7.5"/>' in html
+    assert '<path d="M18 6L6 18"/>' in html
+
+
+def test_icon24_renders_menu() -> None:
+    # The lucide ``menu`` glyph (three horizontal lines) is the titlebar
+    # button that opens the floating workspace menu.
+    html = CATALOG.render("Icon24", name="menu")
+    assert 'viewBox="0 0 24 24"' in html
+    assert '<line x1="4" y1="6" x2="20" y2="6"/>' in html
+    assert '<line x1="4" y1="12" x2="20" y2="12"/>' in html
+    assert '<line x1="4" y1="18" x2="20" y2="18"/>' in html
 
 
 def test_icon12_renders_with_w3_h3_size_and_12_viewbox() -> None:

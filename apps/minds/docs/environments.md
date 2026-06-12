@@ -13,7 +13,7 @@ of per-developer dynamic envs on top of the dev tier:
   accounts.
 
 Each tier has its own Modal account, Neon account, Cloudflare account,
-SuperTokens account, OAuth clients, Vultr account, Anthropic key, and
+SuperTokens account, OAuth clients, OVH account, Anthropic key, and
 pool-management SSH keypair. There is zero cross-tier reach.
 
 ## Per-env data root
@@ -236,7 +236,7 @@ resources". For staging destroy this means:
    `metadata.env = "staging"` (created via the connector's
    `cf_create_tunnel` -- see "Tier generation id + activate auto-wipe"
    below).
-7. Delete any Vultr instance tagged `minds_env=staging`.
+7. Delete any OVH instance tagged `minds_env=staging`.
 8. Delete the tier generation id from Vault (so the next deploy mints
    a fresh one).
 9. Only after every cloud-side step succeeds, `rmdir`
@@ -248,7 +248,7 @@ resources". For staging destroy this means:
 Dev env destroy follows the same shape but operates on the per-dev
 Modal env / Neon DB / SuperTokens app (which deploy created outright,
 so destroy deletes them outright too rather than wiping data inside).
-The Cloudflare-tunnel + Vultr + mngr-agent + env-root-removal steps
+The Cloudflare-tunnel + OVH + mngr-agent + env-root-removal steps
 are identical.
 
 ## Tier generation id + activate auto-wipe
@@ -301,7 +301,7 @@ dev tier. Resources created per dev env: a Modal *environment* inside
 the shared dev Modal workspace, a Neon *project* (named
 `minds-<env>`) under the shared dev Neon org -- with `host_pool` and
 `litellm_cost` databases provisioned inside -- and a SuperTokens app
-under the shared dev SuperTokens core. Cloudflare, Vultr, Anthropic,
+under the shared dev SuperTokens core. Cloudflare, OVH, Anthropic,
 and OAuth clients are dev-tier shared.
 
 The per-env Neon project gives every dev env atomic, isolated state
@@ -417,7 +417,7 @@ Done once per tier (production / staging), out of band:
 
 1. Stand up the per-tier accounts (Modal workspace, Neon project,
    Cloudflare account+zone, SuperTokens core, Google+GitHub OAuth apps,
-   Vultr account).
+   OVH account).
 2. Populate the Vault paths under `secrets/minds/<tier>/...` -- see
    the schema files at `.minds/template/*.sh`.
 3. Update `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml` with

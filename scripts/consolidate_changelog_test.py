@@ -16,6 +16,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from scripts.consolidate_changelog import _build_dated_sections  # noqa: E402
 from scripts.consolidate_changelog import _collect_project_entries  # noqa: E402
 from scripts.consolidate_changelog import _consolidate_project  # noqa: E402
+from scripts.consolidate_changelog import _format_section_line  # noqa: E402
 from scripts.consolidate_changelog import _get_entry_added_datetime  # noqa: E402
 from scripts.consolidate_changelog import _group_entries_by_date  # noqa: E402
 from scripts.consolidate_changelog import _insert_section_into_changelog  # noqa: E402
@@ -93,6 +94,16 @@ def test_pending_changelog_entries_walks_every_project(tmp_path: Path) -> None:
     # Sorted by project name (alphabetical: 'minds' < 'mngr'), then filename.
     # 'dev' is always last.
     assert [p.name for p in result] == ["c.md", "a.md", "b.md", "d.md"]
+
+
+def test_format_section_line_joins_dates_newest_first() -> None:
+    # The consolidation prompt parses this exact "SECTION <project> <date>..."
+    # format, one line per project, dates space-separated newest first.
+    assert _format_section_line("mngr", ["2026-06-10", "2026-06-09"]) == "SECTION mngr 2026-06-10 2026-06-09"
+
+
+def test_format_section_line_single_date() -> None:
+    assert _format_section_line("dev", ["2026-06-10"]) == "SECTION dev 2026-06-10"
 
 
 def test_build_dated_sections_single_date() -> None:

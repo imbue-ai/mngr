@@ -42,7 +42,7 @@ See [the desktop client design doc](../imbue/minds/desktop_client/README.md) for
 When a user visits the desktop client and no agents exist, they are shown a creation form where they can provide a git repository URL or local path. The desktop client:
 
 1. Clones the repository to a temp directory (if a URL) or uses the local path directly
-2. Runs `mngr create <name> --id <id> --no-connect --label workspace=<name> --template main --template <mode>` to create the agent
+2. Runs `mngr create <name> --no-connect --label workspace=<name> --template main --template <mode>` to create the agent (the agent id is read back from the `created` JSONL event; minds does not pre-generate one)
 3. Creates a Cloudflare tunnel (if configured) and injects the tunnel token into the agent via `mngr exec`
 4. Redirects the user to the newly created agent (the user is already authenticated via the global session)
 
@@ -50,7 +50,7 @@ Agent creation is also available via the `/api/create-agent` API endpoint, which
 
 ### Cloudflare tunnel integration
 
-The remote service connector URL comes from the per-tier `client.toml` selected by `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). When `--config-file` is not passed, the default resolves to `apps/minds/imbue/minds/config/envs/_bundled/client.toml` (written by the Electron production build) and falls back to `apps/minds/imbue/minds/config/envs/dev/client.toml` shipped with the wheel. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
+The remote service connector URL comes from the per-tier `client.toml` selected by `minds run --config-file <path>` (see `apps/minds/docs/environments.md`). `minds run` has no implicit default: if neither `--config-file` nor `MINDS_CLIENT_CONFIG_PATH` is set it refuses to start. The packaged Electron build passes `--config-file` explicitly from the bundled `client.toml`. Every tunnel request authenticates with the signed-in user's SuperTokens session: the JWT is sent as a Bearer token, and the session's email becomes the default Cloudflare Access policy for new services. No client-side Basic-auth credentials or `OWNER_EMAIL` need to be configured. Once a user is signed in, the desktop client creates a Cloudflare tunnel per new agent that provides global access to the agent's services gated on that user's email.
 
 Within each workspace's dockview UI, a Share action per service opens a modal that surfaces the global Cloudflare link and provides toggle controls for enabling/disabling global forwarding per service.
 

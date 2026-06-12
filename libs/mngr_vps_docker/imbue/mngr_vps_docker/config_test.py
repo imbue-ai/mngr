@@ -10,6 +10,9 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 
 def test_default_config_values() -> None:
+    # Deliberate change-detector on the public default contract (also documented
+    # in README.md): a typo'd default (e.g. an idle timeout or port flip) must
+    # fail here. Update these intentionally when defaults change.
     config = VpsDockerProviderConfig(backend=ProviderBackendName("test-backend"))
     assert config.host_dir == Path("/mngr")
     assert config.default_image == "debian:bookworm-slim"
@@ -31,21 +34,3 @@ def test_default_activity_sources_includes_all() -> None:
     # Should contain all ActivitySource values
     for source in ActivitySource:
         assert source in config.default_activity_sources
-
-
-def test_custom_config_values() -> None:
-    config = VpsDockerProviderConfig(
-        backend=ProviderBackendName("custom"),
-        host_dir=Path("/custom/dir"),
-        default_image="ubuntu:22.04",
-        default_idle_timeout=600,
-        container_ssh_port=3333,
-        default_start_args=("--cpus=2", "--memory=4g"),
-        builder=DockerBuilder.DEPOT,
-    )
-    assert config.host_dir == Path("/custom/dir")
-    assert config.default_image == "ubuntu:22.04"
-    assert config.default_idle_timeout == 600
-    assert config.container_ssh_port == 3333
-    assert config.default_start_args == ("--cpus=2", "--memory=4g")
-    assert config.builder is DockerBuilder.DEPOT

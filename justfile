@@ -184,7 +184,7 @@ test-quick args="":
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
@@ -390,13 +390,6 @@ minds-start agent_name="mindtest" branch="":
             exit 2
         fi
         rm -f "$pid_file"
-    fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
-    if [ ! -e "$fct_wt/.git" ]; then
-        echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
-        exit 2
     fi
     if [ -f .env ]; then
         set -a
@@ -786,13 +779,49 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
-# Destroy and remove every host in the pool with status='released'.
-# Sources .minds/<env>/neon.sh for DATABASE_URL.
-cleanup-pool-hosts env="production":
-    #!/bin/bash
-    set -ueo pipefail
-    set -a
-    . .minds/{{env}}/neon.sh
-    set +a
-    uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
-        --database-url "$DATABASE_URL"
+# === minds pool hosts (OVH-backed, leased mode) ===
+#
+# Thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI,
+# which resolves the management SSH key, OVH AK/AS/CK, AND (for staging /
+# production) the host_pool DSN from the activated tier's Vault entries
+# automatically -- so you never export creds or pass --database-url by hand.
+# dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
+# minds env first:  eval "$(uv run minds env activate <name>)"
+
+# Bake one or more pre-provisioned pool hosts for the activated minds env.
+#
+# The baked version comes entirely from <workspace_dir> (a forever-claude-template
+# checkout) -- check it out at the branch/tag you want baked first. <attributes>
+# is only the lease-match label the desktop client sends (e.g. repo_branch_or_tag);
+# it does NOT select the baked version. Extra flags forward to `minds pool create`
+# (e.g. --no-recycle, --mngr-source <monorepo-root>).
+#
+# Usage:
+#   eval "$(uv run minds env activate staging)"
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-EAST-VA ~/project/forever-claude-template 2
+bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --attributes '{{attributes}}' \
+        --workspace-dir "{{workspace_dir}}" \
+        {{extra_args}}
+
+# List pool_hosts rows for the activated minds env (read-only).
+list-pool-hosts:
+    uv run minds pool list
+
+# Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
+# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
+# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
+# VPS is already gone).
+#
+#   just destroy-pool-host <pool-host-id>
+#
+# Note: the steady-state teardown is automatic -- the connector releases a host
+# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
+# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
+# This recipe is the manual single-host escape hatch.
+destroy-pool-host pool_host_id *extra_args:
+    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}

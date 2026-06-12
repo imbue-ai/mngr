@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Fixed a stale See-Also reference in the `tmr` command's help metadata. The `pull` reference pointed at a top-level command that was removed when push/pull were restructured into `rsync` and `git push`/`git pull`; it is now replaced with an `rsync` reference. Previously this produced a broken `[mngr help pull](mngr help pull)` markdown link in the generated docs.
+
+Raised the stale coverage floor from 50% to 75% to match the coverage CI already measures (~78%).
+
 ## 2026-06-08
 
 - Stays unpublished-on-purpose (already in `UNPUBLISHED_PACKAGES`; the canonical mapreduce recipe, internal tooling). Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.

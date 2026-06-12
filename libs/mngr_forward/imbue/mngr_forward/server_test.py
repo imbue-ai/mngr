@@ -238,6 +238,86 @@ def test_preauth_cookie_short_circuit(tmp_path: Path) -> None:
     assert "Discovered agents" in response.text
 
 
+def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path) -> None:
+    """A stale subdomain cookie must redirect to /goto/<id>/ on the bare
+    origin, not the bare landing page.
+
+    Background: the host app (minds.app) regenerates its signing key on
+    every restart, so any pre-existing per-subdomain session cookie
+    fails verification after a quit/reopen. Previously the unauthenticated
+    HTML response 302-redirected to ``localhost:<port>/``, dumping the
+    user on the landing page even though their session was valid on the
+    bare origin. The fix self-heals by sending the browser through the
+    ``/goto/<agent_id>/`` bridge: the bare-origin session cookie still
+    verifies, the bridge mints a fresh subdomain auth token, the
+    subdomain handler then sets a fresh subdomain cookie, and the user
+    lands in their workspace without an interactive re-auth.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    listen_port = 18421
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=listen_port,
+    )
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:{listen_port}", follow_redirects=False) as client:
+        response = client.get(
+            "/",
+            headers={
+                "accept": "text/html",
+                # Cookie value that fails signature verification (signed
+                # by a different key) -- the post-restart scenario.
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=stale-cookie-from-previous-launch",
+            },
+        )
+
+    assert response.status_code == 302
+    assert response.headers["Location"] == f"http://localhost:{listen_port}/goto/{agent_id}/"
+
+
+def test_subdomain_unauthenticated_non_html_returns_403(tmp_path: Path) -> None:
+    """Stale cookie on a non-HTML request still returns 403 (no goto redirect).
+
+    The /goto/ self-heal applies only to navigational HTML loads; an
+    XHR / API call carrying a stale cookie has no browser to follow
+    the redirect and should get a clean 403 instead.
+    """
+    auth_store = FileAuthStore(data_directory=tmp_path)
+    resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    agent_id = AgentId()
+    resolver.add_known_agent(agent_id)
+    resolver.update_services(agent_id, {"system_interface": "http://stub-backend"})
+    tunnel_manager = SSHTunnelManager()
+    envelope_writer = EnvelopeWriter(output=io.StringIO())
+    app = create_forward_app(
+        auth_store=auth_store,
+        resolver=resolver,
+        tunnel_manager=tunnel_manager,
+        envelope_writer=envelope_writer,
+        listen_host="127.0.0.1",
+        listen_port=18421,
+    )
+    with TestClient(app, base_url=f"http://{agent_id}.localhost:18421", follow_redirects=False) as client:
+        response = client.get(
+            "/api/something",
+            headers={
+                "accept": "application/json",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}=stale",
+            },
+        )
+
+    assert response.status_code == 403
+
+
 def test_subdomain_forward_strips_session_cookie_before_proxying_to_backend(tmp_path: Path) -> None:
     """The plugin must NEVER forward its own session cookie to the agent's
     system_interface.
