@@ -1,3 +1,4 @@
+import io
 from collections.abc import Generator
 from pathlib import Path
 
@@ -164,6 +165,31 @@ def test_destroy_host_untags_build_image(docker_provider: DockerProviderInstance
     # delete_host is idempotent and does not error on the already-removed tag.
     offline = docker_provider.get_host(host_id)
     docker_provider.delete_host(offline)
+
+
+@pytest.mark.docker_sdk
+def test_remove_build_image_tolerates_container_still_referencing_it(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    # A container still referencing the build image makes Docker refuse to
+    # remove its last tag (409 "must be forced -- container is using its
+    # referenced image"). Build-image cleanup is best-effort and must not
+    # propagate this, or one host's cleanup aborts the whole destroy/GC run.
+    client = docker_provider._docker_client
+    host_id = HostId.generate()
+    build_tag = docker_provider._build_image_tag(host_id)
+    # A unique image (label keyed on host_id) so build_tag is its only tag --
+    # otherwise images.remove would just untag and never hit the conflict.
+    dockerfile = io.BytesIO(f"FROM busybox:latest\nLABEL mngr.test={host_id}\nCMD sleep 600\n".encode())
+    image, _ = client.images.build(fileobj=dockerfile, tag=build_tag, rm=True)
+    container = client.containers.create(build_tag, name=f"{build_tag}-container")
+    try:
+        docker_provider._remove_build_image(host_id)
+        # The in-use removal is refused (not forced), so the tag survives.
+        assert client.images.get(build_tag) is not None
+    finally:
+        container.remove(force=True)
+        client.images.remove(build_tag, force=True)
 
 
 @pytest.mark.docker
