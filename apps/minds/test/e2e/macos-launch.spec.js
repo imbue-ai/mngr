@@ -17,12 +17,14 @@ test('main window launches to a usable state (Create or Welcome)', async ({ mind
   const { mainWindow, app, pickContentWindow } = mindsApp;
   // Either auth path is fine -- racing them with `.or()` so we don't
   // burn a full timeout per state if the runner happens to be in the
-  // logged-in one.
+  // logged-in one. Identify the welcome splash by stable structural
+  // hooks (the skip-account button id, the login link href), not visible
+  // copy or role, so a wording / link-vs-button redesign can't break this
+  // launch smoke test.
+  const welcomeSplash = mainWindow.locator('#skip-account-btn, a[href="/auth/login"]');
   const createLink = mainWindow.getByRole('link', { name: /^create$/i });
-  const loginLink = mainWindow.getByRole('link', { name: /^log in$/i });
-  const skipAccountBtn = mainWindow.getByRole('button', { name: /continue without an account/i });
   try {
-    await expect(createLink.or(loginLink).or(skipAccountBtn).first())
+    await expect(welcomeSplash.or(createLink).first())
       .toBeVisible({ timeout: 2 * 60 * 1000 });
   } finally {
     // Always attach a final main-window screenshot. The shared
