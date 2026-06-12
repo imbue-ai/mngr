@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Generator
 from pathlib import Path
@@ -326,6 +327,60 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     ):
         assert not path_pattern.fullmatch(url_path), url_path
     assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
+
+
+@pytest.mark.parametrize(
+    "target_path",
+    [
+        "/home/example/My Documents/data.txt",
+        "/home/example/My Documents/",
+        "/home/example/r\u00e9sum\u00e9s/sp ace/d\u00ef.txt",
+    ],
+)
+def test_file_sharing_pattern_matches_percent_encoded_request_path(
+    node_extension: tuple[str, Path, Path],
+    target_path: str,
+) -> None:
+    """A shared path with spaces / non-ASCII matches the encoded request path.
+
+    The gateway builds the permission check's request from a WHATWG URL,
+    so detent matches the per-file schema's ``pattern`` against the
+    percent-encoded ``URL.pathname`` (a space becomes ``%20``, non-ASCII
+    its UTF-8 ``%XX`` sequence). The pattern must therefore embed the
+    encoded form -- embedding the raw path (with a literal space) would
+    never match the request and the grant would be silently inert.
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "needs the shared directory",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "READ"},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    # The schema *name* is a human-readable plaintext key, so it keeps
+    # the raw path verbatim for auditability.
+    permission_name = _file_sharing_permission_name(target_path, "READ")
+    schema = parsed["effect"]["schemas"][permission_name]
+    path_pattern = re.compile(schema["properties"]["path"]["pattern"])
+    # ``urllib.parse.quote`` with ``safe='/'`` reproduces the WHATWG
+    # path-percent-encode set for these characters (space -> %20,
+    # non-ASCII -> UTF-8 %XX), matching what detent sees on the request.
+    encoded_path = urllib.parse.quote(
+        f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}", safe="/"
+    )
+    raw_path = f"{_FILE_SHARING_PROXY_PATH_PREFIX}{target_path}"
+    # The encoded request path matches; the raw (literal-space) path does
+    # not -- the request never arrives un-encoded, and matching it would
+    # be a sign the pattern was built from the wrong (raw) form.
+    assert path_pattern.fullmatch(encoded_path), encoded_path
+    assert path_pattern.fullmatch(f"{encoded_path}/sub"), encoded_path
+    if raw_path != encoded_path:
+        assert not path_pattern.fullmatch(raw_path), raw_path
 
 
 def test_read_and_write_grants_for_same_path_coexist_in_persisted_record(

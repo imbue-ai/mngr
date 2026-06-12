@@ -726,13 +726,48 @@ function fileSharingPermissionPathPattern(fileWebdavPath) {
   return `^${escapeForRegex(fileWebdavPath)}(/.*)?$`;
 }
 
+/**
+ * Normalize ``urlPath`` exactly the way the WHATWG URL parser
+ * normalizes an incoming request's ``pathname``, so a per-file
+ * permission pattern built from an on-disk path matches the path
+ * detent actually checks at request time.
+ *
+ * The gateway feeds the permission check a ``Request`` built from a
+ * WHATWG URL, and detent matches the per-file schema's ``pattern``
+ * against ``URL.pathname``. That pathname is percent-encoded by the
+ * URL parser's path-percent-encode set: a space becomes ``%20``, each
+ * non-ASCII byte its UTF-8 ``%XX`` sequence, and characters like
+ * ``#``/``?`` (which would otherwise start the fragment/query) their
+ * encoded forms -- while ``/`` separators, ``+``/``:``/``@`` and
+ * already-encoded ``%XX`` triplets are left untouched. If we embedded
+ * the raw on-disk path (with a literal space, accented letter, etc.)
+ * into the regex, the encoded request pathname (``...%20...``) would
+ * never match it -- which is exactly the bug a path containing a space
+ * (e.g. an agent-requested or user-selected directory) used to hit.
+ *
+ * Assigning to ``URL.pathname`` applies precisely that path-percent-
+ * encode set without truncating on ``#``/``?``, and -- verified against
+ * the full-URL parse detent performs -- reproduces the identical
+ * canonical pathname (including dot-segment collapsing). We use the
+ * same ``placeholder.invalid`` origin the route parser uses for
+ * symmetry.
+ */
+function normalizeWebdavUrlPath(urlPath) {
+  const url = new URL('http://placeholder.invalid');
+  url.pathname = urlPath;
+  return url.pathname;
+}
+
 function computeFileSharingEffect(filePath, access) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
   // permission's URL path is the prefix + the absolute file path.
   // ``validateAbsoluteFileSharingPath`` has already guaranteed that
-  // ``filePath`` starts with ``/`` and is traversal-free.
-  const fileWebdavPath = `${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`;
+  // ``filePath`` starts with ``/`` and is traversal-free. We normalize
+  // the combined path the same way the WHATWG URL parser normalizes the
+  // incoming request's pathname so the regex matches even when the path
+  // has characters the parser percent-encodes (spaces, non-ASCII, ...).
+  const fileWebdavPath = normalizeWebdavUrlPath(`${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`);
   return {
     schemas: {
       [permissionSchemaName]: {
