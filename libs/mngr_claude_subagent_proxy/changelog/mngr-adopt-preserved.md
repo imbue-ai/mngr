@@ -1,0 +1,1 @@
+Internal: routed `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now in `imbue.mngr.hosts.common`). No behavior change.
