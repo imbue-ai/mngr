@@ -817,7 +817,7 @@ class SmolvmProviderInstance(BaseProviderInstance):
             except SmolvmCommandError as e:
                 logger.warning("Error stopping smolvm machine: {}", e)
         else:
-            logger.debug("No host record found for {}", host_id)
+            logger.debug("No host record with machine config found for {}; nothing to stop", host_id)
 
         if host_record is not None:
             updated_certified_data = host_record.certified_host_data.model_copy_update(
