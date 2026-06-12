@@ -503,6 +503,32 @@ class SmolvmProviderInstance(BaseProviderInstance):
     # Image Archive Packing
     # =========================================================================
 
+    def _cached_sidecar_path(self, cache_key: str) -> Path:
+        """Path of the cached .smolmachine sidecar for a given cache key."""
+        return self._packs_dir / f"{cache_key}.smolmachine"
+
+    def _create_pack_sidecar(self, archive_path: Path, cache_key: str) -> Path:
+        """Pack an image archive into the cache, returning the .smolmachine sidecar path.
+
+        pack create -o PATH emits PATH (a runnable stub) plus the
+        PATH.smolmachine sidecar; machines are created from the sidecar. The
+        stub is not needed for machine create, so it is dropped to halve the
+        cache footprint.
+        """
+        self._packs_dir.mkdir(parents=True, exist_ok=True)
+        sidecar_path = self._cached_sidecar_path(cache_key)
+        output_path = self._packs_dir / cache_key
+        smolvm_pack_create_from_archive(
+            self.mngr_ctx.concurrency_group,
+            self.config.smolvm_command,
+            archive_path,
+            output_path,
+        )
+        if not sidecar_path.exists():
+            raise MngrError(f"pack create did not produce expected sidecar: {sidecar_path}")
+        output_path.unlink(missing_ok=True)
+        return sidecar_path
+
     def _pack_from_archive_cached(self, archive_path: Path) -> Path:
         """Convert an image archive into a cached .smolmachine pack.
 
@@ -513,27 +539,12 @@ class SmolvmProviderInstance(BaseProviderInstance):
         if not archive_path.exists():
             raise MngrError(f"Image archive not found: {archive_path}")
         content_hash = _sha256_of_file(archive_path)
-        self._packs_dir.mkdir(parents=True, exist_ok=True)
-        sidecar_path = self._packs_dir / f"{content_hash}.smolmachine"
+        sidecar_path = self._cached_sidecar_path(content_hash)
         if sidecar_path.exists():
             logger.debug("Using cached pack for archive {}: {}", archive_path, sidecar_path)
             return sidecar_path
-        output_path = self._packs_dir / content_hash
         with log_span("Packing image archive {} (content hash {})", archive_path, content_hash[:12]):
-            smolvm_pack_create_from_archive(
-                self.mngr_ctx.concurrency_group,
-                self.config.smolvm_command,
-                archive_path,
-                output_path,
-            )
-        # pack create -o PATH emits PATH (a runnable stub) plus the
-        # PATH.smolmachine sidecar; machines are created from the sidecar.
-        # The stub is not needed for machine create, so drop it to halve the
-        # cache footprint.
-        if not sidecar_path.exists():
-            raise MngrError(f"pack create did not produce expected sidecar: {sidecar_path}")
-        output_path.unlink(missing_ok=True)
-        return sidecar_path
+            return self._create_pack_sidecar(archive_path, content_hash)
 
     def _pack_from_dockerfile_cached(self, dockerfile: Path) -> Path:
         """Build a Dockerfile with docker, export the image, and pack it.
@@ -558,12 +569,12 @@ class SmolvmProviderInstance(BaseProviderInstance):
         if not image_id_hex:
             raise MngrError("docker build produced no image id")
 
-        self._packs_dir.mkdir(parents=True, exist_ok=True)
-        sidecar_path = self._packs_dir / f"{image_id_hex}.smolmachine"
+        sidecar_path = self._cached_sidecar_path(image_id_hex)
         if sidecar_path.exists():
             logger.debug("Using cached pack for image {}: {}", image_id_hex[:12], sidecar_path)
             return sidecar_path
 
+        self._packs_dir.mkdir(parents=True, exist_ok=True)
         archive_path = self._packs_dir / f"{image_id_hex}.tar"
         try:
             with log_span("Exporting docker image {} to archive", image_id_hex[:12]):
@@ -574,20 +585,10 @@ class SmolvmProviderInstance(BaseProviderInstance):
                 )
             if save_result.returncode != 0:
                 raise MngrError(f"docker save failed: {save_result.stderr.strip()}")
-            output_path = self._packs_dir / image_id_hex
             with log_span("Packing docker image {}", image_id_hex[:12]):
-                smolvm_pack_create_from_archive(
-                    self.mngr_ctx.concurrency_group,
-                    self.config.smolvm_command,
-                    archive_path,
-                    output_path,
-                )
-            if not sidecar_path.exists():
-                raise MngrError(f"pack create did not produce expected sidecar: {sidecar_path}")
-            output_path.unlink(missing_ok=True)
+                return self._create_pack_sidecar(archive_path, image_id_hex)
         finally:
             archive_path.unlink(missing_ok=True)
-        return sidecar_path
 
     # =========================================================================
     # Core Lifecycle Methods
