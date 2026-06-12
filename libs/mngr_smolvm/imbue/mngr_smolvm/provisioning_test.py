@@ -21,6 +21,18 @@ def test_ssh_provisioning_script_embeds_public_keys_only() -> None:
     assert "MNGR_PROVISION_OK" in script
 
 
+def test_ssh_provisioning_script_install_gate_covers_all_base_tools() -> None:
+    """The install gate must trigger when ANY base tool is missing, not just
+    sshd: an image can ship sshd while lacking tmux/git/..., and mngr needs
+    all of them on a host."""
+    script = build_ssh_provisioning_script(
+        host_public_key_openssh="pub",
+        client_authorized_public_key="client",
+    )
+    assert "for tool in sshd tmux git rsync jq curl; do" in script
+    assert 'if [ "$is_install_needed" = "1" ]; then' in script
+
+
 def test_ssh_provisioning_script_reads_private_key_from_secret_env_var() -> None:
     """The private key is injected via the --secret-file env var (so it never
     appears in host-side argv); the script must reference the var, refuse to

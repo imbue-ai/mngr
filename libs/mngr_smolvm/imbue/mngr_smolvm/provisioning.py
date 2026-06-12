@@ -25,8 +25,8 @@ def build_ssh_provisioning_script(
     (so the host-side known_hosts entry is valid without a keyscan),
     authorizes mngr's client key for root, and starts sshd with a dedicated
     config file. Safe to re-run on every host start: package installs are
-    skipped when sshd is already present and an already-running sshd is left
-    alone.
+    skipped when all the base tools are already present and an
+    already-running sshd is left alone.
 
     The private key is NOT embedded in the script (which travels through
     host-side argv); it is read from the ``HOST_PRIVATE_KEY_ENV_VAR``
@@ -41,7 +41,14 @@ if [ -z "${{{HOST_PRIVATE_KEY_ENV_VAR}:-}}" ]; then
     echo "{HOST_PRIVATE_KEY_ENV_VAR} is not set (expected via smolvm machine exec --secret-file)" >&2
     exit 8
 fi
-if ! command -v sshd >/dev/null 2>&1; then
+# Install whenever ANY base tool is missing (not just sshd): an arbitrary
+# OCI image can ship sshd while lacking tmux/git/..., and mngr needs all of
+# them on a host.
+is_install_needed=0
+for tool in sshd tmux git rsync jq curl; do
+    command -v "$tool" >/dev/null 2>&1 || is_install_needed=1
+done
+if [ "$is_install_needed" = "1" ]; then
     if command -v apk >/dev/null 2>&1; then
         apk add -q openssh tmux git rsync jq curl bash
     elif command -v apt-get >/dev/null 2>&1; then
