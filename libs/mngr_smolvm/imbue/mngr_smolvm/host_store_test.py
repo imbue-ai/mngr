@@ -37,8 +37,8 @@ def test_write_and_read_host_record(tmp_path: Path) -> None:
         certified_host_data=certified_data,
         ssh_hostname="127.0.0.1",
         ssh_port=60022,
-        ssh_user="josh",
-        ssh_identity_file="/home/josh/.lima/_config/user",
+        ssh_user="root",
+        ssh_identity_file="/home/josh/.mngr/providers/smolvm/smolvm/keys/root_ssh_key",
         config=SmolvmMachineConfig(machine_name="mngr-test", ssh_host_port=2222),
     )
 
@@ -48,7 +48,7 @@ def test_write_and_read_host_record(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded.ssh_hostname == "127.0.0.1"
     assert loaded.ssh_port == 60022
-    assert loaded.ssh_user == "josh"
+    assert loaded.ssh_user == "root"
     assert loaded.config is not None
     assert loaded.config.machine_name == "mngr-test"
 
