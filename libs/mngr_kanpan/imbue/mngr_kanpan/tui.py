@@ -1012,7 +1012,7 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     )
     _render_footer(state)
     _ensure_animation_running(state)
-    _schedule_spinner_tick(loop, state)
+    _schedule_refresh_poll(loop, state)
 
 
 def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
@@ -1030,15 +1030,15 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
     )
     _render_footer(state)
     _ensure_animation_running(state)
-    _schedule_spinner_tick(loop, state)
+    _schedule_refresh_poll(loop, state)
 
 
-def _schedule_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
+def _schedule_refresh_poll(loop: MainLoop, state: _KanpanState) -> None:
     """Schedule the next refresh-completion poll."""
-    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_spinner_tick, state)
+    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_refresh_completion, state)
 
 
-def _on_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
+def _poll_refresh_completion(loop: MainLoop, state: _KanpanState) -> None:
     """Alarm callback: poll the in-flight refresh and finish it when done.
 
     The spinner glyph is animated by `_on_animation_tick`; this loop only watches
@@ -1051,7 +1051,7 @@ def _on_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
         _finish_refresh(loop, state)
         return
 
-    _schedule_spinner_tick(loop, state)
+    _schedule_refresh_poll(loop, state)
 
 
 def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:

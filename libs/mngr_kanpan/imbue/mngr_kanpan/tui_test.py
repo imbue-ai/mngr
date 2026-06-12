@@ -387,6 +387,39 @@ def test_transient_message_expires_to_steady() -> None:
     assert state.footer_left_text.text == "  Steady"
 
 
+class _RecordingLoop:
+    """Mock loop that hands out real alarm handles and records cancellations.
+
+    Lets us exercise the transient-message debounce, where a second message must
+    cancel the first message's pending expiry alarm so it cannot clear the new one.
+    """
+
+    def __init__(self) -> None:
+        self.next_handle = 0
+        self.removed: list[int] = []
+
+    def set_alarm_in(self, _seconds: float, _callback: Any, _data: Any = None) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        return handle
+
+    def remove_alarm(self, handle: int) -> None:
+        self.removed.append(handle)
+
+
+def test_show_transient_message_cancels_previous_alarm() -> None:
+    state = _make_state()
+    loop = _RecordingLoop()
+    state.loop = cast(Any, loop)
+    _show_transient_message(state, "  First")
+    first_handle = state.transient_alarm
+    _show_transient_message(state, "  Second")
+    # The first message's expiry alarm was cancelled so it cannot clear the second.
+    assert loop.removed == [first_handle]
+    assert state.transient_alarm != first_handle
+    assert state.footer_left_text.text == "  Second"
+
+
 def test_footer_priority_action_wins_over_refresh() -> None:
     # Regression: a refresh and a user action (e.g. delete) overlapping must not
     # flicker. The single-owner footer shows the action label, not "Refreshing".
