@@ -20,8 +20,8 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat

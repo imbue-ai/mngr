@@ -204,9 +204,7 @@ def _resolve_host_events_target(address: HostAddress, mngr_ctx: MngrContext) -> 
     # Narrow discovery to the pinned provider when the address has one, so a
     # `@HOST.PROVIDER` target skips unrelated providers (the agent path gets
     # the same treatment via discover_by_address).
-    provider_names: tuple[str, ...] | None = (
-        (str(address.provider),) if address.provider is not None else None
-    )
+    provider_names: tuple[str, ...] | None = (str(address.provider),) if address.provider is not None else None
     host_agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
