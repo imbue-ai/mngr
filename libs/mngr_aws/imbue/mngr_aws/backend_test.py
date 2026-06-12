@@ -335,6 +335,50 @@ def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContex
     assert agents[0]["name"] == "a1"
 
 
+def test_list_persisted_agent_data_skips_non_object_agent_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A mngr-agent-* tag whose value is valid JSON but not an object is skipped, not crashed on.
+
+    mngr only ever writes object-shaped values, so a scalar/array value means an
+    externally edited/corrupted tag. It must degrade gracefully (skip + warn) like
+    the unparseable-JSON case: appending a non-dict would make downstream
+    discovery (validate_and_create_discovered_agent's ``.get('id')``) raise
+    AttributeError and crash the whole sweep for every host. A well-formed sibling
+    tag is still returned.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    good_id = AgentId.generate()
+    bad_id = AgentId.generate()
+    good_json = json.dumps({"id": str(good_id), "name": "a1"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        f"mngr-agent-{good_id}": good_json,
+                        # Valid JSON, but a bare integer rather than an object.
+                        f"mngr-agent-{bad_id}": "5",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        agents = provider.list_persisted_agent_data_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert [a["id"] for a in agents] == [str(good_id)]
+    assert any("not a JSON object" in w for w in log_warnings), log_warnings
+
+
 def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
     """A stopped instance (no public IP) is reconstructed from tags as a STOPPED host with its agents."""
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)

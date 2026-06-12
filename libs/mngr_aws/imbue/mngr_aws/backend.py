@@ -887,9 +887,19 @@ class AwsProvider(VpsDockerProvider):
             if not sep or not key.startswith(AGENT_TAG_PREFIX):
                 continue
             try:
-                agents.append(json.loads(value))
+                parsed = json.loads(value)
             except json.JSONDecodeError:
                 logger.warning("Skipping unparseable persisted-agent tag {!r}", key)
+                continue
+            # mngr only ever writes a JSON object here (see _compact_agent_tag_value);
+            # a valid-JSON-but-non-object value means an externally edited/corrupted
+            # tag. Skip it rather than appending a non-dict, which downstream callers
+            # (validate_and_create_discovered_agent's .get('id')) would crash on,
+            # taking down the whole discovery sweep for every host.
+            if not isinstance(parsed, dict):
+                logger.warning("Skipping persisted-agent tag {!r}: value is not a JSON object", key)
+                continue
+            agents.append(parsed)
         return agents
 
     def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
