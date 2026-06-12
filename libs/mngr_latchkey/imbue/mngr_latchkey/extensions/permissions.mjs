@@ -22,9 +22,13 @@
  *       Detent's ``$comment``), and ``permissions`` (an array of
  *       ``{name, description}`` objects -- the Detent permission-schema
  *       name plus its own plain-English summary -- that may be granted
- *       under the scope). Returns 404 when the service is unknown.
- *       Backed by the ``services.json`` file that ships alongside this
- *       extension, which is keyed by raw service name.
+ *       under the scope). The catch-all ``any`` permission is always
+ *       injected at index 0 of every scope's ``permissions`` array (even
+ *       when the catalog lists none, as for Linear), so a caller can
+ *       always request unrestricted access under a known scope. Returns
+ *       404 when the service is unknown. Backed by the ``services.json``
+ *       file that ships alongside this extension, which is keyed by raw
+ *       service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -79,6 +83,20 @@ const AVAILABLE_SERVICES_PATH = resolve(
 // to lowercase letters, digits, and ``-`` so a caller cannot smuggle
 // path-traversal segments or other surprises into the lookup key.
 const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+// Detent's catch-all *permission* schema. It matches every request, so a
+// rule like ``{"linear-api": ["any"]}`` grants all access under that
+// scope. The ``services.json`` catalog never lists it explicitly (every
+// scope implicitly admits it), so a scope whose ``permissions`` array is
+// empty (e.g. Linear) would otherwise look as though there is nothing to
+// ask for. We inject ``any`` as an always-available option so a caller
+// can always request unrestricted access under a known scope. This
+// mirrors the desktop dialog (``services_catalog._service_info_from_entry``),
+// which prepends the same option.
+const ALWAYS_AVAILABLE_PERMISSION = 'any';
+const ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION =
+  'Unrestricted access: every request permitted under this scope. Grant only ' +
+  'when no narrower permission covers what you need.';
 
 class PermissionsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -515,7 +533,31 @@ function handleGetAvailableForService(response, rawServiceName) {
   if (!Object.prototype.hasOwnProperty.call(catalog, rawServiceName)) {
     throw new ServiceNotFoundError(rawServiceName);
   }
-  sendJson(response, 200, catalog[rawServiceName]);
+  sendJson(response, 200, catalog[rawServiceName].map(withAlwaysAvailablePermission));
+}
+
+/**
+ * Prepend the always-available ``any`` permission to a scope entry's
+ * ``permissions`` array (deduplicating in case the catalog lists it
+ * explicitly). This ensures every scope -- even one with no enumerated
+ * permissions, like Linear -- surfaces at least the ``any`` option so a
+ * caller can request unrestricted access under it.
+ */
+function withAlwaysAvailablePermission(entry) {
+  const existing = Array.isArray(entry.permissions) ? entry.permissions : [];
+  const withoutAny = existing.filter(
+    (permission) => permission.name !== ALWAYS_AVAILABLE_PERMISSION,
+  );
+  return {
+    ...entry,
+    permissions: [
+      {
+        name: ALWAYS_AVAILABLE_PERMISSION,
+        description: ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION,
+      },
+      ...withoutAny,
+    ],
+  };
 }
 
 function handleGetSelf(response, context) {

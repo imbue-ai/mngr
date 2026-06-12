@@ -535,6 +535,29 @@ def test_post_rejects_unknown_permission_in_predefined(node_extension: tuple[str
     assert "made-up-perm" in error
 
 
+@pytest.mark.parametrize("scope", ["slack-api", "linear-api"])
+def test_post_accepts_any_permission_for_known_scope(node_extension: tuple[str, Path, Path], scope: str) -> None:
+    """The catch-all ``any`` permission is valid under any known scope.
+
+    This holds even for a scope whose catalog enumerates no permissions
+    (``linear-api``), so a caller can always request unrestricted access
+    under a known scope.
+    """
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": "agent-1",
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": scope, "permissions": ["any"]},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["effect"] == {"rules": [{scope: ["any"]}]}
+
+
 def test_post_rejects_permission_from_a_different_scope(node_extension: tuple[str, Path, Path]) -> None:
     """A permission valid under one scope must not be accepted under a different scope."""
     base_url, *_ = node_extension
