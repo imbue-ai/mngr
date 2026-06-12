@@ -61,7 +61,6 @@ def test_vps_host_config_optional_fields() -> None:
         vps_instance_id=VpsInstanceId("inst-abc123"),
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         container_name="test",
         volume_name="vol",
     )
@@ -86,7 +85,6 @@ def test_vps_docker_host_record_serialization_roundtrip() -> None:
         vps_instance_id=VpsInstanceId("inst-abc123"),
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         container_name="test",
         volume_name="vol",
     )
