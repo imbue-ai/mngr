@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shutil
+import uuid
 from datetime import datetime
 from datetime import timezone
 from functools import cached_property
@@ -514,19 +515,30 @@ class SmolvmProviderInstance(BaseProviderInstance):
         PATH.smolmachine sidecar; machines are created from the sidecar. The
         stub is not needed for machine create, so it is dropped to halve the
         cache footprint.
+
+        Packing targets a temporary name and the sidecar is renamed into its
+        final cache path only once complete, so an interrupted pack never
+        leaves a partial file that later creates would treat as a cache hit.
         """
         self._packs_dir.mkdir(parents=True, exist_ok=True)
         sidecar_path = self._cached_sidecar_path(cache_key)
-        output_path = self._packs_dir / cache_key
-        smolvm_pack_create_from_archive(
-            self.mngr_ctx.concurrency_group,
-            self.config.smolvm_command,
-            archive_path,
-            output_path,
-        )
-        if not sidecar_path.exists():
-            raise MngrError(f"pack create did not produce expected sidecar: {sidecar_path}")
-        output_path.unlink(missing_ok=True)
+        # The temp output lives in _packs_dir itself so the rename below stays
+        # on one filesystem (and is therefore atomic).
+        temp_output_path = self._packs_dir / f"tmp-{uuid.uuid4().hex}"
+        temp_sidecar_path = self._packs_dir / f"{temp_output_path.name}.smolmachine"
+        try:
+            smolvm_pack_create_from_archive(
+                self.mngr_ctx.concurrency_group,
+                self.config.smolvm_command,
+                archive_path,
+                temp_output_path,
+            )
+            if not temp_sidecar_path.exists():
+                raise MngrError(f"pack create did not produce expected sidecar: {temp_sidecar_path}")
+            temp_sidecar_path.replace(sidecar_path)
+        finally:
+            temp_output_path.unlink(missing_ok=True)
+            temp_sidecar_path.unlink(missing_ok=True)
         return sidecar_path
 
     def _pack_from_archive_cached(self, archive_path: Path) -> Path:

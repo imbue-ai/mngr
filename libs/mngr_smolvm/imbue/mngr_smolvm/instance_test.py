@@ -1,8 +1,10 @@
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -10,12 +12,93 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
+from imbue.mngr_smolvm.errors import SmolvmCommandError
 from imbue.mngr_smolvm.errors import SmolvmHostRenameError
 from imbue.mngr_smolvm.host_store import HostRecord
 from imbue.mngr_smolvm.host_store import SmolvmMachineConfig
 from imbue.mngr_smolvm.instance import SmolvmProviderInstance
 from imbue.mngr_smolvm.instance import _find_pass_through_arg_value
 from imbue.mngr_smolvm.instance import _parse_build_args
+from imbue.mngr_smolvm.testing import make_smolvm_provider
+
+
+def _write_pack_stub(tmp_path: Path, calls_log: Path, is_failing: bool) -> Path:
+    """Write a stub smolvm binary handling `pack create ... -o <output>`.
+
+    The stub records each invocation in calls_log and emits the stub +
+    sidecar pair the way the real `smolvm pack create -o PATH` does. The
+    failing variant writes only a partial sidecar and exits non-zero,
+    simulating an interrupted pack.
+    """
+    failure_tail = "exit 1" if is_failing else ""
+    sidecar_content = "partial" if is_failing else "sidecar-content"
+    script = f"""#!/bin/sh
+echo "$@" >> {calls_log}
+out=""
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$arg"; fi
+    prev="$arg"
+done
+printf 'stub' > "$out"
+printf '{sidecar_content}' > "$out.smolmachine"
+{failure_tail}
+"""
+    stub_path = tmp_path / "smolvm-stub"
+    stub_path.write_text(script)
+    stub_path.chmod(0o755)
+    return stub_path
+
+
+def test_pack_from_archive_cached_packs_atomically_and_caches(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A packed archive lands at its content-hash cache path with no temp
+    leftovers, and a second call is served from the cache without invoking
+    smolvm again."""
+    calls_log = tmp_path / "calls.log"
+    stub_path = _write_pack_stub(tmp_path, calls_log, is_failing=False)
+    provider = make_smolvm_provider(temp_mngr_ctx, smolvm_command=str(stub_path))
+    archive_path = tmp_path / "image.tar"
+    archive_path.write_bytes(b"fake-archive")
+
+    sidecar_path = provider._pack_from_archive_cached(archive_path)
+
+    assert sidecar_path.exists()
+    assert sidecar_path.parent == provider._packs_dir
+    assert sidecar_path.read_text() == "sidecar-content"
+    # The temp output and temp sidecar were cleaned up: the cache dir holds
+    # only the final sidecar.
+    assert list(provider._packs_dir.iterdir()) == [sidecar_path]
+    assert len(calls_log.read_text().splitlines()) == 1
+
+    # Second call: cache hit, smolvm not invoked again.
+    assert provider._pack_from_archive_cached(archive_path) == sidecar_path
+    assert len(calls_log.read_text().splitlines()) == 1
+
+
+def test_pack_from_archive_failure_does_not_poison_cache(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> None:
+    """A failed pack create must not leave anything at the cache path (which
+    later calls would treat as a valid cached pack) nor any temp files."""
+    calls_log = tmp_path / "calls.log"
+    stub_path = _write_pack_stub(tmp_path, calls_log, is_failing=True)
+    provider = make_smolvm_provider(temp_mngr_ctx, smolvm_command=str(stub_path))
+    archive_path = tmp_path / "image.tar"
+    archive_path.write_bytes(b"fake-archive")
+
+    with pytest.raises(SmolvmCommandError):
+        provider._pack_from_archive_cached(archive_path)
+
+    assert list(provider._packs_dir.iterdir()) == []
+
+    # The cache did not record the failure: a later attempt retries the pack.
+    with pytest.raises(SmolvmCommandError):
+        provider._pack_from_archive_cached(archive_path)
+    assert len(calls_log.read_text().splitlines()) == 2
 
 
 def test_provider_capabilities(smolvm_provider: SmolvmProviderInstance) -> None:

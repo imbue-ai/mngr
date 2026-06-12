@@ -9,9 +9,15 @@ from imbue.mngr_smolvm.instance import SmolvmProviderInstance
 def make_smolvm_provider(
     mngr_ctx: MngrContext,
     host_dir: Path | None = None,
+    smolvm_command: str = "smolvm",
 ) -> SmolvmProviderInstance:
-    """Create a SmolvmProviderInstance for testing without smolvm checks."""
+    """Create a SmolvmProviderInstance for testing without smolvm checks.
+
+    Pass smolvm_command to point the provider at a stub script standing in
+    for the real smolvm binary.
+    """
     config = SmolvmProviderConfig(
+        smolvm_command=smolvm_command,
         host_dir=host_dir or Path("/mngr"),
         default_idle_timeout=60,
     )
