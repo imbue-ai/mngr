@@ -1452,10 +1452,24 @@ def test_destroying_agent_ids_returns_empty_when_paths_is_none() -> None:
     assert _destroying_agent_ids(None, ()) == []
 
 
+class _AllAgentsKnownStaticResolver(StaticBackendResolver):
+    """Reports every queried agent as a known, host-resolvable agent.
+
+    The inbox display filters out requests whose agent can't be resolved
+    to a host (see ``_displayable_pending_requests``). These tests cover
+    the running-workspace case where every agent resolves, so the resolver
+    claims to know any agent it's asked about.
+    """
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
+
+
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
-    assert _build_requests_payload(None) == {"count": 0, "request_ids": []}
-    assert _build_requests_payload(RequestInbox()) == {"count": 0, "request_ids": []}
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    assert _build_requests_payload(None, resolver) == {"count": 0, "request_ids": []}
+    assert _build_requests_payload(RequestInbox(), resolver) == {"count": 0, "request_ids": []}
 
 
 def test_build_requests_payload_carries_pending_ids() -> None:
@@ -1464,7 +1478,8 @@ def test_build_requests_payload_carries_pending_ids() -> None:
     event = create_latchkey_predefined_permission_request_event(
         agent_id=agent_id, scope="slack-api", rationale="post updates"
     )
-    payload = _build_requests_payload(RequestInbox().add_request(event))
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload = _build_requests_payload(RequestInbox().add_request(event), resolver)
     assert payload == {"count": 1, "request_ids": [str(event.event_id)]}
 
 
@@ -1494,8 +1509,9 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
         )
     ).add_request(request_b)
 
-    payload_a = _build_requests_payload(inbox_with_a)
-    payload_b = _build_requests_payload(inbox_with_b)
+    resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
+    payload_a = _build_requests_payload(inbox_with_a, resolver)
+    payload_b = _build_requests_payload(inbox_with_b, resolver)
     assert payload_a["count"] == payload_b["count"] == 1
     assert payload_a != payload_b
     assert payload_b["request_ids"] == [str(request_b.event_id)]
@@ -1658,7 +1674,10 @@ def _build_inbox_test_app(
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     session_store = make_session_store_for_test(tmp_path)
     minds_config = MindsConfig(data_dir=tmp_path)
-    backend_resolver = StaticBackendResolver(url_by_agent_and_service={})
+    # The inbox display hides requests whose agent can't be resolved to a
+    # host; these tests exercise the running-workspace case, so use a
+    # resolver that treats every agent as known.
+    backend_resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=backend_resolver,
