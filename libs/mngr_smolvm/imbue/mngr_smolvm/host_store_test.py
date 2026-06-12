@@ -38,7 +38,7 @@ def test_write_and_read_host_record(tmp_path: Path) -> None:
         ssh_hostname="127.0.0.1",
         ssh_port=60022,
         ssh_user="root",
-        ssh_identity_file="/home/josh/.mngr/providers/smolvm/smolvm/keys/root_ssh_key",
+        ssh_identity_file="/test/home/.mngr/providers/smolvm/smolvm/keys/root_ssh_key",
         config=SmolvmMachineConfig(machine_name="mngr-test", ssh_host_port=2222),
     )
 
