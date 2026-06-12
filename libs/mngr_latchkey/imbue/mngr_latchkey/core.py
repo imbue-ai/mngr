@@ -30,7 +30,6 @@ from enum import auto
 from importlib import resources
 from pathlib import Path
 from typing import Final
-from typing import IO
 
 from loguru import logger
 from packaging.version import InvalidVersion
@@ -45,6 +44,7 @@ from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import RotatingLineWriter
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
@@ -410,35 +410,27 @@ def _materialize_bundled_extensions(latchkey_directory: Path) -> Path:
 
 
 class _GatewayLogWriter(MutableModel):
-    """Per-line callback that appends ``latchkey gateway`` output to a log file.
+    """Per-line callback that appends ``latchkey gateway`` output to a rotating log file.
 
     :class:`ConcurrencyGroup` always pipes a child's stdout/stderr through
     a per-line callback; this writer plays that callback role and tees
     each line into the same on-disk log file the previous detached-spawn
-    path used (``<plugin_data_dir>/latchkey_gateway.log``). The file is
-    opened lazily so a failed spawn never creates an empty log artefact.
+    path used (``<plugin_data_dir>/latchkey_gateway.log``). The underlying
+    :class:`RotatingLineWriter` opens the file lazily (so a failed spawn never
+    creates an empty log artefact), prefixes every line with a UTC timestamp
+    -- the gateway's own output is unstructured text we cannot turn into JSONL,
+    so a receipt timestamp is what makes its timing observable -- and rotates
+    the file by size so it cannot grow without bound.
     """
 
-    log_path: Path = Field(frozen=True, description="On-disk log file the gateway's stdout/stderr is appended to")
-
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _log_file: IO[bytes] | None = PrivateAttr(default=None)
+    writer: RotatingLineWriter = Field(
+        frozen=True,
+        description="Rotating, timestamping line writer that owns the gateway log file.",
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         del is_stdout
-        with self._lock:
-            if self._log_file is None:
-                self.log_path.parent.mkdir(parents=True, exist_ok=True)
-                self._log_file = self.log_path.open("ab")
-            try:
-                self._log_file.write(line.encode("utf-8", errors="replace"))
-                if not line.endswith("\n"):
-                    self._log_file.write(b"\n")
-                self._log_file.flush()
-            except OSError as e:
-                # Best-effort log -- a write failure must not crash the
-                # gateway dispatch thread the CG calls us on.
-                logger.warning("Failed to write latchkey gateway log line to {}: {}", self.log_path, e)
+        self.writer.write_line(line)
 
 
 class _RunningGateway(FrozenModel):
@@ -1104,7 +1096,7 @@ class Latchkey(MutableModel):
             self.listen_host,
             port,
         ):
-            log_writer = _GatewayLogWriter(log_path=log_path)
+            log_writer = _GatewayLogWriter(writer=RotatingLineWriter(path=log_path))
             try:
                 process = concurrency_group.run_process_in_background(
                     command=[self.latchkey_binary, "gateway"],

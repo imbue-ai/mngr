@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -14,12 +15,16 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import IO
 from typing import ParamSpec
 from typing import TypeVar
 from uuid import uuid4
 
 from loguru import logger
+from pydantic import Field
+from pydantic import PrivateAttr
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 
 
@@ -238,7 +243,21 @@ def _build_flat_log_dict(
     return event
 
 
-ROTATED_JSONL_PATTERN: Final[re.Pattern[str]] = re.compile(r"^events\.jsonl\.(\d+)$")
+# Filename of the default structured event log. Its rotated copies are named
+# ``events.jsonl.<rotation_timestamp>`` and matched by ROTATED_JSONL_PATTERN.
+_EVENTS_JSONL_BASENAME: Final[str] = "events.jsonl"
+
+
+def rotated_file_pattern(base_name: str) -> re.Pattern[str]:
+    """Return a regex matching ``<base_name>.<rotation_timestamp>`` rotated copies.
+
+    The rotation timestamp is the all-digit string produced by
+    :func:`generate_rotation_timestamp`, so the suffix is ``\\.(\\d+)``.
+    """
+    return re.compile(rf"^{re.escape(base_name)}\.(\d+)$")
+
+
+ROTATED_JSONL_PATTERN: Final[re.Pattern[str]] = rotated_file_pattern(_EVENTS_JSONL_BASENAME)
 
 _ROTATION_LOCK_FILENAME: Final[str] = ".rotation.lock"
 _ROTATION_LOCK_WARNING_SECONDS: Final[float] = 3.0
@@ -283,16 +302,58 @@ def generate_rotation_timestamp() -> str:
     return now.strftime("%Y%m%d%H%M%S") + f"{now.microsecond:06d}"
 
 
-def cleanup_old_rotated_files(directory: Path, max_rotated_count: int) -> None:
-    """Remove the oldest rotated files, keeping at most max_rotated_count."""
-    rotated_files: list[Path] = []
-    for child in directory.iterdir():
-        if ROTATED_JSONL_PATTERN.match(child.name):
-            rotated_files.append(child)
+def cleanup_old_rotated_files(
+    directory: Path,
+    max_rotated_count: int,
+    base_name: str = _EVENTS_JSONL_BASENAME,
+) -> None:
+    """Remove the oldest rotated copies of ``base_name``, keeping at most max_rotated_count.
+
+    Rotated files are matched by name as ``<base_name>.<rotation_timestamp>``
+    (an all-digit suffix). ``base_name`` defaults to ``events.jsonl`` so existing
+    callers keep their behaviour; pass the real log filename when rotating other
+    files so their rotated copies are pruned too (otherwise they would accumulate
+    forever, since the ``events.jsonl`` pattern would never match them).
+    """
+    pattern = rotated_file_pattern(base_name)
+    rotated_files = [child for child in directory.iterdir() if pattern.match(child.name)]
     rotated_files.sort(key=lambda p: p.name)
     files_to_remove = rotated_files[:-max_rotated_count] if max_rotated_count > 0 else rotated_files
     for old_file in files_to_remove:
         old_file.unlink(missing_ok=True)
+
+
+def rotate_file_if_too_large(
+    path: Path,
+    max_size_bytes: int,
+    max_rotated_count: int = 10,
+) -> bool:
+    """Rotate ``path`` out of the way if it already exceeds ``max_size_bytes``.
+
+    Intended for append-only capture files whose file descriptor is handed
+    directly to a detached subprocess (so they cannot be rotated mid-write):
+    rotate them at (re)spawn time instead, which bounds growth across restarts.
+    The current file is renamed to ``<name>.<rotation_timestamp>`` and at most
+    ``max_rotated_count`` rotated copies are kept. Returns True when a rotation
+    happened. Best-effort and concurrency-safe via :func:`rotation_lock`; a
+    missing file is a no-op.
+    """
+    try:
+        if path.stat().st_size < max_size_bytes:
+            return False
+    except OSError:
+        return False
+    with rotation_lock(path.parent):
+        # Re-check under the lock: another spawner may have rotated already.
+        try:
+            if path.stat().st_size < max_size_bytes:
+                return False
+        except OSError:
+            return False
+        rotated = path.with_name(f"{path.name}.{generate_rotation_timestamp()}")
+        path.rename(rotated)
+        cleanup_old_rotated_files(path.parent, max_rotated_count, base_name=path.name)
+    return True
 
 
 def make_jsonl_file_sink(
@@ -326,7 +387,7 @@ def make_jsonl_file_sink(
             Path(bound_path).parent.mkdir(parents=True, exist_ok=True)
             # Clean up old rotated files on first open
             if not state["cleaned_up"]:
-                cleanup_old_rotated_files(Path(bound_path).parent, bound_max_rotated)
+                cleanup_old_rotated_files(Path(bound_path).parent, bound_max_rotated, base_name=Path(bound_path).name)
                 state["cleaned_up"] = True
             state["file"] = open(bound_path, "a")
             try:
@@ -356,7 +417,7 @@ def make_jsonl_file_sink(
                 timestamp = generate_rotation_timestamp()
                 rotated = path.with_name(f"{path.name}.{timestamp}")
                 path.rename(rotated)
-                cleanup_old_rotated_files(path.parent, bound_max_rotated)
+                cleanup_old_rotated_files(path.parent, bound_max_rotated, base_name=path.name)
                 state["file"] = open(bound_path, "a")
                 state["size"] = 0
 
@@ -373,3 +434,115 @@ def make_jsonl_file_sink(
         state["size"] += line_bytes
 
     return sink
+
+
+# Default cap for rotating raw-line capture files (subprocess stdout/stderr that
+# can't go through the structured JSONL path). 50 MiB, keeping 10 copies, bounds
+# a single such log at ~500 MiB.
+_DEFAULT_ROTATING_LINE_MAX_BYTES: Final[int] = 50 * 1024 * 1024
+
+
+class RotatingLineWriter(MutableModel):
+    """Append raw text lines to a size-rotated, optionally timestamped log file.
+
+    Built for capturing the stdout/stderr of subprocesses that emit
+    unstructured text (e.g. the Latchkey gateway), which cannot go through the
+    structured loguru/JSONL path. Each line is optionally prefixed with an
+    ISO-8601 UTC timestamp (nanosecond precision, matching
+    :func:`format_nanosecond_iso_timestamp`) so the timing of otherwise opaque
+    output is observable. The file is rotated once it would exceed
+    ``max_size_bytes``; at most ``max_rotated_count`` rotated copies are kept,
+    named ``<name>.<rotation_timestamp>`` (the same scheme
+    :func:`make_jsonl_file_sink` uses), and the oldest are pruned on rotation.
+
+    Thread-safe: :meth:`write_line` serializes writes (and rotation) under an
+    internal lock, so it can be used directly as a per-line subprocess-output
+    callback invoked from multiple reader threads.
+    """
+
+    path: Path = Field(frozen=True, description="On-disk file that raw lines are appended to.")
+    max_size_bytes: int = Field(
+        default=_DEFAULT_ROTATING_LINE_MAX_BYTES,
+        frozen=True,
+        description="Rotate the file once writing the next line would push it past this many bytes.",
+    )
+    max_rotated_count: int = Field(
+        default=10,
+        frozen=True,
+        description="Maximum number of rotated copies to keep; the oldest are pruned on rotation.",
+    )
+    is_timestamped: bool = Field(
+        default=True,
+        frozen=True,
+        description="Prefix each written line with an ISO-8601 UTC nanosecond timestamp.",
+    )
+
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _file: IO[bytes] | None = PrivateAttr(default=None)
+    _size: int = PrivateAttr(default=0)
+
+    def write_line(self, line: str) -> None:
+        """Append ``line`` (one log line) to the file, rotating first if needed.
+
+        A trailing newline is normalized so exactly one is written. Write
+        failures are swallowed after a warning so a logging hiccup never crashes
+        the caller's output-pump thread.
+        """
+        text = line.rstrip("\n")
+        if self.is_timestamped:
+            text = f"{format_nanosecond_iso_timestamp(datetime.now(timezone.utc))} {text}"
+        data = (text + "\n").encode("utf-8", errors="replace")
+        with self._lock:
+            try:
+                self._rotate_if_needed_locked(len(data))
+                handle = self._ensure_open_locked()
+                handle.write(data)
+                handle.flush()
+                self._size += len(data)
+            except OSError as e:
+                logger.warning("Failed to write rotating log line to {}: {}", self.path, e)
+
+    def close(self) -> None:
+        """Close the underlying file handle (idempotent)."""
+        with self._lock:
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+
+    def _ensure_open_locked(self) -> IO[bytes]:
+        if self._file is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            cleanup_old_rotated_files(self.path.parent, self.max_rotated_count, base_name=self.path.name)
+            self._file = self.path.open("ab")
+            try:
+                self._size = self.path.stat().st_size
+            except OSError:
+                self._size = 0
+        return self._file
+
+    def _rotate_if_needed_locked(self, incoming_bytes: int) -> None:
+        # Open lazily first so a freshly-constructed writer learns the on-disk size.
+        self._ensure_open_locked()
+        if self._size + incoming_bytes < self.max_size_bytes:
+            return
+        with rotation_lock(self.path.parent):
+            # Re-check actual size: another writer/process may have already rotated.
+            try:
+                actual_size = self.path.stat().st_size
+            except OSError:
+                actual_size = 0
+            if actual_size < self.max_size_bytes:
+                # Already rotated elsewhere -- reopen our handle onto the fresh file.
+                if self._file is not None:
+                    self._file.close()
+                self._file = self.path.open("ab")
+                self._size = actual_size
+                return
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+            rotated = self.path.with_name(f"{self.path.name}.{generate_rotation_timestamp()}")
+            self.path.rename(rotated)
+            cleanup_old_rotated_files(self.path.parent, self.max_rotated_count, base_name=self.path.name)
+            self._file = self.path.open("ab")
+            self._size = 0

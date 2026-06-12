@@ -20,6 +20,19 @@ import os
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
+
+from imbue.imbue_common.logging import rotate_file_if_too_large
+from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
+
+# Size at which the raw stdout/stderr capture file of the detached
+# ``mngr latchkey forward`` is rotated at (re)spawn time. Its fd is handed
+# straight to the subprocess, so it cannot be rotated mid-write; rotating at
+# spawn bounds growth across the supervisor's restarts. 10 MiB is generous for
+# the process's relatively low-volume console output (the high-volume per-request
+# gateway output goes to a separate, mid-write-rotated log).
+_FORWARD_LOG_ROTATE_AT_BYTES: Final[int] = 10 * 1024 * 1024
 
 
 def spawn_detached_latchkey_ensure_browser(
@@ -94,9 +107,22 @@ def spawn_detached_mngr_latchkey_forward(
     internal ``_active`` list for zombie reaping, but never kills a
     still-running child during garbage collection, so the forward
     supervisor keeps running until something explicitly terminates it.
+
+    Two logs are produced. ``log_path`` captures the process's raw
+    stdout/stderr (rotated here at spawn time, since its fd is handed straight
+    to the child). The process is also pointed via ``--log-file`` at a
+    co-located structured JSONL log (:func:`forward_events_log_path`), which
+    carries nanosecond timestamps and is rotated mid-run by the standard mngr
+    file sink -- this is the log to read when you need to observe timing.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     latchkey_directory.mkdir(parents=True, exist_ok=True)
+
+    # Rotate the append-only raw-capture file if a previous incarnation left it
+    # large, so it cannot grow without bound across supervisor restarts.
+    rotate_file_if_too_large(log_path, _FORWARD_LOG_ROTATE_AT_BYTES)
+
+    events_log_path = forward_events_log_path(_plugin_data_dir(latchkey_directory))
 
     env = dict(os.environ)
     if extra_env is not None:
@@ -115,6 +141,8 @@ def spawn_detached_mngr_latchkey_forward(
                 latchkey_binary,
                 "--mngr-binary",
                 mngr_binary,
+                "--log-file",
+                str(events_log_path),
             ],
             stdin=subprocess.DEVNULL,
             stdout=log_file,

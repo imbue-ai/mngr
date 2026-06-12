@@ -67,6 +67,7 @@ PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 _GATEWAY_LOG_FILENAME: Final[str] = "latchkey_gateway.log"
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
+_FORWARD_EVENTS_LOG_FILENAME: Final[str] = "latchkey_forward_events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
@@ -182,8 +183,31 @@ def delete_forward_info(data_dir: Path) -> None:
 
 
 def forward_log_path(data_dir: Path) -> Path:
-    """Return the log file path for the detached ``mngr latchkey forward`` subprocess."""
+    """Return the raw stdout/stderr capture-log path for the detached ``mngr latchkey forward`` subprocess.
+
+    This file holds whatever the detached process writes to its real
+    stdout/stderr file descriptors (human-format console log lines, plus any
+    pre-logging tracebacks or Click error messages). Its fd is handed straight
+    to the subprocess, so it cannot be rotated mid-write; callers rotate it at
+    (re)spawn time via :func:`imbue.imbue_common.logging.rotate_file_if_too_large`.
+    For the process's own structured, timestamped, in-run-rotated log see
+    :func:`forward_events_log_path`.
+    """
     return data_dir / _FORWARD_LOG_FILENAME
+
+
+def forward_events_log_path(data_dir: Path) -> Path:
+    """Return the structured JSONL log path for the detached ``mngr latchkey forward`` process.
+
+    Companion to :func:`forward_log_path`: where that file captures the raw
+    stdout/stderr of the detached process, this one receives the process's own
+    structured loguru events (nanosecond timestamps, level, message, ...),
+    size-rotated by :func:`imbue.imbue_common.logging.make_jsonl_file_sink`. The
+    forward process is pointed at it via ``--log-file`` so its structured log is
+    co-located with the rest of the plugin's files instead of mixed into the
+    shared host-dir events stream.
+    """
+    return data_dir / _FORWARD_EVENTS_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:

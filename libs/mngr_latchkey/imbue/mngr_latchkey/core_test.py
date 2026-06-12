@@ -13,6 +13,7 @@ from watchdog.events import FileModifiedEvent
 from watchdog.observers import Observer
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.logging import RotatingLineWriter
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -28,6 +29,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyNotInitializedError
 from imbue.mngr_latchkey.core import LatchkeyVersionError
+from imbue.mngr_latchkey.core import _GatewayLogWriter
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import _LatchkeyStateChangeHandler
@@ -40,6 +42,25 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.testing import FakeLatchkey
 
 _POLL_INTERVAL_SECONDS = 0.05
+
+
+def test_gateway_log_writer_timestamps_and_rotates(tmp_path: Path) -> None:
+    """The gateway log callback timestamps each captured line and rotates by size."""
+    log_path = tmp_path / "latchkey_gateway.log"
+    writer = _GatewayLogWriter(
+        writer=RotatingLineWriter(path=log_path, max_size_bytes=200, max_rotated_count=2),
+    )
+    for i in range(100):
+        writer(f"gateway line {i}", is_stdout=True)
+    writer.writer.close()
+
+    lines = log_path.read_text().splitlines()
+    assert lines, "expected the live log file to contain captured lines"
+    # Each captured line carries a UTC receipt timestamp prefix (ends with Z).
+    assert lines[-1].split(" ", 1)[0].endswith("Z")
+    rotated = [p for p in tmp_path.iterdir() if p.name.startswith("latchkey_gateway.log.")]
+    assert 0 < len(rotated) <= 2
+
 
 # The previous on-disk gateway-record tests went away when the record
 # itself did -- gateway lifetime is now scoped to a single ``mngr

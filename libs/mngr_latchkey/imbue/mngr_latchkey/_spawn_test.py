@@ -8,6 +8,7 @@ exercised by the integration tests in ``core_test.py``), and
 ``forward_supervisor_test.py``.
 """
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,10 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
+from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
+from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import forward_log_path
+from imbue.mngr_latchkey.store import plugin_data_dir
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -91,3 +96,67 @@ def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_p
             latchkey_binary=str(missing),
             log_path=tmp_path / "log",
         )
+
+
+def _make_argv_reporter_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that records its argv to ``$FAKE_MNGR_REPORT`` and exits."""
+    script = tmp_path / "mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "open(os.environ['FAKE_MNGR_REPORT'], 'w').write(json.dumps(sys.argv[1:]))\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+    )
+    assert pid > 0
+    assert _wait_for_file(report_path)
+    argv = json.loads(report_path.read_text())
+    # The forward process is pointed at its co-located structured JSONL log so
+    # its timestamped events do not get mixed into the shared host-dir stream.
+    assert "--log-file" in argv
+    assert argv[argv.index("--log-file") + 1] == str(forward_events_log_path(plugin_dir))
+
+
+def test_spawn_detached_mngr_latchkey_forward_rotates_oversized_raw_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+    log_path = forward_log_path(plugin_dir)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Seed an oversized raw capture file (the spawn-time rotation threshold is
+    # 10 MiB) so the spawn rotates it out of the way before reopening.
+    log_path.write_bytes(b"x" * (11 * 1024 * 1024))
+
+    pid = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=log_path,
+    )
+    assert pid > 0
+    rotated = [p for p in plugin_dir.iterdir() if p.name.startswith("latchkey_forward.log.")]
+    assert len(rotated) == 1
+    # The live file was reopened fresh; the bulk moved into the rotated copy.
+    assert log_path.stat().st_size < 11 * 1024 * 1024
+    assert rotated[0].stat().st_size == 11 * 1024 * 1024
