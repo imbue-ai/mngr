@@ -1,0 +1,1 @@
+Added `specs/claude-settings-overrides.md`: a design spec for unifying user-provided Claude settings overrides under mngr's existing assign/extend/narrowing config semantics (schema-free `dict[str, Any]`, `__extend` for additive merges, the narrowing guard as a hard error), moving `settings_overrides` to the managed `--settings` file. Spec only -- not yet implemented.
