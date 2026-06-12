@@ -275,6 +275,10 @@ def _is_same_machine(a: OnlineHostInterface, b: OnlineHostInterface) -> bool:
 # mngr's preferred length of tmux's status-left.
 _TMUX_STATUS_LEFT_LENGTH: Final[int] = 20
 
+# tmux set-titles-string mngr forwards to the outer terminal tab: session name
+# then the pane title, e.g. 'mngr-foo  Fix the bug'.
+_TMUX_SET_TITLES_STRING: Final[str] = "#S  #T"
+
 
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
@@ -2363,9 +2367,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
         The config:
         1. Use mngr's preferred status-left-length (tmux default is 10)
-        2. Sources the user's default tmux config if it exists (~/.tmux.conf)
-        3. Adds a Ctrl-q binding that detaches and destroys the current agent
-        4. Adds a Ctrl-t binding that detaches and stops the current agent
+        2. Enable set-titles so the agent's title reaches the outer terminal tab
+        3. Sources the user's default tmux config if it exists (~/.tmux.conf)
+        4. Adds a Ctrl-q binding that detaches and destroys the current agent
+        5. Adds a Ctrl-t binding that detaches and stops the current agent
 
         This uses the tmux session_name format variable in the commands,
         which expands to the current session name at runtime. This approach
@@ -2391,6 +2396,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             "",
             "# Widen status-left to show more session name, i.e. '[mngr-<agent_name>]'",
             f"set -g status-left-length {_TMUX_STATUS_LEFT_LENGTH}",
+            "",
+            "# Forward the agent's title to the outer terminal tab (tmux default is off)",
+            "set -g set-titles on",
+            f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"',
             "",
             "# Source user's default tmux config if it exists",
             "if-shell 'test -f ~/.tmux.conf' 'source-file ~/.tmux.conf'",
@@ -2885,6 +2894,10 @@ def _build_start_agent_shell_command(
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
+
+    # tmux honors -f only when it starts a new server, so source the config
+    # explicitly to also configure a server an earlier session already started.
+    steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))}")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 

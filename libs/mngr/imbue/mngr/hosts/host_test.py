@@ -32,6 +32,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import ONBOARDING_TEXT
 from imbue.mngr.hosts.host import ONBOARDING_TEXT_TMUX_USER
+from imbue.mngr.hosts.host import _TMUX_SET_TITLES_STRING
 from imbue.mngr.hosts.host import _TMUX_STATUS_LEFT_LENGTH
 from imbue.mngr.hosts.host import _build_start_agent_shell_command
 from imbue.mngr.hosts.host import _format_env_file
@@ -714,6 +715,23 @@ def test_build_start_agent_shell_command_includes_unset_vars(
     unset_pos = result.index("unset")
     new_session_pos = result.index("new-session")
     assert unset_pos < new_session_pos
+
+
+def test_build_start_agent_shell_command_sources_config_after_new_session(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The config is sourced after new-session so an already-running server picks it up.
+
+    tmux reads the -f config only when it starts a new server, so a session created
+    on a server an earlier session already started would otherwise ignore it.
+    """
+    agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
+    result = _build_command_with_defaults(agent, temp_host_dir)
+
+    assert "source-file" in result
+    assert result.index("new-session") < result.index("source-file")
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(
@@ -2647,6 +2665,26 @@ def test_host_create_host_tmux_config_widens_status_left_before_user_config(
     assert widen_line in content
     assert content.index(widen_line) < content.index("source-file"), (
         "status-left-length must be set before the user config is sourced so the user can override it"
+    )
+
+
+def test_host_create_host_tmux_config_enables_set_titles_before_user_config(
+    local_host: Host,
+    temp_host_dir: Path,
+) -> None:
+    """The config must enable set-titles before sourcing the user's config.
+
+    set-titles forwards the agent's title to the outer terminal's tab; ordering
+    keeps it overridable by a set-titles set in the user's ~/.tmux.conf.
+    """
+    host = local_host
+    content = host._create_host_tmux_config().read_text()
+
+    enable_line = "set -g set-titles on"
+    assert enable_line in content
+    assert f'set -g set-titles-string "{_TMUX_SET_TITLES_STRING}"' in content
+    assert content.index(enable_line) < content.index("source-file"), (
+        "set-titles must be enabled before the user config is sourced so the user can override it"
     )
 
 
