@@ -19,9 +19,13 @@
  *       the catalog lists under that scope; otherwise the request is
  *       rejected with HTTP 400.
  *       For ``type=="file-sharing"`` the payload is
- *         ``{path: <absolute_path>}``;
- *       the path must be absolute and must not contain any ``..``
- *       segments (rejected as a path-traversal attempt).
+ *         ``{path: <absolute_or_tilde_path>}``;
+ *       the path must be absolute (start with ``/``) or use ``~`` /
+ *       ``~/...`` to denote the current user's home directory (which is
+ *       expanded to an absolute path before storage), and must not
+ *       contain any ``..`` segments (rejected as a path-traversal
+ *       attempt). ``~user`` notation for another user's home is
+ *       rejected.
  *
  *       The extension also stores, alongside the user-supplied fields:
  *         - ``request_id`` (server-generated, UUIDv4 hex)
@@ -355,35 +359,84 @@ function isPathWithinFileSharingRoot(filePath, root) {
 }
 
 /**
- * Validate an absolute filesystem path for the ``file-sharing`` payload.
+ * Expand a leading ``~`` in a file-sharing path to the current user's
+ * home directory, returning the path unchanged when it has no ``~``
+ * prefix.
  *
- * The path must start with ``/``, must not contain any ``..`` segments
- * (under either POSIX or Windows separators), and must lie within one
- * of the WebDAV mount roots (the user's home directory or the system
- * temp directory). We deliberately do not resolve symlinks or check
- * that the file exists here; that is a job for the Minds API endpoint
- * that ends up serving the file when the request is approved. The goals
- * are to reject obvious traversal patterns (e.g. ``/etc/passwd/../shadow``)
- * and to reject paths the WebDAV server could never serve (anything
- * outside the two mounts), so the agent gets a clear error at request
- * time -- or at approve time, when this also guards a user-edited path
- * override -- rather than an approve-then-404 dead end.
+ * Only the current user's home is supported: a bare ``~`` and a
+ * ``~/...`` prefix both expand against Node's ``homedir()`` -- the same
+ * root ``fileSharingMountRoots`` derives the home WebDAV mount from, so
+ * an expanded path lands inside that mount and the root check below
+ * accepts it. The ``~user`` form (some other user's home) cannot be
+ * resolved here, so it is rejected with a clear error rather than
+ * silently treated as a relative path.
+ *
+ * The expansion is a pure string splice -- we prepend the home
+ * directory to the remainder verbatim rather than going through
+ * ``path.join`` -- so any ``..`` segment in the remainder survives into
+ * the expanded path and is still caught by the traversal checks in
+ * ``validateAbsoluteFileSharingPath``. Joining would silently normalize
+ * ``~/../foo`` into an escape past the home directory.
+ */
+function expandFileSharingHomePrefix(rawPath) {
+  if (rawPath === '~' || rawPath.startsWith('~/')) {
+    // ``slice(1)`` drops the leading ``~`` only: ``~`` -> ``<home>`` and
+    // ``~/foo`` -> ``<home>/foo``.
+    return `${homedir()}${rawPath.slice(1)}`;
+  }
+  if (rawPath.startsWith('~')) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' uses unsupported '~user' notation; only '~' or '~/...' `
+      + `(the current user's home) is accepted. Got ${rawPath}.`,
+    );
+  }
+  return rawPath;
+}
+
+/**
+ * Validate a filesystem path for the ``file-sharing`` payload and
+ * return its canonical absolute form.
+ *
+ * A leading ``~`` / ``~/`` is first expanded to the current user's home
+ * directory. The resulting path must start with ``/``, must not contain
+ * any ``..`` segments (under either POSIX or Windows separators), and
+ * must lie within one of the WebDAV mount roots (the user's home
+ * directory or the system temp directory). We deliberately do not
+ * resolve symlinks or check that the file exists here; that is a job
+ * for the Minds API endpoint that ends up serving the file when the
+ * request is approved. The goals are to reject obvious traversal
+ * patterns (e.g. ``/etc/passwd/../shadow``) and to reject paths the
+ * WebDAV server could never serve (anything outside the two mounts), so
+ * the agent gets a clear error at request time -- or at approve time,
+ * when this also guards a user-edited path override -- rather than an
+ * approve-then-404 dead end.
+ *
+ * The returned value is the expanded path; callers persist it so the
+ * stored payload, the per-file schema name, and the WebDAV pattern all
+ * use a canonical absolute path rather than the ``~`` shorthand.
  */
 function validateAbsoluteFileSharingPath(rawPath) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw new InvalidRequestBodyError("payload.'path' is required and must be a non-empty string.");
   }
+  // Expand a leading ``~`` / ``~/`` to the current user's home before
+  // any structural validation, so the checks below -- and the schema
+  // name / WebDAV pattern derived downstream -- all operate on a
+  // canonical absolute path.
+  const expandedPath = expandFileSharingHomePrefix(rawPath);
   // POSIX rule -- absolute paths must start with '/'. The Minds host
   // is always POSIX (macOS or Linux), so we do not accept
   // Windows-style ``C:\\...`` paths.
-  if (!rawPath.startsWith('/')) {
-    throw new InvalidRequestBodyError(`payload.'path' must be absolute (start with '/'): got ${rawPath}.`);
+  if (!expandedPath.startsWith('/')) {
+    throw new InvalidRequestBodyError(
+      `payload.'path' must be absolute (start with '/') or use '~' / '~/...': got ${rawPath}.`,
+    );
   }
   // Reject any ``..`` segment regardless of where in the path it
   // appears (start, middle, end, or as the entire suffix). We split on
   // both POSIX and Windows separators so a payload smuggling
   // ``..\\foo`` past the unix check still gets refused.
-  const segments = rawPath.split(/[\\/]+/);
+  const segments = expandedPath.split(/[\\/]+/);
   for (const segment of segments) {
     if (segment === '..') {
       throw new InvalidRequestBodyError(`payload.'path' contains a '..' segment, refusing as a path-traversal attempt: ${rawPath}.`);
@@ -393,7 +446,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
   // multiple slashes. If the result still does not start with ``/`` or
   // changes the meaning (e.g. a hidden ``..`` snuck past the segment
   // scan), refuse.
-  const normalized = posix.normalize(rawPath);
+  const normalized = posix.normalize(expandedPath);
   if (!normalized.startsWith('/') || normalized.includes('/../') || normalized.endsWith('/..')) {
     throw new InvalidRequestBodyError(`payload.'path' normalizes to a traversed path: ${rawPath} -> ${normalized}.`);
   }
@@ -405,6 +458,7 @@ function validateAbsoluteFileSharingPath(rawPath) {
       `payload.'path' must be within a shared root (${roots.join(', ')}); got ${rawPath}.`,
     );
   }
+  return expandedPath;
 }
 
 /**
@@ -561,7 +615,10 @@ function validateFileSharingPayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'file-sharing'.");
   }
-  validateAbsoluteFileSharingPath(payload.path);
+  // ``validateAbsoluteFileSharingPath`` expands a leading ``~`` and
+  // returns the canonical absolute path, which we persist in place of
+  // the (possibly ``~``-prefixed) input.
+  const path = validateAbsoluteFileSharingPath(payload.path);
   ensureNonEmptyString('payload.', 'access', payload.access);
   if (!VALID_FILE_SHARING_ACCESS_MODES.has(payload.access)) {
     throw new InvalidRequestBodyError(
@@ -571,7 +628,7 @@ function validateFileSharingPayload(payload) {
     );
   }
   ensureNoExtraneousFields('payload ', ['path', 'access'], payload);
-  return { path: payload.path, access: payload.access };
+  return { path, access: payload.access };
 }
 
 /**
@@ -738,13 +795,48 @@ function fileSharingPermissionPathPattern(fileWebdavPath) {
   return `^${escapeForRegex(fileWebdavPath)}(/.*)?$`;
 }
 
+/**
+ * Normalize ``urlPath`` exactly the way the WHATWG URL parser
+ * normalizes an incoming request's ``pathname``, so a per-file
+ * permission pattern built from an on-disk path matches the path
+ * detent actually checks at request time.
+ *
+ * The gateway feeds the permission check a ``Request`` built from a
+ * WHATWG URL, and detent matches the per-file schema's ``pattern``
+ * against ``URL.pathname``. That pathname is percent-encoded by the
+ * URL parser's path-percent-encode set: a space becomes ``%20``, each
+ * non-ASCII byte its UTF-8 ``%XX`` sequence, and characters like
+ * ``#``/``?`` (which would otherwise start the fragment/query) their
+ * encoded forms -- while ``/`` separators, ``+``/``:``/``@`` and
+ * already-encoded ``%XX`` triplets are left untouched. If we embedded
+ * the raw on-disk path (with a literal space, accented letter, etc.)
+ * into the regex, the encoded request pathname (``...%20...``) would
+ * never match it -- which is exactly the bug a path containing a space
+ * (e.g. an agent-requested or user-selected directory) used to hit.
+ *
+ * Assigning to ``URL.pathname`` applies precisely that path-percent-
+ * encode set without truncating on ``#``/``?``, and -- verified against
+ * the full-URL parse detent performs -- reproduces the identical
+ * canonical pathname (including dot-segment collapsing). We use the
+ * same ``placeholder.invalid`` origin the route parser uses for
+ * symmetry.
+ */
+function normalizeWebdavUrlPath(urlPath) {
+  const url = new URL('http://placeholder.invalid');
+  url.pathname = urlPath;
+  return url.pathname;
+}
+
 function computeFileSharingEffect(filePath, access) {
   const permissionSchemaName = fileSharingPermissionSchemaName(filePath, access);
   // WebDAV serves the on-disk path directly under the mount, so the
   // permission's URL path is the prefix + the absolute file path.
   // ``validateAbsoluteFileSharingPath`` has already guaranteed that
-  // ``filePath`` starts with ``/`` and is traversal-free.
-  const fileWebdavPath = `${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`;
+  // ``filePath`` starts with ``/`` and is traversal-free. We normalize
+  // the combined path the same way the WHATWG URL parser normalizes the
+  // incoming request's pathname so the regex matches even when the path
+  // has characters the parser percent-encodes (spaces, non-ASCII, ...).
+  const fileWebdavPath = normalizeWebdavUrlPath(`${FILE_SHARING_PROXY_PATH_PREFIX}${filePath}`);
   return {
     schemas: {
       [permissionSchemaName]: {
@@ -1296,8 +1388,10 @@ async function parseApproveOverrideBody(request) {
   if (parsed.path === undefined) {
     return null;
   }
-  validateAbsoluteFileSharingPath(parsed.path);
-  return { path: parsed.path };
+  // Expand ``~`` and canonicalize the user-edited path the same way a
+  // request-creation path is handled, then carry the absolute form.
+  const path = validateAbsoluteFileSharingPath(parsed.path);
+  return { path };
 }
 
 /**
