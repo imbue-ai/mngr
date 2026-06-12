@@ -132,3 +132,6 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     # its timestamped events do not get mixed into the shared host-dir stream.
     assert "--log-file" in argv
     assert argv[argv.index("--log-file") + 1] == str(forward_events_log_path(plugin_dir))
+    # ``--quiet`` suppresses the detached child's console handler so the raw
+    # stdout/stderr capture file does not accumulate in steady state.
+    assert "--quiet" in argv

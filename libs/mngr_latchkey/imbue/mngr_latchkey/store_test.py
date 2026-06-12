@@ -37,9 +37,9 @@ def test_forward_log_paths_are_distinct(tmp_path: Path) -> None:
     raw = forward_log_path(tmp_path)
     structured = forward_events_log_path(tmp_path)
     assert raw == tmp_path / "latchkey_forward.log"
-    # Named ``events.jsonl`` under a dedicated subdir so the standard mngr JSONL
-    # sink prunes its rotated copies (``events.jsonl.<timestamp>``).
-    assert structured == tmp_path / "forward_logs" / "events.jsonl"
+    # Named ``events.jsonl`` (directly in the plugin dir, no nested subdir) so
+    # the standard mngr JSONL sink prunes its rotated copies.
+    assert structured == tmp_path / "events.jsonl"
     assert raw != structured
 
 

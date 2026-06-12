@@ -98,13 +98,16 @@ def spawn_detached_mngr_latchkey_forward(
     still-running child during garbage collection, so the forward
     supervisor keeps running until something explicitly terminates it.
 
-    Two logs are produced. ``log_path`` captures the process's raw
-    stdout/stderr (an unrotated catch-all for console output and any pre-logging
-    tracebacks; its fd is handed straight to the child). The process is also
-    pointed via ``--log-file`` at a co-located structured JSONL log
-    (:func:`forward_events_log_path`), which carries nanosecond timestamps and
-    is rotated mid-run by the standard mngr file sink -- this is the log to read
-    when you need to observe timing.
+    Two logs are produced. The process is pointed via ``--log-file`` at a
+    co-located structured JSONL log (:func:`forward_events_log_path`), which
+    carries nanosecond timestamps and is rotated mid-run by the standard mngr
+    file sink -- this is the log to read when you need to observe timing.
+    ``log_path`` is the raw stdout/stderr capture; its fd is handed straight to
+    the child so it cannot be rotated mid-write. We pass ``--quiet`` so the
+    child suppresses its loguru console handler (everything still goes to the
+    structured log), which keeps this raw file from accumulating in steady
+    state -- it then only ever captures rare startup-failure output (Click
+    errors, pre-logging tracebacks) that never reaches the structured log.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     latchkey_directory.mkdir(parents=True, exist_ok=True)
@@ -130,6 +133,10 @@ def spawn_detached_mngr_latchkey_forward(
                 mngr_binary,
                 "--log-file",
                 str(events_log_path),
+                # Suppress the detached child's loguru console handler so its
+                # raw stdout/stderr capture file stays empty in steady state;
+                # all logging still lands in the structured ``--log-file``.
+                "--quiet",
             ],
             stdin=subprocess.DEVNULL,
             stdout=log_file,

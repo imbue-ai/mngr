@@ -66,11 +66,10 @@ PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
 _FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
-# The forward supervisor's structured log lives in its own subdirectory and is
-# named ``events.jsonl`` so it shares the standard mngr JSONL-sink layout
-# (``<dir>/events.jsonl`` plus ``events.jsonl.<rotation_timestamp>`` siblings),
-# which is also what ``make_jsonl_file_sink`` prunes its rotated copies against.
-_FORWARD_LOG_SUBDIR_NAME: Final[str] = "forward_logs"
+# The forward supervisor's structured log must be named exactly ``events.jsonl``
+# so the standard mngr JSONL sink prunes its rotated copies
+# (``events.jsonl.<rotation_timestamp>``), whose cleanup pattern is hard-coded to
+# that name. It lives directly in the plugin data dir (no extra subdirectory).
 _EVENTS_LOG_FILENAME: Final[str] = "events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
@@ -204,7 +203,7 @@ def forward_events_log_path(data_dir: Path) -> Path:
     structured log is co-located with the rest of the plugin's files instead of
     mixed into the shared host-dir events stream.
     """
-    return data_dir / _FORWARD_LOG_SUBDIR_NAME / _EVENTS_LOG_FILENAME
+    return data_dir / _EVENTS_LOG_FILENAME
 
 
 def ensure_browser_log_path(data_dir: Path) -> Path:
