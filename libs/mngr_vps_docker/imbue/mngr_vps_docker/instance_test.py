@@ -6,13 +6,14 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_vps_docker.container_setup import emit_docker_build_output
+from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
+from imbue.mngr_vps_docker.container_setup import redact_secret_env
+from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.container_setup import resolve_dockerfile_paths
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
-from imbue.mngr_vps_docker.instance import _emit_docker_build_output
-from imbue.mngr_vps_docker.instance import _is_retryable_rsync_error
 from imbue.mngr_vps_docker.instance import _parse_build_args
-from imbue.mngr_vps_docker.instance import _redact_secret_env
-from imbue.mngr_vps_docker.instance import _remove_host_from_known_hosts
-from imbue.mngr_vps_docker.instance import _resolve_dockerfile_paths
 from imbue.mngr_vps_docker.instance import build_vps_tags
 
 _DEFAULT_REGION = "ewr"
@@ -104,7 +105,7 @@ def test_parse_build_args_git_depth() -> None:
 def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("192.168.1.100 ssh-ed25519 AAAA key1\n192.168.1.101 ssh-ed25519 BBBB key2\n")
-    _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
+    remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
     result = known_hosts.read_text()
     assert "192.168.1.100" not in result
     assert "192.168.1.101" in result
@@ -113,7 +114,7 @@ def test_remove_host_from_known_hosts_port_22(tmp_path: Path) -> None:
 def test_remove_host_from_known_hosts_nonstandard_port(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("[192.168.1.100]:2222 ssh-ed25519 AAAA key1\n192.168.1.100 ssh-ed25519 BBBB key2\n")
-    _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 2222)
+    remove_host_from_known_hosts(known_hosts, "192.168.1.100", 2222)
     result = known_hosts.read_text()
     assert "[192.168.1.100]:2222" not in result
     # The port-22 entry should remain
@@ -123,59 +124,59 @@ def test_remove_host_from_known_hosts_nonstandard_port(tmp_path: Path) -> None:
 def test_remove_host_from_known_hosts_file_not_exists(tmp_path: Path) -> None:
     known_hosts = tmp_path / "nonexistent"
     # Should not raise
-    _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
+    remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
 
 
 def test_remove_host_from_known_hosts_no_match(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     original = "192.168.1.101 ssh-ed25519 AAAA key1\n"
     known_hosts.write_text(original)
-    _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
+    remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
     assert known_hosts.read_text() == original
 
 
 def test_remove_host_from_known_hosts_empty_file(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("")
-    _remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
+    remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
     assert known_hosts.read_text() == ""
 
 
-# -- _resolve_dockerfile_paths tests --
+# -- resolve_dockerfile_paths tests --
 
 
 def test_resolve_dockerfile_paths_rewrites_file_equals() -> None:
-    result = _resolve_dockerfile_paths(["--file=Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["--file=Dockerfile"], "/tmp/build")
     assert result == ("--file=/tmp/build/Dockerfile",)
 
 
 def test_resolve_dockerfile_paths_rewrites_f_equals() -> None:
-    result = _resolve_dockerfile_paths(["-f=Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["-f=Dockerfile"], "/tmp/build")
     assert result == ("-f=/tmp/build/Dockerfile",)
 
 
 def test_resolve_dockerfile_paths_rewrites_f_separate_arg() -> None:
-    result = _resolve_dockerfile_paths(["-f", "Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["-f", "Dockerfile"], "/tmp/build")
     assert result == ("-f", "/tmp/build/Dockerfile")
 
 
 def test_resolve_dockerfile_paths_rewrites_file_separate_arg() -> None:
-    result = _resolve_dockerfile_paths(["--file", "my.Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["--file", "my.Dockerfile"], "/tmp/build")
     assert result == ("--file", "/tmp/build/my.Dockerfile")
 
 
 def test_resolve_dockerfile_paths_preserves_absolute_path() -> None:
-    result = _resolve_dockerfile_paths(["--file=/abs/Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["--file=/abs/Dockerfile"], "/tmp/build")
     assert result == ("--file=/abs/Dockerfile",)
 
 
 def test_resolve_dockerfile_paths_preserves_absolute_separate_arg() -> None:
-    result = _resolve_dockerfile_paths(["-f", "/abs/Dockerfile"], "/tmp/build")
+    result = resolve_dockerfile_paths(["-f", "/abs/Dockerfile"], "/tmp/build")
     assert result == ("-f", "/abs/Dockerfile")
 
 
 def test_resolve_dockerfile_paths_preserves_other_args() -> None:
-    result = _resolve_dockerfile_paths(
+    result = resolve_dockerfile_paths(
         ["--build-arg=FOO=bar", "--file=Dockerfile", "--no-cache"],
         "/tmp/build",
     )
@@ -183,7 +184,7 @@ def test_resolve_dockerfile_paths_preserves_other_args() -> None:
 
 
 def test_resolve_dockerfile_paths_empty_args() -> None:
-    result = _resolve_dockerfile_paths([], "/tmp/build")
+    result = resolve_dockerfile_paths([], "/tmp/build")
     assert result == ()
 
 
@@ -249,50 +250,73 @@ def test_build_vps_tags_uses_provided_provider_name() -> None:
 def test_redact_secret_env_replaces_known_var_value() -> None:
     """Known secret env-var assignments have their value redacted."""
     cmd = "DEPOT_TOKEN=tok-12345 docker build ."
-    assert _redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
+    assert redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
 
 
 def test_redact_secret_env_replaces_single_quoted_value() -> None:
     """Single-quoted secret values are also redacted."""
     cmd = "DEPOT_TOKEN='tok with spaces' docker build ."
-    assert _redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
+    assert redact_secret_env(cmd) == "DEPOT_TOKEN=<redacted> docker build ."
 
 
 def test_redact_secret_env_leaves_unknown_vars_alone() -> None:
     """Non-secret env-var assignments are untouched."""
     cmd = "FOO=bar docker build ."
-    assert _redact_secret_env(cmd) == "FOO=bar docker build ."
+    assert redact_secret_env(cmd) == "FOO=bar docker build ."
 
 
 def test_redact_secret_env_no_op_when_no_match() -> None:
     """A command with no env-var assignments comes back unchanged."""
     cmd = "docker build ."
-    assert _redact_secret_env(cmd) == "docker build ."
+    assert redact_secret_env(cmd) == "docker build ."
 
 
-def test_is_retryable_rsync_error_true_on_known_pattern() -> None:
-    """Connection-class rsync stderr strings are flagged retryable."""
-    # Pick from the documented retry patterns; any one of them suffices.
-    assert _is_retryable_rsync_error("rsync: Connection reset by peer")
+# One representative stderr string per entry in _RETRYABLE_RSYNC_PATTERNS, so every
+# retryable branch is exercised (a dropped pattern flips exactly one case to failing).
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "rsync: write error: Broken pipe (32)",
+        "rsync: Connection reset by peer",
+        "ssh: connect to host 1.2.3.4 port 22: Connection refused",
+        "rsync: [sender] failed: Connection timed out",
+        "client_loop: send disconnect: Broken pipe",
+        "ssh: connect to host 1.2.3.4 port 22: No route",
+        "kex_exchange_identification: read: Connection reset by peer",
+        "connect to address 1.2.3.4: Network is unreachable",
+    ],
+)
+def test_is_retryable_rsync_error_true_for_each_connection_class_pattern(stderr: str) -> None:
+    """Every connection-class pattern in _RETRYABLE_RSYNC_PATTERNS must be flagged retryable."""
+    assert is_retryable_rsync_error(stderr)
 
 
-def test_is_retryable_rsync_error_false_on_unknown_pattern() -> None:
-    """Unrelated rsync stderr should not be retried."""
-    assert not _is_retryable_rsync_error("rsync: permission denied")
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "rsync: permission denied (13)",
+        "unexpected EOF in tar header",
+        "",
+    ],
+)
+def test_is_retryable_rsync_error_false_for_non_connection_errors(stderr: str) -> None:
+    """Application-level rsync failures (and empty stderr) must NOT be retried."""
+    assert not is_retryable_rsync_error(stderr)
 
 
-def test_is_retryable_rsync_error_false_on_empty_string() -> None:
-    """No stderr -> nothing to match -> not retryable."""
-    assert not _is_retryable_rsync_error("")
+def test_emit_docker_build_output_logs_stripped_nonempty_line_at_build_level() -> None:
+    """A non-empty line is logged exactly once at BUILD level, with surrounding whitespace stripped."""
+    with capture_loguru(level="BUILD") as log_output:
+        emit_docker_build_output("  Step 1/5 : FROM debian:bookworm-slim  ")
+    # The BUILD sink uses a "{message}" format, so the captured text is just the
+    # rendered (stripped) line followed by loguru's trailing newline.
+    assert log_output.getvalue() == "Step 1/5 : FROM debian:bookworm-slim\n"
 
 
-def test_emit_docker_build_output_handles_nonempty_line() -> None:
-    """Non-empty lines are logged; the call should not raise."""
-    _emit_docker_build_output("Step 1/5 : FROM debian:bookworm-slim")
-
-
-def test_emit_docker_build_output_skips_whitespace_only() -> None:
-    """Whitespace-only / empty lines are silently dropped."""
-    _emit_docker_build_output("")
-    _emit_docker_build_output("   ")
-    _emit_docker_build_output("\n")
+def test_emit_docker_build_output_drops_whitespace_only_lines() -> None:
+    """Whitespace-only / empty lines must produce no log output at all."""
+    with capture_loguru(level="BUILD") as log_output:
+        emit_docker_build_output("")
+        emit_docker_build_output("   ")
+        emit_docker_build_output("\n")
+    assert log_output.getvalue() == ""

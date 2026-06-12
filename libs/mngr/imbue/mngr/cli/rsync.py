@@ -178,6 +178,11 @@ Each endpoint is a host-location address: ``AGENT[@HOST[.PROVIDER]][:PATH]``,
 ``@HOST[.PROVIDER]:PATH``, or a bare local path. The local side is implicit
 for a bare path; ``./``, ``../``, ``/``, and ``~/`` prefixes are honored.
 
+**Agent paths**: a ``:PATH`` on an agent endpoint is taken relative to that
+agent's workdir unless it is absolute. ``my-agent:runtime/reports`` therefore
+means ``runtime/reports`` *inside the agent's worktree*, regardless of where
+you run the command; pass an absolute ``:PATH`` to target an exact location.
+
 mngr is a thin wrapper around ``rsync``. Anything you pass after ``--`` is
 forwarded verbatim (use ``--dry-run``, ``--delete``, ``--exclude=PATTERN``,
 ``--include-from=FILE``, etc. directly).

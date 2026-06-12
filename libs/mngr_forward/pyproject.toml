@@ -1,13 +1,13 @@
 [project]
 name = "imbue-mngr-forward"
-version = "0.1.0"
+version = "0.1.1"
 description = "Auth + subdomain-forwarding plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr",
-    "imbue-common",
-    "concurrency-group",
+    "imbue-mngr==0.2.12",
+    "imbue-common==0.1.19",
+    "concurrency-group==0.1.19",
     "click",
     "click-option-group",
     "fastapi>=0.115",
@@ -64,7 +64,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 50
+fail_under = 70
 omit = [
   "*_test.py",
   "test_*.py",

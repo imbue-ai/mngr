@@ -3,10 +3,10 @@
 Every line on stdout is a single JSON object with shape
 ``{"stream": "observe"|"event"|"forward", ["agent_id": ...,] "payload": ...}``.
 
-A consumer (notably ``minds run``) parses these lines and dispatches based on
-``stream``. ``observe`` and ``event`` lines carry raw JSON from the spawned
-``mngr observe`` / ``mngr event`` subprocesses; ``forward`` lines carry the
-plugin's own state events (``login_url``, ``listening``,
+A consumer (the application that spawned the plugin) parses these lines and
+dispatches based on ``stream``. ``observe`` and ``event`` lines carry raw JSON
+from the spawned ``mngr observe`` / ``mngr event`` subprocesses; ``forward``
+lines carry the plugin's own state events (``login_url``, ``listening``,
 ``reverse_tunnel_established``).
 """
 
@@ -23,6 +23,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import ListeningPayload
 from imbue.mngr_forward.data_types import LoginUrlPayload
+from imbue.mngr_forward.data_types import ResolverSnapshotPayload
 from imbue.mngr_forward.data_types import ReverseTunnelEstablishedPayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.primitives import ForwardPort
@@ -94,11 +95,20 @@ class EnvelopeWriter(MutableModel):
             }
         )
 
+    def emit_resolver_snapshot(self, services_by_agent: dict[str, dict[str, str]]) -> None:
+        """Emit a ``resolver_snapshot`` plugin event with the current per-agent service map.
+
+        Sent on every resolver mutation. Carries the full map so a
+        late-attaching consumer only needs the latest envelope to be in sync.
+        """
+        payload = ResolverSnapshotPayload(services_by_agent=services_by_agent)
+        self._write_envelope({"stream": "forward", "payload": payload.model_dump(mode="json")})
+
     def emit_system_interface_backend_failure(self, payload: SystemInterfaceBackendFailurePayload) -> None:
         """Emit a ``system_interface_backend_failure`` plugin event.
 
         Surfaces a per-agent backend failure observed in the forwarding
-        path so the minds-side health tracker can apply restart-recovery
+        path so a downstream consumer can apply its own restart-recovery
         policy. The plugin remains a dumb reverse proxy -- this is the
         only forwarding-failure signal it exposes outside its own logs.
         """

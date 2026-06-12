@@ -101,9 +101,13 @@ def default_create_cli_opts() -> CreateCliOptions:
         start_on_boot=False,
         start_host=True,
         extra_provision_command=(),
+        post_host_create_command=(),
         upload_file=(),
         update=False,
         yes=False,
+        tmux_width=None,
+        tmux_height=None,
+        tmux_window_size=None,
     )
 
 
@@ -127,6 +131,7 @@ def default_connect_cli_opts() -> ConnectCliOptions:
         start=True,
         reconnect=True,
         session_command=None,
+        connect_command=None,
         allow_unknown_host=False,
     )
 

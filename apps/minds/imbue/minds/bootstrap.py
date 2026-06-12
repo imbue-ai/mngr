@@ -395,18 +395,17 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_na
             logger.warning("Skipping imbue_cloud provider registration for {!r}: {}", email, e)
 
 
-def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
-    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+def read_active_profile_dir(mngr_host_dir: Path) -> Path | None:
+    """Return ``<mngr_host_dir>/profiles/<active-profile>``, or None if unresolved.
 
-    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
-    ``get_active_profile_dir``: the active profile id lives in
-    ``<host_dir>/config.toml`` and the accounts index lives at
-    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
-    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
-    import (which transitively pulls in mngr).
+    The active profile id lives in ``<mngr_host_dir>/config.toml`` under the
+    ``profile`` key and each profile's state lives at
+    ``<mngr_host_dir>/profiles/<profile>/``. Returns None when mngr hasn't been
+    initialized in this host_dir yet (no ``config.toml`` / no ``profile`` key) or
+    when the config can't be read. Resolution is inlined here (rather than imported
+    from mngr) so bootstrap stays free of any ``imbue.mngr.*`` import.
     """
-    host_dir = mngr_host_dir_for(root_name)
-    config_path = host_dir / "config.toml"
+    config_path = mngr_host_dir / "config.toml"
     if not config_path.is_file():
         return None
     try:
@@ -417,10 +416,38 @@ def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
     profile_id = config_data.get("profile")
     if not isinstance(profile_id, str) or not profile_id:
         return None
-    return host_dir / "profiles" / profile_id / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
+    return mngr_host_dir / "profiles" / profile_id
+
+
+def _imbue_cloud_accounts_path(root_name: str) -> Path | None:
+    """Return the path to the plugin's ``accounts.json``, or None if no profile is set.
+
+    Mirrors ``mngr_imbue_cloud.config.get_sessions_dir`` /
+    ``get_active_profile_dir``: the active profile id lives in
+    ``<host_dir>/config.toml`` and the accounts index lives at
+    ``<host_dir>/profiles/<profile>/providers/imbue_cloud/sessions/accounts.json``.
+    Inlined here so bootstrap stays free of the ``imbue.mngr_imbue_cloud``
+    import (which transitively pulls in mngr).
+    """
+    profile_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if profile_dir is None:
+        return None
+    return profile_dir / "providers" / "imbue_cloud" / "sessions" / "accounts.json"
 
 
 _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
+
+# Runtime knobs written into each per-account ``[providers.imbue_cloud_<slug>]``
+# block so the imbue_cloud slow (rebuild) path runs the agent container under
+# gVisor with the runsc hardening args. These mirror the forever-claude-template
+# ``[providers.ovh]`` bake settings; ``ImbueCloudProviderConfig`` (which extends
+# ``VpsDockerProviderConfig``) forwards them onto the delegated vps_docker
+# provider, and ``install_gvisor_runtime`` also drives the slow path's SSH
+# host-setup so a leased host that lacks runsc has it installed before the
+# container is rebuilt under it.
+_IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
+_IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+_IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
 
 class BootstrapError(ValueError):
@@ -458,16 +485,8 @@ def _resolve_active_settings_path(root_name: str) -> Path | None:
     ``config.toml`` / a profile dir). Callers should treat ``None`` as
     "skip silently" since there's nothing useful to write yet.
     """
-    mngr_host_dir = mngr_host_dir_for(root_name)
-    root_config_path = mngr_host_dir / "config.toml"
-    if not root_config_path.exists():
-        return None
-    root_config = tomllib.loads(root_config_path.read_text())
-    profile_id = root_config.get("profile")
-    if not profile_id:
-        return None
-    settings_dir = mngr_host_dir / "profiles" / profile_id
-    if not settings_dir.exists():
+    settings_dir = read_active_profile_dir(mngr_host_dir_for(root_name))
+    if settings_dir is None or not settings_dir.exists():
         return None
     return settings_dir / "settings.toml"
 
@@ -545,6 +564,9 @@ def set_imbue_cloud_provider_for_account(
         and existing.get("account") == email
         and existing.get("connector_url") == connector_url
         and existing_is_enabled == desired_is_enabled
+        and existing.get("docker_runtime") == _IMBUE_CLOUD_DOCKER_RUNTIME
+        and existing.get("install_gvisor_runtime") == _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+        and existing.get("default_start_args") == list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     ):
         return False
     new_block = tomlkit.table()
@@ -553,6 +575,11 @@ def set_imbue_cloud_provider_for_account(
     new_block["connector_url"] = connector_url
     if desired_is_enabled is not None:
         new_block["is_enabled"] = desired_is_enabled
+    # Run the rebuilt agent container under gVisor with the runsc hardening args
+    # (see the module constants above).
+    new_block["docker_runtime"] = _IMBUE_CLOUD_DOCKER_RUNTIME
+    new_block["install_gvisor_runtime"] = _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME
+    new_block["default_start_args"] = list(_IMBUE_CLOUD_DEFAULT_START_ARGS)
     providers[provider_name] = new_block
     _atomic_write_settings(settings_path, doc)
     logger.info("imbue_cloud provider {} registered in {}", provider_name, settings_path)

@@ -1,4 +1,3 @@
-import importlib.metadata
 import json
 import os
 import sys
@@ -27,9 +26,9 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
 from imbue.mngr.cli.output_helpers import AbortError
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.plugin_install_wizard import install_wizard
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import ConfigScope
@@ -44,6 +43,7 @@ from imbue.mngr.utils.toml_config import set_plugin_enabled
 from imbue.mngr.uv_tool import ToolRequirement
 from imbue.mngr.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
+from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
 
@@ -211,13 +211,13 @@ def _emit_plugin_list_human(plugins: list[PluginInfo], fields: tuple[str, ...]) 
 def _emit_plugin_list_json(plugins: list[PluginInfo], fields: tuple[str, ...]) -> None:
     """Emit plugin list in JSON format."""
     plugin_dicts = [{f: _get_field_value(p, f) for f in fields} for p in plugins]
-    emit_final_json({"plugins": plugin_dicts})
+    write_json_line({"plugins": plugin_dicts})
 
 
 def _emit_plugin_list_jsonl(plugins: list[PluginInfo], fields: tuple[str, ...]) -> None:
     """Emit plugin list in JSONL format (one line per plugin)."""
     for p in plugins:
-        emit_final_json({f: _get_field_value(p, f) for f in fields})
+        write_json_line({f: _get_field_value(p, f) for f in fields})
 
 
 @pure
@@ -269,19 +269,6 @@ def _read_package_name_from_pyproject(local_path: str) -> str:
     return name
 
 
-def _check_for_mngr_entry_points(package_name: str) -> bool:
-    """Check whether an installed package registered any mngr entry points.
-
-    Returns True if entry points were found, False otherwise.
-    """
-    try:
-        dist = importlib.metadata.distribution(package_name)
-    except importlib.metadata.PackageNotFoundError:
-        return False
-    entry_points = dist.entry_points
-    return any(ep.group == "mngr" for ep in entry_points)
-
-
 def _emit_plugin_add_result(
     specifier: str,
     package_name: str,
@@ -297,7 +284,7 @@ def _emit_plugin_add_result(
                     "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
                 )
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "specifier": specifier,
                     "package": package_name,
@@ -305,7 +292,7 @@ def _emit_plugin_add_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_added",
                     "specifier": specifier,
@@ -326,13 +313,13 @@ def _emit_plugin_remove_result(
         case OutputFormat.HUMAN:
             write_human_line("Removed plugin package '{}'", package_name)
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "package": package_name,
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_removed",
                     "package": package_name,
@@ -645,7 +632,7 @@ def _plugin_add_impl(ctx: click.Context) -> None:
 
     # Report results for each source
     for specifier, resolved_package_name, _ in source_info:
-        has_entry_points = _check_for_mngr_entry_points(resolved_package_name)
+        has_entry_points = has_mngr_entry_points(resolved_package_name)
         _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
 
 
@@ -800,7 +787,7 @@ def _emit_plugin_toggle_result(
             action = "Enabled" if is_enabled else "Disabled"
             write_human_line("{} plugin '{}' in {} ({})", action, name, scope.value.lower(), config_path)
         case OutputFormat.JSON:
-            emit_final_json(
+            write_json_line(
                 {
                     "plugin": name,
                     "enabled": is_enabled,
@@ -809,7 +796,7 @@ def _emit_plugin_toggle_result(
                 }
             )
         case OutputFormat.JSONL:
-            emit_final_json(
+            write_json_line(
                 {
                     "event": "plugin_toggled",
                     "plugin": name,

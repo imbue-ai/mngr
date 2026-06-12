@@ -4,6 +4,42 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 60% to 70% to match the coverage CI already measures (~72%).
+
+## 2026-06-08
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-05-29
+
+User-visible: minds workspaces running on Vultr (docker-on-VPS) hosts can now
+be backed up off-site (restic) when a backup provider is selected at creation
+time.
+
+(No code change in this project in this PR; the integration lives in the
+minds app and the forever-claude-template `host_backup` service.)
+
+Vultr hosts created by `mngr create --provider vultr` now back their per-host
+unified docker volume with a btrfs subvolume on a loop-mounted btrfs filesystem
+on the VPS (`/mngr-btrfs/<host_id_hex>` on `/var/lib/mngr-btrfs.img`). This
+makes future consistent snapshotting of the agent data via
+`btrfs subvolume snapshot -r` possible. See `mngr_vps_docker`'s changelog for
+the full mechanism.
+
+**Breaking change:** existing vultr hosts created before this release cannot
+be discovered or managed after upgrade. Destroy and recreate them.
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests

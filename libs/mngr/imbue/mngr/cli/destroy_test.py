@@ -1,6 +1,7 @@
 """Unit tests for the destroy CLI command."""
 
 import json
+from typing import cast
 
 import pluggy
 import pytest
@@ -9,11 +10,20 @@ from click.testing import CliRunner
 from imbue.mngr.cli.destroy import DestroyCliOptions
 from imbue.mngr.cli.destroy import _DestroyTargets
 from imbue.mngr.cli.destroy import _OfflineHostToDestroy
+from imbue.mngr.cli.destroy import _destroy_emptied_hosts
+from imbue.mngr.cli.destroy import _emit_dry_run_entries
 from imbue.mngr.cli.destroy import _output_result
 from imbue.mngr.cli.destroy import destroy
 from imbue.mngr.cli.destroy import get_agent_name_from_session
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 
 
@@ -54,6 +64,10 @@ def test_destroy_targets_has_expected_fields() -> None:
     """Test that _DestroyTargets has the expected fields."""
     assert "online_agents" in _DestroyTargets.model_fields
     assert "offline_hosts" in _DestroyTargets.model_fields
+    # ``online_hosts_with_provider`` is the deduplicated host+provider pairs
+    # the destroy loop uses to force-destroy hosts whose last live agent was
+    # just destroyed (the documented "destroy CLI destroys empty host" contract).
+    assert "online_hosts_with_provider" in _DestroyTargets.model_fields
 
 
 def test_destroy_cli_options_can_be_instantiated() -> None:
@@ -66,6 +80,7 @@ def test_destroy_cli_options_can_be_instantiated() -> None:
         remove_created_branch=False,
         allow_worktree_removal=True,
         sessions=(),
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -287,5 +302,227 @@ def test_destroy_dash_strips_whitespace(
         input="  agent-padded  \n\n  \n",
         obj=plugin_manager,
         catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+
+# =============================================================================
+# _destroy_emptied_hosts -- the "destroy host when its last agent was
+# destroyed" post-loop sweep. Asserts the documented destroy-CLI contract
+# fires immediately for young hosts (not deferred to gc_machines' min-age
+# check, which is what was leaking imbue_cloud leases until the 7-day
+# destroyed-host grace period expired).
+# =============================================================================
+
+
+class _StubOnlineHost:
+    """Duck-typed stand-in for ``OnlineHostInterface``.
+
+    Implements ``id``, ``get_name``, ``get_agents`` (what the sweep itself
+    reads) plus ``discover_agents`` returning an empty list -- needed so
+    plugin hooks like ``mngr_claude``'s ``on_before_host_destroy`` (which
+    iterates ``host.discover_agents()``) short-circuit harmlessly. The
+    sweep's own logic doesn't call ``discover_agents``.
+    """
+
+    def __init__(
+        self,
+        host_id: HostId | None = None,
+        remaining_agents: list[object] | None = None,
+        raise_on_get_agents: Exception | None = None,
+    ) -> None:
+        self.id = host_id if host_id is not None else HostId.generate()
+        self._remaining_agents = list(remaining_agents) if remaining_agents else []
+        self._raise_on_get_agents = raise_on_get_agents
+
+    def get_name(self) -> HostName:
+        return HostName(f"stub-host-{self.id}")
+
+    def get_agents(self) -> list[object]:
+        if self._raise_on_get_agents is not None:
+            raise self._raise_on_get_agents
+        return list(self._remaining_agents)
+
+    def discover_agents(self) -> list[object]:
+        # Plugin-hook short-circuit: an empty discover list means the hook
+        # has nothing to preserve / no sessions to save.
+        return []
+
+
+class _RecordingProvider:
+    """Duck-typed stand-in for ``ProviderInstanceInterface`` that records destroy_host calls."""
+
+    def __init__(
+        self,
+        raise_on_destroy: Exception | None = None,
+    ) -> None:
+        self.destroyed_hosts: list[object] = []
+        self._raise_on_destroy = raise_on_destroy
+
+    def destroy_host(self, host: object) -> None:
+        if self._raise_on_destroy is not None:
+            raise self._raise_on_destroy
+        self.destroyed_hosts.append(host)
+
+
+def _pair_for_emptied(
+    host: _StubOnlineHost, provider: _RecordingProvider
+) -> tuple[OnlineHostInterface, ProviderInstanceInterface]:
+    return cast(OnlineHostInterface, host), cast(ProviderInstanceInterface, provider)
+
+
+def test_destroy_emptied_hosts_destroys_host_when_no_agents_remain(temp_mngr_ctx: MngrContext) -> None:
+    """A host whose last live agent was just destroyed gets destroyed by the post-loop sweep."""
+    host = _StubOnlineHost(remaining_agents=[])
+    provider = _RecordingProvider()
+
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[_pair_for_emptied(host, provider)],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+    )
+
+    assert provider.destroyed_hosts == [host], (
+        "Empty online host must be destroyed by the post-loop sweep so cloud-side "
+        "resources (lease / VPS / btrfs subvolume) don't leak until the 7-day "
+        "destroyed-host grace period eventually triggers delete_host."
+    )
+
+
+def test_destroy_emptied_hosts_skips_host_with_remaining_agents(temp_mngr_ctx: MngrContext) -> None:
+    """A host that still has live agents (e.g. only some targeted) is left alive."""
+    # One live agent remains on the host -- destroy CLI must NOT take the host
+    # out from under it.
+    host = _StubOnlineHost(remaining_agents=[object()])
+    provider = _RecordingProvider()
+
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[_pair_for_emptied(host, provider)],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+    )
+
+    assert provider.destroyed_hosts == [], (
+        "Host with remaining live agents must NOT be destroyed -- the destroy CLI's "
+        "'destroy host when last agent gone' contract only fires when the host is empty."
+    )
+
+
+@pytest.mark.allow_warnings(match="Cannot re-check host")
+def test_destroy_emptied_hosts_skips_host_when_get_agents_raises_connection_error(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A transient connection failure during the re-check must not destroy the host.
+
+    Cloud-side state is unknown if we can't talk to the host; the post-destroy
+    GC pass (which has its own retry semantics) is the safety net.
+    """
+    host = _StubOnlineHost(
+        raise_on_get_agents=HostConnectionError("Connection timed out"),
+    )
+    provider = _RecordingProvider()
+
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[_pair_for_emptied(host, provider)],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+    )
+
+    assert provider.destroyed_hosts == []
+
+
+@pytest.mark.allow_warnings(match="Failed to destroy emptied host")
+def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: MngrContext) -> None:
+    """A provider.destroy_host failure on one host must not block others.
+
+    Sweep processes hosts sequentially; a single broken host must surface as a
+    warning (logged) and let the rest of the loop proceed. The post-destroy GC
+    pass is the safety net for the failed one.
+    """
+    empty_host_a = _StubOnlineHost(remaining_agents=[])
+    empty_host_b = _StubOnlineHost(remaining_agents=[])
+    failing_provider = _RecordingProvider(raise_on_destroy=MngrError("provider broke"))
+    working_provider = _RecordingProvider()
+
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[
+            _pair_for_emptied(empty_host_a, failing_provider),
+            _pair_for_emptied(empty_host_b, working_provider),
+        ],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+    )
+
+    # The failing host's destroy was attempted (it raised before recording).
+    # The working host's destroy still ran after the failure -- this is the
+    # "one bad host doesn't block the others" guarantee.
+    assert failing_provider.destroyed_hosts == []
+    assert working_provider.destroyed_hosts == [empty_host_b]
+
+
+def test_destroy_emptied_hosts_does_nothing_for_empty_input(temp_mngr_ctx: MngrContext) -> None:
+    """No online hosts touched (e.g. all targets were offline) -> sweep is a no-op."""
+    _destroy_emptied_hosts(
+        online_hosts_with_provider=[],
+        mngr_ctx=temp_mngr_ctx,
+        output_opts=OutputOptions(output_format=OutputFormat.HUMAN),
+    )
+    # No assertions on side effects; we're just verifying it doesn't crash.
+
+
+# =============================================================================
+# --dry-run: preview targets without destroying anything.
+# =============================================================================
+
+
+def test_destroy_dry_run_output_human_lists_agents_and_marks_offline(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run HUMAN output names each agent that would be destroyed and marks offline ones."""
+    entries = [
+        {"name": "agent-a", "host": "host-1", "offline": "false"},
+        {"name": "agent-b", "host": "host-2", "offline": "true"},
+    ]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN))
+    captured = capsys.readouterr()
+    assert "Would destroy 2 agent(s)" in captured.out
+    assert "agent-a@host-1" in captured.out
+    assert "agent-b@host-2 (offline)" in captured.out
+    # An online agent must NOT be annotated as offline.
+    assert "agent-a@host-1 (offline)" not in captured.out
+
+
+def test_destroy_dry_run_output_json_reports_count(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run JSON output is machine-readable and flags dry_run=True with a count."""
+    entries = [{"name": "agent-x", "host": "host-1", "offline": "false"}]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.JSON))
+    captured = capsys.readouterr()
+    data = json.loads(captured.out.strip())
+    assert data["dry_run"] is True
+    assert data["count"] == 1
+    assert data["agents"][0]["name"] == "agent-x"
+
+
+def test_destroy_dry_run_output_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """Dry-run honors a custom --format template, emitting one line per agent."""
+    entries = [
+        {"name": "agent-a", "host": "host-1", "offline": "false"},
+        {"name": "agent-b", "host": "host-2", "offline": "true"},
+    ]
+    _emit_dry_run_entries(entries, OutputOptions(output_format=OutputFormat.HUMAN, format_template="{name}"))
+    captured = capsys.readouterr()
+    assert "agent-a" in captured.out
+    assert "agent-b" in captured.out
+
+
+def test_destroy_dry_run_empty_input_is_noop(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """'-' with empty stdin plus --dry-run is a no-op (mirrors filtered pipeline with no matches)."""
+    result = cli_runner.invoke(
+        destroy,
+        ["-", "--force", "--dry-run"],
+        input="",
+        obj=plugin_manager,
+        catch_exceptions=True,
     )
     assert result.exit_code == 0

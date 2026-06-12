@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
@@ -172,8 +175,121 @@ def test_merge_lima_yaml_forces_port_forwards_disabled() -> None:
     assert merged["portForwards"] == _EXPECTED_DISABLED_PORT_FORWARDS
 
 
+def test_generate_default_lima_yaml_bind_mount_mode_omits_additional_disks(tmp_path: Path) -> None:
+    """Today's default (is_host_data_volume_exposed=True equivalent): the YAML has
+    a 9p mount and no additionalDisks; the provisioning script does not contain
+    the host-data-disk block."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    config = generate_default_lima_yaml(volume_host_path=volume_path, host_dir="/mngr")
+    assert "additionalDisks" not in config
+    assert "mounts" in config and len(config["mounts"]) == 1
+    assert config["mounts"][0]["mountPoint"] == "/mngr"
+    script = config["provision"][0]["script"]
+    assert "/mnt/lima-" not in script
+    assert "ln -sfn" not in script
+
+
+def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: Path) -> None:
+    """When host_data_disk_name is set and volume_host_path is None, the YAML
+    omits the `mounts:` block entirely, attaches a btrfs additionalDisk with
+    format: true, and the provisioning script symlinks host_dir to Lima's
+    auto-mount path for that disk."""
+    del tmp_path
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc123-data",
+        host_data_disk_size="100GiB",
+    )
+    assert "mounts" not in config
+    assert "additionalDisks" in config
+    assert len(config["additionalDisks"]) == 1
+    disk_entry = config["additionalDisks"][0]
+    assert disk_entry["name"] == "mngr-abc123-data"
+    assert disk_entry["format"] is True
+    assert disk_entry["fsType"] == "btrfs"
+    assert disk_entry["size"] == "100GiB"
+
+    script = config["provision"][0]["script"]
+    # The symlink target is the disk's canonical mount path.
+    assert "ln -sfn /mnt/lima-mngr-abc123-data /mngr" in script
+    # We format + mount the disk ourselves (Lima can't on minimal images that lack
+    # mkfs.btrfs): btrfs-progs is installed, the disk is formatted, and mounted at
+    # the canonical path before host_dir is symlinked into it.
+    assert "btrfs-progs" in script
+    assert "mkfs.btrfs -f" in script
+    assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
+    # Opens the btrfs root for the Lima default non-root user (fresh mkfs.btrfs
+    # leaves the root dir owned by root:root).
+    assert "chmod 0777 /mnt/lima-mngr-abc123-data" in script
+    # No intermediate bind-mount or fstab manipulation -- those caused
+    # stacked-mount ordering quirks on reboot.
+    assert "mount --bind" not in script
+    assert "/etc/fstab" not in script
+
+
+def test_generate_default_lima_yaml_disk_name_without_size_raises(tmp_path: Path) -> None:
+    """host_data_disk_size is required whenever a disk name is set; the helper
+    raises MngrError rather than silently producing a malformed YAML."""
+    volume_path = tmp_path / "volume"
+    volume_path.mkdir()
+    with pytest.raises(MngrError):
+        generate_default_lima_yaml(
+            volume_host_path=volume_path,
+            host_dir="/mngr",
+            host_data_disk_name="mngr-abc-data",
+            host_data_disk_size=None,
+        )
+
+
+def test_merge_lima_yaml_additional_disks_extends() -> None:
+    """A user --file YAML adding its own additionalDisks must not silently drop
+    mngr's btrfs host-data disk. _LIST_EXTEND_KEYS makes the merge concatenate
+    rather than replace."""
+    base = {"additionalDisks": [{"name": "mngr-host-data", "format": True, "fsType": "btrfs", "size": "100GiB"}]}
+    override = {"additionalDisks": [{"name": "user-extra", "format": True, "fsType": "ext4", "size": "20GiB"}]}
+    merged = merge_lima_yaml(base, override)
+    assert len(merged["additionalDisks"]) == 2
+    assert merged["additionalDisks"][0]["name"] == "mngr-host-data"
+    assert merged["additionalDisks"][1]["name"] == "user-extra"
+
+
 def test_parse_build_args_for_yaml_path() -> None:
     assert parse_build_args_for_yaml_path(("--file", "/path/to/config.yaml")) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--file=/path/to/config.yaml",)) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--other", "arg")) is None
     assert parse_build_args_for_yaml_path(()) is None
+
+
+def test_generate_default_lima_yaml_without_root_key_omits_root_login() -> None:
+    """Without root_authorized_public_key, the provisioning script must not enable
+    root login or authorize a root key -- the default non-root path is untouched."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+    )
+    script = config["provision"][0]["script"]
+    assert "PermitRootLogin" not in script
+    assert "/root/.ssh/authorized_keys" not in script
+
+
+def test_generate_default_lima_yaml_with_root_key_enables_root_login() -> None:
+    """When a root client key is provided, the provisioning script enables
+    key-based root login and authorizes that key for root."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        root_authorized_public_key="ssh-ed25519 AAAAROOTKEY mngr-lima-root",
+    )
+    script = config["provision"][0]["script"]
+    assert "PermitRootLogin prohibit-password" in script
+    assert "/root/.ssh/authorized_keys" in script
+    assert "ssh-ed25519 AAAAROOTKEY mngr-lima-root" in script
+    # The btrfs disk is still formatted + mounted; root mode doesn't change that.
+    assert "mkfs.btrfs -f" in script
+    assert "ln -sfn /mnt/lima-mngr-abc-data /mngr" in script

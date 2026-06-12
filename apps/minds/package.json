@@ -1,25 +1,30 @@
 {
   "name": "minds",
   "productName": "Minds",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
   "scripts": {
+    "prestart": "node scripts/ensure-binaries.js",
     "start": "electron .",
     "build": "node scripts/build.js",
     "dist": "pnpm build && pnpm exec todesktop build",
+    "todesktop:beforeInstall": "./scripts/download-binaries.js",
     "fetch-tailwind": "bash scripts/fetch_tailwind.sh",
-    "postinstall": "bash scripts/fetch_tailwind.sh"
+    "postinstall": "bash scripts/fetch_tailwind.sh",
+    "test:e2e": "playwright test --config=test/e2e/playwright.config.js"
   },
   "dependencies": {
     "@todesktop/runtime": "^1.6.0",
-    "latchkey": "^2.12.2"
+    "latchkey": "^2.16.0"
   },
   "devDependencies": {
+    "@todesktop/cli": "^1.8.0",
     "electron": "40.10.1",
-    "@todesktop/cli": "^1.8.0"
+    "@playwright/test": "1.60.0",
+    "playwright": "1.60.0"
   },
   "engines": {
     "node": "24.15.0",

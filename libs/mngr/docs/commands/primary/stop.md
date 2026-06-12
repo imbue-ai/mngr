@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
+mngr [stop|s] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [--archive] [--stop-host] [--dry-run] [--snapshot-mode <MODE>] [--graceful/--no-graceful]
 ```
 
 Stop running agent(s).
@@ -17,10 +17,18 @@ running unless idle detection stops it automatically.
 For local agents, this stops the agent's tmux session. The local host
 itself cannot be stopped (if you want that, shut down your computer).
 
+Use --stop-host to stop the agent's entire host instead of just the
+agent. This takes down every agent on that host. For container-backed
+providers it stops the container (the underlying machine keeps running);
+it is rejected on providers that do not support stopping hosts.
+
 Use --archive to also set an 'archived_at' label on each stopped agent.
 This marks the agent as archived without destroying it, allowing it to
 be filtered out of listings while preserving its state. The 'mngr archive'
 command is a shorthand for 'mngr stop --archive'.
+
+Use --dry-run to preview which agents (or hosts, with --stop-host) would be
+stopped without actually stopping anything.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -49,6 +57,8 @@ mngr stop [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--archive` | boolean | Set an 'archived_at' label on each stopped agent (marks it as archived) | `False` |
+| `--stop-host` | boolean | Stop the agent's entire host (all agents on it) instead of just the named agent | `False` |
+| `--dry-run` | boolean | Show what would be stopped without actually stopping anything | `False` |
 | `--snapshot-mode` | choice (`auto` &#x7C; `always` &#x7C; `never`) | Control snapshot creation when stopping: auto (snapshot if needed), always, or never [future] | None |
 | `--graceful`, `--no-graceful` | boolean | Wait for agent to reach a clean state before stopping [future] | `True` |
 | `--graceful-timeout` | text | Timeout for graceful stop (e.g., 30s, 5m) [future] | None |
@@ -100,6 +110,18 @@ $ mngr list --ids | mngr stop -
 
 ```bash
 $ mngr stop my-agent --archive
+```
+
+**Stop the agent's whole host**
+
+```bash
+$ mngr stop my-agent --stop-host
+```
+
+**Preview what would be stopped**
+
+```bash
+$ mngr list --ids | mngr stop - --dry-run
 ```
 
 **Stop by tmux session name**

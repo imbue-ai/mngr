@@ -41,6 +41,16 @@ _REVERSE_TUNNEL_BACKOFF_CAP_SECONDS: Final[float] = 300.0
 # usable max is 103 on macOS and 107 on Linux. We use 103 to be portable.
 _MAX_AF_UNIX_PATH_LENGTH: Final[int] = 103
 
+# Interval (seconds) for SSH-level keepalives on every tunnel connection.
+# Without keepalives an idle reverse tunnel can silently half-die: paramiko
+# keeps the transport marked "active" and the remote sshd keeps the forwarded
+# listener bound, so the remote port is orphaned across restarts (the next
+# run's ``request_port_forward`` is then denied). Periodic keepalives keep the
+# connection from idling out and let paramiko mark a dead peer promptly so the
+# health check can repair it. Kept below the 30s health-check interval so a
+# dead connection is detectable before the next repair tick.
+_SSH_KEEPALIVE_INTERVAL_SECONDS: Final[int] = 15
+
 
 class RemoteSSHInfo(FrozenModel):
     """SSH connection info for a remote agent host."""
@@ -95,7 +105,7 @@ class ReverseTunnelInfo(FrozenModel):
             "caller of ``setup_reverse_tunnel`` (currently the Latchkey discovery handler) and "
             "read by ``remove_reverse_tunnels_for_agent`` so all tunnels belonging to a "
             "destroyed agent can be torn down together. ``None`` when the caller does not "
-            "associate the tunnel with a specific agent (e.g. minds' bare ``--reverse <r>:<l>`` "
+            "associate the tunnel with a specific agent (e.g. bare ``--reverse <r>:<l>`` "
             "specs from the plugin CLI)."
         ),
     )
@@ -173,8 +183,8 @@ class SSHTunnelManager(MutableModel):
     _shutdown_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     # Reverse tunnels are keyed by ``(conn_key, local_port)`` so that a single
     # SSH host can host multiple concurrent tunnels for different purposes --
-    # e.g. one for the minds API (``local_port == server_port``) and one per
-    # agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
+    # e.g. one for a host application's API (``local_port == server_port``) and
+    # one per agent for the Latchkey gateway (``local_port == per_agent_gateway_port``).
     _reverse_tunnels: dict[tuple[str, int], ReverseTunnelInfo] = PrivateAttr(default_factory=dict)
     _reverse_tunnel_setup_locks: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
     _health_check_thread: threading.Thread | None = PrivateAttr(default=None)
@@ -604,17 +614,24 @@ class SSHTunnelManager(MutableModel):
         for thread in self._tunnel_threads.values():
             thread.join(timeout=5.0)
 
-        # Cancel reverse port forwards
+        # Cancel reverse port forwards. Attempt the cancel unconditionally
+        # (best-effort) instead of skipping it when the connection looks
+        # inactive: a half-dead transport that paramiko has not yet noticed
+        # would otherwise leave the remote sshd's forwarded listener bound,
+        # orphaning the port across restarts. ``cancel_port_forward`` is itself
+        # a no-op on a transport paramiko already considers dead, so this is
+        # safe even when the connection is genuinely gone.
         for tunnel_key, tunnel_info in self._reverse_tunnels.items():
             conn_key, _local_port = tunnel_key
             client = self._connections.get(conn_key)
-            if client is not None and _ssh_connection_is_active(client):
-                try:
-                    transport = client.get_transport()
-                    if transport is not None:
-                        transport.cancel_port_forward("127.0.0.1", tunnel_info.remote_port)
-                except (paramiko.SSHException, OSError) as e:
-                    logger.trace("Error cancelling reverse port forward: {}", e)
+            if client is None:
+                continue
+            try:
+                transport = client.get_transport()
+                if transport is not None:
+                    transport.cancel_port_forward("127.0.0.1", tunnel_info.remote_port)
+            except (paramiko.SSHException, OSError) as e:
+                logger.trace("Error cancelling reverse port forward: {}", e)
         self._reverse_tunnels.clear()
         self._failure_state.clear()
 
@@ -660,6 +677,17 @@ def _create_ssh_client(ssh_info: RemoteSSHInfo) -> paramiko.SSHClient:
         key_filename=str(ssh_info.key_path),
         timeout=10.0,
     )
+
+    # Send periodic keepalives so an idle reverse tunnel does not silently
+    # half-die: without this a dropped connection goes unnoticed on both ends
+    # (paramiko keeps the transport "active" and the remote sshd keeps the
+    # forwarded listener bound), orphaning the remote port across restarts.
+    # Keepalives also let paramiko mark the transport dead promptly when the
+    # peer stops responding, so the reverse-tunnel health check repairs it
+    # instead of spinning against a zombie connection.
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(_SSH_KEEPALIVE_INTERVAL_SECONDS)
 
     return client
 

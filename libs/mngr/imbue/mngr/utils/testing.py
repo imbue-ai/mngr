@@ -75,6 +75,14 @@ from imbue.mngr.utils.polling import wait_for
 # list only contains IDs from tests run by THIS worker.
 worker_test_ids: list[str] = []
 
+# Track the mngr prefixes under which this worker's docker fixtures may have
+# created a singleton state container. Each xdist worker is a separate process,
+# so this only holds prefixes from THIS worker's tests. The session cleanup uses
+# it to attribute leaked state containers to us (and fail), as opposed to
+# containers from other concurrent workers/sessions (which it can only
+# warn-and-clean). Mirrors worker_test_ids.
+worker_docker_state_prefixes: list[str] = []
+
 # Track Modal app names that were created during tests for cleanup verification.
 # This enables detection of leaked apps that weren't properly cleaned up.
 worker_modal_app_names: list[str] = []
@@ -361,9 +369,12 @@ def assert_home_is_temp_directory() -> None:
     """
     actual_home = Path.home()
     actual_home_str = str(actual_home)
-    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS
+    # pytest's tmp_path uses /tmp on Linux, /var/folders or /private/var on macOS.
+    # /private/tmp is also valid: when TMPDIR points into /tmp (e.g. a /tmp/<runner> sandbox),
+    # macOS realpath-resolves the /tmp -> /private/tmp symlink, so tmp_path lands under /private/tmp.
     if not (
         actual_home_str.startswith("/tmp")
+        or actual_home_str.startswith("/private/tmp")
         or actual_home_str.startswith("/var/folders")
         or actual_home_str.startswith("/private/var")
     ):
@@ -415,6 +426,29 @@ def setup_mngr_test_environment(
     # Safety check: verify Path.home() is in a temp directory.
     # If this fails, tests could accidentally modify the real home directory.
     assert_home_is_temp_directory()
+
+
+@contextmanager
+def capture_log_warnings() -> Generator[list[str], None, None]:
+    """Capture loguru warning messages, yielding the list they accumulate in.
+
+    Core logic shared by all log_warnings fixtures (in mngr/conftest.py and
+    plugin_testing.py). This is the single source of truth so the fixtures stay
+    thin delegation wrappers rather than duplicating the handler bookkeeping.
+
+    Tolerates handler removal during the test (e.g. setup_logging() calls
+    logger.remove() which clears all handlers, so the handler we added may no
+    longer exist by the time teardown runs).
+    """
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
+    try:
+        yield messages
+    finally:
+        try:
+            logger.remove(handler_id)
+        except ValueError:
+            pass
 
 
 def get_subprocess_test_env(
@@ -880,6 +914,7 @@ def make_test_agent_details(
     host_plugin: dict | None = None,
     host_tags: dict[str, str] | None = None,
     labels: dict[str, str] | None = None,
+    plugin: dict | None = None,
     host_id: HostId | None = None,
     provider_name: ProviderInstanceName | None = None,
     ssh: SSHInfo | None = None,
@@ -911,6 +946,7 @@ def make_test_agent_details(
         start_on_boot=False,
         state=state,
         labels=labels or {},
+        plugin=plugin or {},
         host=host_details,
     )
 

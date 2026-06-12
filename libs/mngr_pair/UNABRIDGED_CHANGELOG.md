@@ -4,6 +4,21 @@ Full, unedited changelog entries for the `mngr_pair` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-05-29
+
+Mark ``test_unison_syncer_syncs_symlinks`` flaky.
+
+The test's ``wait_for`` only waits for the symlink to land in the target
+directory, but the very next assertion checks that the symlink's referent file
+``real_file.txt`` also exists. Unison gives no ordering guarantee between two
+unrelated files in a single sync sweep, so the symlink can appear before its
+target file does. The proper fix is to widen the ``wait_for`` predicate; left
+for a follow-up.
+
 ## 2026-05-28
 
 ### Migrate to the new thin `git_pull`/`git_push` wrappers

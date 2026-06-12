@@ -117,7 +117,12 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    rc.check_yaml_usage(_DIR, snapshot(5))
+    # litellm mandates a YAML config file, so this app cannot use TOML here:
+    # app.py builds/writes it (yaml.dump) and config_drift_test.py parses the
+    # local-dev litellm_proxy/config.yaml (yaml.safe_load) to assert it stays
+    # in sync with app.py. These are references to litellm's externally-required
+    # format, not new YAML config of our own.
+    rc.check_yaml_usage(_DIR, snapshot(10))
 
 
 def test_prevent_functools_partial() -> None:
@@ -278,6 +283,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(0))
 
 
 # --- Project-level checks ---

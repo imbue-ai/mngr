@@ -4,6 +4,218 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-10
+
+Raised the stale coverage floor from 19% to 45% to match the coverage CI already measures (~50%).
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
+## 2026-06-08
+
+The imbue_cloud slow (rebuild) path now re-applies the full idempotent host
+setup on the leased VPS before rebuilding the container: it ensures the pinned
+Docker version, installs/registers gVisor `runsc` if missing, tunes sshd, and
+installs the base packages. This runs after the old container is torn down and
+before the rebuild, and a failure is fatal. The result is that a workspace
+created via the slow path -- even against a host baked with an old version, or
+one baked before runsc existed -- comes up consistent and runs its agent
+container under gVisor.
+
+`ImbueCloudProviderConfig` now extends `VpsDockerProviderConfig`, so it carries
+`docker_runtime` / `install_gvisor_runtime` / `default_start_args`; the delegated
+vps_docker provider used for the rebuild forwards these, so the rebuilt container
+runs under `--runtime runsc` with the `--workdir=/` and
+`--security-opt=no-new-privileges` hardening args. These values are written into
+the per-account `[providers.imbue_cloud_<slug>]` block by minds bootstrap.
+
+Added a `--no-recycle` flag to `mngr imbue_cloud admin pool create`. By default
+the OVH provider reclaims a cancelled (still-billable) VPS when one is available;
+`--no-recycle` forces a fresh order instead (it sets
+`MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false` on the inner `mngr create`),
+which makes it easy to exercise and test the fresh-provision path.
+
+Region-aware leasing for imbue_cloud hosts.
+
+- `mngr create` against imbue_cloud now accepts two new build-arg knobs: a hard `-b region=<datacenter>` requirement (only a host in that datacenter is leased, else the create fails) and a soft `-b preferred_region=<datacenter>` preference (a host in that datacenter is preferred, but any available host is still returned so the fast path is never blocked). Both are validated against the known OVH-US datacenters (`US-EAST-VA`, `US-WEST-OR`); an unknown value fails fast.
+- Both knobs are sent to the connector's lease endpoint as separate fields (not folded into the JSONB attribute filter) and are applied on both the fast (adopt) and slow (rebuild) create paths. A hard `region` is preserved through the slow path's attribute relaxation.
+- `mngr imbue_cloud admin pool add` now records the bake `--region` (OVH datacenter) into the new `pool_hosts.region` column so the connector can filter/order on it.
+
+- Removed the soft `preferred_region` lease knob. A lease now takes only the hard
+  `region` build arg (`-b region=<dc>`): when set, only a host in that OVH
+  datacenter is leased, otherwise the lease is region-agnostic.
+
+Tests now isolate $HOME the same way as every other mngr plugin: the project
+conftest calls `register_plugin_test_fixtures(globals())`, which brings in the
+autouse `setup_test_mngr_env` fixture. Previously this plugin's tests did not
+redirect $HOME, so running them on their own could read or write the real
+`~/.mngr` / `~/.claude.json`. Internal test-infrastructure change only; no
+user-facing behavior change.
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr imbue_cloud` provider plugin, not minds-specific). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its previously-unpinned internal deps (`imbue-mngr-vps-docker`, `imbue-common`) are now pinned with `==` to their current workspace versions, as a published wheel requires. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check. No runtime behavior change.
+
+Fixed a stale reference in `UNABRIDGED_CHANGELOG.md`: the `minds-dev-iterate`
+skill was renamed to `minds-dev-workflow`. The historical entry now points at
+the current skill name (noting the former name) so readers can find it.
+
+## 2026-06-03
+
+Fixed the imbue_cloud slow (rebuild) path. When `fast_mode=prevent` leased a host
+and rebuilt its container, the rebuilt host was still marked as carrying a
+pre-baked agent, so `provision_agent` took the minimal "adopt" path (which runs a
+`python3` claude-config patch) against the freshly-rebuilt container -- failing
+with `python3: not found`. The slow path now builds the host object with
+`adopt_pre_baked_agent=False`, so `pre_baked_agent_id` is unset and mngr runs its
+standard full create + provision pipeline (matching the slow path's "fresh OVH
+host" contract). The rebuilt agent gets a fresh id; the bake's agent id was only
+bookkeeping (release keys off the lease's host db id).
+
+This pairs with the FCT `imbue_cloud` create template gaining the same build
+config as `ovh` (`--file=Dockerfile .`, `target_path=/mngr/code/`, `fct-seed`
+post-create) so the rebuild produces the FCT image rather than a bare
+`debian:bookworm-slim`; those build args are ignored on the fast/adopt path.
+
+Fixed the pool-host bake writing the wrong value into `pool_hosts.vps_instance_id`:
+the INSERT passed the mngr `host_id` where the OVH service name belongs, which
+broke every connector-side OVH teardown (they key on `vps_instance_id`). The bake
+now writes `vps_address` (the service name) via the new pure
+`build_pool_host_insert_values()`, pinned by a regression test using the real
+`host-`/`vps-` shapes.
+
+`mngr imbue_cloud admin pool destroy` (and the `minds pool destroy` wrapper) now
+do a full teardown: cancel the OVH VPS (strip per-lease tags + `deleteAtExpiration`)
+before dropping the row, so it can no longer strand a still-billing VPS. Pass
+`--skip-vps-cancel` only when the VPS is already gone. The wrapper injects the
+tier's OVH credentials from Vault, like `pool create`. Relatedly, the imbue_cloud
+provider's `destroy_host` now raises when the connector release fails instead of
+silently cleaning up local state, so a failed release no longer makes mngr
+"forget" a host whose lease/VPS is still live.
+
+Stopped masking errors in the lease/teardown paths (error-handling audit):
+- `_list_leased_hosts_cached` no longer swallows a `list_hosts` failure to an
+  empty list -- a transient connector outage / expired token now propagates
+  (the method already raised via `_require_account`, so callers tolerate it)
+  rather than making the account look like it has zero leased hosts.
+- `client.release_host` now raises `ImbueCloudConnectorError` on a transport
+  error or non-2xx (e.g. the synchronous release returning 5xx because the OVH
+  cancel failed) instead of returning a quiet `False`. `destroy_host` lets it
+  propagate (so a failed release surfaces and local state isn't cleaned up);
+  the create-rollback path (`_release_lease_quietly`) catches it explicitly to
+  stay best-effort.
+- The leased-host TOFU host-key scan now logs (debug) the cause when it can't
+  read a remote key, so the later StrictHostKeyChecking SSH failure is
+  diagnosable.
+
+Added `mngr imbue_cloud admin paid` subcommands for managing the connector's paid-user lists: `paid domain add|remove|list` and `paid email add|remove|list` (with `--paid-only` on list). These talk to the connector's `/paid/*` admin API using the fixed API key read from `$MINDS_PAID_ADMIN_KEY` (or `--api-key`). Added matching client methods and a `PaidListEntry` data type.
+
+Added a robust "slow path" to imbue_cloud host leasing. A new `fast_mode` build
+arg (`-b fast_mode=require|prevent`) selects how `mngr create` lands on a pool
+host:
+
+- `fast_mode=require`: lease a pool host whose attributes exactly match and adopt
+  its pre-baked agent (the original fast path). Raises a distinct
+  `FastPathUnavailableError` when no exact match exists.
+- `fast_mode=prevent` (the new default): lease any adequately-sized available
+  host (resource attributes only; `repo_branch_or_tag`/`repo_url` are dropped),
+  destroy its baked container, and rebuild it from the FCT Dockerfile via the
+  shared `mngr_vps_docker` setup path, then run mngr's standard full client-side
+  setup -- exactly like an OVH host.
+
+Once a host is leased, any failure during the remaining setup now releases the
+lease back to the pool before re-raising, so failed builds never leak a lease.
+Logs clearly state which path was taken (`FAST PATH` vs `SLOW PATH`).
+
+Unknown `-b` entries (e.g. `--file=Dockerfile`, `.`) are now forwarded verbatim
+to the delegated build instead of being rejected.
+
+## 2026-06-02
+
+Simplified an exception handler now that `HostError`/`HostConnectionError`/`HostNotFoundError`
+are all `MngrError` subclasses: the redundant `except (HostConnectionError, HostNotFoundError,
+MngrError)` guard is now just `except MngrError`. No behavior change.
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
+## 2026-06-01
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override (and its lease-only `_build_offline_details_from_lease` fallback) to accept and forward the new `offline_field_generators` parameter, so offline plugin fields (see the mngr changelog entry) are populated for leased hosts that fall back to offline/lease-only data.
+
+## 2026-05-29
+
+# Fix OAuth CLI hang after successful browser sign-in
+
+- Fixed a bug in `mngr imbue_cloud auth oauth` where the local callback listener would hang until the 300s timeout after the browser had already returned the OAuth code. The handler now only records query params when the request is for `/oauth/callback` and carries non-empty params, so secondary browser GETs (favicon, prefetches, etc.) can no longer overwrite the captured callback with `{}`.
+
+Added R2 bucket support: a new `mngr imbue_cloud bucket` command group for
+creating, listing, inspecting, and destroying R2 buckets (one per host, paid
+accounts only), plus `bucket keys create/list/destroy` for minting and revoking
+scoped S3 keys (read-only or read-write) to hand to different agents.
+
+`bucket create` returns S3-compatible credentials (access key id, secret access
+key, endpoint, bucket name) as JSON; the secret is shown only once and is never
+stored by the service. `bucket destroy` refuses a non-empty bucket and, on
+success, revokes all of that bucket's keys.
+
+`mngr destroy <agent>` against an imbue_cloud-leased pool host is now
+*terminal* rather than a soft `docker stop`. The new flow on the leased
+VPS:
+
+1. Stops + removes the workspace container, drops the per-host docker named
+   volume, deletes the per-host btrfs subvolume under `/mngr-btrfs/`, runs
+   `docker system prune -a -f --volumes`, and wipes `/root` + `/tmp`
+   (preserving only `/root/.ssh/authorized_keys` so the pool-management ssh
+   path still works through `cleanup_released_hosts.py`).
+2. Releases the lease back to the pool (the `/hosts/{id}/release` connector
+   call -- same as `mngr imbue_cloud hosts release`).
+3. Cleans up local per-host state (ssh keys, known_hosts, cached records).
+
+Privacy-first ordering: the agent's data is gone before the connector flips
+the row to `released`, so the eventual VPS-destroy by
+`cleanup_released_hosts.py` is belt-and-suspenders rather than the only
+barrier.
+
+To stop the container without releasing the lease (i.e. you intend to
+resume the workspace later on the same VPS), use `mngr stop <agent>`
+instead.
+
+`mngr delete <agent>` (the GC path) now also runs this same flow; it's a
+safe no-op for an already-released lease and acts as a recovery path if a
+prior `destroy` crashed mid-wipe.
+
+The wipe script (`build_pool_host_wipe_script`) is exposed as a pure free
+function in `mngr_imbue_cloud.instance` so the rendered shell can be unit
+tested without standing up an SSH transport.
+
+The minds app now consumes the `mngr imbue_cloud bucket` capability: when a
+workspace is created with the `imbue_cloud` backup provider, minds calls
+`mngr imbue_cloud bucket create` / `bucket keys create` to provision a
+per-workspace R2 bucket (named after the host id) and a scoped readwrite key,
+then points the workspace's restic backups at it.
+
+(This integration PR adds no code in this project; it wires the existing
+bucket commands into the minds workspace-creation flow. The bucket commands
+themselves are covered by the `mngr-cloud-bucket` changelog entry.)
+
 ## 2026-05-28
 
 # Dropped redundant per-project ty/ruff ratchet tests
@@ -93,7 +305,7 @@ Swap the imbue-cloud pool bake walker from Vultr to OVH:
 ## 2026-05-06
 
 - `mngr imbue_cloud admin pool create`: post-create read-back is now scoped to `--provider <provider>` (default `vultr`) and uses `--on-error continue`, so a pre-existing stale host on the operator's machine no longer aborts the bake before the management-key install + DB INSERT. The bake still fails loudly when the just-created agent is genuinely missing from the listing output.
-- Removed the broken `just create-pool-hosts-dev` and `just create-pool-hosts` recipes. Both called `apps/remote_service_connector/scripts/create_pool_hosts.py`, which still inserted into the dropped `pool_hosts.version` column and so failed against the migrated schema. The replacement is `mngr imbue_cloud admin pool create` (with `--mngr-source` for the dev-loop's working-tree-into-vendor/mngr/ rsync). `just sync-vendor-mngr` is unchanged -- it serves a different (release) flow not covered by the plugin. Updated `just minds-start`'s "no FCT worktree" hint and the `minds-dev-iterate` skill to point at the new bake path.
+- Removed the broken `just create-pool-hosts-dev` and `just create-pool-hosts` recipes. Both called `apps/remote_service_connector/scripts/create_pool_hosts.py`, which still inserted into the dropped `pool_hosts.version` column and so failed against the migrated schema. The replacement is `mngr imbue_cloud admin pool create` (with `--mngr-source` for the dev-loop's working-tree-into-vendor/mngr/ rsync). `just sync-vendor-mngr` is unchanged -- it serves a different (release) flow not covered by the plugin. Updated `just minds-start`'s "no FCT worktree" hint and the `minds-dev-workflow` skill to point at the new bake path.
 - Deleted dead code: `apps/remote_service_connector/scripts/create_pool_hosts.py` (replaced by `mngr imbue_cloud admin pool create`).
 
 - Internal: re-baseline mngr_imbue_cloud against the standard ratchet checks. The new plugin's `test_ratchets.py` now includes the full set of `test_prevent_*` functions derived from `standard_ratchet_checks.py` (snapshots pinned to current violation counts so they can only ratchet down).

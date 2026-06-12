@@ -9,7 +9,7 @@ from imbue.skitwright.expect import expect
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.modal
+@pytest.mark.timeout(300)
 def test_full_lifecycle(e2e: E2eSession) -> None:
     # Create
     expect(
@@ -42,6 +42,14 @@ def test_full_lifecycle(e2e: E2eSession) -> None:
     exec_after_restart = e2e.run("mngr exec my-task 'echo still-alive'", comment="Verify exec works after restart")
     expect(exec_after_restart).to_succeed()
     expect(exec_after_restart.stdout).to_contain("still-alive")
+
+    # Verify start actually relaunched the agent's own command, not just that
+    # exec works: the "sleep 100100" process must be running again after restart.
+    ps_after_restart = e2e.run(
+        "mngr exec my-task 'ps aux'", comment="Verify the agent command is running after restart"
+    )
+    expect(ps_after_restart).to_succeed()
+    expect(ps_after_restart.stdout).to_contain("sleep 100100")
 
     # Destroy
     expect(e2e.run("mngr destroy my-task --force", comment="Destroy the agent")).to_succeed()

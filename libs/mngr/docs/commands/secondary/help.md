@@ -58,6 +58,7 @@ mngr help [OPTIONS] [TOPIC]...
 - provisioning - Provisioning
 - resource_cleanup - Resource Cleanup
 - snapshot - Snapshots
+- usage_cron_recipes - mngr usage: Cron automation recipes
 
 ## Examples
 

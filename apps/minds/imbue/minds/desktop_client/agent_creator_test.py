@@ -8,6 +8,7 @@ file covers minds' command-building and helpers.
 """
 
 import queue
+import subprocess
 import threading
 import time
 from collections.abc import Mapping
@@ -15,32 +16,46 @@ from http.server import BaseHTTPRequestHandler
 from http.server import HTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.agent_creator import _CreateEventCapture
 from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import checkout_branch
+from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
+from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.errors import GitCloneError
+from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
+from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import CreationId
+from imbue.minds.primitives import GitBranch
+from imbue.minds.primitives import GitUrl
 from imbue.minds.primitives import LaunchMode
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -52,6 +67,47 @@ def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
 def test_extract_repo_name_falls_back_to_workspace() -> None:
     assert extract_repo_name("/") == "workspace"
     assert extract_repo_name("///") == "workspace"
+
+
+def test_create_event_capture_records_error_class_from_jsonl_error_event() -> None:
+    """A structured ``{"event":"error","error_class":...}`` line populates ``error_class``.
+
+    This is what lets the fast->slow fallback branch on the error *type* rather
+    than substring-matching human text.
+    """
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "error", "error_class": "FastPathUnavailableError", "message": "no match"}',
+        is_stdout=True,
+    )
+    assert capture.error_class == "FastPathUnavailableError"
+    assert capture.canonical_agent_id is None
+
+
+def test_create_event_capture_still_records_created_event() -> None:
+    """The error-event handling must not regress the existing ``created`` parsing."""
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "created", "agent_id": "agent-b40593cc326a41cd832e3dc5c3d951de", "host_id": "host-xyz"}',
+        is_stdout=True,
+    )
+    assert str(capture.canonical_agent_id) == "agent-b40593cc326a41cd832e3dc5c3d951de"
+    assert capture.canonical_host_id == "host-xyz"
+    assert capture.error_class is None
+
+
+def test_create_event_capture_ignores_error_event_without_error_class() -> None:
+    """An error event lacking ``error_class`` leaves the field unset (no crash)."""
+    capture = _CreateEventCapture()
+    capture('{"event": "error", "message": "something failed"}', is_stdout=True)
+    assert capture.error_class is None
+
+
+def test_mngr_command_error_carries_error_class() -> None:
+    """MngrCommandError exposes the parsed error class for fallback decisions."""
+    err = MngrCommandError("mngr create failed", error_class="FastPathUnavailableError")
+    assert err.error_class == "FastPathUnavailableError"
+    assert MngrCommandError("plain failure").error_class is None
 
 
 def test_is_local_path_recognises_relative_and_absolute_paths() -> None:
@@ -116,6 +172,31 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
+    """The onboarding picker passes a hex through; the command builder
+    lifts it into a --label color=<hex> flag alongside the existing
+    workspace / is_primary / user_created labels so the workspace ships
+    with its color from create time onward (no post-create write needed)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        color="#0b292b",
+    )
+    # The label must be expressed as two consecutive argv tokens so the
+    # CLI parser binds the value to ``-l``/``--label``.
+    joined = " ".join(command)
+    assert "--label color=#0b292b" in joined
+
+
+def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "color=" not in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
@@ -141,6 +222,70 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
         assert "MINDS_API_KEY" not in joined, f"{mode}: command must not mention MINDS_API_KEY"
 
 
+def test_build_mngr_create_command_forwards_fast_mode_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        imbue_cloud_fast_mode="require",
+    )
+    # The fast_mode knob must reach mngr as a -b build arg.
+    assert "-b" in command
+    assert "fast_mode=require" in command
+
+
+def test_build_mngr_create_command_omits_fast_mode_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "fast_mode" not in joined
+
+
+def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+        region="US-WEST-OR",
+    )
+    # The explicit region must reach mngr as a hard -b region= build arg.
+    assert "region=US-WEST-OR" in command
+
+
+def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.CLOUD,
+        host_name=HostName("hello"),
+        region="lhr",
+    )
+    # Vultr takes the region as the --vps-region build arg.
+    assert "--vps-region=lhr" in command
+
+
+def test_build_mngr_create_command_omits_region_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.IMBUE_CLOUD,
+        host_name=HostName("hello"),
+        imbue_cloud_account="alice@imbue.com",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined
+
+
+def test_build_mngr_create_command_ignores_region_for_docker() -> None:
+    # Region is meaningful only for region-bearing providers; DOCKER drops it.
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        region="US-WEST-OR",
+    )
+    joined = " ".join(command)
+    assert "region=" not in joined and "vps-region" not in joined
+
+
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
     """Empty / ``None`` ``latchkey_env`` opts the host out of latchkey wiring entirely."""
     for latchkey_env in (None, {}):
@@ -154,11 +299,26 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
+    launch_mode: LaunchMode,
+) -> None:
+    """Non-IMBUE_CLOUD modes express "fresh host" via ``--new-host`` and never pass ``--reuse`` / ``--update``.
+
+    mngr's ``--reuse`` matches on agent name only (``system-services``
+    here) without scoping to a host, so passing it from the create-form
+    would adopt the wrong host's agent whenever any other workspace
+    shared the constant agent name. ``--new-host`` already encodes
+    fresh-host intent; ``--reuse`` is reserved for IMBUE_CLOUD where the
+    pool host comes pre-baked with a ``system-services`` agent.
+    """
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.DOCKER,
+        launch_mode=launch_mode,
         host_name=HostName("hello"),
     )
+    assert "--new-host" in command
+    assert "--reuse" not in command
+    assert "--update" not in command
     assert "--template" in command
     assert "main" in command
     # The /welcome message now lives in forever-claude-template's
@@ -167,10 +327,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
@@ -252,6 +408,152 @@ def test_is_git_worktree_returns_false_for_nonexistent_path(tmp_path) -> None:
     assert not _is_git_worktree(tmp_path / "no-such-dir")
 
 
+def _git(cwd: Path, *args: str) -> str:
+    """Run a git command in ``cwd`` and return its stripped stdout."""
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
+    """Create a repo on ``main`` with a second branch ``branch`` that has its own tip.
+
+    The branch tip has a parent commit, which is exactly the case a ``--depth 1``
+    clone would turn into a shallow boundary (and thus an unpushable mirror).
+    """
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "f").write_text("base\n")
+    _git(origin, "add", "f")
+    _git(origin, "commit", "-qm", "base commit")
+    _git(origin, "checkout", "-q", "-b", branch)
+    (origin / "f").write_text("on branch\n")
+    _git(origin, "commit", "-qam", "branch commit")
+    _git(origin, "checkout", "-q", "main")
+
+
+def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
+    """Cloning then checking out a branch keeps full ancestry (non-shallow) and remains mirror-pushable.
+
+    Regression for the deep-clone fix: a ``--depth 1`` clone is rejected
+    by mngr create's mirror-push into the agent container ("shallow update
+    not allowed"). The init + fetch implementation is non-shallow by
+    default; we assert that here.
+
+    The pair-of-calls (clone_git_repo then checkout_branch) mirrors
+    production usage in :func:`AgentCreator.create_agent`.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("testing"))
+    checkout_branch(dest, GitBranch("testing"))
+
+    # Checked out on the requested branch, with that branch's content.
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
+    assert (dest / "f").read_text() == "on branch\n"
+    # Clone is NOT shallow.
+    assert not (dest / ".git" / "shallow").exists()
+
+    # The mirror-push mngr create performs into the agent container's bare repo
+    # must succeed -- this is what fails on a shallow clone.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+    assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+
+
+def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
+    """Requesting a branch that does not exist fails at clone time (cleanly)."""
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    with pytest.raises(GitCloneError):
+        clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
+    """``clone_git_repo(branch=<40-hex sha>)`` works -- the previous
+    ``git clone --branch <sha>`` rejected SHAs outright.
+
+    Drives a SHA pointing at the tip of the non-default branch so the
+    resulting worktree must really land at that commit (not main).
+    HEAD's local branch name is ``sha-<sha>`` so subsequent operations
+    that type the SHA do not trigger git's "refname is ambiguous"
+    warning. Mirror-push still succeeds because the fetch was
+    non-shallow.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    target_sha = _git(origin, "rev-parse", "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch(target_sha))
+    checkout_branch(dest, GitBranch(target_sha))
+
+    # Worktree lands at the requested commit.
+    assert _git(dest, "rev-parse", "HEAD") == target_sha
+    assert (dest / "f").read_text() == "on branch\n"
+    # Local branch carries the sha- prefix (40-hex would otherwise warn).
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == f"sha-{target_sha}"
+    assert not (dest / ".git" / "shallow").exists()
+
+    # Mirror-push must succeed.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+
+
+def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> None:
+    """Annotated tags resolve through `git fetch` + `checkout -B name FETCH_HEAD` just like branches.
+
+    This is the FALLBACK_BRANCH="v0.3.0" path used by the released minds
+    binary: the input is a tag, not a branch.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    _git(origin, "tag", "-a", "v1.0.0", "testing", "-m", "release v1.0.0")
+    expected_sha = _git(origin, "rev-list", "-n1", "v1.0.0")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("v1.0.0"))
+    checkout_branch(dest, GitBranch("v1.0.0"))
+
+    assert _git(dest, "rev-parse", "HEAD") == expected_sha
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "v1.0.0"
+    assert (dest / "f").read_text() == "on branch\n"
+
+
+class _RecordingNotificationDispatcher(NotificationDispatcher):
+    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching."""
+
+    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
+
+    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
+        self._recorded.append((request, agent_display_name))
+
+    @property
+    def recorded(self) -> list[tuple[NotificationRequest, str]]:
+        return self._recorded
+
+
 def _make_test_creator(
     tmp_path,
     *,
@@ -261,6 +563,9 @@ def _make_test_creator(
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
+    notification_dispatcher: NotificationDispatcher | None = None,
+    backup_setup_retry_budget_seconds: float = 0.0,
+    backup_setup_retry_wait_seconds: float = 0.0,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
     cg = ConcurrencyGroup(name="agent-creator-test")
@@ -268,13 +573,16 @@ def _make_test_creator(
     return AgentCreator(
         paths=paths,
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        notification_dispatcher=notification_dispatcher
+        or NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         workspace_ready_timeout_seconds=timeout_seconds,
         workspace_ready_poll_interval_seconds=poll_interval_seconds,
         workspace_ready_probe_timeout_seconds=probe_timeout_seconds,
         system_interface_health_tracker=system_interface_health_tracker or SystemInterfaceHealthTracker(),
+        backup_setup_retry_budget_seconds=backup_setup_retry_budget_seconds,
+        backup_setup_retry_wait_seconds=backup_setup_retry_wait_seconds,
     )
 
 
@@ -315,6 +623,34 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
     return server, thread, port
 
 
+def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) -> None:
+    """A backup setup that keeps failing notifies the user once the retry budget is spent.
+
+    Uses an API_KEY request with no RESTIC_REPOSITORY, which fails deterministically
+    (no network) on every attempt. With a zero-second budget the loop makes a single
+    attempt, then gives up and dispatches exactly one notification -- and must not let
+    the exception escape the detached-thread entry point.
+    """
+    dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
+    creator = _make_test_creator(
+        tmp_path,
+        notification_dispatcher=dispatcher,
+        backup_setup_retry_budget_seconds=0.0,
+        backup_setup_retry_wait_seconds=0.0,
+    )
+    request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+
+    creator._provision_backups(
+        agent_id=AgentId.generate(),
+        host_id="host-00000000000000000000000000000000",
+        backup_request=request,
+    )
+
+    assert len(dispatcher.recorded) == 1
+    notification, _agent_display_name = dispatcher.recorded[0]
+    assert notification.title == "Backup setup failed"
+
+
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
     """Default construction (``mngr_forward_port=0``) skips the probe entirely."""
     creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
@@ -351,10 +687,10 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
             probe_timeout_seconds=0.5,
         )
         log_q: queue.Queue[str] = queue.Queue()
-        # Use a localhost URL that resolves to the same server. Subdomains
-        # of localhost all resolve to 127.0.0.1, so an http.server bound to
-        # 127.0.0.1 answers regardless of the Host header. Construct a
-        # plausible-looking AgentId so the probe URL is well-formed.
+        # The probe connects to the plugin on loopback and carries the agent
+        # vhost only in the Host header, so the http.server bound to 127.0.0.1
+        # answers it without any ``*.localhost`` name resolution. Construct a
+        # plausible-looking AgentId so the Host header is well-formed.
         aid = AgentId.generate()
         creator._wait_for_workspace_ready(aid, log_q)
     finally:
@@ -363,24 +699,27 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     while not log_q.empty():
         drained.append(log_q.get_nowait())
     assert any("Waiting for system interface" in line for line in drained)
-    assert any("ready" in line.lower() for line in drained)
+    # Assert the *success* line specifically -- the timeout-warning line also
+    # contains the word "ready", so a substring check would pass on a timeout.
+    assert any("System interface is ready" in line for line in drained)
 
 
-def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> None:
+def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) -> None:
     """Regression: a successful readiness probe must propagate to the health tracker.
 
-    Without the ``record_success`` call, a HEALTHY->STUCK timer armed by an
-    earlier ``system_interface_backend_failure`` envelope would fire AFTER readiness
-    returned, the chrome SSE would receive ``status=stuck``, and the user
-    would land on the workspace-recovery page seconds after their freshly
-    created agent appeared healthy. See ``system_interface_health.py`` for
-    the timer's lifecycle.
+    Without the ``record_probe_success`` call, the agent stays enrolled as a
+    suspect probe target after an earlier ``system_interface_backend_failure``
+    envelope, the background probe loop keeps accumulating a probe-failure run
+    while the container warms up, and the agent would be driven to STUCK --
+    landing the user on the recovery page seconds after their freshly created
+    agent appeared healthy. See ``system_interface_health.py`` for the
+    suspect / probe-failure-run lifecycle.
     """
     tracker = SystemInterfaceHealthTracker()
     aid = AgentId.generate()
-    # Pre-arm the STUCK timer the way an in-flight warmup failure would.
-    # The agent stays HEALTHY until the 5s timer fires; we want to verify
-    # ``record_success`` cancels the timer before that.
+    # Enroll the agent as a suspect the way an in-flight warmup failure would.
+    # The agent stays HEALTHY; we want to verify ``record_probe_success``
+    # de-enrolls it so the background probe loop stops polling it.
     tracker.record_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     server, _thread, port = _start_scripted_server(not_ready_count=0)
@@ -397,11 +736,68 @@ def test_wait_for_workspace_ready_calls_record_success_on_ready(tmp_path) -> Non
         creator._wait_for_workspace_ready(aid, queue.Queue())
     finally:
         server.shutdown()
-    # ``record_success`` cancelled the timer + cleared first_failure_at, so
-    # any subsequent record_failure would arm a fresh timer (i.e. the
-    # tracker is no longer mid-failing-run for this agent).
+    # ``record_probe_success`` de-enrolled the agent, so it is no longer a
+    # probe target and the background loop will stop polling it.
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert aid not in tracker.snapshot_all()
+    assert aid not in tracker.snapshot_probe_targets()
+
+
+def test_probe_workspace_through_plugin_targets_root_path() -> None:
+    """The probe hits ``/``, carrying the agent vhost in the Host header.
+
+    Probing ``/`` deliberately decouples readiness from any particular app
+    running inside the workspace: a 200 only confirms that some web server is
+    answering on the inner port, with no assumption about which routes it
+    implements.
+    """
+    captured: list[httpx.Request] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, text="ok")
+
+    aid = AgentId.generate()
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=aid,
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 200
+    assert len(captured) == 1
+    assert captured[0].url.path == "/"
+    # The agent vhost rides the Host header, not the URL host, so the probe
+    # does not depend on ``*.localhost`` resolution.
+    assert captured[0].headers["host"] == f"{aid}.localhost"
+
+
+def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
+    """A non-200 from the probed route surfaces as that status (not None / not 200).
+
+    When the inner port answers but not with a 200 (e.g. a 503 while the server
+    is still warming up), the probe returns that status so the caller's
+    ``== 200`` check treats the workspace as unready and the background loop
+    records a probe failure, driving the agent toward STUCK.
+    """
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(503, text="Service Unavailable")
+
+    with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
+        status = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            agent_id=AgentId.generate(),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert status == 503
 
 
 def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
