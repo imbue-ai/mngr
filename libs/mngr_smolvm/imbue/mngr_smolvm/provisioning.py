@@ -65,10 +65,17 @@ MaxStartups 100:30:200
 Subsystem sftp internal-sftp
 PidFile /run/sshd_mngr.pid
 SSHDCFG
-if [ -f /run/sshd_mngr.pid ] && kill -0 "$(cat /run/sshd_mngr.pid)" 2>/dev/null; then
-    :
-else
-    "$(command -v sshd)" -f /etc/ssh/sshd_config_mngr
+# Start sshd, tolerating an instance that is already listening. A pidfile
+# liveness check is unreliable here: each smolvm exec session observes its
+# own PID namespace, so recorded pids are meaningless across sessions. sshd
+# itself is the truthful probe -- a second start fails with "Address already
+# in use", which means we are already done.
+sshd_output=$("$(command -v sshd)" -f /etc/ssh/sshd_config_mngr 2>&1) && sshd_rc=0 || sshd_rc=$?
+if [ "$sshd_rc" != "0" ]; then
+    case "$sshd_output" in
+        *"already in use"*) : ;;
+        *) echo "$sshd_output" >&2; exit "$sshd_rc" ;;
+    esac
 fi
 echo MNGR_PROVISION_OK
 """
