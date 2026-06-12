@@ -179,9 +179,7 @@ def _compute_loader_provider_filter(
                 return None
 
     # Target side: consulted only for an existing host on a real provider.
-    target_uses_loader = (
-        address.host_name is not None and not _is_creating_new_host(address, opts.new_host)
-    )
+    target_uses_loader = address.host_name is not None and not _is_creating_new_host(address, opts.new_host)
     if target_uses_loader:
         if address.provider_name is not None:
             needed.add(str(address.provider_name))
@@ -845,9 +843,7 @@ def _setup_create(
     # Narrow discovery to the providers actually needed by the source/target/--reuse
     # consumers; falls back to a full scan when any of them needs to search across providers.
     loader_provider_filter = _compute_loader_provider_filter(opts, address)
-    agent_and_host_loader = _CachedAgentHostLoader(
-        mngr_ctx=mngr_ctx, provider_names=loader_provider_filter
-    )
+    agent_and_host_loader = _CachedAgentHostLoader(mngr_ctx=mngr_ctx, provider_names=loader_provider_filter)
 
     # figure out where the source data is coming from
     resolved_source = _resolve_source_location(opts, agent_and_host_loader, mngr_ctx, is_start_desired=opts.start_host)
