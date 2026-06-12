@@ -68,7 +68,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    rc.check_inline_imports(_DIR, snapshot(3))
+    rc.check_inline_imports(_DIR, snapshot(0))
 
 
 def test_prevent_relative_imports() -> None:
@@ -144,7 +144,7 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    rc.check_trailing_comments(_DIR, snapshot(1))
+    rc.check_trailing_comments(_DIR, snapshot(0))
 
 
 def test_prevent_init_docstrings() -> None:
@@ -169,7 +169,7 @@ def test_prevent_literal_with_multiple_options() -> None:
 
 
 def test_prevent_bare_generic_types() -> None:
-    rc.check_bare_generic_types(_DIR, snapshot(4))
+    rc.check_bare_generic_types(_DIR, snapshot(0))
 
 
 def test_prevent_typing_builtin_imports() -> None:
