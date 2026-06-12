@@ -70,6 +70,7 @@ from imbue.mngr_smolvm.errors import SmolvmProvisioningError
 from imbue.mngr_smolvm.host_store import HostRecord
 from imbue.mngr_smolvm.host_store import SmolvmHostStore
 from imbue.mngr_smolvm.host_store import SmolvmMachineConfig
+from imbue.mngr_smolvm.provisioning import HOST_PRIVATE_KEY_ENV_VAR
 from imbue.mngr_smolvm.provisioning import allocate_free_tcp_port
 from imbue.mngr_smolvm.provisioning import build_shutdown_script
 from imbue.mngr_smolvm.provisioning import build_ssh_provisioning_script
@@ -270,12 +271,14 @@ class SmolvmProviderInstance(BaseProviderInstance):
         """Path to this host's per-host known_hosts file, under its keys dir."""
         return self._host_keys_dir(host_id) / "known_hosts"
 
-    def _ensure_host_keypair(self, host_id: HostId) -> tuple[str, str]:
-        """Generate (or load) this host's ed25519 keypair, returning ``(private_key_pem, public_key_openssh)``."""
-        private_key_path, public_key_openssh = load_or_create_host_keypair(
-            self._host_keys_dir(host_id), _HOST_KEY_NAME
-        )
-        return private_key_path.read_text(), public_key_openssh
+    def _ensure_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
+        """Generate (or load) this host's ed25519 keypair, returning ``(private_key_path, public_key_openssh)``.
+
+        The private key is returned as a path (not its contents) so callers
+        can hand it to smolvm's ``--secret-file`` injection without the key
+        material ever passing through host-side argv.
+        """
+        return load_or_create_host_keypair(self._host_keys_dir(host_id), _HOST_KEY_NAME)
 
     def _client_ssh_keypair(self) -> tuple[Path, str]:
         """Client keypair mngr uses to reach guests as root."""
@@ -427,19 +430,22 @@ class SmolvmProviderInstance(BaseProviderInstance):
         after first boot of a large image, while the guest agent is still
         staging the workload container's layers.
         """
-        host_private_key_pem, host_public_key_openssh = self._ensure_host_keypair(host_id)
+        host_private_key_path, host_public_key_openssh = self._ensure_host_keypair(host_id)
         _client_key_path, client_public_key = self._client_ssh_keypair()
         script = build_ssh_provisioning_script(
-            host_private_key_pem=host_private_key_pem,
             host_public_key_openssh=host_public_key_openssh,
             client_authorized_public_key=client_public_key,
         )
         with log_span("Provisioning sshd in smolvm machine {}", machine_name):
+            # The private key travels via --secret-file (resolved host-side
+            # into the exec environment), never via argv, which other local
+            # users can read through /proc/<pid>/cmdline.
             exit_code, stdout, stderr = smolvm_machine_exec(
                 self.mngr_ctx.concurrency_group,
                 self.config.smolvm_command,
                 machine_name,
                 script,
+                secret_files=((HOST_PRIVATE_KEY_ENV_VAR, str(host_private_key_path)),),
                 timeout=self.config.provision_timeout_seconds,
             )
         if exit_code != 0 or "MNGR_PROVISION_OK" not in stdout:

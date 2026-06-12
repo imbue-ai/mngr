@@ -193,15 +193,17 @@ def test_ensure_host_keypair_creates_and_is_idempotent(smolvm_provider: SmolvmPr
     private_key_path, public_key_path = smolvm_provider._host_keypair_paths(host_id)
     assert not private_key_path.exists()
 
-    private_pem, public_openssh = smolvm_provider._ensure_host_keypair(host_id)
+    returned_private_key_path, public_openssh = smolvm_provider._ensure_host_keypair(host_id)
+    assert returned_private_key_path == private_key_path
+    private_pem = private_key_path.read_text()
     assert "PRIVATE KEY" in private_pem
     assert public_openssh.startswith("ssh-ed25519 ")
-    assert private_key_path.exists()
     assert public_key_path.exists()
 
     # Idempotent: a second call returns the same key
-    private_pem_2, public_openssh_2 = smolvm_provider._ensure_host_keypair(host_id)
-    assert private_pem_2 == private_pem
+    returned_private_key_path_2, public_openssh_2 = smolvm_provider._ensure_host_keypair(host_id)
+    assert returned_private_key_path_2 == private_key_path
+    assert private_key_path.read_text() == private_pem
     assert public_openssh_2 == public_openssh
 
 

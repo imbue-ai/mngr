@@ -1,17 +1,16 @@
 import socket
 
+from imbue.mngr_smolvm.provisioning import HOST_PRIVATE_KEY_ENV_VAR
 from imbue.mngr_smolvm.provisioning import allocate_free_tcp_port
 from imbue.mngr_smolvm.provisioning import build_shutdown_script
 from imbue.mngr_smolvm.provisioning import build_ssh_provisioning_script
 
 
-def test_ssh_provisioning_script_embeds_keys() -> None:
+def test_ssh_provisioning_script_embeds_public_keys_only() -> None:
     script = build_ssh_provisioning_script(
-        host_private_key_pem="-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
         host_public_key_openssh="ssh-ed25519 AAAAhost host-key",
         client_authorized_public_key="ssh-ed25519 AAAAclient client-key",
     )
-    assert "BEGIN PRIVATE KEY" in script
     assert "ssh-ed25519 AAAAhost host-key" in script
     assert "ssh-ed25519 AAAAclient client-key" in script
     # Installs sshd via either package manager and starts it with the
@@ -22,9 +21,21 @@ def test_ssh_provisioning_script_embeds_keys() -> None:
     assert "MNGR_PROVISION_OK" in script
 
 
+def test_ssh_provisioning_script_reads_private_key_from_secret_env_var() -> None:
+    """The private key is injected via the --secret-file env var (so it never
+    appears in host-side argv); the script must reference the var, refuse to
+    run without it, and re-append the trailing newline smolvm strips."""
+    script = build_ssh_provisioning_script(
+        host_public_key_openssh="ssh-ed25519 AAAAhost host-key",
+        client_authorized_public_key="ssh-ed25519 AAAAclient client-key",
+    )
+    assert "PRIVATE KEY" not in script
+    assert f"printf '%s\\n' \"${{{HOST_PRIVATE_KEY_ENV_VAR}}}\" > /etc/ssh/ssh_host_ed25519_key" in script
+    assert f'if [ -z "${{{HOST_PRIVATE_KEY_ENV_VAR}:-}}" ]' in script
+
+
 def test_ssh_provisioning_script_is_idempotent_about_authorized_keys() -> None:
     script = build_ssh_provisioning_script(
-        host_private_key_pem="key",
         host_public_key_openssh="pub",
         client_authorized_public_key="ssh-ed25519 AAAA client",
     )

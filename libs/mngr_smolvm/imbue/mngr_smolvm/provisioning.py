@@ -1,12 +1,18 @@
 import shlex
 import socket
+from typing import Final
 
 from imbue.imbue_common.pure import pure
+
+# Guest environment variable carrying the sshd host private key PEM. The key
+# is injected via `smolvm machine exec --secret-file`, which resolves the file
+# host-side into the exec environment, so the key never appears in host argv
+# (argv is world-readable via /proc/<pid>/cmdline).
+HOST_PRIVATE_KEY_ENV_VAR: Final[str] = "MNGR_SSH_HOST_KEY"
 
 
 @pure
 def build_ssh_provisioning_script(
-    host_private_key_pem: str,
     host_public_key_openssh: str,
     client_authorized_public_key: str,
 ) -> str:
@@ -21,11 +27,20 @@ def build_ssh_provisioning_script(
     config file. Safe to re-run on every host start: package installs are
     skipped when sshd is already present and an already-running sshd is left
     alone.
+
+    The private key is NOT embedded in the script (which travels through
+    host-side argv); it is read from the ``HOST_PRIVATE_KEY_ENV_VAR``
+    environment variable, injected per exec via ``--secret-file``. smolvm's
+    secret injection strips the file's trailing newline, so the script
+    re-appends exactly one when writing the key file.
     """
-    private_key_quoted = shlex.quote(host_private_key_pem)
     public_key_quoted = shlex.quote(host_public_key_openssh.strip())
     authorized_key_quoted = shlex.quote(client_authorized_public_key.strip())
     return f"""set -e
+if [ -z "${{{HOST_PRIVATE_KEY_ENV_VAR}:-}}" ]; then
+    echo "{HOST_PRIVATE_KEY_ENV_VAR} is not set (expected via smolvm machine exec --secret-file)" >&2
+    exit 8
+fi
 if ! command -v sshd >/dev/null 2>&1; then
     if command -v apk >/dev/null 2>&1; then
         apk add -q openssh tmux git rsync jq curl bash
@@ -48,7 +63,8 @@ chmod 700 /root /root/.ssh
 # layout; git (running as root in the guest) refuses such repos without a
 # safe.directory exception. The whole VM is single-user, so allow all.
 git config --global --add safe.directory '*' 2>/dev/null || true
-printf '%s' {private_key_quoted} > /etc/ssh/ssh_host_ed25519_key
+printf '%s\\n' "${{{HOST_PRIVATE_KEY_ENV_VAR}}}" > /etc/ssh/ssh_host_ed25519_key
+unset {HOST_PRIVATE_KEY_ENV_VAR}
 chmod 600 /etc/ssh/ssh_host_ed25519_key
 printf '%s\\n' {public_key_quoted} > /etc/ssh/ssh_host_ed25519_key.pub
 touch /root/.ssh/authorized_keys

@@ -221,17 +221,25 @@ def smolvm_machine_exec(
     smolvm_command: str,
     machine_name: str,
     command: str,
+    # (guest_env_var, host_file_path) pairs injected via --secret-file: the
+    # file contents are resolved host-side into the exec environment, so
+    # secrets never appear in host argv. smolvm strips the file's trailing
+    # newline from the injected value.
+    secret_files: tuple[tuple[str, str], ...] = (),
     timeout: float = 120.0,
 ) -> tuple[int | None, str, str]:
     """Execute a shell command inside a smolvm machine via the vsock channel.
 
-    Runs: smolvm machine exec --name <name> -- sh -c <command>
+    Runs: smolvm machine exec --name <name> [--secret-file VAR=PATH ...] -- sh -c <command>
     Returns: (returncode, stdout, stderr)
 
     This works before (and without) sshd, so it is the bootstrap channel
     used to provision SSH access.
     """
-    cmd = [smolvm_command, "machine", "exec", "--name", machine_name, "--", "sh", "-c", command]
+    cmd = [smolvm_command, "machine", "exec", "--name", machine_name]
+    for env_var, host_path in secret_files:
+        cmd.extend(["--secret-file", f"{env_var}={host_path}"])
+    cmd.extend(["--", "sh", "-c", command])
     result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     return result.returncode, result.stdout, result.stderr
 
