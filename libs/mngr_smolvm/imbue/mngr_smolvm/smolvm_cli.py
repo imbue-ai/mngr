@@ -103,7 +103,9 @@ def smolvm_machine_create(
     timeout: float = 120.0,
 ) -> None:
     """Create a smolvm machine: smolvm machine create --name <name> --net ..."""
-    cmd = [smolvm_command, "machine", "create", "--name", machine_name, "--net"]
+    # Published ports (the sshd forward) require the virtio-net backend:
+    # smolvm's default TSI backend is outbound-only.
+    cmd = [smolvm_command, "machine", "create", "--name", machine_name, "--net", "--net-backend", "virtio-net"]
     cmd.extend(["--cpus", str(cpus), "--mem", str(memory_mib)])
     if image is not None:
         cmd.extend(["--image", image])

@@ -38,6 +38,16 @@ if ! command -v sshd >/dev/null 2>&1; then
     fi
 fi
 mkdir -p /etc/ssh /run/sshd /var/empty /root/.ssh
+chown root /var/empty /run/sshd
+chmod 755 /var/empty /run/sshd
+# Unprivileged rootfs builds can leave /root owned by the build user; sshd's
+# StrictModes rejects authorized_keys under a foreign-owned home directory.
+chown root:root /root /root/.ssh
+chmod 700 /root /root/.ssh
+# host_dir is a virtiofs mount owned by the host-side user in the exposed
+# layout; git (running as root in the guest) refuses such repos without a
+# safe.directory exception. The whole VM is single-user, so allow all.
+git config --global --add safe.directory '*' 2>/dev/null || true
 printf '%s' {private_key_quoted} > /etc/ssh/ssh_host_ed25519_key
 chmod 600 /etc/ssh/ssh_host_ed25519_key
 printf '%s\\n' {public_key_quoted} > /etc/ssh/ssh_host_ed25519_key.pub
