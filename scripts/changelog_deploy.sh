@@ -11,7 +11,7 @@ set -euo pipefail
 # --timezone (see SCHEDULE / TIMEZONE below) so the fire time does not
 # depend on the deploying machine's local timezone. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
-# are executed by claude itself (running consolidate_changelog.py, summarizing
+# are executed by claude itself (running changelog_consolidate.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md
 # [Unreleased], committing, spawning one or more subagents to review the new
 # bullets for factual accuracy against the code, pushing a branch, opening a
@@ -20,7 +20,7 @@ set -euo pipefail
 # `mngr schedule run` stdout and Modal logs.
 #
 # Usage:
-#   ./scripts/setup_changelog_agent.sh
+#   ./scripts/changelog_deploy.sh
 #
 # Required environment:
 #   GH_TOKEN          - token for bot@imbue.com.
@@ -31,7 +31,7 @@ set -euo pipefail
 #                        or "full" to run the agent once during deploy.
 #
 # The provider is read from the shared `PROVIDER` constant in
-# scripts/trigger_changelog_consolidation.py so release.py's printed
+# scripts/changelog_consolidation_trigger.py so release.py's printed
 # on-demand command targets the same deployment. To change providers,
 # edit that constant and re-run this script.
 #
@@ -50,7 +50,7 @@ TRIGGER_NAME="changelog-consolidation"
 # Pacific regardless of where this deploy script runs).
 SCHEDULE="0 0 * * *"
 TIMEZONE="America/Los_Angeles"
-PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
+PROVIDER=$(uv run python "${REPO_ROOT}/scripts/changelog_consolidation_trigger.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
 # Use an isolated mngr config namespace so we don't load the repo's
@@ -75,7 +75,7 @@ export IS_SANDBOX=1
 # Compute --disable-plugin args via the shared helper so the deploy and
 # the on-demand trigger (scripts/release.py) stay in sync about which
 # plugins must be disabled around `mngr schedule` invocations.
-DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-disable-plugin-args)
+DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/changelog_consolidation_trigger.py" --print-disable-plugin-args)
 
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.

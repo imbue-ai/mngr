@@ -825,3 +825,12 @@ list-pool-hosts:
 # This recipe is the manual single-host escape hatch.
 destroy-pool-host pool_host_id *extra_args:
     uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+
+# Requires GH_TOKEN and ANTHROPIC_API_KEY in the environment; set
+# CHANGELOG_VERIFY=quick|full to run the agent once during deploy. Idempotent:
+# removes any existing schedule before recreating, so this is also how you
+# redeploy after editing scripts/changelog_consolidation_prompt.md or
+# scripts/changelog_deploy.sh.
+# (Re)deploy the nightly changelog-consolidation schedule from current source.
+changelog-deploy:
+    bash scripts/changelog_deploy.sh

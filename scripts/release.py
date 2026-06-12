@@ -41,14 +41,14 @@ from typing import TextIO
 import httpx
 import semver
 import tomlkit
+from changelog_consolidate import pending_changelog_entries
+from changelog_consolidation_trigger import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
+from changelog_consolidation_trigger import PROVIDER as CHANGELOG_PROVIDER
+from changelog_consolidation_trigger import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
+from changelog_consolidation_trigger import disable_plugin_args as changelog_disable_plugin_args
 from changelog_release_utils import finalize_changelog_unreleased
 from changelog_release_utils import today_pacific
-from consolidate_changelog import pending_changelog_entries
 from tomlkit.items import Array
-from trigger_changelog_consolidation import MNGR_ROOT_NAME as CHANGELOG_MNGR_ROOT_NAME
-from trigger_changelog_consolidation import PROVIDER as CHANGELOG_PROVIDER
-from trigger_changelog_consolidation import TRIGGER_NAME as CHANGELOG_TRIGGER_NAME
-from trigger_changelog_consolidation import disable_plugin_args as changelog_disable_plugin_args
 from utils import PACKAGES
 from utils import PACKAGE_BY_PYPI_NAME
 from utils import REPO_ROOT
@@ -612,7 +612,7 @@ def _pluralize_entry(count: int) -> str:
 def _print_on_demand_consolidation_command(file: TextIO) -> None:
     """Print the one-liner that triggers an on-demand consolidation run.
 
-    Equivalent to the example invocation in ``setup_changelog_agent.sh``'s
+    Equivalent to the example invocation in ``changelog_deploy.sh``'s
     header so the user can copy-paste it directly. Uses the shared
     constants and helper so the disable-plugin list stays in sync with
     the deploy script. The deploy script's header inlines that list as

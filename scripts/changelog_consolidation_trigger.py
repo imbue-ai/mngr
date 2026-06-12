@@ -1,6 +1,6 @@
 """Shared identifiers + plugin-disable args for the changelog-consolidation schedule.
 
-``setup_changelog_agent.sh`` (which deploys the trigger) and
+``changelog_deploy.sh`` (which deploys the trigger) and
 ``scripts/release.py`` (which prints an on-demand invocation when the
 pre-release gate fires) need to agree on three things: the
 ``--disable-plugin <name>`` list passed to ``mngr schedule …`` calls,
@@ -12,7 +12,7 @@ directly. The shell script reads them through this module's CLI:
 ``--print-disable-plugin-args`` for the disable list and
 ``--print-provider`` for the provider. ``TRIGGER_NAME`` and
 ``MNGR_ROOT_NAME`` are still duplicated as bash literals in
-``setup_changelog_agent.sh`` because that script needs them before any
+``changelog_deploy.sh`` because that script needs them before any
 ``uv run python`` invocation; those two literals must be kept in sync
 with the constants here by hand.
 """
@@ -57,12 +57,12 @@ def main() -> None:
         "--print-disable-plugin-args",
         action="store_true",
         help="Print the --disable-plugin args (space-separated) and exit. "
-        "Used by setup_changelog_agent.sh and release.py so they stay in sync.",
+        "Used by changelog_deploy.sh and release.py so they stay in sync.",
     )
     parser.add_argument(
         "--print-provider",
         action="store_true",
-        help="Print the deployed provider name and exit. Used by setup_changelog_agent.sh.",
+        help="Print the deployed provider name and exit. Used by changelog_deploy.sh.",
     )
     args = parser.parse_args()
     if args.print_disable_plugin_args:
