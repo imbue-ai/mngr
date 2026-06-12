@@ -210,19 +210,16 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
             search_dirs.append(candidate)
 
     matches: list[Path] = []
-    searched: list[Path] = []
     for projects_dir in search_dirs:
         if projects_dir.exists():
-            searched.append(projects_dir)
             matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
 
-    if not searched:
-        dirs_str = " or ".join(str(d) for d in search_dirs)
-        raise UserInputError(f"No projects directory found at {dirs_str}. Cannot find session to adopt.")
     if not matches:
-        dirs_str = " or ".join(str(d) for d in searched)
+        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
+        # list can run to hundreds of paths. The --adopt-session help documents the
+        # search scope (current/user Claude config dirs, live agents, preserved agents).
         raise UserInputError(
-            f"Session {adopt_session_arg} not found in {dirs_str}. "
+            f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
         )
     if len(matches) > 1:
