@@ -14,6 +14,7 @@ from imbue.mngr_smolvm.errors import SmolvmHostRenameError
 from imbue.mngr_smolvm.host_store import HostRecord
 from imbue.mngr_smolvm.host_store import SmolvmMachineConfig
 from imbue.mngr_smolvm.instance import SmolvmProviderInstance
+from imbue.mngr_smolvm.instance import _find_pass_through_arg_value
 from imbue.mngr_smolvm.instance import _parse_build_args
 
 
@@ -156,6 +157,24 @@ def test_parse_build_args_rejects_missing_value() -> None:
 def test_parse_build_args_rejects_empty_inline_value() -> None:
     with pytest.raises(MngrError, match="requires a PATH"):
         _parse_build_args(("--dockerfile=",))
+
+
+def test_find_pass_through_arg_value_absent() -> None:
+    assert _find_pass_through_arg_value(("--storage", "20"), "--cpus") == (False, None)
+
+
+def test_find_pass_through_arg_value_separate_form() -> None:
+    assert _find_pass_through_arg_value(("--storage", "20", "--cpus", "8"), "--cpus") == (True, "8")
+
+
+def test_find_pass_through_arg_value_inline_form() -> None:
+    assert _find_pass_through_arg_value(("--mem=2048",), "--mem") == (True, "2048")
+
+
+def test_find_pass_through_arg_value_missing_value() -> None:
+    # Malformed trailing flag: present, but with no value (smolvm itself
+    # rejects this loudly).
+    assert _find_pass_through_arg_value(("--cpus",), "--cpus") == (True, None)
 
 
 def test_reset_caches(smolvm_provider: SmolvmProviderInstance) -> None:

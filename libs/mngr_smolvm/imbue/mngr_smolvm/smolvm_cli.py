@@ -89,8 +89,11 @@ def smolvm_machine_create(
     cg: ConcurrencyGroup,
     smolvm_command: str,
     machine_name: str,
-    cpus: int,
-    memory_mib: int,
+    # vCPU count, or None to omit --cpus (the caller's extra_args then carry
+    # the flag; smolvm rejects duplicate occurrences).
+    cpus: int | None,
+    # Memory in MiB, or None to omit --mem (same duplicate-flag rule).
+    memory_mib: int | None,
     # OCI image reference to run as the workload (None for bare VM mode).
     image: str | None,
     # Path to a .smolmachine sidecar to create the machine from.
@@ -110,7 +113,10 @@ def smolvm_machine_create(
     # Published ports (the sshd forward) require the virtio-net backend:
     # smolvm's default TSI backend is outbound-only.
     cmd = [smolvm_command, "machine", "create", "--name", machine_name, "--net", "--net-backend", "virtio-net"]
-    cmd.extend(["--cpus", str(cpus), "--mem", str(memory_mib)])
+    if cpus is not None:
+        cmd.extend(["--cpus", str(cpus)])
+    if memory_mib is not None:
+        cmd.extend(["--mem", str(memory_mib)])
     if image is not None:
         cmd.extend(["--image", image])
     if from_pack is not None:

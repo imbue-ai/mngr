@@ -157,6 +157,24 @@ def _parse_build_args(build_args: tuple[str, ...]) -> _ParsedBuildArgs:
     )
 
 
+@pure
+def _find_pass_through_arg_value(start_args: tuple[str, ...], flag: str) -> tuple[bool, str | None]:
+    """Find a ``--flag`` in pass-through start args, returning ``(is_present, value)``.
+
+    Handles both the ``--flag value`` and ``--flag=value`` forms. The value is
+    None when the flag is present but its value is missing -- smolvm's own CLI
+    rejects such malformed args loudly, so callers only need presence to decide
+    whether to omit their own default for the flag.
+    """
+    for idx, arg in enumerate(start_args):
+        if arg == flag:
+            value = start_args[idx + 1] if idx + 1 < len(start_args) else None
+            return True, value
+        if arg.startswith(f"{flag}="):
+            return True, arg.split("=", 1)[1]
+    return False, None
+
+
 class SmolvmProviderInstance(BaseProviderInstance):
     """Provider instance for managing smolvm microVMs as hosts.
 
@@ -618,6 +636,12 @@ class SmolvmProviderInstance(BaseProviderInstance):
         ssh_port = allocate_free_tcp_port()
         effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
 
+        # smolvm rejects duplicate flags, so omit the default --cpus/--mem when
+        # the pass-through start args already specify them (the user's values
+        # then take effect via extra_args).
+        is_cpus_overridden, cpus_override = _find_pass_through_arg_value(effective_start_args, "--cpus")
+        is_memory_overridden, memory_override = _find_pass_through_arg_value(effective_start_args, "--mem")
+
         # Tracked so the `finally` can tear down a half-built machine on ANY
         # failure -- including unexpected exceptions that are not
         # MngrError/OSError -- so no orphaned, untracked machine is left behind.
@@ -628,8 +652,8 @@ class SmolvmProviderInstance(BaseProviderInstance):
                 self.mngr_ctx.concurrency_group,
                 self.config.smolvm_command,
                 machine_name,
-                cpus=self.config.default_cpus,
-                memory_mib=self.config.default_memory_mib,
+                cpus=None if is_cpus_overridden else self.config.default_cpus,
+                memory_mib=None if is_memory_overridden else self.config.default_memory_mib,
                 image=image_reference,
                 from_pack=from_pack,
                 ports=((ssh_port, 22),),
@@ -695,9 +719,13 @@ class SmolvmProviderInstance(BaseProviderInstance):
             is_host_data_volume_exposed=is_host_data_volume_exposed,
             data_disk_spec=data_disk_spec,
         )
+        # Overrides were already validated by `smolvm machine create` above, so
+        # int() cannot fail here.
+        effective_cpus = int(cpus_override) if cpus_override is not None else self.config.default_cpus
+        effective_memory_mib = int(memory_override) if memory_override is not None else self.config.default_memory_mib
         resources = HostResources(
-            cpu=CpuResources(count=self.config.default_cpus),
-            memory_gb=self.config.default_memory_mib / 1024.0,
+            cpu=CpuResources(count=effective_cpus),
+            memory_gb=effective_memory_mib / 1024.0,
             disk_gb=float(self.config.host_data_disk_size_gb) if data_disk_spec is not None else None,
             gpu=None,
         )
