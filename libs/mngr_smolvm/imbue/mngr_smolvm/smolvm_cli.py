@@ -230,8 +230,8 @@ def smolvm_machine_exec(
 ) -> tuple[int | None, str, str]:
     """Execute a shell command inside a smolvm machine via the vsock channel.
 
-    Runs: smolvm machine exec --name <name> [--secret-file VAR=PATH ...] -- sh -c <command>
-    Returns: (returncode, stdout, stderr)
+    Runs ``smolvm machine exec --name <name> [--secret-file VAR=PATH ...] --
+    sh -c <command>`` and gives back a ``(returncode, stdout, stderr)`` tuple.
 
     This works before (and without) sshd, so it is the bootstrap channel
     used to provision SSH access.

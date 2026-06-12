@@ -158,7 +158,7 @@ def test_prevent_args_in_docstrings() -> None:
 
 @pytest.mark.timeout(10)
 def test_prevent_returns_in_docstrings() -> None:
-    rc.check_returns_in_docstrings(_DIR, snapshot(1))
+    rc.check_returns_in_docstrings(_DIR, snapshot(0))
 
 
 # --- Type safety ---
