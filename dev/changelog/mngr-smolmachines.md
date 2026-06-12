@@ -1,0 +1,1 @@
+Add the blueprint plan for the smolvm provider effort (`blueprint/smolvm-provider/`), covering the libkrunfw btrfs kernel, smolvm data-disk/archive-import/poweroff features, the new `libs/mngr_smolvm` provider, and the FCT/minds integration.

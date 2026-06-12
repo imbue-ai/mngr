@@ -88,6 +88,7 @@ addopts = [
   "--cov=imbue.mngr_forward",
   "--cov=imbue.mngr_imbue_cloud",
   "--cov=imbue.mngr_lima",
+  "--cov=imbue.mngr_smolvm",
   "--cov=imbue.mngr_tmr",
   "--cov=imbue.mngr_mapreduce",
   "--cov=imbue.skitwright",
@@ -181,6 +182,8 @@ omit = [
     # Lima provider requires Lima/QEMU for full integration testing
     "libs/mngr_lima/imbue/mngr_lima/instance.py",
     "libs/mngr_lima/imbue/mngr_lima/limactl.py",
+    "libs/mngr_smolvm/imbue/mngr_smolvm/instance.py",
+    "libs/mngr_smolvm/imbue/mngr_smolvm/smolvm_cli.py",
     # Mind deploy modules run on Modal and require infrastructure to test
     "apps/minds/imbue/minds/deploy/cron_runner.py",
     "apps/minds/imbue/minds/deploy/remote_runner.py",

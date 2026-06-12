@@ -68,7 +68,9 @@ def check_smolvm_data_disk_support(
     default virtiofs-exposed layout works on stock smolvm; only the btrfs
     layout needs this capability.
     """
-    result = cg.run_process_to_completion([smolvm_command, "machine", "create", "--help"], timeout=10.0)
+    result = cg.run_process_to_completion(
+        [smolvm_command, "machine", "create", "--help"], timeout=10.0, is_checked_after=False
+    )
     if result.returncode != 0:
         raise SmolvmCommandError("machine create --help", result.returncode, result.stderr)
     if "--data-disk" not in result.stdout:
@@ -119,7 +121,9 @@ def smolvm_machine_create(
         cmd.extend(["--data-disk", data_disk])
     cmd.extend(extra_args)
     with log_span("Running smolvm machine create: {}", machine_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout, on_output=_log_smolvm_output)
+        result = cg.run_process_to_completion(
+            cmd, timeout=timeout, on_output=_log_smolvm_output, is_checked_after=False
+        )
     if result.returncode != 0:
         raise SmolvmCommandError("machine create", result.returncode, result.stderr)
 
@@ -138,6 +142,7 @@ def smolvm_machine_start(
             cmd,
             timeout=timeout,
             on_output=on_output or _log_smolvm_output,
+            is_checked_after=False,
         )
     if result.returncode != 0:
         raise SmolvmCommandError("machine start", result.returncode, result.stderr)
@@ -152,7 +157,7 @@ def smolvm_machine_stop(
     """Stop a running smolvm machine: smolvm machine stop --name <name>."""
     cmd = [smolvm_command, "machine", "stop", "--name", machine_name]
     with log_span("Running smolvm machine stop: {}", machine_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise SmolvmCommandError("machine stop", result.returncode, result.stderr)
 
@@ -169,13 +174,13 @@ def smolvm_machine_delete(
     """
     cmd = [smolvm_command, "machine", "rm", "--name", machine_name, "--force"]
     with log_span("Running smolvm machine rm: {}", machine_name):
-        result = cg.run_process_to_completion(cmd, timeout=timeout)
+        result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
-        stderr_lower = result.stderr.lower()
-        if "not found" in stderr_lower or "does not exist" in stderr_lower:
+        combined_output = (result.stderr + result.stdout).lower()
+        if "not found" in combined_output or "does not exist" in combined_output:
             logger.debug("smolvm machine {} already absent, skipping", machine_name)
             return
-        raise SmolvmCommandError("machine rm", result.returncode, result.stderr)
+        raise SmolvmCommandError("machine rm", result.returncode, result.stderr or result.stdout)
 
 
 def smolvm_machine_list(
@@ -185,7 +190,7 @@ def smolvm_machine_list(
 ) -> list[dict[str, Any]]:
     """List all smolvm machines as parsed JSON: smolvm machine ls --json."""
     cmd = [smolvm_command, "machine", "ls", "--json"]
-    result = cg.run_process_to_completion(cmd, timeout=timeout)
+    result = cg.run_process_to_completion(cmd, timeout=timeout, is_checked_after=False)
     if result.returncode != 0:
         raise SmolvmCommandError("machine ls", result.returncode, result.stderr)
     output = result.stdout.strip()
@@ -241,6 +246,8 @@ def smolvm_pack_create_from_archive(
         str(output_path),
     ]
     with log_span("Running smolvm pack create --from-archive: {}", archive_path):
-        result = cg.run_process_to_completion(cmd, timeout=timeout, on_output=_log_smolvm_output)
+        result = cg.run_process_to_completion(
+            cmd, timeout=timeout, on_output=_log_smolvm_output, is_checked_after=False
+        )
     if result.returncode != 0:
         raise SmolvmCommandError("pack create --from-archive", result.returncode, result.stderr)
