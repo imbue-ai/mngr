@@ -41,10 +41,6 @@ class SmolvmCapabilityError(ProviderUnavailableError):
         )
 
 
-class SmolvmConfigError(MngrError, ValueError):
-    """Raised when a SmolvmProviderConfig combines mutually-incompatible options."""
-
-
 class SmolvmCommandError(MngrError):
     """Raised when a smolvm CLI command fails."""
 
