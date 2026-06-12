@@ -226,6 +226,8 @@ def test_create_agent_env_emits_expected_json_shape(
     assert set(payload.keys()) == {"env", "opaque_permissions_path"}
     env = payload["env"]
     assert env["LATCHKEY_GATEWAY"] == "http://127.0.0.1:1989"
+    # Secondary (per-VPS) gateway URL, on a distinct in-container port.
+    assert env["LATCHKEY_GATEWAY_SECONDARY"] == "http://127.0.0.1:1990"
     assert env["LATCHKEY_DISABLE_COUNTING"] == "1"
     assert env["LATCHKEY_GATEWAY_PASSWORD"]
     assert env["LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE"].startswith("fake-jwt-for:")

@@ -10,8 +10,8 @@ from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -159,10 +159,10 @@ def _emit_schedule_list_json(records: list[ScheduleCreationRecord]) -> None:
     data = {
         "schedules": [record.model_dump(mode="json") for record in records],
     }
-    emit_final_json(data)
+    write_json_line(data)
 
 
 def _emit_schedule_list_jsonl(records: list[ScheduleCreationRecord]) -> None:
     """Emit JSONL output for schedule list."""
     for record in records:
-        emit_final_json(record.model_dump(mode="json"))
+        write_json_line(record.model_dump(mode="json"))

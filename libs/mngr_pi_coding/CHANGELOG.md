@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-08
+
+## [v0.1.8] - 2026-06-05
+
+### Fixed
+
+- Fixed: Remote provisioning of pi resource directories (skills/prompts/extensions/themes) now transfers with a single rsync (`host.copy_local_directory`) instead of uploading each file individually over SSH. The per-file approach opened an SFTP channel per file and did not scale to large resource sets (the same failure mode as github issue 1825).
+
 ## [v0.1.7] - 2026-06-01
 
 ## [v0.1.6] - 2026-05-28

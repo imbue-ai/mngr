@@ -1,9 +1,8 @@
 """FastAPI app for ``mngr forward``: auth + subdomain HTTP/WS forwarding.
 
-Adapted from the subdomain-forwarding portions of
-``apps/minds/imbue/minds/desktop_client/app.py``. The minds-specific routes
-(create form, accounts, sharing, request inbox, telegram, chrome, etc.) all
-stay in minds; the plugin only handles:
+Adapted from the subdomain-forwarding portions of minds' desktop client.
+Application-specific routes (create form, accounts, sharing, request inbox,
+telegram, chrome, etc.) stay in the host application; the plugin only handles:
 
 - the bare-origin login flow (``/login``, ``/authenticate``, ``/`` debug index)
 - the ``/goto/<agent>/`` cookie-bridge to per-subdomain auth
@@ -53,6 +52,7 @@ from imbue.mngr_forward.cookie import verify_subdomain_auth_token
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.envelope import EnvelopeWriter
+from imbue.mngr_forward.loading_page import render_loading_page
 from imbue.mngr_forward.primitives import FORWARD_SUBDOMAIN_PATTERN
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
@@ -69,13 +69,6 @@ _SUBDOMAIN_AUTH_PATH: Final[str] = "/_subdomain_auth"
 _EXCLUDED_RESPONSE_HEADERS: Final[frozenset[str]] = frozenset(
     {"transfer-encoding", "content-encoding", "content-length"}
 )
-
-# HTTP status codes that the plugin surfaces as ``system_interface_backend_failure``
-# events with ``reason=FIVEXX_RESPONSE``. Limiting to the "infrastructure"
-# subset (Bad Gateway / Service Unavailable / Gateway Timeout) avoids
-# surfacing a wedged Python backend's stack-trace 500s as health-recovery
-# events, which would be too aggressive.
-_INFRASTRUCTURE_5XX_STATUSES: Final[frozenset[int]] = frozenset({502, 503, 504})
 
 # WebSocket close-reasons are capped at 123 bytes by RFC 6455. Keep messages
 # short; full diagnostic detail goes to ``logger.warning`` instead.
@@ -169,12 +162,29 @@ def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
 
 
 def _unauthenticated_subdomain_response(request: Request, port: int) -> Response:
-    """Redirect HTML navigations to the bare-origin landing page; 403 for everything else."""
+    """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
+
+    The bridge re-mints a fresh subdomain auth token using the bare-origin
+    session cookie (which the host app refreshes on every restart) and
+    sets a new subdomain cookie before bouncing the browser back. Without
+    this, an agent-subdomain cookie that fails verification (stale
+    signing key after a host-app restart, expired window) would land the
+    user on the bare-origin landing instead of self-healing into the
+    workspace.
+
+    Falls back to the bare-origin landing if the host header does not
+    carry an ``agent-<hex>.localhost`` we can parse.
+    """
     accept = request.headers.get("accept", "")
-    if "text/html" in accept:
+    if "text/html" not in accept:
+        return Response(status_code=403, content="Not authenticated")
+    host_header = request.headers.get("host", "")
+    agent_id = _parse_workspace_subdomain(host_header)
+    if agent_id is None:
         location = f"http://localhost:{port}/"
-        return Response(status_code=302, headers={"Location": location})
-    return Response(status_code=403, content="Not authenticated")
+    else:
+        location = f"http://localhost:{port}/goto/{agent_id}/"
+    return Response(status_code=302, headers={"Location": location})
 
 
 # -- WebSocket forwarding helpers -----------------------------------------
@@ -350,9 +360,9 @@ async def _forward_workspace_http(
             return Response(status_code=502, content="Backend connection lost")
         except httpx.TimeoutException:
             # A wedged-but-listening backend produces a TimeoutException
-            # rather than ConnectError. Surface this as CONNECT_ERROR so
-            # the minds-side tracker still ticks the agent toward STUCK,
-            # matching the behaviour for a backend that returns a 504.
+            # rather than ConnectError. Surface this as CONNECT_ERROR so a
+            # consumer still treats the agent as failing, matching the
+            # behaviour for a backend that returns a 504.
             _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
             return Response(status_code=504, content="Backend stream timed out")
 
@@ -383,9 +393,9 @@ async def _forward_workspace_http(
     except (httpx.ConnectError, httpx.RemoteProtocolError):
         # System interface may not yet be listening, or it may have closed the
         # connection before sending headers (typical during startup). Surface
-        # a 503 so chrome's health SSE (driven by the failure envelope below)
-        # can navigate the user to the minds-side recovery UI; non-HTML
-        # callers can interpret the 503 programmatically.
+        # a 503 (and the failure envelope below) so a consumer can react (e.g.
+        # navigate the user to its recovery UI); non-HTML callers can interpret
+        # the 503 programmatically.
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return _service_unavailable_response(request)
     except httpx.ReadError:
@@ -396,17 +406,21 @@ async def _forward_workspace_http(
         return Response(status_code=502, content="Backend connection lost")
     except httpx.TimeoutException:
         # A wedged-but-listening backend produces a TimeoutException rather
-        # than ConnectError. Surface this as CONNECT_ERROR so the minds-side
-        # tracker still ticks the agent toward STUCK, matching the behaviour
-        # for a backend that returns a 504.
+        # than ConnectError. Surface this as CONNECT_ERROR so a consumer still
+        # treats the agent as failing, matching the behaviour for a backend
+        # that returns a 504.
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
         return Response(status_code=504, content="Backend timed out")
 
-    if backend_response.status_code in _INFRASTRUCTURE_5XX_STATUSES:
+    if not 200 <= backend_response.status_code < 300:
+        # Any non-2xx response is surfaced as a single ``ERROR_RESPONSE`` signal
+        # carrying the status code. The plugin forwards the response unchanged
+        # and does not interpret which codes matter -- the consumer decides
+        # whether (and how) to react to a given status.
         _emit_backend_failure(
             envelope_writer,
             agent_id,
-            SystemInterfaceBackendFailureReason.FIVEXX_RESPONSE,
+            SystemInterfaceBackendFailureReason.ERROR_RESPONSE,
             backend_response.status_code,
         )
 
@@ -436,73 +450,21 @@ def _emit_backend_failure(
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
 
 
-_SERVICE_UNAVAILABLE_HTML = """\
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="refresh" content="1">
-    <title>System interface starting</title>
-    <style>
-      html, body { height: 100%; margin: 0; }
-      body {
-        background: #fafafa;
-        color: #18181b;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 24px;
-        box-sizing: border-box;
-      }
-      .card {
-        background: #fff;
-        border: 1px solid #e4e4e7;
-        border-radius: 12px;
-        padding: 24px;
-        max-width: 480px;
-        width: 100%;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-      }
-      .row { display: flex; align-items: center; gap: 12px; }
-      h1 { font-size: 1.125rem; font-weight: 600; margin: 0 0 6px; color: #18181b; }
-      p { margin: 0; color: #52525b; font-size: 0.875rem; line-height: 1.5; }
-      .spinner {
-        width: 20px;
-        height: 20px;
-        border: 2px solid #e4e4e7;
-        border-top-color: #18181b;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        flex-shrink: 0;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <div class="row">
-        <div class="spinner" aria-hidden="true"></div>
-        <div>
-          <h1>System interface starting</h1>
-          <p>This page will reload automatically once the workspace is ready.</p>
-        </div>
-      </div>
-    </div>
-  </body>
-</html>
-"""
+# The proxy loader: the canonical "Loading workspace" page with a 1s meta
+# refresh so it re-attempts the workspace until the backend answers. A
+# downstream consumer can reuse ``render_loading_page`` so its own loading
+# page renders identically.
+_SERVICE_UNAVAILABLE_HTML = render_loading_page(head_extra='    <meta http-equiv="refresh" content="1">\n')
 
 
 def _service_unavailable_response(request: Request) -> Response:
     """Return a 503 (styled loading page for browsers, plain text otherwise).
 
-    The chrome shell drives recovery navigation off the per-agent health
-    SSE stream emitted by minds (which is fed by the
-    ``system_interface_backend_failure`` envelope). That separation keeps the
-    plugin origin-agnostic: it does not need to know where minds is
-    listening. For browsers that hit the plugin directly (including users
-    landing here mid-restart from the minds chrome), we serve a styled
+    Recovery navigation is driven by a consumer off the per-agent
+    ``system_interface_backend_failure`` envelope, not by the plugin. That
+    separation keeps the plugin origin-agnostic: it does not need to know
+    where any consumer is listening. For browsers that hit the plugin
+    directly (including users landing here mid-restart), we serve a styled
     auto-refreshing loader so the experience is not a blank flash.
     """
     accepts_html = "text/html" in request.headers.get("accept", "")
@@ -597,23 +559,31 @@ async def _handle_workspace_forward_http(
             ssh_http_clients_lock,
         )
     except (SSHTunnelError, paramiko.SSHException, OSError) as e:
+        # A stopped container fails here (its SSH endpoint is gone) rather
+        # than at the resolver -- the resolver still holds a stale entry.
+        # Emit a backend-failure envelope so a consumer can react (e.g. drive
+        # its own recovery UI), and serve the same styled loader as the
+        # UNRESOLVED path instead of raw error text.
         logger.warning("SSH tunnel setup failed for {}: {}", agent_id, e)
-        return Response(status_code=502, content=f"SSH tunnel failed: {e}")
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        return _service_unavailable_response(request)
 
     if tunnel_client is None and _is_loopback_url(backend_url) and not allow_host_loopback:
+        # A loopback registered URL with no SSH tunnel is what a stopped
+        # container looks like once discovery drops its SSH info: there is
+        # nothing safe to dial. Treat it exactly like the SSH-tunnel setup
+        # failure above -- emit a backend-failure envelope so a consumer can
+        # react, and serve the styled loader instead of raw 502 error text.
+        # (When allow_host_loopback is set the agent really runs on the host,
+        # so that case never reaches here.)
         logger.warning(
             "Refusing to dial host loopback for agent {}: registered URL {} has no SSH tunnel "
             "(pass --allow-host-loopback if the agent really runs on the host).",
             agent_id,
             backend_url,
         )
-        return Response(
-            status_code=502,
-            content=(
-                f"system interface unreachable: no SSH tunnel available for agent {agent_id}; "
-                f"refusing to dial host loopback at {backend_url}"
-            ),
-        )
+        _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None)
+        return _service_unavailable_response(request)
 
     active_client = tunnel_client or http_client
     return await _forward_workspace_http(

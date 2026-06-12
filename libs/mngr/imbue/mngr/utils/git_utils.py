@@ -1,3 +1,4 @@
+import os
 import re
 import shutil
 import uuid
@@ -360,25 +361,63 @@ def clone_git_url_to_managed_dir(url: str, base_dir: Path, name: str, cg: Concur
     return dest
 
 
+def _git_env_with_stable_locale() -> dict[str, str]:
+    """The current environment with a forced C locale for git subprocesses.
+
+    The repo-detection helpers below key off git's "not a git repository" stderr
+    message to tell the expected no-repo case apart from genuine failures.
+    Forcing ``LC_ALL=C`` keeps that message in English regardless of the ambient
+    locale, so the check cannot be defeated by a localized git. ``env`` replaces
+    the whole environment for the subprocess, so the current environment is
+    merged in rather than dropped.
+    """
+    return {**os.environ, "LC_ALL": "C"}
+
+
+def _is_not_a_git_repository_error(error: ProcessError) -> bool:
+    """Whether a git ``ProcessError`` is git's clean "not a git repository" result.
+
+    That is the one git failure callers treat as a normal answer ("this path is
+    not in a git repo") rather than an error. Spawn failures and timeouts
+    (``ProcessError`` subclasses whose ``returncode`` is None) and any other
+    non-zero exit are not this case and must surface loudly rather than be
+    quietly turned into a "no repo" sentinel.
+    """
+    return error.returncode is not None and "not a git repository" in error.stderr.lower()
+
+
 def find_git_worktree_root(start: Path | None, cg: ConcurrencyGroup) -> Path | None:
-    """Find the git worktree root."""
+    """Find the git worktree root, or None if `start` is not inside a git repository.
+
+    Only git's own "not a git repository" result maps to None -- that is the one
+    case where "no worktree root" is a normal, expected answer, and every caller
+    treats None as "not in a repo / no project root". Any other failure (git
+    missing, a timeout, a failure to spawn the subprocess, or an unexpected
+    non-zero exit) is raised rather than swallowed, so transient or environmental
+    problems surface loudly instead of silently dropping the project config layer
+    and leaving callers to misbehave with no explanation.
+    """
     cwd = start or Path.cwd()
     try:
         result = cg.run_process_to_completion(
             ["git", "rev-parse", "--show-toplevel"],
             cwd=cwd,
+            env=_git_env_with_stable_locale(),
         )
-        return Path(result.stdout.strip())
     except ProcessError as e:
-        logger.trace("Failed to find worktree root: {}", e)
-        return None
+        if _is_not_a_git_repository_error(e):
+            return None
+        raise
+    return Path(result.stdout.strip())
 
 
 def is_git_repository(path: Path, cg: ConcurrencyGroup) -> bool:
     """Check if the given path is inside a git repository.
 
     Works from any subdirectory within a git worktree.
-    Returns False if the path does not exist.
+    Returns False if the path does not exist or is cleanly reported by git as not
+    being a git repository. Any other git failure is raised rather than swallowed
+    into a misleading False (see ``_is_not_a_git_repository_error``).
     """
     if not path.exists():
         return False
@@ -386,10 +425,13 @@ def is_git_repository(path: Path, cg: ConcurrencyGroup) -> bool:
         cg.run_process_to_completion(
             ["git", "rev-parse", "--git-dir"],
             cwd=path,
+            env=_git_env_with_stable_locale(),
         )
-        return True
-    except ProcessError:
-        return False
+    except ProcessError as e:
+        if _is_not_a_git_repository_error(e):
+            return False
+        raise
+    return True
 
 
 def get_current_branch(path: Path, cg: ConcurrencyGroup) -> str:
@@ -457,16 +499,37 @@ def find_git_common_dir(path: Path, cg: ConcurrencyGroup) -> Path | None:
     For a regular repository, this returns the .git directory.
     For a worktree, this returns the main repository's .git directory,
     not the worktree's .git file.
+
+    Returns None only when git cleanly reports the path is not a git repository;
+    any other git failure is raised rather than swallowed (see
+    ``_is_not_a_git_repository_error``).
     """
     try:
         result = cg.run_process_to_completion(
             ["git", "rev-parse", "--git-common-dir"],
             cwd=path,
+            env=_git_env_with_stable_locale(),
         )
-        git_common_dir = Path(result.stdout.strip())
-        if not git_common_dir.is_absolute():
-            git_common_dir = (path / git_common_dir).resolve()
-        return git_common_dir
     except ProcessError as e:
-        logger.trace("Failed to find main .git dir: {}", e)
+        if _is_not_a_git_repository_error(e):
+            return None
+        raise
+    git_common_dir = Path(result.stdout.strip())
+    if not git_common_dir.is_absolute():
+        git_common_dir = (path / git_common_dir).resolve()
+    return git_common_dir
+
+
+def find_git_source_path(path: Path, cg: ConcurrencyGroup) -> Path | None:
+    """Find the source repository root for ``path``, if it is inside a git repo.
+
+    Returns the parent of the git common dir (the source repo root) -- for a
+    worktree this is the main repository, for a regular checkout it is the repo
+    itself -- or ``None`` if ``path`` is not inside a git repo. The source-path
+    concept is what lets a single trust grant cover every worktree of the same
+    repo: it is the durable thing agent plugins persist.
+    """
+    git_common_dir = find_git_common_dir(path, cg)
+    if git_common_dir is None:
         return None
+    return git_common_dir.parent

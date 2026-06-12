@@ -1,0 +1,19 @@
+{#def variant="secondary", size="md", extra="", block=false #}
+{#
+  Plain <button type="button">. Use for in-page actions (modal triggers,
+  toggles, AJAX-style buttons). Usage:
+    <Button variant="secondary" onclick="copyUrl()">Copy</Button>
+    <Button variant="primary" size="lg" block>Sign in</Button>
+    <Button variant="ghost" size="icon" title="Restart"><svg .../></Button>
+
+  Pulls its base class string, sizes map, and variants map from the
+  Catalog globals ``BTN_BASE`` / ``BTN_SIZES`` / ``BTN_VARIANTS`` (defined
+  in templates.py) so the three button components stay in lockstep
+  without duplicating those values.
+
+  Any HTML attribute on the tag that is not declared above (id=,
+  onclick=, title=, aria-*, data-*) flows through via JinjaX's ``attrs``
+  passthrough.
+#}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+<button {{ attrs.render(type="button", classes=_cls) }}>{{ content }}</button>

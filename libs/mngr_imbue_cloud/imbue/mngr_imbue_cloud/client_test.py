@@ -36,6 +36,10 @@ def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTranspor
 
 def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        # An absent region must not be sent so the connector treats the lease as
+        # region-agnostic.
+        body = _json.loads(request.content)
+        assert "region" not in body
         return httpx.Response(503, json={"detail": "no match"})
 
     transport = httpx.MockTransport(handler)
@@ -56,6 +60,8 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
         assert body["host_name"] == "my-host"
+        # The hard region rides alongside attributes as a top-level field when set.
+        assert body["region"] == "US-EAST-VA"
         return httpx.Response(
             200,
             json={
@@ -79,7 +85,13 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(httpx, "post", fake_post)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
-    result = client.lease_host(SecretStr("tok"), LeaseAttributes(cpus=2), "ssh-ed25519 AAAA", "my-host")
+    result = client.lease_host(
+        SecretStr("tok"),
+        LeaseAttributes(cpus=2),
+        "ssh-ed25519 AAAA",
+        "my-host",
+        region="US-EAST-VA",
+    )
     assert result.vps_address == "10.0.0.1"
     assert result.agent_id == "agent-abc"
     assert result.host_name == "my-host"
@@ -353,3 +365,75 @@ def test_destroy_bucket_key_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = _install_mock_httpx(monkeypatch, handler)
     client.destroy_bucket_key(SecretStr("tok"), "akid1")
+
+
+# -- Paid lists (admin-key authenticated) --
+
+
+def test_list_paid_domains_parses_and_sends_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/paid/domains"
+        assert request.url.params.get("paid_only") == "true"
+        assert request.headers["authorization"] == "Bearer admin-key-xyz"
+        return httpx.Response(
+            200,
+            json=[
+                {"domain": "imbue.com", "is_paid": True, "created_at": "t0", "updated_at": "t1"},
+            ],
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    entries = client.list_paid_domains(SecretStr("admin-key-xyz"), paid_only=True)
+    assert len(entries) == 1
+    assert entries[0].value == "imbue.com"
+    assert entries[0].is_paid is True
+
+
+def test_list_paid_emails_maps_email_key_to_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/paid/emails"
+        assert request.url.params.get("paid_only") == "false"
+        return httpx.Response(
+            200,
+            json=[{"email": "bob@gmail.com", "is_paid": False, "created_at": "t0", "updated_at": "t1"}],
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    entries = client.list_paid_emails(SecretStr("k"), paid_only=False)
+    assert entries[0].value == "bob@gmail.com"
+    assert entries[0].is_paid is False
+
+
+def test_add_paid_domain_posts_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"status": "added", "domain": "imbue.com"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.add_paid_domain(SecretStr("k"), "Imbue.com")
+    assert seen["path"] == "/paid/domains/add"
+    assert seen["body"] == {"value": "Imbue.com"}
+    assert result == {"status": "added", "domain": "imbue.com"}
+
+
+def test_remove_paid_email_posts_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/paid/emails/remove"
+        assert _json.loads(request.content) == {"value": "bob@gmail.com"}
+        return httpx.Response(200, json={"status": "removed", "email": "bob@gmail.com"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    result = client.remove_paid_email(SecretStr("k"), "bob@gmail.com")
+    assert result == {"status": "removed", "email": "bob@gmail.com"}
+
+
+def test_paid_list_unauthenticated_raises_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "Invalid paid-list admin API key"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudAuthError):
+        client.list_paid_domains(SecretStr("wrong"), paid_only=False)

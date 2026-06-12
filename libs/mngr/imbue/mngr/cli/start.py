@@ -24,9 +24,9 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -51,6 +51,7 @@ class StartCliOptions(CommonCliOptions):
     connect_command: str | None
     restart: bool
     no_resume: bool
+    dry_run: bool
     # Planned features (not yet implemented)
     host: tuple[HostAddress, ...]
 
@@ -70,7 +71,7 @@ def _output_result(started_agents: Sequence[str], output_opts: OutputOptions, *,
     result_data = {"started_agents": started_agents, "count": len(started_agents)}
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("start_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -137,6 +138,11 @@ def _send_resume_message_if_configured(agent: AgentInterface, output_opts: Outpu
     help="Skip sending the resume message after starting.",
 )
 @optgroup.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be started without actually starting anything",
+)
+@optgroup.option(
     "--connect/--no-connect",
     default=False,
     help="Connect to the agent after starting (only valid for single agent)",
@@ -198,6 +204,14 @@ def _start_agents(
             _output("No agents found matching the given addresses", output_opts)
         else:
             _output("No stopped agents found to start", output_opts)
+        return
+
+    # Handle dry-run mode: report what would be started without touching any hosts.
+    if opts.dry_run:
+        verb = "restarted" if is_restart else "started"
+        _output(f"Would be {verb}:", output_opts)
+        for match in matched_agents:
+            _output(f"  - {match.agent_name} (on host {match.host_id})", output_opts)
         return
 
     started_agents: list[str] = []
@@ -290,7 +304,7 @@ def _maybe_connect(
 CommandHelpMetadata(
     key="start",
     one_line_description="Start stopped agent(s)",
-    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect]",
+    synopsis="mngr start [AGENTS...|-] [--agent <AGENT>] [--host <HOST>] [--restart] [--no-resume] [--connect] [--dry-run]",
     description="""For remote hosts, this restores from the most recent snapshot and starts
 the container/instance. For local agents, this starts the agent's tmux
 session.
@@ -311,6 +325,7 @@ Supports custom format templates via --format. Available fields: name.""",
         ("Restart a running agent cleanly", "mngr start my-agent --restart"),
         ("Start and connect", "mngr start my-agent --connect"),
         ("Start all stopped agents", "mngr list --ids | mngr start -"),
+        ("Preview what would be started", "mngr list --ids | mngr start - --dry-run"),
         ("Custom format template output", "mngr start agent1 agent2 --format '{name}'"),
     ),
     see_also=(

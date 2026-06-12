@@ -7,12 +7,11 @@ Each test stages:
   - A fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh in commands/
   - A fake $ANTIGRAVITY_APP_DATA_DIR with brain/<conv_id>/.system_generated/
     logs/transcript.jsonl files for each conversation under test
-  - An $ANTIGRAVITY_AGY_LOG_FILE containing the `Created conversation
-    <uuid>` lines the streamer keys off to scope its watch
+  - An antigravity_conversation_ids file (written by the capture hook) listing
+    the conversation UUIDs the streamer keys off to scope its watch
 
 The streamer's contract:
-  - Read agy's log file, extract conversation UUIDs from the `Created
-    conversation` / `Resumed conversation` lines.
+  - Read the conversation-ids file, extract conversation UUIDs (one per line).
   - For each discovered conversation, tail brain/<uuid>/.system_generated/
     logs/transcript.jsonl and append every new line to
     $MNGR_AGENT_STATE_DIR/logs/antigravity_transcript/events.jsonl after
@@ -34,8 +33,8 @@ import pytest
 
 _SCRIPT_PATH = Path(__file__).parent / "stream_transcript.sh"
 
-# The streamer's UUID-shape regex is intentionally strict so that other
-# text in agy's log can't accidentally match. Use real UUID-shaped IDs in
+# The streamer's UUID-shape regex is intentionally strict so that a stray
+# line in the ids file can't accidentally match. Use real UUID-shaped IDs in
 # tests so the regex picks them up; substituting human-friendly IDs like
 # "conv-A" silently drops them at the grep step.
 _CONV_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -72,13 +71,11 @@ def env(tmp_path: Path, stub_mngr_log_sh: str) -> dict[str, Any]:
 
     app_data_dir = tmp_path / "app_data"
     (app_data_dir / "brain").mkdir(parents=True)
-    agy_log_file = tmp_path / "agy_cli.log"
-    agy_log_file.touch()
 
     return {
         "state_dir": state_dir,
         "app_data_dir": app_data_dir,
-        "agy_log_file": agy_log_file,
+        "conversation_ids_file": state_dir / "antigravity_conversation_ids",
         "raw_output_file": state_dir / "logs" / "antigravity_transcript" / "events.jsonl",
         "offset_dir": state_dir / "plugin" / "antigravity" / ".transcript_offsets",
     }
@@ -93,14 +90,13 @@ def _write_transcript(env: dict[str, Any], conv_id: str, lines: list[str]) -> Pa
     return path
 
 
-def _add_created_conversation(env: dict[str, Any], conv_id: str) -> None:
-    with env["agy_log_file"].open("a") as f:
-        f.write(f"I0521 00:00:00.000000  1234 server.go:747] Created conversation {conv_id}\n")
+def _record_conversation(env: dict[str, Any], conv_id: str) -> None:
+    """Record a conversation id the way capture_conversation_id.sh would.
 
-
-def _add_resumed_conversation(env: dict[str, Any], conv_id: str) -> None:
-    with env["agy_log_file"].open("a") as f:
-        f.write(f"I0521 00:00:00.000000  1234 server.go:747] Resumed conversation {conv_id}\n")
+    Appends the uuid to the per-agent conversation-ids file (one per line).
+    """
+    with env["conversation_ids_file"].open("a") as f:
+        f.write(f"{conv_id}\n")
 
 
 def _run_streamer(env: dict[str, Any]) -> None:
@@ -109,7 +105,6 @@ def _run_streamer(env: dict[str, Any]) -> None:
         **os.environ,
         "MNGR_AGENT_STATE_DIR": str(env["state_dir"]),
         "ANTIGRAVITY_APP_DATA_DIR": str(env["app_data_dir"]),
-        "ANTIGRAVITY_AGY_LOG_FILE": str(env["agy_log_file"]),
     }
     result = subprocess.run(
         ["bash", str(_SCRIPT_PATH), "--single-pass"],
@@ -137,7 +132,7 @@ def _read_raw_events(env: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_streamer_with_no_conversations_produces_empty_output(env: dict[str, Any]) -> None:
-    """No `Created conversation` lines in the agy log -> nothing to stream."""
+    """No recorded conversation ids -> nothing to stream."""
     _run_streamer(env)
     assert _read_raw_events(env) == []
 
@@ -152,7 +147,7 @@ def test_streamer_copies_transcript_lines_with_conv_id_augmentation(env: dict[st
             _make_event(2, "MODEL", "PLANNER_RESPONSE", content="hello"),
         ],
     )
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
 
     _run_streamer(env)
 
@@ -165,12 +160,12 @@ def test_streamer_copies_transcript_lines_with_conv_id_augmentation(env: dict[st
     assert events[1]["content"] == "hello"
 
 
-def test_streamer_filters_conversations_to_those_in_the_agy_log(env: dict[str, Any]) -> None:
-    """A transcript whose UUID is not in the agy log (e.g. created by another agent) is not streamed."""
+def test_streamer_filters_conversations_to_those_in_the_ids_file(env: dict[str, Any]) -> None:
+    """A transcript whose UUID is not in the ids file (e.g. created by another agent) is not streamed."""
     _write_transcript(env, _CONV_MINE, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="mine")])
     _write_transcript(env, _CONV_OTHER, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="other")])
-    _add_created_conversation(env, _CONV_MINE)
-    # Note: conv-other is NOT in the agy log.
+    _record_conversation(env, _CONV_MINE)
+    # Note: conv-other is NOT in the ids file.
 
     _run_streamer(env)
 
@@ -178,10 +173,13 @@ def test_streamer_filters_conversations_to_those_in_the_agy_log(env: dict[str, A
     assert {e["_mngr_conv_id"] for e in events} == {_CONV_MINE}
 
 
-def test_streamer_picks_up_resumed_conversations(env: dict[str, Any]) -> None:
-    """`Resumed conversation <uuid>` lines (from -c / --conversation) are honored, not just Created."""
+def test_streamer_ignores_malformed_lines_in_the_ids_file(env: dict[str, Any]) -> None:
+    """A stray non-uuid line in the ids file is filtered out by the shape regex."""
     _write_transcript(env, _CONV_RESUMED, [_make_event(5, "MODEL", "PLANNER_RESPONSE", content="continued")])
-    _add_resumed_conversation(env, _CONV_RESUMED)
+    # A real id plus a junk line that must not be treated as a conversation id.
+    with env["conversation_ids_file"].open("a") as f:
+        f.write("not-a-uuid\n")
+    _record_conversation(env, _CONV_RESUMED)
 
     _run_streamer(env)
 
@@ -193,7 +191,7 @@ def test_streamer_picks_up_resumed_conversations(env: dict[str, Any]) -> None:
 def test_streamer_persists_offset_so_second_pass_emits_only_new_lines(env: dict[str, Any]) -> None:
     """Per-conversation offsets are saved; new lines appearing later are picked up incrementally."""
     transcript_path = _write_transcript(env, _CONV_A, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="first")])
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
     _run_streamer(env)
 
     initial = _read_raw_events(env)
@@ -217,12 +215,12 @@ def test_streamer_persists_offset_so_second_pass_emits_only_new_lines(env: dict[
 def test_streamer_picks_up_late_appearing_conversations(env: dict[str, Any]) -> None:
     """A conversation created between two streamer passes is picked up on the second pass."""
     _write_transcript(env, _CONV_A, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="first")])
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
     _run_streamer(env)
     assert {e["_mngr_conv_id"] for e in _read_raw_events(env)} == {_CONV_A}
 
     _write_transcript(env, _CONV_B, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="from B")])
-    _add_created_conversation(env, _CONV_B)
+    _record_conversation(env, _CONV_B)
     _run_streamer(env)
 
     events = _read_raw_events(env)
@@ -239,7 +237,7 @@ def test_streamer_resets_offset_when_transcript_shrinks(env: dict[str, Any]) -> 
             _make_event(2, "MODEL", "PLANNER_RESPONSE", content="response"),
         ],
     )
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
     _run_streamer(env)
     assert (env["offset_dir"] / _CONV_A).read_text().strip() == "2"
 
@@ -255,18 +253,18 @@ def test_streamer_resets_offset_when_transcript_shrinks(env: dict[str, Any]) -> 
 
 
 def test_streamer_handles_missing_transcript_file_gracefully(env: dict[str, Any]) -> None:
-    """A conversation id in agy's log without an on-disk transcript yet is tolerated."""
-    _add_created_conversation(env, _CONV_MISSING)
+    """A recorded conversation id without an on-disk transcript yet is tolerated."""
+    _record_conversation(env, _CONV_MISSING)
     # No transcript file staged.
     _run_streamer(env)
     assert _read_raw_events(env) == []
 
 
-def test_streamer_dedupes_conversation_ids_in_the_log(env: dict[str, Any]) -> None:
-    """If agy logs `Created conversation X` twice, the streamer treats it as one."""
+def test_streamer_dedupes_conversation_ids_in_the_ids_file(env: dict[str, Any]) -> None:
+    """If a conversation id appears twice in the ids file, the streamer treats it as one."""
     _write_transcript(env, _CONV_A, [_make_event(0, "USER_EXPLICIT", "USER_INPUT", content="hi")])
-    _add_created_conversation(env, _CONV_A)
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
     _run_streamer(env)
     assert len(_read_raw_events(env)) == 1
 
@@ -278,7 +276,7 @@ def test_streamer_skips_malformed_transcript_lines(env: dict[str, Any]) -> None:
     (transcript_dir / "transcript.jsonl").write_text(
         "{ not really json\n" + _make_event(0, "USER_EXPLICIT", "USER_INPUT", content="good") + "\n"
     )
-    _add_created_conversation(env, _CONV_A)
+    _record_conversation(env, _CONV_A)
 
     _run_streamer(env)
 

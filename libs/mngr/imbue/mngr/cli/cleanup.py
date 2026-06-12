@@ -31,9 +31,9 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_event
-from imbue.mngr.cli.output_helpers import emit_final_json
 from imbue.mngr.cli.output_helpers import emit_info
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
@@ -563,7 +563,7 @@ def _emit_no_agents_found(output_opts: OutputOptions) -> None:
     """Output message when no agents are found."""
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"agents": [], "message": "No agents found"})
+            write_json_line({"agents": [], "message": "No agents found"})
         case OutputFormat.JSONL:
             emit_event("info", {"message": "No agents found"}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -599,7 +599,7 @@ def _emit_dry_run_output(
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json({"action": action.value.lower(), "dry_run": True, "agents": agent_data})
+            write_json_line({"action": action.value.lower(), "dry_run": True, "agents": agent_data})
         case OutputFormat.JSONL:
             emit_event("dry_run", {"action": action.value.lower(), "agents": agent_data}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
@@ -632,7 +632,7 @@ def _emit_result(
 
     match output_opts.output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
             emit_event("cleanup_result", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:

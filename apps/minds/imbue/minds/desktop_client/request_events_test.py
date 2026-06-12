@@ -38,6 +38,37 @@ def test_inbox_add_request() -> None:
     assert pending[0].agent_id == "agent-1"
 
 
+def test_is_request_resolved_tracks_responses() -> None:
+    """A request is unresolved until a matching response is recorded.
+
+    The request itself lingers in the append-only log after a grant/deny,
+    so ``get_request_by_id`` still finds it; ``is_request_resolved`` is what
+    distinguishes a still-actionable request from a completed one.
+    """
+    event = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="post status updates",
+    )
+    inbox = RequestInbox().add_request(event)
+    assert inbox.is_request_resolved(str(event.event_id)) is False
+    assert inbox.is_request_resolved("never-existed") is False
+
+    resolved = inbox.add_response(
+        create_request_response_event(
+            request_event_id=str(event.event_id),
+            status=RequestStatus.GRANTED,
+            agent_id="agent-1",
+            request_type=event.request_type,
+            scope="slack-api",
+        )
+    )
+    # The request still exists, but is now resolved and no longer pending.
+    assert resolved.get_request_by_id(str(event.event_id)) is not None
+    assert resolved.is_request_resolved(str(event.event_id)) is True
+    assert resolved.get_pending_count() == 0
+
+
 def test_inbox_response_only_affects_matched_request() -> None:
     """A response only removes the request it references, not others."""
     event1 = create_latchkey_predefined_permission_request_event(agent_id="agent-1", scope="slack-api", rationale="r1")
@@ -175,7 +206,13 @@ def test_parse_request_event_round_trips_latchkey_permission_request() -> None:
     assert parsed.rationale == "Need to open a PR."
 
 
-def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
+def test_inbox_keeps_distinct_requests_for_same_scope() -> None:
+    """Two distinct requests for the same scope both stay pending.
+
+    Requests are keyed by ``event_id``, so identical-looking requests
+    (same agent, scope, permissions) are each shown as their own card
+    rather than collapsed into one.
+    """
     first = create_latchkey_predefined_permission_request_event(
         agent_id="agent-1",
         scope="slack-api",
@@ -190,9 +227,22 @@ def test_inbox_dedup_includes_latchkey_permission_requests() -> None:
     inbox = RequestInbox().add_request(first).add_request(second)
     pending = inbox.get_pending_requests()
 
+    assert {str(req.event_id) for req in pending} == {str(first.event_id), str(second.event_id)}
+
+
+def test_inbox_collapses_redelivered_request_by_event_id() -> None:
+    """Re-adding the same request (same ``event_id``) does not duplicate it."""
+    request = create_latchkey_predefined_permission_request_event(
+        agent_id="agent-1",
+        scope="slack-api",
+        rationale="summary",
+    )
+
+    inbox = RequestInbox().add_request(request).add_request(request)
+    pending = inbox.get_pending_requests()
+
     assert len(pending) == 1
-    assert isinstance(pending[0], LatchkeyPredefinedPermissionRequestEvent)
-    assert pending[0].rationale == "second"
+    assert str(pending[0].event_id) == str(request.event_id)
 
 
 def test_inbox_treats_different_services_as_different_requests() -> None:

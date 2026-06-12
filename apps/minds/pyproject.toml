@@ -13,6 +13,7 @@ dependencies = [
     "imbue-common",
     "itsdangerous>=2.2.0",
     "jinja2>=3.1.0",
+    "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
     "imbue-mngr-forward",
@@ -22,6 +23,7 @@ dependencies = [
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
+    "psycopg2-binary>=2.9",
     "pydantic>=2.0",
     "python-multipart>=0.0.9",
     "tenacity",
@@ -92,6 +94,9 @@ omit = [
   "*/telegram/credential_extractor.py",
   "*/telegram/bot_creator.py",
   "*/telegram/injector.py",
+  # Cloudflare tunnel token inject/clear shell out via `mngr exec` -- exercised
+  # via acceptance/release tests. The path constant is pinned in the *_test.py.
+  "*/desktop_client/tunnel_token_injection.py",
   # SuperTokens routes require a live Core connection -- tested via release test.
   "*/desktop_client/supertokens_routes.py",
   # Docker state-container teardown shells out to the `docker` CLI and needs a
@@ -121,9 +126,4 @@ pythonVersion = "3.12"
 strict = ["**/*.py"]
 
 [tool.coverage.report]
-# Local single-process runs report 69%; offload's combined-coverage merge from
-# parallel modal sandboxes drifts the stmt count by ~21 lines (covered count
-# unchanged) which lands the gate at 68% in CI. Pin to the CI-observed value
-# so the gate doesn't fail on a coverage-tooling artifact unrelated to any
-# real coverage regression.
-fail_under = 68
+fail_under = 70

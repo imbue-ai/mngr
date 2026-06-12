@@ -1,0 +1,177 @@
+{#def agent_id, ws_name, current_account, accounts, servers, telegram_state, is_leased_imbue_cloud=False, current_color="#0b292b", is_stale=False, palette={} #}
+{#
+  Workspace settings page. Color picker, account section, sharing servers
+  list, optional Telegram setup, and the danger-zone destroy flow.
+
+  telegram_state controls the Telegram section:
+    - None        : no Telegram orchestrator; section hidden
+    - "active"    : Telegram already set up for this workspace
+    - "pending"   : show the setup button
+
+  is_leased_imbue_cloud is True for workspaces running on a host leased from
+  Imbue Cloud. Such hosts are permanently bound to the leasing account to avoid
+  confusing "account mixing", so the account section shows the bound account
+  with a disabled Disassociate control and offers no association controls.
+
+  current_color is the stored workspace color hex (#rrggbb); it pre-fills the
+  hex input and pre-selects the matching palette swatch (if any).
+  is_stale disables the picker controls when the workspace's provider's last
+  discovery poll errored -- writes against an unreachable host would not be
+  observable until provider recovery.
+  palette is the {name: hex} map of pickable swatches (12 entries).
+#}
+{% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/workspace_settings.js" defer></script>
+<script>
+  (function() {
+    var destroyBtn = document.getElementById('destroy-btn');
+    var destroyDialog = document.getElementById('destroy-dialog');
+    var destroyCancelBtn = document.getElementById('destroy-cancel-btn');
+    var destroyConfirmBtn = document.getElementById('destroy-confirm-btn');
+    var destroyErrorEl = document.getElementById('destroy-error');
+    var agentId = document.getElementById('workspace-settings').dataset.agentId;
+
+    destroyBtn.addEventListener('click', function() {
+      destroyDialog.classList.remove('hidden');
+    });
+    destroyCancelBtn.addEventListener('click', function() {
+      destroyDialog.classList.add('hidden');
+    });
+    destroyDialog.addEventListener('click', function(e) {
+      if (e.target === destroyDialog) destroyDialog.classList.add('hidden');
+    });
+
+    destroyConfirmBtn.addEventListener('click', function() {
+      destroyConfirmBtn.disabled = true;
+      // Fire-and-redirect: the detached destroy subprocess survives a
+      // settings-page navigation, and the landing page renders a
+      // "Destroying..." marker on the row from on-disk state. No more
+      // polling here.
+      fetch('/api/destroy-agent/' + agentId, { method: 'POST' })
+        .then(function(resp) {
+          if (resp.ok) {
+            window.location.href = '/';
+            return;
+          }
+          destroyConfirmBtn.disabled = false;
+          destroyErrorEl.textContent = 'Could not start destroy (HTTP ' + resp.status + ')';
+          destroyErrorEl.classList.remove('hidden');
+          destroyDialog.classList.add('hidden');
+        })
+        .catch(function() {
+          destroyConfirmBtn.disabled = false;
+          destroyErrorEl.textContent = 'Could not start destroy (network error)';
+          destroyErrorEl.classList.remove('hidden');
+          destroyDialog.classList.add('hidden');
+        });
+    });
+  })();
+</script>
+{% endset %}
+<Base title={{ "Settings: " ~ ws_name }}
+      body_class="bg-zinc-50 text-zinc-900 font-sans antialiased"
+      scripts={{ _scripts }}>
+  <PageContainer>
+    <div id="workspace-settings" data-agent-id="{{ agent_id }}" data-is-stale="{{ 'true' if is_stale else 'false' }}">
+      <h1 class="text-xl font-semibold text-zinc-900 leading-tight">{{ ws_name }}</h1>
+      <p class="text-xs text-zinc-400 mb-5">{{ agent_id }}</p>
+
+      {# ``extra`` turns the h2 into a flex row so the badge centers on
+         the title's vertical axis; ``leading-none`` + fixed badge height
+         keeps the line box from growing when the badge un-hides (which
+         would push the swatches down a couple px). #}
+      <SectionHeader extra="flex items-center gap-2">Workspace Color <span id="color-saving-badge" class="hidden leading-none text-[10px] uppercase tracking-wider font-semibold text-zinc-900 bg-white rounded-sm px-1.5 py-1">Saving</span></SectionHeader>
+      <div id="color-section">
+        {% if is_stale %}
+          <Notice variant="warn">
+            This workspace is currently unreachable, so its color can't be changed right now.
+            Try again once the workspace reconnects.
+          </Notice>
+        {% endif %}
+        <div role="radiogroup"
+             aria-label="Workspace color palette"
+             class="flex flex-wrap items-center gap-2 mb-3"
+             id="color-swatches">
+          {% for name, hex_value in palette.items() %}
+            <ColorSwatch :hex="hex_value" :name="name" size="md"
+                         :selected="hex_value == current_color" :disabled="is_stale" />
+          {% endfor %}
+          <input id="color-hex-input"
+                 type="text"
+                 class="color-hex-pill h-[34px] px-3 rounded-full text-sm font-mono text-zinc-900 placeholder:text-zinc-400 disabled:opacity-40{{ ' is-selected' if current_color not in palette.values() else '' }}"
+                 value="{{ current_color }}"
+                 placeholder="#a1b2c3"
+                 maxlength="9"
+                 spellcheck="false"
+                 autocomplete="off"
+                 aria-label="Workspace color hex"
+                 size="8"
+                 {% if is_stale %}disabled{% endif %}>
+        </div>
+        <p id="color-error" class="hidden text-sm text-red-600 mt-2" role="alert"></p>
+      </div>
+
+      <SectionHeader divider>Account</SectionHeader>
+      <div id="account-section">
+      {% if is_leased_imbue_cloud %}
+        {% if current_account %}
+          <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+        {% endif %}
+        <Notice variant="info">
+          This workspace runs on a host leased from Imbue Cloud, so its account
+          association is fixed and cannot be changed.
+        </Notice>
+        <Button variant="danger" id="disassociate-btn" disabled>Disassociate</Button>
+      {% elif current_account %}
+        <p>Associated with: <strong>{{ current_account.email }}</strong></p>
+        <Notice variant="warn">
+          Disassociating will remove all sharing (tunnels) for this workspace.
+          You will need to set up sharing again after re-associating.
+        </Notice>
+        <Button variant="danger" id="disassociate-btn">Disassociate</Button>
+        <span id="disassociate-spinner" class="hidden text-zinc-500 ml-2">Disassociating...</span>
+      {% else %}
+        <Associate :agent_id="agent_id" :accounts="accounts" />
+      {% endif %}
+      </div>
+
+      <SectionHeader divider>Sharing</SectionHeader>
+      {% for server in servers %}
+        <Card layout="row-spread">
+          <span class="font-medium">{{ server }}</span>
+          <ButtonLink href={{ "/sharing/" ~ agent_id ~ "/" ~ server }} variant="secondary">Manage sharing</ButtonLink>
+        </Card>
+      {% else %}
+        <p class="text-zinc-500">No servers discovered for this workspace.</p>
+      {% endfor %}
+
+      {% if telegram_state %}
+        <SectionHeader divider>Telegram</SectionHeader>
+        {% if telegram_state == 'active' %}
+          <p class="text-emerald-700">Telegram is active for this workspace.</p>
+        {% elif telegram_state == 'pending' %}
+          <Button variant="primary" id="tg-btn">Setup Telegram</Button>
+        {% endif %}
+      {% endif %}
+
+      <SectionHeader divider>Danger zone</SectionHeader>
+      <p class="text-sm text-zinc-500 mb-3">Permanently destroy this project and release any associated resources.</p>
+      <Button variant="danger" id="destroy-btn">Destroy project</Button>
+      <p id="destroy-error" class="hidden text-sm text-red-600 mt-2"></p>
+
+      <Modal id="destroy-dialog">
+        <h2 class="text-lg font-semibold text-zinc-900 mb-3">Destroy project?</h2>
+        <p class="text-sm text-zinc-700 mb-4">This will permanently destroy <strong>{{ ws_name }}</strong> and all its data. This action cannot be undone.</p>
+        <div class="flex justify-end gap-3">
+          <Button variant="secondary" id="destroy-cancel-btn">Cancel</Button>
+          <Button variant="danger" id="destroy-confirm-btn">Destroy</Button>
+        </div>
+      </Modal>
+
+      <div class="mt-8">
+        <Link href="/">&larr; Back to projects</Link>
+      </div>
+    </div>
+  </PageContainer>
+</Base>

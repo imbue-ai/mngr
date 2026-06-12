@@ -41,7 +41,6 @@ from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
-from imbue.modal_proxy.errors import ModalProxyPermissionDeniedError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
@@ -133,11 +132,7 @@ def _lookup_persistent_app_with_env_retry(
 
 
 @retry(
-    # Retry on PermissionDeniedError as well: after `modal environment create`
-    # returns success, Modal's per-user permission entry is propagated
-    # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3-7 seconds before catching up.
-    retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
+    retry=retry_if_exception_type(ModalProxyNotFoundError),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
@@ -180,11 +175,7 @@ def _enter_ephemeral_app_context_with_env_retry(
 
 
 @retry(
-    # Retry on PermissionDeniedError as well: after `modal environment create`
-    # returns success, Modal's per-user permission entry is propagated
-    # asynchronously and operations on the new env raise PermissionDeniedError
-    # for ~3-7 seconds before catching up.
-    retry=retry_if_exception_type((ModalProxyNotFoundError, ModalProxyPermissionDeniedError)),
+    retry=retry_if_exception_type(ModalProxyNotFoundError),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     reraise=True,
@@ -515,7 +506,7 @@ Supported build arguments for the modal provider:
         Production calls via ``build_provider_instance`` (which selects a
         ``DirectModalInterface`` per ``ModalMode.DIRECT``); tests call via
         ``mngr_modal.testing.make_testing_provider`` (which passes a
-        ``TestingModalInterface``). Output capture is yielded off
+        ``FakeModalInterface``). Output capture is yielded off
         ``modal_interface.enable_output_capture(...)`` so this function has
         no per-implementation branches.
 

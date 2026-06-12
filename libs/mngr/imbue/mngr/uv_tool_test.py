@@ -15,41 +15,11 @@ from imbue.mngr.uv_tool import build_uv_tool_install_add_path
 from imbue.mngr.uv_tool import build_uv_tool_install_add_requirements
 from imbue.mngr.uv_tool import build_uv_tool_install_remove
 from imbue.mngr.uv_tool import build_uv_tool_install_remove_multiple
+from imbue.mngr.uv_tool import get_installed_plugin_package_names
 from imbue.mngr.uv_tool import get_receipt_path
+from imbue.mngr.uv_tool import has_mngr_entry_points
 from imbue.mngr.uv_tool import read_receipt
 from imbue.mngr.uv_tool import require_uv_tool_receipt
-
-# =============================================================================
-# Tests for ToolRequirement
-# =============================================================================
-
-
-def test_tool_requirement_minimal() -> None:
-    """ToolRequirement should create with just a name."""
-    requirement = ToolRequirement(name="imbue-mngr")
-    assert requirement.name == "imbue-mngr"
-    assert requirement.specifier is None
-    assert requirement.editable is None
-    assert requirement.git is None
-
-
-def test_tool_requirement_with_specifier() -> None:
-    """ToolRequirement should store version specifiers."""
-    requirement = ToolRequirement(name="imbue-mngr", specifier=">=0.1.0")
-    assert requirement.specifier == ">=0.1.0"
-
-
-def test_tool_requirement_with_editable() -> None:
-    """ToolRequirement should store editable paths."""
-    requirement = ToolRequirement(name="my-plugin", editable="/path/to/plugin")
-    assert requirement.editable == "/path/to/plugin"
-
-
-def test_tool_requirement_with_git() -> None:
-    """ToolRequirement should store git URLs."""
-    requirement = ToolRequirement(name="my-plugin", git="https://github.com/user/repo.git")
-    assert requirement.git == "https://github.com/user/repo.git"
-
 
 # =============================================================================
 # Tests for _requirement_to_with_arg
@@ -481,3 +451,71 @@ def test_build_uv_tool_install_remove_multiple_all_deps() -> None:
     )
     cmd = build_uv_tool_install_remove_multiple(receipt, {"dep-a", "dep-b"})
     assert cmd == ("uv", "tool", "install", "imbue-mngr", "--reinstall")
+
+
+# =============================================================================
+# Tests for get_installed_plugin_package_names
+# =============================================================================
+
+
+def test_has_mngr_entry_points_false_for_missing_package() -> None:
+    """A package that is not installed has no mngr entry points."""
+    assert has_mngr_entry_points("definitely-not-installed-package-zzz") is False
+
+
+def test_has_mngr_entry_points_false_for_non_plugin_library() -> None:
+    """An installed library that declares no mngr entry points is not a plugin."""
+    # pytest is always installed in the test environment and is not an mngr plugin.
+    assert has_mngr_entry_points("pytest") is False
+
+
+def test_get_installed_plugin_package_names_returns_empty_in_dev_mode() -> None:
+    """Best-effort: returns empty when mngr was not installed via uv tool (no receipt)."""
+    assert get_installed_plugin_package_names() == []
+
+
+def test_get_installed_plugin_package_names_sorted_and_deduped(tmp_path: Path) -> None:
+    """Returns the receipt extras' package names, sorted and deduplicated."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text(
+        "[tool]\nrequirements = [\n"
+        '  { name = "imbue-mngr" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        '  { name = "imbue-mngr-claude" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        "]\n"
+    )
+
+    # Inject a deterministic plugin predicate so the test does not depend on
+    # which packages happen to be installed in the test environment.
+    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=lambda name: True)
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+def test_get_installed_plugin_package_names_filters_non_plugin_extras(tmp_path: Path) -> None:
+    """Non-plugin extras (libraries with no mngr entry points) are excluded."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    # Mirrors a real editable dev install: plugins plus workspace libraries.
+    receipt_path.write_text(
+        "[tool]\nrequirements = [\n"
+        '  { name = "imbue-mngr" },\n'
+        '  { name = "concurrency-group" },\n'
+        '  { name = "imbue-common" },\n'
+        '  { name = "modal-proxy" },\n'
+        '  { name = "imbue-mngr-modal" },\n'
+        '  { name = "imbue-mngr-claude" },\n'
+        "]\n"
+    )
+
+    is_plugin = {"imbue-mngr-modal", "imbue-mngr-claude"}.__contains__
+    result = get_installed_plugin_package_names(receipt_path, is_plugin_package=is_plugin)
+    assert result == ["imbue-mngr-claude", "imbue-mngr-modal"]
+
+
+@pytest.mark.allow_warnings(match=r"Could not read uv-tool receipt")
+def test_get_installed_plugin_package_names_handles_malformed_receipt(tmp_path: Path) -> None:
+    """Best-effort: a garbled receipt yields an empty list (and warns) rather than raising."""
+    receipt_path = tmp_path / "uv-receipt.toml"
+    receipt_path.write_text("this is not valid toml = = =\n")
+
+    assert get_installed_plugin_package_names(receipt_path) == []

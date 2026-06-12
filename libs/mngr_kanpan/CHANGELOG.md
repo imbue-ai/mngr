@@ -6,6 +6,19 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `mngr kanpan --format json` now prints a single board snapshot instead of launching the TUI — the JSON has ordered columns, agents grouped into sections with human labels, and any fetch errors; each agent carries both the pre-rendered cells and the structured field values (PR number, CI status, commits-ahead count, etc.). `--format jsonl` emits one agent record per line in board order, followed by error lines. Previously `--format json` was accepted but silently ignored.
+
+### Fixed
+
+- Fixed: GitHub data source now pages through PR search results instead of fetching only the first 100. Boards tracking more than 100 agents previously hit GitHub's hard per-page cap and silently rendered "Create PR" for the overflow agents; kanpan now follows the search cursor (up to GitHub's ~1000-result ceiling, beyond which it surfaces an explicit error).
+- Fixed: Each GitHub page request is now retried with exponential backoff when GitHub returns a transient failure (HTTP 403 secondary rate limit, 5xx, or an unparseable body). A failure on a later page keeps earlier pages and retries only the failing page.
+
+## [v0.2.12] - 2026-06-08
+
+## [v0.2.11] - 2026-06-05
+
 ## [v0.2.10] - 2026-06-01
 
 ### Fixed
@@ -16,7 +29,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: GitHub data source now refreshes via a single `gh api graphql` request per board cycle (filtered by `repo:` / `head:` qualifiers with `mergeable`, `statusCheckRollup`, `reviewThreads`, and `comments` embedded inline), replacing the four separate `gh` calls. Eliminates the gh HTTP cache race, drops the `_GH_PR_LIST_LOCK`, `ThreadPoolExecutor`, and conflicts/unresolved second-pass fetcher, and removes ~250 lines of fetch/parse/orchestration code.
+- Changed: GitHub data source now refreshes via a single `gh api graphql` request per board cycle (with mergeability, status checks, review threads, and comments embedded inline), replacing the four separate `gh` calls and eliminating the gh HTTP cache race.
 
 ## [v0.2.7] - 2026-05-11
 

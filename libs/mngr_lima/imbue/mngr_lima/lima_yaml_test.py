@@ -212,10 +212,13 @@ def test_generate_default_lima_yaml_btrfs_mode_omits_mounts_adds_disk(tmp_path: 
     assert disk_entry["size"] == "100GiB"
 
     script = config["provision"][0]["script"]
-    # The symlink target is Lima's auto-mount path for the additional disk.
+    # The symlink target is the disk's canonical mount path.
     assert "ln -sfn /mnt/lima-mngr-abc123-data /mngr" in script
-    # Hardens the chicken-and-egg: provisioning script waits for Lima's auto-mount
-    # before symlinking host_dir into it.
+    # We format + mount the disk ourselves (Lima can't on minimal images that lack
+    # mkfs.btrfs): btrfs-progs is installed, the disk is formatted, and mounted at
+    # the canonical path before host_dir is symlinked into it.
+    assert "btrfs-progs" in script
+    assert "mkfs.btrfs -f" in script
     assert "mountpoint -q /mnt/lima-mngr-abc123-data" in script
     # Opens the btrfs root for the Lima default non-root user (fresh mkfs.btrfs
     # leaves the root dir owned by root:root).
@@ -257,3 +260,36 @@ def test_parse_build_args_for_yaml_path() -> None:
     assert parse_build_args_for_yaml_path(("--file=/path/to/config.yaml",)) == Path("/path/to/config.yaml")
     assert parse_build_args_for_yaml_path(("--other", "arg")) is None
     assert parse_build_args_for_yaml_path(()) is None
+
+
+def test_generate_default_lima_yaml_without_root_key_omits_root_login() -> None:
+    """Without root_authorized_public_key, the provisioning script must not enable
+    root login or authorize a root key -- the default non-root path is untouched."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+    )
+    script = config["provision"][0]["script"]
+    assert "PermitRootLogin" not in script
+    assert "/root/.ssh/authorized_keys" not in script
+
+
+def test_generate_default_lima_yaml_with_root_key_enables_root_login() -> None:
+    """When a root client key is provided, the provisioning script enables
+    key-based root login and authorizes that key for root."""
+    config = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        root_authorized_public_key="ssh-ed25519 AAAAROOTKEY mngr-lima-root",
+    )
+    script = config["provision"][0]["script"]
+    assert "PermitRootLogin prohibit-password" in script
+    assert "/root/.ssh/authorized_keys" in script
+    assert "ssh-ed25519 AAAAROOTKEY mngr-lima-root" in script
+    # The btrfs disk is still formatted + mounted; root mode doesn't change that.
+    assert "mkfs.btrfs -f" in script
+    assert "ln -sfn /mnt/lima-mngr-abc-data /mngr" in script

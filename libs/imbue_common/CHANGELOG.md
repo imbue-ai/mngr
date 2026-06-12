@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.19] - 2026-06-05
+
+### Added
+
+- Added: `check_per_file_host_upload` ratchet (and `find_per_file_host_uploads_in_loops` AST helper) in the shared `ratchet_testing` framework. Flags `write_file` / `write_text_file` / `put_file` calls inside `for` / `while` loops, steering bulk transfers toward a single rsync (`host.copy_directory`).
+
+### Fixed
+
+- Fixed: Ratchet file scans no longer crash on a tracked symlink that resolves to a directory. The file walker (`_get_all_files_with_extension`) now filters on `is_file()` instead of `exists()`, so a symlink-to-directory (listed as a blob by git but not readable as a file) is skipped instead of raising `FileReadError`.
+
 ## [v0.1.18] - 2026-05-28
 
 ### Added

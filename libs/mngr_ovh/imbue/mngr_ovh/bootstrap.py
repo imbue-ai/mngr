@@ -29,35 +29,6 @@ _ROOT_AUTHORIZED_KEYS_COPY_COMMAND: str = (
 )
 _ROOT_VERIFY_COMMAND: str = 'test "$(whoami)" = root && echo OK'
 
-# Packages the OVH "Debian 12 - Docker" image does NOT ship that
-# ``mngr_vps_docker`` requires on the outer host:
-#
-# * ``rsync`` -- used by ``_upload_directory_to_outer`` to push the
-#   Docker build context onto the VPS. Without it the build aborts with
-#   ``bash: line 1: rsync: command not found`` after every other
-#   bootstrap step has already succeeded. Cloud-init-using backends
-#   (Vultr) get rsync for free because their base images include it;
-#   OVH does not, so the gap has to be closed here.
-#
-# * ``inotify-tools`` and ``jq`` -- both required by the per-host
-#   ``snapshot_helper.service`` that ``mngr_vps_docker`` installs on
-#   every outer (the script blocks on ``inotifywait`` for snapshot
-#   requests from the in-container ``host_backup`` service, and uses
-#   ``jq`` to parse + emit the JSON request/result files). Cloud-init
-#   backends pull these in via the cloud-init ``packages:`` list; OVH
-#   has to install them here for parity.
-#
-# Kept as a tuple so the list is easy to extend if future vps_docker
-# revisions need another tool the image doesn't ship.
-_REQUIRED_OUTER_PACKAGES: tuple[str, ...] = ("rsync", "inotify-tools", "jq")
-# apt-get update + install on a fresh VPS routinely takes 30-90s
-# (Debian mirrors plus package extraction). The default
-# ``exec_command(timeout=60)`` is the per-read I/O timeout, but
-# ``recv_exit_status`` waits for the whole command to finish; bump the
-# wall-clock deadline so a slow apt mirror doesn't fail an otherwise-
-# fine bake.
-_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS: float = 300.0
-
 
 class _SilentAcceptHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     """Paramiko policy that silently accepts any host key on first sight.
@@ -235,58 +206,6 @@ def verify_root_ssh(
         logger.info("Verified SSH as root works on {}:{}", hostname, port)
     finally:
         client.close()
-
-
-def install_required_outer_packages(
-    *,
-    hostname: str,
-    port: int,
-    private_key_path: Path,
-    known_hosts_path: Path,
-    timeout_seconds: float,
-    packages: tuple[str, ...] = _REQUIRED_OUTER_PACKAGES,
-) -> None:
-    """Install packages that ``mngr_vps_docker`` needs on the OVH outer host.
-
-    OVH has no cloud-init, so the package-list mechanism
-    ``generate_cloud_init_user_data`` provides for cloud-init backends
-    (Vultr) doesn't apply here. The OVH ``Debian 12 - Docker`` image
-    ships docker but not ``rsync`` -- which the build-context upload
-    needs -- so we apt-install the gap as the final outer-bootstrap step
-    before handing off to ``VpsDockerProvider.create_host``.
-
-    Runs ``apt-get update`` followed by a single ``apt-get install -y``
-    for the package set. ``DEBIAN_FRONTEND=noninteractive`` prevents
-    debconf from prompting on a non-interactive SSH session.
-
-    Idempotent: a re-run on an already-provisioned host is a no-op for
-    apt (packages already installed) and a refresh of the apt cache.
-    """
-    if not packages:
-        return
-    apt_env = "DEBIAN_FRONTEND=noninteractive"
-    package_list = " ".join(packages)
-    command = f"set -e && {apt_env} apt-get update && {apt_env} apt-get install -y {package_list}"
-    with log_span("Installing {} on OVH VPS {}:{}", list(packages), hostname, port):
-        client = _connect_with_retry(
-            hostname=hostname,
-            port=port,
-            ssh_user="root",
-            private_key_path=private_key_path,
-            known_hosts_path=known_hosts_path,
-            timeout_seconds=timeout_seconds,
-            failure_label=f"SSH as root for installing required outer packages {list(packages)}",
-        )
-        try:
-            _run_or_raise(
-                client,
-                command,
-                failure_label=f"apt-get install {' '.join(packages)}",
-                command_timeout_seconds=_OUTER_PACKAGES_INSTALL_TIMEOUT_SECONDS,
-            )
-            logger.info("Installed required outer packages on {}: {}", hostname, list(packages))
-        finally:
-            client.close()
 
 
 def _connect_with_retry(

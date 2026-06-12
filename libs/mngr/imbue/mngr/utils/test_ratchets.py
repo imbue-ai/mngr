@@ -17,7 +17,12 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    rc.check_todos(_DIR, snapshot(0))
+    # The 1 violation is in libs/mngr/imbue/mngr/e2e/tutorial/test_git.py inside
+    # an e2e.write_tutorial_block(\"\"\"...\"\"\") triple-quoted string -- it is a
+    # verbatim quote of a "# TODO: ..." line in mega_tutorial.sh that the
+    # tutorial_matcher requires to appear in the test body, not a TODO we
+    # added to the codebase. See PR #1806.
+    rc.check_todos(_DIR, snapshot(1))
 
 
 def test_prevent_exec() -> None:
@@ -257,12 +262,14 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 # the agent background-task scripts, ttyd's attach script) where Python types
 # don't reach.
 #
-# Baseline 1 accounts for agents/tui_utils.py:269: `tmux send-keys -t "$1"`
-# where $1 is bound from `tmux_target.as_shell_arg()` at the f-string
-# boundary -- variable indirection that the regex can't see through; safe in
-# practice because the value of $1 includes the `=` prefix.
+# Baseline 2 accounts for two `tmux send-keys -t "$N"` occurrences in
+# agents/tui_utils.py -- one in the signal-only submission command and one in
+# the signal-or-marker command. In both, the positional ($1 / $2) is bound
+# from `tmux_target.as_shell_arg()` at the shell-arg boundary -- variable
+# indirection the regex can't see through; safe in practice because the value
+# already includes the exact-match `=` prefix.
 def test_prevent_bare_tmux_targets() -> None:
-    rc.check_bare_tmux_targets(_DIR, snapshot(1))
+    rc.check_bare_tmux_targets(_DIR, snapshot(2))
 
 
 def test_prevent_direct_subprocess() -> None:
@@ -296,6 +303,10 @@ def test_prevent_cast_usage() -> None:
 
 def test_prevent_assert_isinstance() -> None:
     rc.check_assert_isinstance(_DIR, snapshot(0))
+
+
+def test_prevent_per_file_host_upload() -> None:
+    rc.check_per_file_host_upload(_DIR, snapshot(2))
 
 
 # --- Project-level checks ---

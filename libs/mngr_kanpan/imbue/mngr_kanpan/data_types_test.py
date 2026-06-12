@@ -15,6 +15,22 @@ from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
+from imbue.mngr_kanpan.data_types import section_label
+
+
+def test_section_label_with_suffix() -> None:
+    assert section_label(BoardSection.PR_MERGED) == "Done - PR merged"
+    assert section_label(BoardSection.PR_BEING_REVIEWED) == "In review - PR pending"
+
+
+def test_section_label_without_suffix() -> None:
+    assert section_label(BoardSection.MUTED) == "Muted"
+
+
+def test_section_label_covers_every_section() -> None:
+    # Every BoardSection must have prefix/suffix entries, or section_label raises KeyError.
+    for section in BoardSection:
+        assert section_label(section)
 
 
 def test_ci_status_color() -> None:

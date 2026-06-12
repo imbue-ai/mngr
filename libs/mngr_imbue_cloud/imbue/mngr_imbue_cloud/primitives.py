@@ -8,6 +8,12 @@ from imbue.imbue_common.primitives import NonEmptyStr
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
+# OVH-US datacenters the imbue_cloud host pool can land VPSes in. Used to
+# validate the ``region`` create-path knob client-side (the connector itself
+# accepts any string and simply matches the column). Kept small and explicit on
+# purpose; extend when the pool gains new datacenters.
+KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset({"US-EAST-VA", "US-WEST-OR"})
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -37,6 +43,29 @@ class ImbueCloudKeyType(UpperCaseStrEnum):
     """The class of secret being requested."""
 
     LITELLM = auto()
+
+
+class FastMode(UpperCaseStrEnum):
+    """Whether ``mngr create`` on imbue_cloud may take the fast (adopt) path.
+
+    REQUIRE: only the fast path -- lease an exact attribute match and adopt
+    its pre-baked agent. If no exact match exists, raise
+    ``FastPathUnavailableError`` rather than falling back.
+
+    PREVENT: only the slow path -- lease any adequately-sized available host
+    (relaxed attributes), destroy its baked container, and rebuild the host
+    from scratch like an OVH host. This is the default: it always works as
+    long as the pool has any free host.
+    """
+
+    REQUIRE = auto()
+    PREVENT = auto()
+
+
+# The fast-path adopt optimization is opt-in: a bare ``mngr create`` against
+# imbue_cloud does the robust full rebuild unless the caller explicitly asks
+# for the fast path via ``-b fast_mode=require``.
+DEFAULT_FAST_MODE: Final[FastMode] = FastMode.PREVENT
 
 
 class InvalidR2BucketAccess(ValueError):

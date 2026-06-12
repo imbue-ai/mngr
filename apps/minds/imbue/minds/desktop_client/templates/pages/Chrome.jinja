@@ -1,0 +1,108 @@
+{#def is_mac, is_authenticated, mngr_forward_origin, initial_workspaces #}
+{#
+  Persistent chrome page (titlebar + sidebar + content iframe).
+
+  is_mac controls macOS-specific styling (traffic-light padding, hidden window
+  controls). In Electron mode, the iframe and embedded browser-mode sidebar are
+  hidden via JS; the content is a separate WebContentsView, and the sidebar
+  page is loaded into the shared modal WebContentsView when opened.
+
+  mngr_forward_origin is exposed to page-level JS via a data attribute on the
+  body so chrome.js can build workspace links that target the plugin's port
+  directly.
+#}
+{% set _head %}
+<style>
+  /* Things that can't easily be expressed as Tailwind utilities. */
+  html, body { height: 100%; overflow: hidden; }
+  #minds-titlebar { -webkit-app-region: drag; }
+  #minds-titlebar button { -webkit-app-region: no-drag; }
+  /* When the inbox modal (or any modal hosted in the main process's
+     modalView) is open, drop the titlebar's app-region: drag. macOS
+     unions drag regions across all views in a window, so without this
+     the titlebar's drag swallows clicks intended for the modal's
+     interior in the y=0..TITLEBAR strip. The main process sends
+     `modal-state-changed` over IPC and chrome.js toggles the
+     ``modal-open`` body class accordingly. */
+  body.modal-open #minds-titlebar { -webkit-app-region: no-drag; }
+</style>
+{% endset %}
+{% set _body_attrs %}data-is-mac="{{ 'true' if is_mac else 'false' }}" data-is-authenticated="{{ 'true' if is_authenticated else 'false' }}" data-mngr-forward-origin="{{ mngr_forward_origin }}"{% endset %}
+{% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script src="/_static/sidebar_workspace_row.js" defer></script>
+<script src="/_static/chrome.js" defer></script>
+{% endset %}
+{# Body background tracks --titlebar-bg so the iframe's rounded top corners
+   (browser mode) and the chromeView's extension strip (Electron mode) both
+   reveal accent color through the curve. Falls back to zinc-900 when no
+   workspace is active. #}
+<Base title="Minds"
+      body_class="font-sans antialiased"
+      body_style="background-color: var(--titlebar-bg, #18181b);"
+      head={{ _head }}
+      body_attrs={{ _body_attrs }}
+      scripts={{ _scripts }}>
+  <div id="minds-titlebar"
+       style="background-color: var(--titlebar-bg, #18181b);"
+       class="fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1 {% if is_mac %}pl-[76px]{% endif %}">
+    <div class="flex gap-0.5">
+      <TitlebarButton id="sidebar-toggle" title="Projects"><Icon24 name="menu" /></TitlebarButton>
+      <TitlebarButton id="home-btn" title="Home"><Icon24 name="home" /></TitlebarButton>
+      <TitlebarButton id="back-btn" title="Back"><Icon24 name="back" /></TitlebarButton>
+      <TitlebarButton id="forward-btn" title="Forward"><Icon24 name="forward" /></TitlebarButton>
+    </div>
+    <div class="flex-1 flex items-center justify-center px-2 min-w-0">
+      <span id="page-title" class="titlebar-title text-xs whitespace-nowrap overflow-hidden text-ellipsis">Minds</span>
+    </div>
+    <TitlebarButton id="requests-toggle" title="Requests" extra="relative">
+      <Icon24 name="messages" />
+      <span id="requests-badge" class="hidden absolute top-0.5 right-0.5 w-2 h-2 rounded-full bg-red-500"></span>
+    </TitlebarButton>
+    <div class="flex {% if is_mac %}hidden{% endif %}">
+      <TitlebarButton variant="control" id="min-btn" title="Minimize"><Icon12 name="minimize" /></TitlebarButton>
+      <TitlebarButton variant="control" id="max-btn" title="Maximize"><Icon12 name="maximize" /></TitlebarButton>
+      <TitlebarButton variant="control" tone="danger" id="close-btn" title="Close"><Icon12 name="close" /></TitlebarButton>
+    </div>
+  </div>
+
+  {# Browser-mode floating sidebar: full-screen transparent backdrop
+     (#sidebar-backdrop) with a floating dark menu (#sidebar-menu)
+     positioned at toggle time by chrome.js using the sidebar-toggle
+     button's getBoundingClientRect + a caller-chosen offset. Clicks on
+     the backdrop and Escape close the menu (handled by chrome.js). In
+     Electron this whole block is hidden via JS; the sidebar page
+     (Sidebar.jinja) is loaded into the shared modal WebContentsView and
+     uses the same #sidebar-backdrop / #sidebar-menu shape with the
+     /_static/sidebar.js renderer. Both modes share the position model:
+     menu.top-left = trigger.bottom-left + offset, with a uniform 4px panel
+     pad (p-1) and 2px between entries (gap-0.5); each row adds its own
+     px-2 for the hover highlight's inset. #}
+  <div id="sidebar-backdrop" class="fixed inset-0 z-50 hidden">
+    <div id="sidebar-menu"
+         class="absolute w-[280px] flex flex-col gap-0.5 p-1 rounded-[10px] border border-white/10 bg-black shadow-[0_12px_32px_rgba(0,0,0,0.25)] overflow-hidden">
+      <div id="sidebar-workspaces" class="flex flex-col gap-0.5"></div>
+      <SidebarBottom />
+    </div>
+  </div>
+
+  {# White "mirror" sized exactly like the Electron contentView (left:4
+     / top:38 / right:4 / bottom:4 / radius:12 -- matches CONTENT_INSET
+     and CONTENT_CORNER_RADIUS in electron/main.js). Sits behind the
+     iframe in browser mode (the iframe covers it completely so it's
+     invisible there) and shows through in Electron mode whenever the
+     WebContentsView's compositor surface goes briefly transparent --
+     which Chromium does on cross-origin history navigation
+     (goBack/goForward between Home and a workspace), between the old
+     frame tearing down and the new frame's first paint. Without this
+     mirror the chromeView body's accent color would flash through.
+     Pointer-events:none so it never intercepts clicks. #}
+  <div id="content-bg-mirror"
+       class="fixed left-[4px] top-[38px] rounded-xl bg-white pointer-events-none"
+       style="width: calc(100% - 8px); height: calc(100% - 42px);"></div>
+
+  <iframe id="content-frame"
+          src="/"
+          class="fixed left-[4px] top-[38px] border-0 rounded-xl bg-white"
+          style="width: calc(100% - 8px); height: calc(100% - 42px); box-shadow: 0 1px 0 rgba(255,255,255,0.05) inset;"></iframe>
+</Base>

@@ -10,19 +10,34 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import HostName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr_antigravity.antigravity_config import ACTIVE_MARKER_FILENAME
+from imbue.mngr_antigravity.antigravity_config import CAPTURE_CONVERSATION_ID_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME
+from imbue.mngr_antigravity.antigravity_config import SET_ACTIVE_MARKER_SCRIPT_NAME
 from imbue.mngr_antigravity.antigravity_config import build_antigravity_hooks_config
-from imbue.mngr_antigravity.antigravity_config import get_antigravity_user_settings_path
+from imbue.mngr_antigravity.antigravity_config import build_isolated_settings
+from imbue.mngr_antigravity.antigravity_config import build_onboarding_seed
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_cli_dir
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_hooks_config_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_onboarding_cache_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 from imbue.mngr_antigravity.antigravity_config import merge_trusted_workspace
 from imbue.mngr_antigravity.antigravity_config import read_antigravity_settings
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_hooks
 from imbue.mngr_antigravity.antigravity_config import serialize_antigravity_settings
 
 
-def test_user_settings_path_lives_under_gemini_antigravity_cli() -> None:
-    """Path is fixed by agy; no env-var override exists in the binary."""
-    path = get_antigravity_user_settings_path()
-    assert path == Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
+def test_path_helpers_address_the_gemini_tree_under_a_given_home() -> None:
+    """All path helpers are rooted at a given ``$HOME``, so the same builders serve
+    both the user's real home and each agent's relocated home (no env-var override
+    exists in agy; a per-agent ``$HOME`` is the only lever)."""
+    home = Path("/some/home")
+    cli_dir = home / ".gemini" / "antigravity-cli"
+    assert get_antigravity_cli_dir(home) == cli_dir
+    assert get_antigravity_settings_path(home) == cli_dir / "settings.json"
+    assert get_antigravity_oauth_token_path(home) == cli_dir / "antigravity-oauth-token"
+    assert get_antigravity_onboarding_cache_path(home) == cli_dir / "cache" / "onboarding.json"
+    assert get_antigravity_hooks_config_path(home) == home / ".gemini" / "config" / "hooks.json"
 
 
 def test_serialize_round_trips_to_two_space_indented_json() -> None:
@@ -32,7 +47,10 @@ def test_serialize_round_trips_to_two_space_indented_json() -> None:
 
     assert json.loads(serialized) == settings
     # Two-space indent, no trailing newline -- mirrors what agy itself writes.
-    assert "  " in serialized
+    # A top-level key must be indented by exactly two spaces (not four, which a
+    # bare ``"  " in serialized`` check could not distinguish).
+    color_scheme_line = next(line for line in serialized.splitlines() if '"colorScheme"' in line)
+    assert color_scheme_line.startswith("  ") and not color_scheme_line.startswith("   ")
     assert not serialized.endswith("\n")
 
 
@@ -64,6 +82,69 @@ def test_merge_trusted_workspace_promotes_non_list_value_to_fresh_array() -> Non
 
     assert merged is not None
     assert merged["trustedWorkspaces"] == ["/work/agent-1"]
+
+
+# =============================================================================
+# Per-agent settings + onboarding builders
+# =============================================================================
+
+
+def test_build_isolated_settings_layers_base_trust_and_overrides() -> None:
+    """Base (copy of user settings) is the floor; trust is merged; overrides win on top."""
+    base = {"colorScheme": "dark", "model": "Base Model", "trustedWorkspaces": ["/repo"]}
+    overrides = {"model": "Override Model", "permissions": {"allow": ["command(git)"]}}
+
+    result = build_isolated_settings(base, overrides, ["/tmp/ws"])
+
+    # Inherited base key survives.
+    assert result["colorScheme"] == "dark"
+    # Overrides win over the base value.
+    assert result["model"] == "Override Model"
+    assert result["permissions"] == {"allow": ["command(git)"]}
+    # Workspace path appended to the inherited trust list (deduped, order preserved).
+    assert result["trustedWorkspaces"] == ["/repo", "/tmp/ws"]
+
+
+def test_build_isolated_settings_does_not_mutate_base() -> None:
+    """The builder is @pure: the caller's base mapping is left untouched."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert base == {"trustedWorkspaces": ["/repo"]}
+
+
+def test_build_isolated_settings_dedupes_already_trusted_workspace() -> None:
+    base = {"trustedWorkspaces": ["/tmp/ws"]}
+    result = build_isolated_settings(base, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_isolated_settings_leaves_trust_untouched_for_empty_workspace_list() -> None:
+    """An empty trusted_workspaces sequence must not change the inherited trust list."""
+    base = {"trustedWorkspaces": ["/repo"]}
+    result = build_isolated_settings(base, {}, [])
+    assert result["trustedWorkspaces"] == ["/repo"]
+
+
+def test_build_isolated_settings_omits_trust_key_for_empty_base_and_empty_workspaces() -> None:
+    """No spurious empty trustedWorkspaces key when there's nothing to trust."""
+    result = build_isolated_settings({}, {}, [])
+    assert "trustedWorkspaces" not in result
+
+
+def test_build_isolated_settings_seeds_trust_list_from_empty_base() -> None:
+    """With an empty base (sync_home_settings=False) the workspace still gets trusted."""
+    result = build_isolated_settings({}, {}, ["/tmp/ws"])
+    assert result["trustedWorkspaces"] == ["/tmp/ws"]
+
+
+def test_build_onboarding_seed_emits_the_three_nux_keys() -> None:
+    """The NUX seed must carry exactly the keys agy checks to skip the first-run flow."""
+    seed = build_onboarding_seed()
+    assert seed == {
+        "consumerOnboardingComplete": True,
+        "enterpriseOnboardingComplete": True,
+        "onboardingComplete": True,
+    }
 
 
 def test_read_antigravity_settings_returns_empty_dict_for_missing_file(
@@ -136,12 +217,16 @@ def test_read_antigravity_settings_returns_parsed_dict(
 
 
 def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() -> None:
-    """PreInvocation touches the active marker; Stop removes it.
+    """PreInvocation sets the marker (+ root); Stop clears it only on the root's fully-idle.
 
-    The active marker drives BaseAgent's RUNNING/WAITING detection. agy fires
-    PreInvocation before each model call (agent working) and Stop when the
-    loop terminates (agent idle), so this pair flips the marker at the right
-    boundaries.
+    The active marker drives BaseAgent's RUNNING/WAITING detection. agy runs
+    PreInvocation before each model call (agent working) and the Stop hooks each
+    time any conversation -- the root agent or a subagent -- goes idle. The first
+    PreInvocation handler runs set_active_marker.sh (touch + record the turn's
+    root) and the Stop handler runs clear_active_marker_when_idle.sh, which
+    removes the marker only on the root's fully-idle Stop, so the pair flips the
+    marker at the right boundaries even when subagents / background tasks finish
+    first.
     """
     config = build_antigravity_hooks_config()
 
@@ -149,8 +234,39 @@ def test_hooks_config_always_emits_active_marker_via_preinvocation_and_stop() ->
     # PreInvocation/Stop use the flat handler-list shape (no matcher wrapper).
     pre = mngr["PreInvocation"]
     stop = mngr["Stop"]
-    assert pre == [{"type": "command", "command": f'touch "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
-    assert stop == [{"type": "command", "command": f'rm -f "$MNGR_AGENT_STATE_DIR/{ACTIVE_MARKER_FILENAME}"'}]
+    # The marker/root script is the first PreInvocation handler (a second handler
+    # captures the conversation id; see the test below).
+    assert pre[0] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{SET_ACTIVE_MARKER_SCRIPT_NAME}"',
+    }
+    # Stop runs the root-gated clear script (not a bare `rm`), so the marker is
+    # removed only on the root agent's fully-idle Stop.
+    assert stop == [
+        {
+            "type": "command",
+            "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CLEAR_ACTIVE_MARKER_WHEN_IDLE_SCRIPT_NAME}"',
+        }
+    ]
+
+
+def test_hooks_config_captures_conversation_id_via_second_preinvocation_handler() -> None:
+    """A second PreInvocation handler runs capture_conversation_id.sh.
+
+    agy delivers the hook-payload stdin to each handler independently (verified
+    live against agy 1.0.4), so the capture handler runs alongside the
+    active-marker touch without contending for stdin. The captured id drives
+    both conversation resume (assemble_command) and transcript scoping
+    (stream_transcript.sh).
+    """
+    config = build_antigravity_hooks_config()
+
+    pre = config["mngr"]["PreInvocation"]
+    assert len(pre) == 2
+    assert pre[1] == {
+        "type": "command",
+        "command": f'bash "$MNGR_AGENT_STATE_DIR/commands/{CAPTURE_CONVERSATION_ID_SCRIPT_NAME}"',
+    }
 
 
 def test_hooks_config_never_emits_pretooluse() -> None:
@@ -170,4 +286,7 @@ def test_serialize_antigravity_hooks_round_trips() -> None:
     config = build_antigravity_hooks_config()
     serialized = serialize_antigravity_hooks(config)
     assert json.loads(serialized) == config
-    assert "  " in serialized
+    # Two-space indent: the top-level key must start with exactly two spaces,
+    # which a bare ``"  " in serialized`` check could not distinguish from four.
+    mngr_key_line = next(line for line in serialized.splitlines() if '"mngr"' in line)
+    assert mngr_key_line.startswith("  ") and not mngr_key_line.startswith("   ")

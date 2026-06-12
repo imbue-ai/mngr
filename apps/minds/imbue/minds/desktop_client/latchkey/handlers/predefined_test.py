@@ -16,8 +16,6 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import RequestInbox
@@ -27,6 +25,8 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 
@@ -84,27 +84,24 @@ _SLACK_AVAILABLE_PAYLOAD: dict[str, object] = {
         {
             "scope": "slack-api",
             "display_name": "Slack",
+            "description": "Any interaction with the Slack API.",
             "permissions": [
-                "slack-read-all",
-                "slack-write-all",
-                "slack-chat-read",
+                {"name": "slack-read-all", "description": "All read operations across the Slack API."},
+                {"name": "slack-write-all"},
+                {"name": "slack-chat-read"},
             ],
         },
     ],
 }
 
 
-def _build_slack_services_catalog(
-    gateway_client: FakeLatchkeyGatewayClient | None = None,
-) -> ServicesCatalog:
+def _build_slack_services_catalog() -> ServicesCatalog:
     """Return a :class:`ServicesCatalog` pre-seeded with the Slack fixture.
 
-    Uses the gateway client's ``available_services_payload`` hook so we
-    don't depend on the real ``services.json`` data file.
+    Uses an explicit catalog payload so we don't depend on the real
+    ``services.json`` data file.
     """
-    client = gateway_client if gateway_client is not None else build_fake_gateway_client()
-    client.available_services_payload = dict(_SLACK_AVAILABLE_PAYLOAD)
-    return ServicesCatalog(gateway_client=client)
+    return ServicesCatalog.from_catalog_payload(_SLACK_AVAILABLE_PAYLOAD)
 
 
 _DEFAULT_AUTH_OPTIONS_JSON: str = json.dumps(["browser", "set"])
@@ -326,7 +323,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     assert len(_read_recording(auth_recording)) == 1
 
 
-def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path: Path) -> None:
+def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
     handler = _build_handler(
         tmp_path,
         credential_status="missing",
@@ -344,18 +341,20 @@ def test_grant_treats_failed_browser_flow_as_deny_with_distinct_message(tmp_path
         granted_permissions=("slack-read-all",),
     )
 
-    assert result.outcome == GrantOutcome.DENIED
+    # A failed sign-in is a FAILED outcome, not a denial.
+    assert result.outcome == GrantOutcome.FAILED
     assert "sign-in" in result.message.lower()
     assert "user cancelled" in result.message
+    # The request stays pending: no resolving response event is returned.
+    assert result.response_event is None
     # latchkey_permissions.json must NOT have been written.
     assert not permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).exists()
-    # A DENIED response event was appended (no separate AUTH_FAILED status).
-    responses = load_response_events(tmp_path)
-    assert len(responses) == 1
-    assert responses[0].status == str(RequestStatus.DENIED)
-    # mngr message was still sent (the agent needs to be unblocked).
-    mngr_recording = _read_recording(tmp_path / "mngr_report.jsonl")
-    assert len(mngr_recording) == 1
+    # No response event was appended, so the request is not auto-denied and
+    # remains pending for the user to retry from the dialog.
+    assert load_response_events(tmp_path) == []
+    # No mngr message was sent: the agent stays blocked, waiting on the
+    # still-pending request rather than being told it was resolved.
+    assert not (tmp_path / "mngr_report.jsonl").exists()
 
 
 def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
@@ -649,7 +648,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
@@ -683,7 +682,7 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
@@ -732,8 +731,8 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     """Deny must work even when the request's scope is not in the gateway catalog.
 
     An agent can file a permission request under an unknown scope
-    (typo, stale catalog, etc.); the rendered dialog
-    (:func:`_render_unknown_scope_page`) offers Deny as the only
+    (typo, stale catalog, etc.); the rendered detail fragment
+    (:func:`_render_unknown_scope_fragment`) offers Deny as the only
     action. The deny HTTP path must therefore still tear down the
     pending request, append a DENIED response event, and notify the
     agent -- using the raw scope string in place of a catalog
@@ -746,7 +745,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=handler.latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=handler.mngr_message_sender,
         gateway_client=fake_client,
     )
@@ -794,7 +793,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(fake_client),
+        services_catalog=_build_slack_services_catalog(),
         mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )

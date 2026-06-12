@@ -27,12 +27,13 @@ from imbue.minds.desktop_client.request_events import RequestEvent
 class RequestEventHandler(MutableModel, ABC):
     """Per-``RequestType`` handler for the request inbox flow.
 
-    Each implementation owns rendering the request page, applying a
-    grant, applying a deny, and providing the human-readable labels the
-    requests panel uses to describe pending requests of its kind. The
-    route layer guarantees that ``req_event.request_type`` matches
-    ``handles_request_type()`` before calling any of the methods below,
-    so subclasses may safely narrow ``req_event`` to their concrete type.
+    Each implementation owns rendering the request detail fragment,
+    applying a grant, applying a deny, and providing the human-readable
+    labels the inbox list uses to describe pending requests of its
+    kind. The route layer guarantees that ``req_event.request_type``
+    matches ``handles_request_type()`` before calling any of the
+    methods below, so subclasses may safely narrow ``req_event`` to
+    their concrete type.
     """
 
     @abstractmethod
@@ -41,11 +42,11 @@ class RequestEventHandler(MutableModel, ABC):
 
     @abstractmethod
     def kind_label(self) -> str:
-        """Short, lower-case label shown on requests-panel cards (e.g. ``"sharing"``)."""
+        """Short, lower-case label shown on inbox list cards (e.g. ``"sharing"``)."""
 
     @abstractmethod
     def display_name_for_event(self, req_event: RequestEvent) -> str:
-        """Human-readable secondary label for the requests-panel card.
+        """Human-readable secondary label for the inbox list card.
 
         Typically the friendly service name (e.g. ``"Slack"`` rather than
         ``"slack"``). Falls back to whatever raw identifier the event
@@ -53,17 +54,22 @@ class RequestEventHandler(MutableModel, ABC):
         """
 
     @abstractmethod
-    def render_request_page(
+    def render_request_detail_fragment(
         self,
         req_event: RequestEvent,
         backend_resolver: BackendResolverInterface,
         mngr_forward_origin: str,
-    ) -> Response:
-        """Render the request-detail page (``GET /requests/{id}``).
+    ) -> str:
+        """Render the right-pane HTML fragment for an inbox detail view.
 
-        The route layer has already authenticated the caller and looked
-        up ``req_event``; the handler's job is purely to produce the
-        HTML (or JSON) the user agent should see.
+        The fragment is embedded inside the inbox modal's
+        ``#inbox-detail`` container (or innerHTML-swapped into it). It
+        must not include ``<html>``, a backdrop, a close button, or any
+        per-handler script tags: chrome and submission JS live in the
+        inbox shell and operate on shared element ids the fragment
+        emits (``#permissions-form``, ``#permissions-approve-btn``,
+        ``#permissions-error``, ``#permissions-progress``,
+        ``#permissions-manual-credentials``).
 
         ``mngr_forward_origin`` is the bare-origin URL of the
         ``mngr forward`` plugin (e.g. ``"http://localhost:8421"``);

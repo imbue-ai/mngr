@@ -31,9 +31,14 @@ class GitOperationError(MindError):
 
 
 class MngrCommandError(MindError):
-    """Raised when an mngr CLI command fails."""
+    """Raised when an mngr CLI command fails (timed out, exited nonzero, or could not be launched)."""
 
-    ...
+    def __init__(self, message: str, *, error_class: str | None = None) -> None:
+        super().__init__(message)
+        # mngr's exception class name, parsed from a structured JSONL ``error``
+        # event when available (e.g. ``FastPathUnavailableError``). Lets callers
+        # branch on the failure *type* without matching human-formatted text.
+        self.error_class = error_class
 
 
 class MalformedMngrOutputError(MindError, ValueError):
@@ -49,6 +54,18 @@ class MalformedMngrOutputError(MindError, ValueError):
 
 class MindsConfigError(MindError):
     """Raised when minds config cannot be parsed or validated."""
+
+    ...
+
+
+class DeployLifecycleConfigError(MindError, ValueError):
+    """Raised when a deploy lifecycle config combination is invalid."""
+
+    ...
+
+
+class EnvelopeStreamConsumerError(MindError, RuntimeError):
+    """Raised when the envelope stream consumer is used out of lifecycle order."""
 
     ...
 
@@ -71,7 +88,7 @@ class TelegramCredentialError(TelegramError, ValueError):
     ...
 
 
-class TelegramCredentialExtractionError(TelegramError):
+class TelegramCredentialExtractionError(TelegramError, ValueError):
     """Raised when credential extraction from the browser fails."""
 
     ...

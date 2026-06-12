@@ -2,11 +2,14 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import httpx
+import psycopg2
 import pytest
 from fastapi import HTTPException
+from ovh.exceptions import ResourceNotFoundError as OvhResourceNotFoundError
 from starlette.testclient import TestClient
 from supertokens_python.exceptions import GeneralError as SuperTokensGeneralError
 from supertokens_python.recipe.session.exceptions import SuperTokensSessionError
@@ -16,6 +19,7 @@ from imbue.remote_service_connector.app import AdminAuth
 from imbue.remote_service_connector.app import AuthPolicy
 from imbue.remote_service_connector.app import CloudflareApiError
 from imbue.remote_service_connector.app import HttpCloudflareOps
+from imbue.remote_service_connector.app import HttpOvhOps
 from imbue.remote_service_connector.app import InvalidR2BucketNameError
 from imbue.remote_service_connector.app import InvalidTunnelComponentError
 from imbue.remote_service_connector.app import R2BucketOwnershipError
@@ -28,18 +32,24 @@ from imbue.remote_service_connector.app import _authenticate_supertokens
 from imbue.remote_service_connector.app import _default_email_getter
 from imbue.remote_service_connector.app import cf_check
 from imbue.remote_service_connector.app import cf_list_all_pages
+from imbue.remote_service_connector.app import clean_up_pool_host_in_ovh
+from imbue.remote_service_connector.app import clear_paid_status_cache
 from imbue.remote_service_connector.app import derive_s3_secret_access_key
 from imbue.remote_service_connector.app import extract_service_name
 from imbue.remote_service_connector.app import extract_username_from_tunnel_name
-from imbue.remote_service_connector.app import is_email_in_paid_account_allowlist
+from imbue.remote_service_connector.app import is_email_paid
+from imbue.remote_service_connector.app import is_email_paid_in_db
 from imbue.remote_service_connector.app import make_bucket_name
 from imbue.remote_service_connector.app import make_hostname
 from imbue.remote_service_connector.app import make_tunnel_name
 from imbue.remote_service_connector.app import require_paid_account
+from imbue.remote_service_connector.app import run_pool_host_cleanup_sweep
 from imbue.remote_service_connector.app import slugify_r2_name
 from imbue.remote_service_connector.app import verify_bucket_ownership
+from imbue.remote_service_connector.app import vps_urn_for
 from imbue.remote_service_connector.app import web_app
 from imbue.remote_service_connector.testing import FakeCloudflareOps
+from imbue.remote_service_connector.testing import FakeOvhOps
 from imbue.remote_service_connector.testing import FakePoolBackend
 from imbue.remote_service_connector.testing import FakeSuperTokensBackend
 from imbue.remote_service_connector.testing import InMemoryKeyStore
@@ -52,7 +62,7 @@ from imbue.remote_service_connector.testing import make_fake_tunnel_token
 _ADMIN_STUB_TOKEN = "admin-stub-jwt"
 _ADMIN_STUB_USERNAME = "testuser"
 _ADMIN_STUB_EMAIL = "testuser@example.com"
-_PAID_ACCOUNT_SUFFIXES_TEST_VALUE = "@example.com"
+_PAID_ADMIN_KEY_TEST_VALUE = "paid-admin-key-secret-9f3a2b"
 
 
 def _admin_headers() -> dict[str, str]:
@@ -74,13 +84,15 @@ def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     Sets up the SuperTokens Bearer auth path so tests calling admin endpoints
     can authenticate with ``_admin_headers()`` without needing a real JWT.
-    Also primes ``PAID_ACCOUNT_SUFFIXES`` with a value that matches the stub
-    admin email so paid-feature endpoints (``/hosts/*``, ``/keys/*``) work
-    out of the box; tests that want to exercise the gate use
-    ``monkeypatch.setenv``/``delenv`` to override.
+    Installs an in-memory paid-list backend seeded with the stub admin email
+    so paid-feature endpoints (``/hosts/*``, ``/keys/*``, ``/buckets/*``)
+    authorize out of the box; gate tests use ``_make_pool_test_client`` to
+    get the backend and flip entries. The paid-status cache is disabled
+    (``MINDS_PAID_LIST_CACHE_TTL_SECONDS=0``) so the module-level cache never
+    bleeds between tests.
     """
     monkeypatch.setenv("SUPERTOKENS_CONNECTION_URI", "https://fake-supertokens.example.com")
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", _PAID_ACCOUNT_SUFFIXES_TEST_VALUE)
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
     fake_ctx = make_fake_forwarding_ctx()
     monkeypatch.setattr(app_mod, "get_ctx", lambda: fake_ctx)
 
@@ -90,6 +102,9 @@ def _make_test_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
         return AdminAuth(username=_ADMIN_STUB_USERNAME, email=_ADMIN_STUB_EMAIL)
 
     monkeypatch.setattr(app_mod, "_authenticate_supertokens", _stub_supertokens)
+    backend = make_fake_pool_backend()
+    backend.add_paid_email(_ADMIN_STUB_EMAIL)
+    backend.install_on_app_module(app_mod, monkeypatch)
     return TestClient(web_app)
 
 
@@ -1635,10 +1650,16 @@ def _make_pool_test_client(
     monkeypatch: pytest.MonkeyPatch,
     pool_backend: FakePoolBackend | None = None,
 ) -> tuple[TestClient, FakePoolBackend]:
-    """Create a TestClient with both tunnel-auth and pool-backend fakes installed."""
+    """Create a TestClient with both tunnel-auth and pool-backend fakes installed.
+
+    The returned backend is seeded with the stub admin email as paid so
+    paid-feature routes authorize by default; gate tests flip entries via
+    ``backend.add_paid_email`` / ``add_paid_domain`` / the CRUD endpoints.
+    """
     client = _make_test_client(monkeypatch)
     monkeypatch.setenv("POOL_SSH_PRIVATE_KEY", "fake-management-key-pem")
     backend = pool_backend if pool_backend is not None else make_fake_pool_backend()
+    backend.add_paid_email(_ADMIN_STUB_EMAIL)
     backend.install_on_app_module(app_mod, monkeypatch)
     return client, backend
 
@@ -1712,6 +1733,50 @@ def test_lease_host_returns_503_when_version_mismatch(monkeypatch: pytest.Monkey
     assert backend.pool_rows[0].status == "available"
 
 
+def test_lease_host_hard_region_filters_out_other_regions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` only leases a host in that datacenter; otherwise 503."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-WEST-OR",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 503
+    assert backend.pool_rows[0].status == "available"
+
+
+def test_lease_host_hard_region_leases_matching_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hard ``region`` leases a host whose region matches."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_available_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000001"),
+        version="v0.1.0",
+        region="US-EAST-VA",
+    )
+    resp = client.post(
+        "/hosts/lease",
+        json={
+            "ssh_public_key": "ssh-ed25519 AAAA testkey",
+            "host_name": "my-workspace",
+            "attributes": {"version": "v0.1.0"},
+            "region": "US-EAST-VA",
+        },
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert backend.pool_rows[0].status == "leased"
+
+
 def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -> None:
     """POST /hosts/lease rejects host_name values that fail the SafeName regex."""
     client, backend = _make_pool_test_client(monkeypatch)
@@ -1732,15 +1797,56 @@ def test_lease_host_rejects_invalid_host_name(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_release_host_succeeds_for_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /hosts/{id}/release succeeds when the caller owns the lease."""
+    """POST /hosts/{id}/release strips OVH tags, cancels the VPS, and drops the row."""
     client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_leased_host(
+    row = backend.add_leased_host(
         host_id=UUID("00000000-0000-0000-0000-000000000042"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
     )
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "released"
-    assert backend.pool_rows[0].status == "released"
+    # Row fully cleaned up (deleted), VPS cancelled, stale tags stripped.
+    assert backend.pool_rows == []
+    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
+    stripped_keys = {key for _urn, key in backend.ovh_ops.deleted_tags}
+    assert stripped_keys == {"minds_env", "mngr-host-id"}
+    # The provider tag is never stripped.
+    assert all(key != "mngr-provider" for _urn, key in backend.ovh_ops.deleted_tags)
+
+
+def test_release_host_idempotent_when_already_removing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A release on a row already in 'removing' re-drives cleanup and returns 200."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    row = backend.add_removing_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000077"),
+        version="v0.1.0",
+        leased_to_user=_ADMIN_STUB_USERNAME,
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000077/release", headers=_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "released"
+    assert backend.pool_rows == []
+    assert backend.ovh_ops.cancelled == [row.vps_instance_id]
+
+
+def test_release_host_fails_loudly_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed OVH cancel makes release return an error -- never a false success.
+
+    Synchronous release contract: a "released" 200 must mean the VPS is actually
+    cancelled. When the cancel fails the endpoint returns 5xx and keeps the row
+    as 'removing' so the client (or the sweep backstop) retries -- the opposite
+    of the old behavior, which returned 200 and silently stranded the VPS.
+    """
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.ovh_ops.fail_on_cancel = True
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-000000000099"), version="v0.1.0", leased_to_user=_ADMIN_STUB_USERNAME
+    )
+    resp = client.post("/hosts/00000000-0000-0000-0000-000000000099/release", headers=_admin_headers())
+    assert resp.status_code == 502
+    # The row is NOT deleted; it stays 'removing' so the teardown is retryable.
+    assert len(backend.pool_rows) == 1
+    assert backend.pool_rows[0].status == "removing"
 
 
 def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1756,11 +1862,12 @@ def test_release_host_returns_403_for_non_owner(monkeypatch: pytest.MonkeyPatch)
     assert backend.pool_rows[0].status == "leased"
 
 
-def test_release_host_returns_404_for_unknown_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /hosts/{id}/release returns 404 when the host doesn't exist or isn't leased."""
+def test_release_host_unknown_returns_already_released(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /hosts/{id}/release on a missing row returns 200 already_released (idempotent)."""
     client, _backend = _make_pool_test_client(monkeypatch)
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000999/release", headers=_admin_headers())
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "already_released"
 
 
 def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1792,92 +1899,216 @@ def test_list_hosts_returns_leased_hosts(monkeypatch: pytest.MonkeyPatch) -> Non
     assert host_ids == {"00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000003"}
 
 
+# -- OVH cleanup tests --
+
+
+def test_clean_up_pool_host_in_ovh_strips_tags_then_cancels() -> None:
+    """The per-host OVH cleanup strips the stale tags and cancels by service name."""
+    ovh_ops = FakeOvhOps()
+    clean_up_pool_host_in_ovh(ovh_ops, "vps-test.vps.ovh.us", "us")
+    expected_urn = vps_urn_for("vps-test.vps.ovh.us", "us")
+    assert ovh_ops.deleted_tags == [(expected_urn, "minds_env"), (expected_urn, "mngr-host-id")]
+    assert ovh_ops.cancelled == ["vps-test.vps.ovh.us"]
+
+
+def test_cleanup_sweep_cleans_only_removing_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sweep cleans every 'removing' row and leaves leased/available rows alone."""
+    _client, backend = _make_pool_test_client(monkeypatch)
+    removing = backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000a1"), version="v0.1.0")
+    backend.add_leased_host(
+        host_id=UUID("00000000-0000-0000-0000-0000000000a2"), version="v0.1.0", leased_to_user="someone"
+    )
+    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-0000000000a3"), version="v0.1.0")
+
+    conn = backend.get_connection()
+    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
+
+    assert (success_count, failure_count) == (1, 0)
+    # The removing row is gone; the leased + available rows remain.
+    remaining_ids = {row.host_id for row in backend.pool_rows}
+    assert remaining_ids == {
+        UUID("00000000-0000-0000-0000-0000000000a2"),
+        UUID("00000000-0000-0000-0000-0000000000a3"),
+    }
+    assert backend.ovh_ops.cancelled == [removing.vps_instance_id]
+
+
+def test_http_ovh_ops_set_delete_at_expiration_is_idempotent_for_gone_vps() -> None:
+    """A 404 from OVH (VPS already removed) is treated as success, not an error."""
+
+    class _NotFoundClient:
+        def call(self, method: str, path: str, data: object, need_auth: bool) -> object:
+            raise OvhResourceNotFoundError(f"{method} {path} not found")
+
+    ops = HttpOvhOps(application_key="ak", application_secret="as", consumer_key="ck", endpoint="ovh-us")
+    ops.client = _NotFoundClient()
+    # Must not raise: a missing service means there is nothing left to cancel.
+    ops.set_delete_at_expiration("vps-gone.vps.ovh.us", True)
+
+
+def test_cleanup_sweep_keeps_row_when_ovh_cancel_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A removing row whose OVH cancel fails is kept for the next run."""
+    _client, backend = _make_pool_test_client(monkeypatch)
+    backend.ovh_ops.fail_on_cancel = True
+    backend.add_removing_host(host_id=UUID("00000000-0000-0000-0000-0000000000b1"), version="v0.1.0")
+
+    conn = backend.get_connection()
+    success_count, failure_count = run_pool_host_cleanup_sweep(conn, backend.ovh_ops, "us")
+
+    assert (success_count, failure_count) == (0, 1)
+    assert len(backend.pool_rows) == 1
+    assert backend.pool_rows[0].status == "removing"
+
+
 # -- PAID_ACCOUNT_SUFFIXES gate tests --
+# -- Paid-list gate tests (paid_domains / paid_emails tables) --
+
+
+def _paid_lookup_backend(
+    *,
+    paid_domains: tuple[str, ...] = (),
+    paid_emails: tuple[str, ...] = (),
+) -> Callable[[], Any]:
+    """Build a connection factory over a fake backend seeded with the given lists."""
+    backend = make_fake_pool_backend()
+    for domain in paid_domains:
+        backend.add_paid_domain(domain)
+    for email in paid_emails:
+        backend.add_paid_email(email)
+    return backend.get_connection
 
 
 @pytest.mark.parametrize(
-    ("email", "raw_suffixes", "expected"),
+    ("email", "paid_domains", "paid_emails", "expected"),
     [
-        ("alice@imbue.com", "@imbue.com", True),
-        ("ALICE@IMBUE.COM", "@imbue.com", True),
-        ("alice@imbue.com", "@IMBUE.COM", True),
-        ("alice@imbue.com", "@example.com,@imbue.com", True),
-        ("alice@imbue.com", "@example.com, @imbue.com ", True),
-        ("alice@imbue.com", "@example.com", False),
-        ("alice@imbue.com", "", False),
-        ("alice@imbue.com", "  ,  ", False),
-        (None, "@imbue.com", False),
-        ("", "@imbue.com", False),
-        # Bare domain matches as a suffix even without a leading "@".
-        ("alice@imbue.com", "imbue.com", True),
-        # A specific personal address matches itself only.
-        ("bob@gmail.com", "bob@gmail.com", True),
-        ("eve@gmail.com", "bob@gmail.com", False),
+        # Exact domain match (case-insensitive on both sides).
+        ("alice@imbue.com", ("imbue.com",), (), True),
+        ("ALICE@IMBUE.COM", ("imbue.com",), (), True),
+        ("alice@imbue.com", ("IMBUE.COM",), (), True),
+        # Subdomains do NOT match a bare-domain entry (exact match only).
+        ("alice@eng.imbue.com", ("imbue.com",), (), False),
+        ("alice@eng.imbue.com", ("eng.imbue.com",), (), True),
+        # Full-email match.
+        ("bob@gmail.com", (), ("bob@gmail.com",), True),
+        ("eve@gmail.com", (), ("bob@gmail.com",), False),
+        # Either list grants access.
+        ("carol@imbue.com", ("imbue.com",), ("dave@elsewhere.com",), True),
+        # Empty lists deny everyone.
+        ("alice@imbue.com", (), (), False),
     ],
 )
-def test_is_email_in_paid_account_allowlist(
-    email: str | None,
-    raw_suffixes: str,
+def test_is_email_paid_in_db_matching(
+    email: str,
+    paid_domains: tuple[str, ...],
+    paid_emails: tuple[str, ...],
     expected: bool,
 ) -> None:
-    assert is_email_in_paid_account_allowlist(email, raw_suffixes) is expected
+    factory = _paid_lookup_backend(paid_domains=paid_domains, paid_emails=paid_emails)
+    assert is_email_paid_in_db(email, connection_factory=factory) is expected
 
 
-def test_require_paid_account_allows_when_email_matches_suffix(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com,@example.com")
-    require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
+def test_is_email_paid_in_db_ignores_soft_deleted_rows() -> None:
+    backend = make_fake_pool_backend()
+    backend.add_paid_email("bob@gmail.com", is_paid=False)
+    backend.add_paid_domain("imbue.com", is_paid=False)
+    assert is_email_paid_in_db("bob@gmail.com", connection_factory=backend.get_connection) is False
+    assert is_email_paid_in_db("alice@imbue.com", connection_factory=backend.get_connection) is False
 
 
-def test_require_paid_account_raises_403_when_env_var_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+def test_is_email_paid_caches_within_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a positive TTL, a second lookup is served from cache (db_lookup not re-invoked)."""
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "60")
+    clear_paid_status_cache()
+    call_count = 0
+
+    def _counting_lookup(email: str) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return True
+
+    fake_clock = [1000.0]
+    assert is_email_paid("x@imbue.com", db_lookup=_counting_lookup, monotonic=lambda: fake_clock[0]) is True
+    # 30s later: still within the 60s window, so the cached value is reused.
+    fake_clock[0] = 1030.0
+    assert is_email_paid("x@imbue.com", db_lookup=_counting_lookup, monotonic=lambda: fake_clock[0]) is True
+    assert call_count == 1
+    clear_paid_status_cache()
+
+
+def test_is_email_paid_refreshes_after_ttl_expires(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "60")
+    clear_paid_status_cache()
+    call_count = 0
+
+    def _counting_lookup(email: str) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return True
+
+    fake_clock = [1000.0]
+    is_email_paid("x@imbue.com", db_lookup=_counting_lookup, monotonic=lambda: fake_clock[0])
+    # 61s later: past the window, so the lookup runs again.
+    fake_clock[0] = 1061.0
+    is_email_paid("x@imbue.com", db_lookup=_counting_lookup, monotonic=lambda: fake_clock[0])
+    assert call_count == 2
+    clear_paid_status_cache()
+
+
+def test_is_email_paid_bypasses_cache_when_ttl_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MINDS_PAID_LIST_CACHE_TTL_SECONDS", "0")
+    clear_paid_status_cache()
+    call_count = 0
+
+    def _counting_lookup(email: str) -> bool:
+        nonlocal call_count
+        call_count += 1
+        return True
+
+    is_email_paid("x@imbue.com", db_lookup=_counting_lookup)
+    is_email_paid("x@imbue.com", db_lookup=_counting_lookup)
+    assert call_count == 2
+
+
+def test_require_paid_account_allows_when_email_is_listed() -> None:
+    require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"), paid_checker=lambda email: True)
+
+
+def test_require_paid_account_raises_403_when_email_not_listed() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
-    assert exc_info.value.status_code == 403
-    assert "not enabled" in exc_info.value.detail
-
-
-def test_require_paid_account_raises_403_when_env_var_empty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "")
-    with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"))
-    assert exc_info.value.status_code == 403
-    assert "not enabled" in exc_info.value.detail
-
-
-def test_require_paid_account_raises_403_when_email_does_not_match(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
-    with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email="alice@elsewhere.com"))
+        require_paid_account(
+            AdminAuth(username="alice", email="alice@elsewhere.com"), paid_checker=lambda email: False
+        )
     assert exc_info.value.status_code == 403
     assert "not authorized" in exc_info.value.detail
 
 
-def test_require_paid_account_raises_403_when_email_is_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+def test_require_paid_account_raises_403_when_email_is_none() -> None:
     with pytest.raises(HTTPException) as exc_info:
-        require_paid_account(AdminAuth(username="alice", email=None))
+        require_paid_account(AdminAuth(username="alice", email=None), paid_checker=lambda email: True)
     assert exc_info.value.status_code == 403
     assert "email unavailable" in exc_info.value.detail
 
 
-def test_route_lease_host_returns_403_when_email_not_in_allowlist(
+def test_require_paid_account_fails_closed_on_db_error() -> None:
+    """A database error during the lookup denies access (403), never allows it."""
+
+    def _raise_db_error(email: str) -> bool:
+        raise psycopg2.OperationalError("connection refused")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_paid_account(AdminAuth(username="alice", email="alice@imbue.com"), paid_checker=_raise_db_error)
+    assert exc_info.value.status_code == 403
+    assert "database error" in exc_info.value.detail
+
+
+def test_route_lease_host_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The pool-lease route enforces the PAID_ACCOUNT_SUFFIXES gate."""
+    """The pool-lease route denies a caller whose email is not in the paid lists."""
     client, backend = _make_pool_test_client(monkeypatch)
     backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
-    # Stub email is testuser@example.com; the suffix below excludes it.
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    # Flip the seeded stub email to not-paid.
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post(
         "/hosts/lease",
         json={
@@ -1893,27 +2124,7 @@ def test_route_lease_host_returns_403_when_email_not_in_allowlist(
     assert backend.append_key_calls == []
 
 
-def test_route_lease_host_returns_403_when_paid_suffixes_unset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When PAID_ACCOUNT_SUFFIXES is unset, paid features are disabled and lease returns 403."""
-    client, backend = _make_pool_test_client(monkeypatch)
-    backend.add_available_host(host_id=UUID("00000000-0000-0000-0000-000000000001"), version="v0.1.0")
-    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
-    resp = client.post(
-        "/hosts/lease",
-        json={
-            "ssh_public_key": "ssh-ed25519 AAAA testkey",
-            "host_name": "my-workspace",
-            "attributes": {"version": "v0.1.0"},
-        },
-        headers=_admin_headers(),
-    )
-    assert resp.status_code == 403
-    assert backend.pool_rows[0].status == "available"
-
-
-def test_route_release_host_returns_403_when_email_not_in_allowlist(
+def test_route_release_host_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, backend = _make_pool_test_client(monkeypatch)
@@ -1922,94 +2133,221 @@ def test_route_release_host_returns_403_when_email_not_in_allowlist(
         version="v0.1.0",
         leased_to_user=_ADMIN_STUB_USERNAME,
     )
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post("/hosts/00000000-0000-0000-0000-000000000042/release", headers=_admin_headers())
     assert resp.status_code == 403
     assert backend.pool_rows[0].status == "leased"
 
 
-def test_route_list_hosts_returns_403_when_email_not_in_allowlist(
+def test_route_list_hosts_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, _backend = _make_pool_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.get("/hosts", headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_create_litellm_key_returns_403_when_email_not_in_allowlist(
+def test_route_create_litellm_key_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The LiteLLM key-create route enforces the PAID_ACCOUNT_SUFFIXES gate.
+    """The LiteLLM key-create route enforces the paid-list gate.
 
     The gate fires before any LiteLLM HTTP call, so this test does not need
     to stub the LiteLLM proxy.
     """
-    client = _make_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post("/keys/create", json={}, headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_list_litellm_keys_returns_403_when_email_not_in_allowlist(
+def test_route_list_litellm_keys_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _make_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.get("/keys", headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_get_litellm_key_returns_403_when_email_not_in_allowlist(
+def test_route_get_litellm_key_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _make_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.get("/keys/some-key-id", headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_update_litellm_key_budget_returns_403_when_email_not_in_allowlist(
+def test_route_update_litellm_key_budget_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _make_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.put("/keys/some-key-id/budget", json={}, headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_delete_litellm_key_returns_403_when_email_not_in_allowlist(
+def test_route_delete_litellm_key_returns_403_when_email_not_paid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = _make_test_client(monkeypatch)
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.delete("/keys/some-key-id", headers=_admin_headers())
     assert resp.status_code == 403
 
 
-def test_route_create_tunnel_is_not_gated_by_paid_account_suffixes(
+def test_route_create_tunnel_is_not_gated_by_paid_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cloudflare forwarding (`/tunnels/*`) must work even when the user's email is not in the paid allowlist."""
-    client = _make_test_client(monkeypatch)
-    # Stub email is testuser@example.com; the env var below would normally
-    # block paid features, but the tunnel route should be unaffected.
-    monkeypatch.setenv("PAID_ACCOUNT_SUFFIXES", "@imbue.com")
+    """Cloudflare forwarding (`/tunnels/*`) must work even when the user is not paid."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    # Not-paid: the tunnel route should be unaffected by the paid gate.
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     assert resp.status_code == 200
     assert resp.json()["tunnel_name"] == f"{_ADMIN_STUB_USERNAME}--agent1"
 
 
-def test_route_list_services_is_not_gated_by_paid_account_suffixes(
+def test_route_list_services_is_not_gated_by_paid_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Tunnel services routes work for any verified email regardless of PAID_ACCOUNT_SUFFIXES."""
-    client = _make_test_client(monkeypatch)
-    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    """Tunnel services routes work for any verified email regardless of paid status."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
     create_resp = client.post("/tunnels", json={"agent_id": "agent1"}, headers=_admin_headers())
     assert create_resp.status_code == 200
     list_resp = client.get(f"/tunnels/{_ADMIN_STUB_USERNAME}--agent1/services", headers=_admin_headers())
     assert list_resp.status_code == 200
+
+
+# -- Paid-list CRUD endpoint tests (admin-key authenticated) --
+
+
+def _paid_admin_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {_PAID_ADMIN_KEY_TEST_VALUE}"}
+
+
+def _make_paid_crud_test_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, FakePoolBackend]:
+    """Test client with the paid-admin key configured and a fresh paid-list backend."""
+    client, backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.setenv("MINDS_PAID_ADMIN_KEY", _PAID_ADMIN_KEY_TEST_VALUE)
+    return client, backend
+
+
+def test_paid_crud_requires_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    # No Authorization header.
+    assert client.get("/paid/domains").status_code == 401
+    # Wrong key.
+    bad = client.get("/paid/domains", headers={"Authorization": "Bearer wrong-key"})
+    assert bad.status_code == 401
+    # A SuperTokens admin JWT is NOT accepted on the paid CRUD endpoints.
+    assert client.get("/paid/domains", headers=_admin_headers()).status_code == 401
+
+
+def test_paid_crud_rejects_non_ascii_bearer_token_with_401(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-ASCII bearer credential is a clean 401, not a 500 (compare over bytes)."""
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    # HTTP header values are latin-1; pass raw bytes (both key and value, which
+    # matches httpx's ``Mapping[bytes, bytes]`` header type) so the non-ASCII
+    # octets reach the handler -- httpx would otherwise reject a non-ASCII str.
+    resp = client.get("/paid/domains", headers={b"Authorization": "Bearer wröng-kéy".encode("latin-1")})
+    assert resp.status_code == 401
+
+
+def test_paid_crud_returns_403_when_admin_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_pool_test_client(monkeypatch)
+    monkeypatch.delenv("MINDS_PAID_ADMIN_KEY", raising=False)
+    resp = client.get("/paid/domains", headers=_paid_admin_headers())
+    assert resp.status_code == 403
+    assert "not enabled" in resp.json()["detail"]
+
+
+def test_paid_admin_key_is_rejected_on_user_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The admin key must not authenticate user-facing routes (e.g. /hosts)."""
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    resp = client.get("/hosts", headers=_paid_admin_headers())
+    assert resp.status_code == 401
+
+
+def test_add_and_list_paid_domain(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    add_resp = client.post("/paid/domains/add", json={"value": "Imbue.com"}, headers=_paid_admin_headers())
+    assert add_resp.status_code == 200
+    assert add_resp.json() == {"status": "added", "domain": "imbue.com"}
+    list_resp = client.get("/paid/domains", headers=_paid_admin_headers())
+    assert list_resp.status_code == 200
+    rows = list_resp.json()
+    assert [r["domain"] for r in rows] == ["imbue.com"]
+    assert rows[0]["is_paid"] is True
+
+
+def test_remove_paid_domain_is_soft_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    remove_resp = client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    assert remove_resp.status_code == 200
+    # The row is still present (soft delete), but is_paid is now false.
+    all_rows = client.get("/paid/domains", headers=_paid_admin_headers()).json()
+    assert [(r["domain"], r["is_paid"]) for r in all_rows] == [("imbue.com", False)]
+    # paid_only filter hides it.
+    paid_rows = client.get("/paid/domains?paid_only=true", headers=_paid_admin_headers()).json()
+    assert paid_rows == []
+
+
+def test_re_adding_soft_removed_domain_reactivates_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    original = client.get("/paid/domains", headers=_paid_admin_headers()).json()[0]
+    client.post("/paid/domains/remove", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    reactivated = client.get("/paid/domains", headers=_paid_admin_headers()).json()[0]
+    assert reactivated["is_paid"] is True
+    # created_at is preserved across the remove/re-add cycle.
+    assert reactivated["created_at"] == original["created_at"]
+
+
+def test_add_paid_domain_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    first = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    second = client.post("/paid/domains/add", json={"value": "imbue.com"}, headers=_paid_admin_headers())
+    assert first.status_code == 200
+    assert second.status_code == 200
+    rows = client.get("/paid/domains", headers=_paid_admin_headers()).json()
+    assert len(rows) == 1
+
+
+def test_remove_absent_paid_email_is_idempotent_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    resp = client.post("/paid/emails/remove", json={"value": "nobody@nowhere.com"}, headers=_paid_admin_headers())
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "removed", "email": "nobody@nowhere.com"}
+
+
+def test_add_paid_email_then_gate_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: add a paid email via CRUD, then a user with that email passes the gate."""
+    client, backend = _make_paid_crud_test_client(monkeypatch)
+    # Start from a clean slate where the stub email is not paid.
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
+    assert client.get("/hosts", headers=_admin_headers()).status_code == 403
+    client.post("/paid/emails/add", json={"value": _ADMIN_STUB_EMAIL}, headers=_paid_admin_headers())
+    assert client.get("/hosts", headers=_admin_headers()).status_code == 200
+
+
+@pytest.mark.parametrize("bad_value", ["", "   ", "has space", "foo@bar.com"])
+def test_add_paid_domain_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    resp = client.post("/paid/domains/add", json={"value": bad_value}, headers=_paid_admin_headers())
+    assert resp.status_code == 400
+
+
+@pytest.mark.parametrize("bad_value", ["", "no-at-sign", "@nodomain", "local@", "a b@c.com"])
+def test_add_paid_email_rejects_invalid(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
+    client, _backend = _make_paid_crud_test_client(monkeypatch)
+    resp = client.post("/paid/emails/add", json={"value": bad_value}, headers=_paid_admin_headers())
+    assert resp.status_code == 400
 
 
 # -- R2 bucket endpoint tests --
@@ -2231,7 +2569,10 @@ def test_destroy_key_not_owned_returns_404(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_buckets_require_paid_account(monkeypatch: pytest.MonkeyPatch) -> None:
     client, _fake, _store = _make_bucket_test_client(monkeypatch)
-    monkeypatch.delenv("PAID_ACCOUNT_SUFFIXES", raising=False)
+    # Install a paid-list backend where the stub admin email is NOT paid.
+    backend = make_fake_pool_backend()
+    backend.add_paid_email(_ADMIN_STUB_EMAIL, is_paid=False)
+    backend.install_on_app_module(app_mod, monkeypatch)
     resp = client.post("/buckets", json={"name": "x"}, headers=_admin_headers())
     assert resp.status_code == 403
 
@@ -2242,3 +2583,13 @@ def test_r2_keys_migration_declares_all_persisted_columns() -> None:
     migration_sql = migration_path.read_text()
     for column in ("access_key_id", "owner_user_id", "bucket_name", "access", "alias", "created_at"):
         assert column in migration_sql, f"r2_keys migration is missing column {column!r}"
+
+
+def test_paid_lists_migration_declares_both_tables() -> None:
+    """Guard against the paid_domains / paid_emails schema drifting from the gate queries."""
+    migration_path = Path(__file__).parent.parent.parent / "migrations" / "005_paid_lists.sql"
+    migration_sql = migration_path.read_text().lower()
+    assert "create table paid_domains" in migration_sql
+    assert "create table paid_emails" in migration_sql
+    for column in ("is_paid", "created_at", "updated_at"):
+        assert column in migration_sql, f"paid-lists migration is missing column {column!r}"

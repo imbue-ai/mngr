@@ -11,6 +11,7 @@ from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
 from imbue.mngr.cli.snapshot import _emit_create_result
+from imbue.mngr.cli.snapshot import _emit_destroy_dry_run
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
 from imbue.mngr.cli.snapshot import snapshot
@@ -20,6 +21,7 @@ from imbue.mngr.main import cli
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
@@ -82,6 +84,7 @@ def test_snapshot_destroy_cli_options_fields() -> None:
         snapshots=("snap-123",),
         all_snapshots=False,
         force=True,
+        dry_run=False,
         output_format="human",
         quiet=False,
         verbose=0,
@@ -92,6 +95,7 @@ def test_snapshot_destroy_cli_options_fields() -> None:
     )
     assert opts.snapshots == ("snap-123",)
     assert opts.force is True
+    assert opts.dry_run is False
 
 
 # =============================================================================
@@ -241,6 +245,55 @@ def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str])
     assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
 
 
+def _make_destroy_dry_run_entry(
+    host_id: HostId,
+) -> tuple[DiscoveredHost, SnapshotId, str]:
+    return (
+        DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName("host-1"),
+            provider_name=ProviderInstanceName("modal"),
+        ),
+        SnapshotId("snap-abc"),
+        "before-refactor",
+    )
+
+
+def test_emit_destroy_dry_run_human(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run lists each snapshot that would be destroyed."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    out = capsys.readouterr().out
+    assert "Would destroy 1 snapshot(s)" in out
+    assert "snap-abc" in out
+    assert "before-refactor" in out
+    assert str(host_id) in out
+
+
+def test_emit_destroy_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run emits a dry_run JSON payload without a destroy count key."""
+    output_opts = OutputOptions(output_format=OutputFormat.JSON)
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["dry_run"] is True
+    assert parsed["count"] == 1
+    assert parsed["snapshots"][0]["snapshot_id"] == "snap-abc"
+    assert parsed["snapshots"][0]["host_id"] == str(host_id)
+
+
+def test_emit_destroy_dry_run_format_template(capsys: pytest.CaptureFixture[str]) -> None:
+    """_emit_destroy_dry_run renders custom format templates."""
+    output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{snapshot_id}\t{host_id}")
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
+    _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
+    assert capsys.readouterr().out.strip() == f"snap-abc\t{host_id}"
+
+
 # =============================================================================
 # Options model instantiation tests
 # =============================================================================
@@ -253,6 +306,7 @@ def test_snapshot_destroy_cli_options_can_be_instantiated() -> None:
         snapshots=(),
         all_snapshots=True,
         force=False,
+        dry_run=False,
         output_format="json",
         quiet=True,
         verbose=1,

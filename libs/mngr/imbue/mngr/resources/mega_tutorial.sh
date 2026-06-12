@@ -108,16 +108,16 @@ mngr create my-task --branch "main:mngr/*"
 # or set the new branch name explicitly:
 mngr create my-task --branch ":feature/my-task"
 
-# you can create a copy instead of a worktree:
-mngr create my-task --copy
-# that is used by default if you're not in a git repo
+# you can create a full copy (an independent git mirror) instead of a worktree:
+mngr create my-task --transfer=git-mirror
+# (a plain rsync copy is used by default if you're not in a git repo)
 
 # you can disable new branch creation entirely by omitting the :NEW part:
 mngr create my-task --branch main
 # this checks out the existing branch in the worktree (or copy) without creating a new one
 
-# you can create a "clone" instead of worktree or copy, which is a lightweight copy that shares git objects with the original repo but has its own separate working directory:
-mngr create my-task --clone
+# you can create a full git "clone" instead of a worktree or copy: this transfers the repo via git, giving the agent its own independent copy with a separate working directory and git history (this is also the default when the source and target are on different hosts):
+mngr create my-task --transfer=git-mirror
 
 # you can clone from an existing agent's work directory:
 mngr create my-task --from other-agent
@@ -180,7 +180,7 @@ mngr create my-task@.modal:/workspace
 
 # you can upload files and run custom commands during host provisioning:
 mngr create my-task --provider modal --upload-file ~/.ssh/config:/root/.ssh/config --extra-provision-command "pip install foo"
-# (--sudo-command runs as root)
+# (provision commands run as the host's default user; prefix with sudo to run as root if it is not)
 
 # by default, agents are started when a host is booted. This can be disabled:
 mngr create my-task --provider modal --no-start-on-boot
@@ -271,7 +271,7 @@ mngr create my-task --no-connect --message "Do the thing"
 # tons more arguments for anything you could want! As always, you can learn more via --help
 mngr create --help
 
-# or see the other commands--list, destroy, message, connect, push, pull, clone, and more!  These other commands are covered in their own sections below.
+# or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
 mngr --help
 
 ##############################################################################
@@ -328,7 +328,7 @@ mngr list --label TEAM=backend
 mngr list --host-label ENV=staging
 
 # choose which fields to display and sort order
-mngr list --fields "name,state,host.provider,created_at" --sort "-created_at"
+mngr list --fields "name,state,host.provider,create_time" --sort "create_time desc"
 # see mngr list --help for a complete list of fields you can reference
 
 # limit the number of results
@@ -395,8 +395,8 @@ mngr msg my-task -m "Check the CI results and fix any failures"
 # send the same message to multiple agents by name
 mngr msg agent-1 agent-2 agent-3 -m "Wrap up and commit your changes"
 
-# send a message to all agents
-mngr msg -a -m "Stop what you are doing and commit your current progress"
+# send a message to every agent by piping their ids from `mngr list`
+mngr list --ids | mngr msg - -m "Stop what you are doing and commit your current progress"
 
 # send a message to agents matching a filter
 mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out of budget, please finish up"
@@ -407,7 +407,7 @@ mngr list --include 'host.provider == "modal"' --ids | mngr msg - -m "Almost out
 #   "abort", which means stop if any agent fails to receive the message
 # note that "abort" is kind of dangerous--you could easily have agents left in a strange state
 # thus the default is "continue"
-mngr msg -a -m "Status update please" --on-error continue
+mngr list --ids | mngr msg - -m "Status update please" --on-error continue
 
 ##############################################################################
 # EXECUTING COMMANDS ON AGENTS
@@ -444,7 +444,7 @@ mngr exec my-task --start "cat /etc/os-release"
 mngr exec my-task --no-start "cat /etc/os-release"
 
 # control error handling when running on multiple agents
-mngr exec -a --on-error continue "git log --oneline -5"
+mngr list --ids | mngr exec - --on-error continue "git log --oneline -5"
 # the choices for --on-error are the same as for messaging: "continue" (try all agents) and "abort" (stop if any agent fails)
 
 # FIXME: sure, these might be experimental, but they could at least use some tests! I think they work in theory...
@@ -499,7 +499,7 @@ mngr list --ids | mngr start - --dry-run
 # stop a running agent
 mngr stop my-task
 
-# stop and archive the agent (creates a snapshot before stopping).
+# stop and archive the agent (marks it archived so it can be filtered out of listings; its state is preserved).
 mngr stop my-task --archive
 
 # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
@@ -543,8 +543,8 @@ mngr destroy agent-1 agent-2 agent-3 --force
 # destroy all agents (be careful!)
 mngr list --ids | mngr destroy - --force
 
-# dry-run to see what would be destroyed without actually doing it
-mngr list --ids | mngr destroy - --dry-run
+# to preview what would be destroyed without doing it, run without --force and answer "no" at the prompt
+mngr destroy my-task
 
 # destroy and run garbage collection afterward (this is the default)
 mngr destroy my-task --force --gc
@@ -587,8 +587,8 @@ mngr snapshot create my-task --name "before-refactor"
 # snapshot all agents' hosts
 mngr list --ids | mngr snapshot create -
 
-# list all snapshots
-mngr snapshot list
+# list snapshots for all running agents
+mngr list --ids | mngr snapshot list -
 
 # list snapshots for a specific agent's host
 mngr snapshot list my-task
@@ -597,7 +597,7 @@ mngr snapshot list my-task
 mngr snapshot list my-task --limit 5
 
 # destroy a specific snapshot
-mngr snapshot destroy --snapshot snap-123abc
+mngr snapshot destroy my-task --snapshot snap-123abc
 
 # destroy all snapshots for an agent's host
 mngr snapshot destroy my-task --all-snapshots --force
@@ -728,7 +728,7 @@ mngr plugin enable my-plugin --scope project
 mngr plugin disable my-plugin --scope user
 
 # list plugins with specific fields
-mngr plugin list --fields "name,version,active"
+mngr plugin list --fields "name,version,enabled"
 
 
 ##############################################################################
@@ -846,7 +846,7 @@ mngr wait agent-auth && mngr wait agent-tests && mngr wait agent-docs
 # run git status on all agents to see what they've changed
 mngr list --ids | mngr exec - "git diff --stat"
 # send a coordination message to all agents
-mngr msg -a -m "Reminder: commit and push your changes when done"
+mngr list --ids | mngr msg - -m "Reminder: commit and push your changes when done"
 # merge all of the changes
 git merge mngr/agent-auth
 git merge mngr/agent-tests
@@ -875,9 +875,8 @@ mngr destroy --force --remove-created-branch agent-auth agent-tests agent-docs
 # check what branch an agent is on (it may have shifted if the agent checked out a new branch)
 mngr exec my-task "git branch --show-current"
 
-# TODO: this field name isn't right, go fix (but that info is there somewhere in mngr list)
-# you can see the original branch as part of the details in "mngr list" as well (field name: "git.original_branch")
-mngr list --fields "name,state,git.original_branch"
+# you can see the branch mngr created for each agent as part of the details in "mngr list" as well (field name: "initial_branch")
+mngr list --fields "name,state,initial_branch"
 
 # check if the agent has uncommitted changes
 mngr exec my-task "git status --short"
@@ -945,7 +944,7 @@ mngr list --include 'host.provider == "modal"' --ids | mngr exec - "df -h /works
 mngr list --include 'labels.team == "backend"' --include 'state == "STOPPED"' --ids | mngr destroy - --force --dry-run
 
 # you can also just list agents by filtering using jq:
-mngr list --format json | jq '.[] | select(.labels.priority == "high")'
+mngr list --format json | jq '.agents[] | select(.labels.priority == "high")'
 
 # or even stream the filters with jq by using jsonl:
 mngr list --format jsonl | jq --unbuffered 'select(.labels.priority == "high")'
@@ -1066,7 +1065,7 @@ mngr snapshot create my-task --name "checkpoint-1"
 mngr list --provider modal
 
 # destroy all Modal agents (be careful!)  Useful for cleaning up while prototyping
-mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f
+mngr list --include 'host.provider == "modal"' --ids | mngr destroy -f -
 
 ##############################################################################
 # RUNNING AGENTS IN DOCKER
@@ -1090,13 +1089,13 @@ mngr create my-task --provider docker -s "-v /host/data:/container/data"
 # available even when a given "host" (container) is stopped
 
 # set resource limits via start args
-mngr create my-task --provider docker -s cpus=2
+mngr create my-task --provider docker -s --cpus=2
 
 # list Docker agents
 mngr list --provider docker
 
 # destroy all docker agents (be careful!)  Useful for cleaning up while prototyping
-mngr list --include 'host.provider == "docker"' --ids | mngr destroy -f
+mngr list --include 'host.provider == "docker"' --ids | mngr destroy -f -
 
 ##############################################################################
 # IDLE DETECTION AND TIMEOUTS
@@ -1238,7 +1237,7 @@ mngr usage wait --until 'five_hour.elapsed_percentage > 75 && five_hour.used_per
 mngr ls
 
 # use custom format templates to customize human-readable output for yourself
-mngr list --format '{agent.name} ({agent.state})'
+mngr list --format '{name} ({state})'
 
 # TODO: some of these commands are kind of duplicated...  what should we do about that?
 #  perhaps a single test could point to multiple commands?
@@ -1253,10 +1252,10 @@ mngr list --format jsonl
 mngr observe --discovery-only
 
 # JSON and JSONL works with most commands
-mngr snapshot list --format json && mngr plugin list --format jsonl
+mngr list --format json && mngr plugin list --format jsonl
 
 # combine json with jq for powerful filtering and transformation
-mngr list --format json | jq '.[] | select(.state == "RUNNING") | .name'
+mngr list --format json | jq '.agents[] | select(.state == "RUNNING") | .name'
 
 # combine jsonl with jq for streaming filtering
 mngr list --format jsonl | jq --unbuffered 'select(.state == "RUNNING") | .name'
@@ -1279,10 +1278,10 @@ mngr create my-task --provider modal --extra-provision-command "sudo apt-get upd
 # append content to a file on the host using a provision command
 mngr create my-task --provider modal --extra-provision-command "echo 'export PATH=/opt/bin:\$PATH' >> /root/.bashrc"
 
-# combine multiple setup steps
+# combine multiple setup steps (--extra-provision-command is repeatable and runs in order)
 mngr create my-task --provider modal \
   --upload-file ./requirements.txt:/workspace/requirements.txt \
-  --sudo-command "apt-get update && apt-get install -y build-essential" \
+  --extra-provision-command "apt-get update && apt-get install -y build-essential" \
   --extra-provision-command "pip install -r /workspace/requirements.txt"
 
 # TODO: also show how you can use "mngr rsync" or "mngr exec" after starting the agent, just as nice alternatives
@@ -1309,7 +1308,7 @@ mngr observe --discovery-only
 # collect results from all agents
 for agent in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   echo "=== $agent ==="
-  mngr exec "$agent" -- git log --oneline -3
+  mngr exec "$agent" "git log --oneline -3"
 done
 
 # TODO: there are a LOT more cool advanced workflows besides just map-reduce! Add a bunch more examples here
@@ -1370,9 +1369,9 @@ mngr transcript my-task --tail 10
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # run commands on the host to diagnose issues
-mngr exec my-task -- cat /var/log/syslog | tail -20
-mngr exec my-task -- ps aux
-mngr exec my-task -- df -h
+mngr exec my-task "cat /var/log/syslog | tail -20"
+mngr exec my-task "ps aux"
+mngr exec my-task "df -h"
 
 # auto-generated by Claude, remove when a human has sanctioned this
 # if an agent is stuck, try stopping and restarting it

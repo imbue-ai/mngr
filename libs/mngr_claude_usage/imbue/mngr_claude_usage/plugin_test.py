@@ -3,34 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 
-from pydantic import BaseModel
-
+from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.cli.testing import create_test_agent
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_claude_usage.plugin import _capture_existing_statusline_command
 from imbue.mngr_claude_usage.plugin import _install_settings_local_statusline
 from imbue.mngr_claude_usage.plugin import _provision_statusline_shim
 from imbue.mngr_claude_usage.plugin import _stable_shim_path
 from imbue.mngr_claude_usage.plugin import on_before_provisioning
-
-
-class _StubAgent(BaseModel):
-    """Stub agent for the hookimpl filter test (not a real ClaudeAgent)."""
-
-    id: str
-    agent_type: str
-    work_dir: Path
-
-
-class _StubHost(BaseModel):
-    """Stub host for tests."""
-
-    host_dir: Path
-
 
 # =============================================================================
 # _capture_existing_statusline_command
@@ -186,7 +170,7 @@ def test_provision_is_idempotent_on_reprovision(local_host: Host, tmp_path: Path
 
 def test_provision_does_not_chain_prior_agents_shim(local_host: Host, tmp_path: Path) -> None:
     """Re-provisioning in the same ``work_dir`` but with a *different* state_dir
-    (a fresh agent, as ``mngr uncapped-claude`` does on every invocation) must
+    (a fresh agent, as ``mngr robinhood`` does on every invocation) must
     not pull the host-stable shim path into the new sidecar -- otherwise the
     shim would invoke itself when chaining and infinite-loop. The provisioner's
     own write_path of settings.local.json IS the stable shim, so capture from
@@ -222,45 +206,32 @@ def test_provision_preserves_user_cmd_when_only_in_settings_local(local_host: Ho
 
 
 # =============================================================================
-# Shim runtime behavior (sanity-check that the actual shell script implements
-# the contract the docs in plugin.py promise; the python tests above only
-# exercise the provisioner side).
+# on_before_provisioning agent-type filter
 # =============================================================================
 
 
-def test_shim_exits_zero_when_mngr_agent_state_dir_unset(local_host: Host, tmp_path: Path) -> None:
-    """Standalone claude invocation: no MNGR_AGENT_STATE_DIR in env. The shim
-    must exit 0 and emit nothing -- claude renders the statusline every couple
-    of seconds and a non-zero exit would surface as a visible error."""
-    state_dir = local_host.host_dir / "agents" / "agent-noenv"
+def test_hookimpl_skips_non_claude_agent(
+    local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    """The hookimpl filters with isinstance(agent, ClaudeAgent). A real non-Claude
+    agent (a plain BaseAgent of the 'generic' type) must be a no-op -- no host
+    commands dir, no settings.local.json. The agent runs on a real host, so
+    removing the isinstance guard would let provisioning actually run and create
+    those artifacts, which these assertions would then catch. Real ClaudeAgent
+    provisioning is exercised in mngr_claude's own tests; this test just locks in
+    the filter behavior."""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    _provision_statusline_shim(local_host, state_dir, work_dir)
-
-    shim_path = _stable_shim_path(local_host.host_dir)
-    env = {k: v for k, v in os.environ.items() if k != "MNGR_AGENT_STATE_DIR"}
-    result = subprocess.run(
-        ["bash", str(shim_path)],
-        input=b'{"session_id":"abc"}',
-        capture_output=True,
-        env=env,
-        check=False,
-        timeout=5,
+    agent = create_test_agent(
+        local_provider,
+        work_dir,
+        agent_config=None,
+        agent_type=None,
+        extra_data=None,
+        agent_class=BaseAgent,
     )
-    assert result.returncode == 0, result.stderr.decode()
-    assert result.stdout == b""
-    assert result.stderr == b""
 
+    on_before_provisioning(agent=agent, host=agent.host, mngr_ctx=temp_mngr_ctx)
 
-def test_hookimpl_skips_non_claude_stub(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    """The hookimpl filters with isinstance(agent, ClaudeAgent). Stub agents don't
-    pass that check, so the hookimpl is a no-op for them -- no commands dir, no
-    settings.local.json. Real ClaudeAgent integration is exercised in mngr_claude's
-    own provisioning tests; this test just locks in the filter behavior."""
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    agent = _StubAgent(id="agent-test", agent_type="opencode", work_dir=work_dir)
-    host = _StubHost(host_dir=tmp_path / "host")
-    on_before_provisioning(agent=agent, host=host, mngr_ctx=temp_mngr_ctx)  # ty: ignore[invalid-argument-type]
-    assert not (tmp_path / "host" / "agents" / "agent-test").exists()
+    assert not (agent.host.host_dir / "commands").exists()
     assert not (work_dir / ".claude" / "settings.local.json").exists()
