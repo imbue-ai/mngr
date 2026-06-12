@@ -71,6 +71,7 @@ def test_provider_backend_supports_shutdown_gates_on_local_backends() -> None:
     # Only the local backends currently expose host shutdown to minds.
     assert provider_backend_supports_shutdown("docker") is True
     assert provider_backend_supports_shutdown("lima") is True
+    assert provider_backend_supports_shutdown("smolvm") is True
     assert provider_backend_supports_shutdown("modal") is False
     assert provider_backend_supports_shutdown("ovh") is False
 
