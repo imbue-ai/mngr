@@ -144,13 +144,16 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="Optional IAM instance profile name attached to launched instances.",
     )
-    attach_self_stop_role: bool = Field(
-        default=True,
+    terminate_on_shutdown: bool = Field(
+        default=False,
         description=(
-            "Attach the mngr-aws self-stop IAM instance profile (from `mngr aws prepare`) to "
-            "launched instances so the idle watcher can stop the instance. Set False to launch "
-            "without it. Ignored when iam_instance_profile is set explicitly (that takes "
-            "precedence)."
+            "Sets EC2 InstanceInitiatedShutdownBehavior. False (default) -> 'stop': an OS "
+            "shutdown -- whether the idle watcher powering the host off, or the "
+            "auto_shutdown_minutes time cap -- STOPS the instance, so it is resumable via "
+            "`mngr start` with its EBS volume intact (the Modal-like idle-pause; an abandoned "
+            "stopped instance costs only EBS until reaped by `mngr destroy` or GC). True -> "
+            "'terminate': an OS shutdown TERMINATES the instance (ephemeral, self-cleaning -- "
+            "used by the release tests so a leaked instance auto-destroys at the time cap)."
         ),
     )
 

@@ -622,19 +622,22 @@ def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> 
     assert "WantedBy=multi-user.target" in unit
 
 
-def test_build_idle_watcher_service_unit_stops_this_instance_in_this_region() -> None:
-    """The oneshot .service removes the sentinel, then ``aws ec2 stop-instances`` for this host.
+def test_build_idle_watcher_service_unit_removes_sentinel_then_powers_off() -> None:
+    """The oneshot .service removes the sentinel, then powers the host off via ``shutdown -P now``.
 
-    The instance id and region must appear in the ExecStart so the watcher stops
-    the correct instance via its IAM role; the sentinel ``rm -f`` must run BEFORE
-    the stop so a later resume isn't immediately re-stopped by the path unit.
+    Powering off (rather than calling the EC2 API) means no IAM role or awscli is
+    needed: EC2's ``InstanceInitiatedShutdownBehavior`` decides stop-vs-terminate.
+    The sentinel ``rm -f`` must run BEFORE the power-off so a later resume isn't
+    immediately re-stopped by the path unit.
     """
     sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
-    unit = _build_idle_watcher_service_unit("i-0123456789abcdef0", "us-west-2", sentinel)
+    unit = _build_idle_watcher_service_unit(sentinel)
     assert "Type=oneshot" in unit
-    assert "stop-instances" in unit
-    assert "--instance-ids i-0123456789abcdef0" in unit
-    assert "--region us-west-2" in unit
+    assert "shutdown -P now" in unit
     assert f"rm -f {sentinel}" in unit
-    # rm must precede the stop so resume gets a clean slate.
-    assert unit.index("rm -f") < unit.index("stop-instances")
+    # rm must precede the power-off so resume gets a clean slate.
+    assert unit.index("rm -f") < unit.index("shutdown -P now")
+    # No IAM/awscli path: the watcher powers the host off, it does not call the EC2 API.
+    assert "stop-instances" not in unit
+    assert "--instance-ids" not in unit
+    assert "--region" not in unit

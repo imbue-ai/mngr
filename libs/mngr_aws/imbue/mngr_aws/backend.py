@@ -84,8 +84,11 @@ _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
 # writes ``IDLE_SENTINEL_FILENAME`` into the host_dir/commands directory on the
 # shared volume when the host goes idle; a host-side systemd ``.path`` unit
 # (``IDLE_WATCHER_UNIT_NAME``) watches the corresponding outer-filesystem path
-# and triggers a oneshot ``.service`` that calls ``aws ec2 stop-instances`` on
-# this instance via its IAM role. See the README "Implementation details".
+# and triggers a oneshot ``.service`` that powers the instance off
+# (``shutdown -P now``). EC2 then applies the instance's
+# ``InstanceInitiatedShutdownBehavior`` -- ``stop`` (resumable idle-pause, the
+# default) or ``terminate`` -- so no IAM role or awscli is needed on the box.
+# See the README "Implementation details".
 IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-aws-idle-watcher"
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 
@@ -96,9 +99,9 @@ def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
     Unlike the base ``VpsDockerProvider`` shutdown script (which runs
     ``kill -TERM 1`` to stop the container), the AWS variant only *signals*
     that the host is idle: it touches a sentinel file on the shared volume.
-    The host-side systemd path unit observes that file and stops the whole
-    EC2 instance (the container cannot stop the instance itself -- the IMDS
-    hop limit is 1, so only the outer host can use the self-stop IAM role).
+    The host-side systemd path unit observes that file and powers the whole
+    EC2 instance off (a container cannot power off its host, so the signal has
+    to cross the container boundary via the shared volume).
     """
     return f'#!/bin/bash\ntouch "{sentinel_in_container}"\n'
 
@@ -121,28 +124,27 @@ def _build_idle_watcher_path_unit(sentinel_on_outer: str) -> str:
     )
 
 
-def _build_idle_watcher_service_unit(instance_id: str, region: str, sentinel_on_outer: str) -> str:
-    """Build the oneshot systemd ``.service`` unit that stops this EC2 instance.
+def _build_idle_watcher_service_unit(sentinel_on_outer: str) -> str:
+    """Build the oneshot systemd ``.service`` that powers the host off when idle.
 
-    Runs ``aws ec2 stop-instances`` via ``/bin/sh -c`` so ``PATH`` resolves the
-    ``aws`` binary. The instance's IAM role (the ``mngr-aws`` self-stop profile,
-    attached at create time) supplies credentials automatically via IMDS, so no
-    explicit credentials are needed -- only ``--instance-ids`` and ``--region``.
+    Powers the instance off with ``shutdown -P now``; EC2 then applies the
+    instance's ``InstanceInitiatedShutdownBehavior`` (``stop`` for resumable
+    idle-pause -- the default -- or ``terminate`` for ephemeral hosts), so no IAM
+    role or awscli is involved.
 
-    It first removes the sentinel file, THEN stops. This is what makes resume
+    It removes the sentinel file BEFORE powering off. This is what makes resume
     work: when ``mngr start`` boots the instance again, systemd re-arms the
     ``.path`` unit -- if the sentinel were still present it would fire
-    immediately and re-stop the just-resumed instance. Removing it as part of
-    stopping guarantees a clean slate on the next boot (the in-container watcher
-    only re-creates it if the host is idle again).
+    immediately and re-power-off the just-resumed instance. Clearing it first
+    guarantees a clean slate on the next boot (the in-container watcher only
+    re-creates it if the host is idle again).
     """
     return (
         "[Unit]\n"
-        "Description=Stop this EC2 instance when mngr signals the host is idle\n"
+        "Description=Power off this instance when mngr signals the host is idle\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && "
-        f"aws ec2 stop-instances --instance-ids {instance_id} --region {region}'\n"
+        f"ExecStart=/bin/sh -c 'rm -f {sentinel_on_outer} && shutdown -P now'\n"
     )
 
 
@@ -195,13 +197,14 @@ class AwsProvider(VpsDockerProvider):
 
         Mirrors the Modal pattern in ``mngr_modal.backend._create_environment``:
         when ``PYTEST_CURRENT_TEST`` is set, the test harness is responsible
-        for configuring the safety net that prevents leaked cost if pytest
-        itself is killed. For AWS, that safety net is cloud-init
-        ``shutdown -P +N`` combined with the launch flag
-        ``InstanceInitiatedShutdownBehavior=terminate`` (both rely on
-        ``auto_shutdown_minutes`` being set on the provider config). If it
-        isn't, fail closed at the pre-create hook rather than silently leak
-        an instance.
+        for configuring the safety net that bounds leaked cost if pytest
+        itself is killed. For AWS, that net is cloud-init ``shutdown -P +N``
+        (the ``auto_shutdown_minutes`` time cap). Its effect depends on
+        ``terminate_on_shutdown``: with the release-test default of ``True``
+        the instance self-terminates at the cap (self-cleaning); with ``False``
+        (resumable idle-stop) it self-stops, and the conftest session-end
+        scanner reaps it. Either way ``auto_shutdown_minutes`` must be set, so
+        fail closed here rather than risk an unbounded leak.
         """
         if "PYTEST_CURRENT_TEST" not in os.environ:
             return
@@ -212,9 +215,8 @@ class AwsProvider(VpsDockerProvider):
                 "auto_shutdown_minutes set on the AWS provider config. "
                 "Set [providers.<instance>] auto_shutdown_minutes = <N> in "
                 "the project settings.toml so cloud-init schedules "
-                "'shutdown -P +N' (combined with the launch flag "
-                "InstanceInitiatedShutdownBehavior=terminate) and the "
-                "instance self-terminates even if pytest is killed."
+                "'shutdown -P +N' and the instance is bounded (terminated or "
+                "stopped per terminate_on_shutdown) even if pytest is killed."
             )
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAwsBuildOptions:
@@ -551,11 +553,11 @@ class AwsProvider(VpsDockerProvider):
         The base ``VpsDockerProvider._create_shutdown_script`` writes a script
         that runs ``kill -TERM 1`` to stop the container on idle. For AWS, an
         idle container should stop the whole *instance* (so a paused agent costs
-        only EBS), but the container cannot do that itself: the IMDS hop limit is
-        1, so only the outer host can use the self-stop IAM role. Instead, the
+        only EBS), but a container cannot power off its host. Instead, the
         in-container watcher touches a sentinel file on the shared volume; a
         host-side systemd path unit (installed in ``_on_host_finalized``) observes
-        it and runs ``aws ec2 stop-instances``. Mirrors the base's
+        it and powers the host off (EC2 then stops or terminates per
+        ``InstanceInitiatedShutdownBehavior``). Mirrors the base's
         mkdir/write/chmod, swapping only the script body.
         """
         sentinel_in_container = str(host.host_dir / "commands" / IDLE_SENTINEL_FILENAME)
@@ -569,15 +571,16 @@ class AwsProvider(VpsDockerProvider):
         """Install the host-side systemd idle watcher that self-stops this instance.
 
         Runs after the host record is durably written. Installs (on the outer
-        host) awscli plus a systemd ``.path``/``.service`` pair: the path unit
-        watches the outer-filesystem location of the in-container idle sentinel
-        and, when it appears, the oneshot service runs ``aws ec2 stop-instances``
-        on this instance via its IAM role.
+        host) a systemd ``.path``/``.service`` pair: the path unit watches the
+        outer-filesystem location of the in-container idle sentinel and, when it
+        appears, the oneshot service powers the host off -- EC2 then stops or
+        terminates the instance per ``InstanceInitiatedShutdownBehavior`` (no IAM
+        or awscli needed).
 
         This is best-effort: per the base-class contract, it MUST NOT raise.
-        Any failure (record lookup, awscli install, SSH, unit install) is caught
-        and logged at WARNING; the only consequence is that the agent will not
-        auto-stop on idle (manual ``mngr stop --stop-host`` still works).
+        Any failure (record lookup, SSH, unit install) is caught and logged at
+        WARNING; the only consequence is that the agent will not auto-stop on
+        idle (manual ``mngr stop --stop-host`` still works).
         """
         # Stash the (public) host keys in tags so resume can rebind known_hosts to
         # the instance's new IP before connecting. Best-effort, like the watcher.
@@ -618,12 +621,13 @@ class AwsProvider(VpsDockerProvider):
             self.aws_client.add_tags(VpsInstanceId(record.config.vps_instance_id), tags)
 
     def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
-        """Install awscli + the systemd path/service idle watcher on the outer host.
+        """Install the systemd path/service idle watcher on the outer host.
 
         Separated from ``_on_host_finalized`` so the no-raise wrapping stays a
         thin try/except. Returns early (after a WARNING) when the host record is
-        missing or awscli cannot be installed, since neither leaves a usable
-        watcher.
+        missing. The watcher powers the host off when the in-container idle
+        sentinel appears; EC2's ``InstanceInitiatedShutdownBehavior`` decides
+        stop-vs-terminate, so no awscli or IAM is involved.
         """
         record = self._find_host_record(host_id)
         if record is None or record.config is None:
@@ -632,31 +636,16 @@ class AwsProvider(VpsDockerProvider):
                 host_id,
             )
             return
-        instance_id = str(record.config.vps_instance_id)
-        region = record.config.region
         sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
         with log_span("Installing AWS idle self-stop watcher"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
-                install_result = outer.execute_idempotent_command(
-                    "command -v aws >/dev/null 2>&1 || "
-                    "(apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y awscli)",
-                    timeout_seconds=300,
-                )
-                if not install_result.success:
-                    logger.warning(
-                        "AWS idle watcher: awscli install failed on host {} ({}); skipping watcher "
-                        "install (no auto-stop)",
-                        host_id,
-                        install_result.stderr,
-                    )
-                    return
                 outer.write_text_file(
                     Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.path"),
                     _build_idle_watcher_path_unit(str(sentinel_on_outer)),
                 )
                 outer.write_text_file(
                     Path(f"/etc/systemd/system/{IDLE_WATCHER_UNIT_NAME}.service"),
-                    _build_idle_watcher_service_unit(instance_id, region, str(sentinel_on_outer)),
+                    _build_idle_watcher_service_unit(str(sentinel_on_outer)),
                 )
                 outer.execute_idempotent_command("systemctl daemon-reload")
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
@@ -999,7 +988,7 @@ class AwsProviderBackend(ProviderBackendInterface):
             root_volume_size_gb=config.root_volume_size_gb,
             root_volume_type=config.root_volume_type,
             iam_instance_profile=config.iam_instance_profile,
-            attach_self_stop_role=config.attach_self_stop_role,
+            terminate_on_shutdown=config.terminate_on_shutdown,
             container_ssh_port=config.container_ssh_port,
         )
 

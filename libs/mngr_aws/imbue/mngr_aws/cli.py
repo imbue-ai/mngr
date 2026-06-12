@@ -27,7 +27,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
@@ -136,17 +135,14 @@ def _build_operator_client(
     )
 
 
-def _perform_cleanup(client: AwsVpsClient) -> tuple[str | None, str | None]:
-    """Core of ``mngr aws cleanup``: refuse if instances exist, else delete the SG + IAM profile.
+def _perform_cleanup(client: AwsVpsClient) -> str | None:
+    """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
 
-    Returns ``(deleted_sg_id, deleted_instance_profile_name)``, each ``None``
-    when that resource was already absent (idempotent). Raises
-    ``click.ClickException`` when any mngr-managed instance still exists in the
-    region, so cleanup never strands a running agent -- and, since AWS refuses
-    to delete an IAM role/instance-profile that a running instance still
-    references, this guard must run *first*. Split from the click callback so
-    the refuse/delete decision is unit-testable against a stubbed client,
-    without the click runtime or real credentials.
+    Returns the deleted security-group id, or ``None`` when it was already absent
+    (idempotent). Raises ``click.ClickException`` when any mngr-managed instance
+    still exists in the region, so cleanup never strands a running agent. Split
+    from the click callback so the refuse/delete decision is unit-testable
+    against a stubbed client, without the click runtime or real credentials.
     """
     instances = client.list_mngr_managed_instances()
     if instances:
@@ -156,20 +152,7 @@ def _perform_cleanup(client: AwsVpsClient) -> tuple[str | None, str | None]:
             f"instance(s) still exist: {summary}. Destroy them first with `mngr destroy "
             "<agent>` (or terminate them), then re-run `mngr aws cleanup`."
         )
-    deleted_sg_id = client.delete_security_group()
-    # IAM teardown is best-effort, mirroring prepare: an admin whose creds lack
-    # the iam:* delete permissions (or who never had them to create the role)
-    # should still be able to clean up the security group.
-    try:
-        deleted_profile_name = client.delete_self_stop_instance_profile()
-    except MngrError as e:
-        logger.warning(
-            "Could not delete the self-stop IAM instance profile ({}); the security group was "
-            "cleaned up. Delete the `mngr-aws` IAM role / instance profile manually if it exists.",
-            e,
-        )
-        deleted_profile_name = None
-    return deleted_sg_id, deleted_profile_name
+    return client.delete_security_group()
 
 
 @click.group(name="aws")
@@ -220,22 +203,17 @@ def aws_cli_group() -> None:
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
-    """Provision the AWS security group + self-stop IAM instance profile for mngr instances.
+    """Provision the AWS security group for mngr-managed instances.
 
-    Creates (or reuses) the `mngr-aws` security group, then ensures the
-    `mngr-aws` IAM role / inline policy / instance profile that lets
-    mngr-managed instances stop themselves (scoped to `mngr-provider`-tagged
-    instances, for the self-stopping idle watcher).
-
-    Idempotent: re-running re-authorizes any missing ingress rules and re-ensures
-    the IAM resources without duplicating. Needs ec2:DescribeSecurityGroups +
-    ec2:CreateSecurityGroup + ec2:AuthorizeSecurityGroupIngress for the security
-    group (required), and iam:CreateRole + iam:PutRolePolicy +
-    iam:CreateInstanceProfile + iam:AddRoleToInstanceProfile for the optional
-    self-stop role (best-effort: missing IAM perms just warn and skip, so agents
-    won't auto-stop on idle). After this succeeds, `mngr create --provider aws`
-    only needs RunInstances + DescribeSecurityGroups + DescribeInstances +
-    ImportKeyPair etc. (no SG- or IAM-management permissions).
+    Creates (or reuses) the `mngr-aws` security group (ingress on tcp/22 +
+    tcp/<container_ssh_port> per allowed_ssh_cidrs). Idempotent: re-running
+    re-authorizes any missing ingress rules without duplicating. Needs
+    ec2:DescribeSecurityGroups + ec2:CreateSecurityGroup +
+    ec2:AuthorizeSecurityGroupIngress. After this succeeds, `mngr create
+    --provider aws` only needs RunInstances + DescribeSecurityGroups +
+    DescribeInstances + ImportKeyPair etc. (no SG-management permissions, and no
+    IAM at all -- idle self-stop powers the host off rather than calling the EC2
+    API, so it needs no instance profile).
     """
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -259,24 +237,6 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     sg_id = client.ensure_security_group()
     logger.info("Prepared AWS security group {} in region {}", sg_id, client.region)
     write_human_line(f"security group: {sg_id}")
-    # The self-stop IAM role enables the idle watcher but is OPTIONAL: the
-    # security group is the essential part of prepare. If the admin's
-    # credentials lack the iam:* permissions, still succeed -- agents just
-    # won't auto-stop on idle (manual `mngr stop --stop-host` still works).
-    try:
-        profile_name = client.ensure_self_stop_instance_profile()
-    except MngrError as e:
-        logger.warning(
-            "Could not provision the self-stop IAM instance profile ({}); the security group is "
-            "ready, but agents will not auto-stop on idle. Grant iam:CreateRole / iam:PutRolePolicy "
-            "/ iam:CreateInstanceProfile / iam:AddRoleToInstanceProfile and re-run `mngr aws "
-            "prepare` to enable it.",
-            e,
-        )
-        write_human_line("instance profile: skipped (insufficient IAM permissions)")
-    else:
-        logger.info("Prepared AWS self-stop IAM instance profile {}", profile_name)
-        write_human_line(f"instance profile: {profile_name}")
 
 
 @aws_cli_group.command(name="cleanup")
@@ -312,26 +272,23 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 @add_common_options
 @click.pass_context
 def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
-    """Undo `mngr aws prepare`: delete the mngr-managed security group + IAM instance profile.
+    """Undo `mngr aws prepare`: delete the mngr-managed security group.
 
     The safe inverse of `prepare`. Refuses (non-zero exit, deletes nothing) if
     any mngr-managed instance still exists in the region -- destroy those first
-    with `mngr destroy <agent>` so a running agent is never stranded (and so AWS
-    does not refuse to delete an IAM role/profile a live instance still
-    references). With no instances present, deletes the auto-created security
-    group and the `mngr-aws` self-stop IAM role / inline policy / instance
-    profile. The SG name comes from `--sg-name` if supplied; otherwise from the
-    resolved `[providers.<--provider>]` block's `security_group.name` when that
-    block configures an `AutoCreateSecurityGroup`; otherwise (block missing,
-    non-AWS, or configured with an `ExistingSecurityGroup` -- which carries an
-    `id` rather than a name) the default `mngr-aws` is used. Idempotent: a no-op
-    (exit 0) when they are already gone.
+    with `mngr destroy <agent>` so a running agent is never stranded. With no
+    instances present, deletes the auto-created security group. The SG name comes
+    from `--sg-name` if supplied; otherwise from the resolved
+    `[providers.<--provider>]` block's `security_group.name` when that block
+    configures an `AutoCreateSecurityGroup`; otherwise (block missing, non-AWS,
+    or configured with an `ExistingSecurityGroup` -- which carries an `id` rather
+    than a name) the default `mngr-aws` is used. Idempotent: a no-op (exit 0)
+    when it is already gone.
 
     Needs ec2:DescribeInstances + ec2:DescribeSecurityGroups +
-    ec2:DeleteSecurityGroup, plus iam:RemoveRoleFromInstanceProfile +
-    iam:DeleteInstanceProfile + iam:DeleteRolePolicy + iam:DeleteRole. Does not
-    touch per-host keypairs -- those are created and deleted by the
-    create/destroy lifecycle, not by `prepare` or `cleanup`.
+    ec2:DeleteSecurityGroup. Does not touch per-host keypairs -- those are
+    created and deleted by the create/destroy lifecycle, not by `prepare` or
+    `cleanup`.
     """
     mngr_ctx, _output_opts, opts = setup_command_context(
         ctx=ctx,
@@ -345,22 +302,12 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # Same credential / environment errors as the prepare path.
         raise click.ClickException(str(e)) from e
 
-    deleted_sg_id, deleted_profile_name = _perform_cleanup(client)
-    if deleted_sg_id is None and deleted_profile_name is None:
-        write_human_line(
-            f"Nothing to clean up: no mngr-managed security group or IAM instance profile in region {client.region}."
-        )
-        return
+    deleted_sg_id = _perform_cleanup(client)
     if deleted_sg_id is None:
-        write_human_line(f"security group: nothing to delete (already gone in region {client.region})")
-    else:
-        logger.info("Cleaned up AWS security group {} in region {}", deleted_sg_id, client.region)
-        write_human_line(f"security group: {deleted_sg_id}")
-    if deleted_profile_name is None:
-        write_human_line("instance profile: nothing to delete (already gone)")
-    else:
-        logger.info("Cleaned up AWS self-stop IAM instance profile {}", deleted_profile_name)
-        write_human_line(f"instance profile: {deleted_profile_name}")
+        write_human_line(f"Nothing to clean up: no mngr-managed security group in region {client.region}.")
+        return
+    logger.info("Cleaned up AWS security group {} in region {}", deleted_sg_id, client.region)
+    write_human_line(f"security group: {deleted_sg_id}")
 
 
 @aws_cli_group.command(name="ami")
