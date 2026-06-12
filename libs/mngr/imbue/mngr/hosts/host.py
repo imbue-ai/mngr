@@ -2888,15 +2888,15 @@ def _build_start_agent_shell_command(
     # path that sets the PTY dimensions correctly at creation time.
     # The window will be resized to match the client's terminal when attached.
     steps.append(
-        f"tmux -f {shlex.quote(str(tmux_config_path))} new-session -d"
+        f"tmux new-session -d"
         f" -s {shlex.quote(session_name)}"
         f" -x 200 -y 50"
         f" -c {shlex.quote(str(agent.work_dir))}"
         f" {shlex.quote(env_shell_cmd)}"
     )
 
-    # tmux honors -f only when it starts a new server, so source the config
-    # explicitly to also configure a server an earlier session already started.
+    # Apply the host config to this session's tmux server; a server started by
+    # an earlier session would otherwise never load it.
     steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))}")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
