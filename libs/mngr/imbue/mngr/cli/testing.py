@@ -7,6 +7,7 @@ from typing import Any
 
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
@@ -58,7 +59,7 @@ def create_test_agent(
     resolved_config = agent_config or AgentTypeConfig(command=CommandString("sleep 1000"))
     create_time = datetime.now(timezone.utc)
 
-    agent_dir = local_provider.host_dir / "agents" / str(agent_id)
+    agent_dir = get_agent_state_dir_path(local_provider.host_dir, agent_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
 
     data: dict[str, Any] = {
@@ -119,7 +120,7 @@ def create_agent_with_events_dir(
     otherwise it is per_host_dir/agents/<id>/events.
     """
     agent_id = AgentId.generate()
-    agent_dir = per_host_dir / "agents" / str(agent_id)
+    agent_dir = get_agent_state_dir_path(per_host_dir, agent_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "id": str(agent_id),
