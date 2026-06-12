@@ -2,7 +2,7 @@
 
 Azure provider backend plugin for mngr. Runs agents in Docker containers on Azure Virtual Machines.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_minutes` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but Azure-specific defaults and the role/permission set may change. Treat the security defaults (see "Azure-specific configuration" below) as a starting point: review the NSG ingress CIDRs, image choice, VM size, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -157,7 +157,7 @@ size has no capacity in the region right now; pick another size with
 
 ## Auto-shutdown and cost safety
 
-`auto_shutdown_minutes` schedules cloud-init `shutdown -P +N`. **Caveat (Azure
+`auto_shutdown_seconds` schedules cloud-init `shutdown -P +N`. **Caveat (Azure
 specific):** an OS-level shutdown leaves the VM "Stopped (not deallocated)",
 which still bills for compute — Azure has no native "delete after N minutes" like
 AWS/GCP. This matches the Vultr provider's behavior. The real cost backstop for
@@ -167,7 +167,7 @@ add true self-deletion via a managed identity + a cloud-init systemd timer.
 
 ## Future improvements
 
-- Managed-identity self-delete after `auto_shutdown_minutes` (true cost parity
+- Managed-identity self-delete after `auto_shutdown_seconds` (true cost parity
   with AWS/GCP, stopping compute billing even if the orchestrator is killed).
 - Custom-image baking (skip the per-create cloud-init Docker install).
 - Azure Resource Graph for cross-region listing.

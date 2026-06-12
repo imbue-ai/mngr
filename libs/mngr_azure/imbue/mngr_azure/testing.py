@@ -48,12 +48,12 @@ AZURE_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AZURE_RELEASE_TES
 # Single source of truth for the release-test VM lifetime. Used in two places
 # that must stay aligned:
 #   1. ``test_release_azure.py`` writes it into a tmp-path settings.toml
-#      (``[providers.azure] auto_shutdown_minutes``) so cloud-init runs
+#      (``[providers.azure] auto_shutdown_seconds``) so cloud-init runs
 #      ``shutdown -P +N`` on every test VM.
 #   2. ``conftest.py`` derives the orphan-scan grace period from this value so
 #      the session-end leak detector never race-kills an in-flight test on a
 #      parallel worker.
-AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
+AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 
 
 def azure_credentials_available() -> bool:

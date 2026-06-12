@@ -23,11 +23,11 @@
 
 - **Azure build args use the `--azure-` prefix**: `--azure-region=`, `--azure-vm-size=`, `--azure-spot`. The old `--vps-*` args raise a migration error.
 
-- **Auto-shutdown caveat (Azure-specific)**: `auto_shutdown_minutes` schedules cloud-init `shutdown -P +N`, but an OS shutdown on Azure leaves the VM "Stopped (not deallocated)", which still bills for compute — Azure has no native delete-after-duration like AWS/GCP. This matches the Vultr provider's documented behavior. The real cost backstop for tests is the session-end orphan scanner (below). A future improvement is true self-deletion via a managed identity + a cloud-init systemd timer.
+- **Auto-shutdown caveat (Azure-specific)**: `auto_shutdown_seconds` schedules cloud-init `shutdown -P +N`, but an OS shutdown on Azure leaves the VM "Stopped (not deallocated)", which still bills for compute — Azure has no native delete-after-duration like AWS/GCP. This matches the Vultr provider's documented behavior. The real cost backstop for tests is the session-end orphan scanner (below). A future improvement is true self-deletion via a managed identity + a cloud-init systemd timer.
 
 - VMs are tagged `mngr-provider`, `mngr-host-id`, `mngr-created-at`, and `managed-by=mngr`; discovery filters the resource group's VM list by `mngr-provider` (client-side, since Azure has no server-side tag filter on the VM list).
 
-- Release tests are triple-gated by `MNGR_AZURE_RELEASE_TESTS=1`, credential presence, and a resolvable subscription; a Modal-style `pytest_sessionfinish` hook in `conftest.py` scans the resource group for any VM tagged `mngr-pytest-launched` older than 1h at session end, force-deletes leaks, and fails the session. `AzureProvider` refuses to create a VM under pytest without `auto_shutdown_minutes` set so the scanner's TTL is well-defined.
+- Release tests are triple-gated by `MNGR_AZURE_RELEASE_TESTS=1`, credential presence, and a resolvable subscription; a Modal-style `pytest_sessionfinish` hook in `conftest.py` scans the resource group for any VM tagged `mngr-pytest-launched` older than 1h at session end, force-deletes leaks, and fails the session. `AzureProvider` refuses to create a VM under pytest without `auto_shutdown_seconds` set so the scanner's TTL is well-defined.
 
 - Fixed: an unresolvable subscription (or credential) now raises `ProviderUnavailableError` instead of `ProviderEmptyError`. When Azure can't be reached its state is *unknown* -- agents may still exist on a subscription we transiently couldn't read -- so `mngr list` now prints a warning instead of silently dropping the azure provider and its agents from the listing. Previously, treating it as "empty" meant a momentary read failure made azure agents vanish from the listing with no indication why.
 

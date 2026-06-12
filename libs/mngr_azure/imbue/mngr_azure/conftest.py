@@ -43,7 +43,7 @@ from imbue.mngr_azure.client import AZURE_PYTEST_LAUNCHED_TAG
 from imbue.mngr_azure.testing import AZURE_DEFAULT_REGION
 from imbue.mngr_azure.testing import AZURE_DEFAULT_RESOURCE_GROUP
 from imbue.mngr_azure.testing import AZURE_RELEASE_TESTS_OPT_IN
-from imbue.mngr_azure.testing import AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_azure.testing import AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
 
@@ -76,9 +76,9 @@ def setup_test_mngr_env(
 
 # Orphan-scan grace period. A test-tagged VM younger than this is left alone to
 # avoid race-killing an in-flight test on a parallel worker. Derived from the
-# shared ``AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES`` constant (the same value
+# shared ``AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS`` constant (the same value
 # release tests propagate into cloud-init) so the two TTLs can never drift.
-_TEST_LEAK_TTL: Final[timedelta] = timedelta(minutes=AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
+_TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
 
 
 def _force_delete_vms(compute: Any, vm_names: list[str]) -> None:
@@ -213,7 +213,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + "\nAZURE SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked Azure VMs tagged {AZURE_PYTEST_LAUNCHED_TAG}=true and "
-        + f"older than {AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES} minutes in "
+        + f"older than {AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes in "
         + f"resource group {AZURE_DEFAULT_RESOURCE_GROUP} (region {AZURE_DEFAULT_REGION}):\n  "
         + "\n  ".join(orphans)
         + "\n\nVMs have been force-deleted, but tests should not leak.\n"
