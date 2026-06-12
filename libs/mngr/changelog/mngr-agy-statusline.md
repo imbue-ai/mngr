@@ -1,0 +1,1 @@
+Moved the `log_warnings` test fixture into the shared `register_plugin_test_fixtures` set (single-sourced from `plugin_testing`), so every mngr plugin inherits it instead of redefining its own copy. mngr-core's identical local definition is removed in favor of the shared one.
