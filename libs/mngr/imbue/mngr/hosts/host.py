@@ -2988,7 +2988,9 @@ def _build_start_agent_shell_command(
 
     # Load the host tmux config (options and key bindings) into the server.
     # tmux reads a config file automatically only when it starts the server.
-    steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))}")
+    # Non-fatal: source-file exits 1 if any sourced line errors (including from
+    # the user's ~/.tmux.conf), and a cosmetic config must not block the agent.
+    steps.append(f"tmux source-file {shlex.quote(str(tmux_config_path))} || true")
 
     quoted_exact_agent_window = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
 

@@ -770,13 +770,17 @@ def test_build_start_agent_shell_command_sources_config_after_new_session(
     """The config is sourced after new-session so an already-running server picks it up.
 
     tmux reads the -f config only when it starts a new server, so a session created
-    on a server an earlier session already started would otherwise ignore it.
+    on a server an earlier session already started would otherwise ignore it. The
+    step is non-fatal: a config error (e.g. from the user's sourced ~/.tmux.conf)
+    must not abort the agent-start chain.
     """
     agent = _create_test_agent(local_provider, temp_host_dir, temp_work_dir)
     result = _build_command_with_defaults(agent, temp_host_dir)
 
     assert "source-file" in result
     assert result.index("new-session") < result.index("source-file")
+    source_file_step = result[result.index("source-file") :].split("&&")[0]
+    assert source_file_step.rstrip().endswith("|| true")
 
 
 def test_build_start_agent_shell_command_includes_additional_windows(
