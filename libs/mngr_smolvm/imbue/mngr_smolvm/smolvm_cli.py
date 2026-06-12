@@ -102,6 +102,8 @@ def smolvm_machine_create(
     # --data-disk spec string, e.g. "size=100,target=/mngr" (None for no data disk).
     data_disk: str | None,
     extra_args: tuple[str, ...],
+    # Workload command appended after "--" (overrides the image/pack cmd).
+    command: tuple[str, ...],
     timeout: float = 120.0,
 ) -> None:
     """Create a smolvm machine: smolvm machine create --name <name> --net ..."""
@@ -120,6 +122,9 @@ def smolvm_machine_create(
     if data_disk is not None:
         cmd.extend(["--data-disk", data_disk])
     cmd.extend(extra_args)
+    if command:
+        cmd.append("--")
+        cmd.extend(command)
     with log_span("Running smolvm machine create: {}", machine_name):
         result = cg.run_process_to_completion(
             cmd, timeout=timeout, on_output=_log_smolvm_output, is_checked_after=False

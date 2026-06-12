@@ -104,6 +104,13 @@ _SSH_HOSTNAME = "127.0.0.1"
 # bare-VM agent context) run as root, matching the docker provider model.
 _SSH_USER = "root"
 
+# Idle keeper command for container-backed machines. Most images' default
+# cmd exits immediately when run detached (python3, /bin/sh, ... read EOF
+# from a null stdin), which would kill the main container that sshd and the
+# agent's tmux sessions live in. Matches the docker provider's entrypoint:
+# exit cleanly on TERM, otherwise sleep forever.
+_IDLE_KEEPER_COMMAND: tuple[str, ...] = ("sh", "-c", "trap 'exit 0' TERM; sleep infinity & wait")
+
 
 class _ParsedBuildArgs(FrozenModel):
     """Image-source selection parsed from create_host build_args."""
@@ -627,6 +634,7 @@ class SmolvmProviderInstance(BaseProviderInstance):
                 volumes=volumes,
                 data_disk=data_disk_spec,
                 extra_args=effective_start_args,
+                command=_IDLE_KEEPER_COMMAND if (image_reference is not None or from_pack is not None) else (),
             )
             smolvm_machine_start(
                 self.mngr_ctx.concurrency_group,
