@@ -74,7 +74,7 @@ IMDS — no separate endpoint needed.
    stays stopped/idle beyond a retention window (default ~7 days, mirroring Modal's
    `destroyed_host_persisted_seconds`) is **auto-terminated** to reclaim the volume — the analog of
    Modal's age-gated `gc_snapshots` cleanup. Manual `mngr destroy` terminates immediately. The
-   `auto_shutdown_minutes` pytest leak-safety net stays (release tests only).
+   `auto_shutdown_seconds` pytest leak-safety net stays (release tests only).
 5. **Offline metadata = EC2 tags only** (host-level) for now. Paused hosts list with correct
    name/state/idle info; their agents reappear only after resume. S3-backed full parity (agents
    listable while paused, like Modal) is noted as a possible follow-up, not built now.
@@ -141,7 +141,7 @@ instance profile, `iam:PassRole`, or awscli is involved** — the watcher never 
   the optional operator-supplied `iam_instance_profile` when set.
 - **Tradeoff (single launch-time flag).** `InstanceInitiatedShutdownBehavior` is one value chosen at
   launch and governs *all* OS-initiated shutdowns on the instance — both the idle watcher's poweroff
-  and the `auto_shutdown_minutes` time-cap poweroff. Without an IAM role, the watcher cannot
+  and the `auto_shutdown_seconds` time-cap poweroff. Without an IAM role, the watcher cannot
   selectively call `stop-instances` vs `terminate-instances`; it can only power off and let the flag
   decide. So an instance is either **instance-autonomously self-terminating** (`terminate`) OR
   **resumable on idle** (`stop`), not both. We chose `stop` (resumable idle-pause, the Modal analog)
@@ -179,7 +179,7 @@ cleanup).
   metadata that survives the stop (EC2 tags / `DescribeInstances` launch+stop timestamps), not an
   SSH read. Exact mechanism is Phase-3 design work; it is the analog of Modal's `gc_snapshots`.
 
-Manual `mngr destroy` terminates immediately. Keep the `auto_shutdown_minutes` time-cap mechanism
+Manual `mngr destroy` terminates immediately. Keep the `auto_shutdown_seconds` time-cap mechanism
 as the release-test leak backstop; whether the cap stops or terminates the instance now follows the
 `terminate_on_shutdown` flag (release tests set it `true` so the cap self-terminates). It is
 independent of the API-driven stop.
