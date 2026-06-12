@@ -343,18 +343,17 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # per-session channel whenever the agent enters a busy state -- i.e. once
         # it starts processing the just-submitted message (see statusline.sh).
         # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # ``queue_log_path_template=None``: the upstream fallback is hardcoded to
-        # Claude's ``"operation":"enqueue"`` + ``jq`` transcript schema, which
-        # conflicts with agy's no-``jq`` constraint; the statusLine busy-signal
-        # already covers the normal and queue-while-busy cases. (Known edge: a
-        # model that *refuses* the prompt -- e.g. quota exhausted -- never enters
-        # a busy state, so this times out even though the prompt was enqueued.)
+        # We don't supply ``accept_marker_command``: agy has no ``jq`` and records
+        # no "message accepted" marker, and the statusLine busy-signal already
+        # covers the normal and queue-while-busy cases, so waiting on the hook
+        # alone suffices. (Known edge: a model that *refuses* the prompt -- e.g.
+        # quota exhausted -- never enters a busy state, so this times out even
+        # though the prompt was enqueued.)
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
             wait_channel=f"mngr-submit-{self.session_name}",
             timeout_seconds=self.enter_submission_timeout_seconds,
-            queue_log_path_template=None,
         )
 
     @property
