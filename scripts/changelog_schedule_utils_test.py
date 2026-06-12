@@ -38,10 +38,10 @@ def test_cli_print_disable_plugin_args_matches_helper() -> None:
 
 
 def test_cli_print_provider_matches_constant() -> None:
-    """The CLI flag is the integration point with changelog_deploy.sh
-    (which reads it to set $PROVIDER); its output must match the in-process
-    constant so the deploy and release.py's printed on-demand command can't
-    drift.
+    """The CLI flag is the integration point with changelog_deploy.sh and the
+    changelog-trigger justfile recipe (both read it to set the provider); its
+    output must match the in-process constant so the deploy and the on-demand
+    trigger can't drift.
     """
     result = subprocess.run(
         [sys.executable, str(_SCRIPT_PATH), "--print-provider"],

@@ -3,20 +3,22 @@
 Three consumers need to agree on how to address this schedule:
 ``changelog_deploy.sh`` (which deploys it), the ``changelog-trigger``
 justfile recipe (which runs it on demand), and ``scripts/release.py``
-(whose pre-release gate names it when blocking). They must share the
-same ``--disable-plugin <name>`` list passed to ``mngr schedule …``
-calls, the schedule's deployed provider, and the trigger / namespace
-identifiers. This module is the source of truth.
+(whose pre-release gate names it when blocking). The two shell
+consumers must share the same ``--disable-plugin <name>`` list passed to
+``mngr schedule …`` calls, the schedule's deployed provider, and the
+trigger / namespace identifiers. This module is the source of truth.
 
-Python callers (``release.py``) import the constants and helpers
-directly. The shell consumers (the deploy script and the justfile
-recipe) read them through this module's CLI:
+The shell consumers (the deploy script and the justfile recipe) read
+the provider and disable list through this module's CLI:
 ``--print-disable-plugin-args`` for the disable list and
-``--print-provider`` for the provider. ``TRIGGER_NAME`` and
-``MNGR_ROOT_NAME`` are still duplicated as bash literals in those two
-shell consumers because they need the values before any ``uv run
-python`` invocation; those literals must be kept in sync with the
-constants here by hand.
+``--print-provider`` for the provider. ``scripts/release.py`` imports
+only ``TRIGGER_NAME`` directly -- enough to name the schedule in its
+gate's error message; it points users at ``just changelog-trigger``
+rather than constructing the ``mngr schedule run`` command itself.
+``TRIGGER_NAME`` and ``MNGR_ROOT_NAME`` are still duplicated as bash
+literals in the two shell consumers because they need the values before
+any ``uv run python`` invocation; those literals must be kept in sync
+with the constants here by hand.
 """
 
 import argparse
@@ -25,10 +27,11 @@ from typing import Final
 
 TRIGGER_NAME: Final[str] = "changelog-consolidation"
 MNGR_ROOT_NAME: Final[str] = "mngr-changelog-schedule"
-# The schedule is deployed against this provider; release.py's printed
-# on-demand command must reference the same value so the command points
-# at the deployment that actually exists. Editing in-source is fine --
-# (re)deploys are rare and the file edit is the deliberate trigger.
+# The schedule is deployed against this provider; the changelog-trigger
+# justfile recipe reads this value (via --print-provider) so its
+# on-demand run targets the deployment that actually exists. Editing
+# in-source is fine -- (re)deploys are rare and the file edit is the
+# deliberate trigger.
 PROVIDER: Final[str] = "modal"
 # Plugins the schedule trigger needs to function; everything else is
 # disabled to avoid loading repo-specific plugins that would error on
@@ -59,12 +62,13 @@ def main() -> None:
         "--print-disable-plugin-args",
         action="store_true",
         help="Print the --disable-plugin args (space-separated) and exit. "
-        "Used by changelog_deploy.sh and release.py so they stay in sync.",
+        "Used by changelog_deploy.sh and the changelog-trigger justfile recipe so they stay in sync.",
     )
     parser.add_argument(
         "--print-provider",
         action="store_true",
-        help="Print the deployed provider name and exit. Used by changelog_deploy.sh.",
+        help="Print the deployed provider name and exit. "
+        "Used by changelog_deploy.sh and the changelog-trigger justfile recipe.",
     )
     args = parser.parse_args()
     if args.print_disable_plugin_args:
