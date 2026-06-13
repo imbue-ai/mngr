@@ -22,7 +22,6 @@ from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -619,11 +618,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
-    def destroy_agent(self, agent: AgentInterface) -> list[CleanupFailure]:
+    def destroy_agent(self, agent: AgentInterface) -> None:
         """Remove an agent and all its associated state from this host.
 
-        Returns the real cleanup failures (resources left behind); empty on full success
-        or benign "already gone" outcomes. See specs/cleanup-error-aggregation.md.
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
         """
         ...
 
@@ -633,11 +634,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         ...
 
     @abstractmethod
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> list[CleanupFailure]:
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop the specified agents gracefully within the given timeout.
 
-        Returns the real cleanup failures (resources left behind); empty on full success
-        or benign "already gone" outcomes. See specs/cleanup-error-aggregation.md.
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
         """
         ...
 

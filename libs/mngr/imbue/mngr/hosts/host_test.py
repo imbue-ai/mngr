@@ -64,6 +64,7 @@ from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import make_test_agent_details
 
@@ -371,15 +372,16 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     """destroy_agent records an on_destroy failure but still completes the teardown.
 
     A MngrError raised by the on_destroy hook is captured as an OTHER cleanup failure
-    (returned, not raised) so the remaining teardown steps still run.
+    (aggregated into the CleanupFailedGroup, not propagated immediately) so the remaining
+    teardown steps still run.
     """
     agent, host = _create_testable_agent(local_provider, temp_host_dir, temp_work_dir, on_destroy_should_raise=True)
 
     agent_dir = local_provider.host_dir / "agents" / str(agent.id)
     assert agent_dir.exists()
 
-    # The hook failure is recorded and returned rather than propagated.
-    failures = host.destroy_agent(agent)
+    # The hook failure is recorded and surfaced via CleanupFailedGroup rather than aborting.
+    failures = get_cleanup_failures(lambda: host.destroy_agent(agent))
 
     assert agent.on_destroy_called
     # Exactly one failure: the on_destroy hook error, classified as OTHER and tagged
@@ -1245,7 +1247,7 @@ def test_stop_agents_records_timeout_failure_and_continues(
 
     host, recorded = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
 
-    failures = host.stop_agents([agent.id])
+    failures = get_cleanup_failures(lambda: host.stop_agents([agent.id]))
 
     assert [f.category for f in failures] == [CleanupFailureCategory.TIMEOUT]
     commands = [command for command, _ in recorded]
@@ -1273,7 +1275,7 @@ def test_stop_agents_classifies_real_vs_benign_stderr(
         return CommandResult(stdout="", stderr="", success=True)
 
     benign_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_benign)
-    assert benign_host.stop_agents([agent.id]) == []
+    assert get_cleanup_failures(lambda: benign_host.stop_agents([agent.id])) == []
 
     def handle_real(command: str) -> CommandResult:
         if "list-windows" in command:
@@ -1286,7 +1288,7 @@ def test_stop_agents_classifies_real_vs_benign_stderr(
         return CommandResult(stdout="", stderr="", success=True)
 
     real_host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle_real)
-    failures = real_host.stop_agents([agent.id])
+    failures = get_cleanup_failures(lambda: real_host.stop_agents([agent.id]))
     assert [f.category for f in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
 
 

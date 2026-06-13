@@ -70,6 +70,9 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.cleanup_failures import collect_cleanup_failures
+from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -2476,62 +2479,68 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 certified_data=updated,
             )
 
-    def destroy_agent(self, agent: AgentInterface) -> list[CleanupFailure]:
+    def destroy_agent(self, agent: AgentInterface) -> None:
         """Destroy an agent and clean up its resources.
 
-        Returns the list of *real* cleanup failures (resources left behind); empty if the
-        agent was fully destroyed or only benign "already gone" outcomes occurred. Each
-        step is best-effort: a failure on the on_destroy hook, the stop, the state-dir
-        removal, or the persisted-data removal is recorded and the remaining steps still
-        run (see specs/cleanup-error-aggregation.md).
+        Returns normally if the agent was fully destroyed or only benign "already gone"
+        outcomes occurred; raises ``CleanupFailedGroup`` carrying the *real* cleanup
+        failures (resources left behind) otherwise. Each step is best-effort: a failure on
+        the on_destroy hook, the stop, the state-dir removal, or the persisted-data removal
+        is recorded and the remaining steps still run (see specs/cleanup-error-aggregation.md).
         """
-        failures: list[CleanupFailure] = []
         with log_span("Destroying agent", agent_id=str(agent.id), agent_name=str(agent.name)):
-            # Plugin on_destroy hook (runs before teardown). A hook failure is recorded but
-            # must not prevent the actual teardown below. (An unexpected non-MngrError is a
-            # plugin bug and is left to propagate.)
-            try:
-                agent.on_destroy(self)
-            except MngrError as e:
-                logger.warning("on_destroy hook failed for agent {} on host {}: {}", agent.name, self.id, e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.OTHER,
-                        message=f"on_destroy hook failed for agent {agent.name}: {e}",
-                        agent_name=agent.name,
-                        host_id=self.id,
+            with collecting_cleanup_failures() as failures:
+                # Plugin on_destroy hook (runs before teardown). A hook failure is recorded but
+                # must not prevent the actual teardown below. (An unexpected non-MngrError is a
+                # plugin bug and is left to propagate.)
+                try:
+                    agent.on_destroy(self)
+                except MngrError as e:
+                    logger.warning("on_destroy hook failed for agent {} on host {}: {}", agent.name, self.id, e)
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.OTHER,
+                            message=f"on_destroy hook failed for agent {agent.name}: {e}",
+                            agent_name=agent.name,
+                            host_id=self.id,
+                        )
                     )
+
+                # Kill the agent's processes and tmux session. stop_agents raises its own
+                # failures rather than returning them; absorb them into this aggregate so
+                # the remaining teardown steps still run.
+                try:
+                    self.stop_agents([agent.id])
+                except CleanupFailedGroup as group:
+                    collect_cleanup_failures(failures, group)
+
+                # Remove the agent's on-host state directory. A missing dir is benign (rm -rf
+                # exits 0 with no stderr); a permission/IO error leaves local state behind.
+                state_dir = get_agent_state_dir_path(self.host_dir, agent.id)
+                _result, failure = self._run_classified_cleanup_command(
+                    f"rm -rf '{str(state_dir)}'",
+                    failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                    benign_stderr_substrings=(),
+                    agent_name=agent.name,
                 )
+                if failure is not None:
+                    failures.append(failure)
 
-            # Kill the agent's processes and tmux session.
-            failures.extend(self.stop_agents([agent.id]))
-
-            # Remove the agent's on-host state directory. A missing dir is benign (rm -rf
-            # exits 0 with no stderr); a permission/IO error leaves local state behind.
-            state_dir = get_agent_state_dir_path(self.host_dir, agent.id)
-            _result, failure = self._run_classified_cleanup_command(
-                f"rm -rf '{str(state_dir)}'",
-                failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
-                benign_stderr_substrings=(),
-                agent_name=agent.name,
-            )
-            if failure is not None:
-                failures.append(failure)
-
-            # Remove persisted agent data from external storage (e.g., Modal volume).
-            try:
-                self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
-            except MngrError as e:
-                logger.warning("Failed to remove persisted data for agent {} on host {}: {}", agent.name, self.id, e)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
-                        message=f"failed to remove persisted data for agent {agent.name}: {e}",
-                        agent_name=agent.name,
-                        host_id=self.id,
+                # Remove persisted agent data from external storage (e.g., Modal volume).
+                try:
+                    self.provider_instance.remove_persisted_agent_data(self.id, agent.id)
+                except MngrError as e:
+                    logger.warning(
+                        "Failed to remove persisted data for agent {} on host {}: {}", agent.name, self.id, e
                     )
-                )
-        return failures
+                    failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                            message=f"failed to remove persisted data for agent {agent.name}: {e}",
+                            agent_name=agent.name,
+                            host_id=self.id,
+                        )
+                    )
 
     def _build_env_shell_command(self, agent: AgentInterface) -> str:
         """Build a shell command that sources env files and then execs into a shell.
@@ -2939,13 +2948,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return []
         return [pid for pid in result.stdout.strip().split("\n") if pid.strip()]
 
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> list[CleanupFailure]:
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         """Stop agents by killing all processes in their tmux sessions.
 
-        Returns the list of *real* cleanup failures (resources left behind); empty if
-        every agent was fully stopped or only benign "already gone" outcomes occurred.
-        Every step is best-effort and bounded: a failure on one step or agent is recorded
-        and the rest still run (see specs/cleanup-error-aggregation.md).
+        Returns normally if every agent was fully stopped or only benign "already gone"
+        outcomes occurred; raises ``CleanupFailedGroup`` carrying the *real* cleanup
+        failures (resources left behind) otherwise. Every step is best-effort and bounded:
+        a failure on one step or agent is recorded and the rest still run (see
+        specs/cleanup-error-aggregation.md).
 
         This ensures all processes in all panes are terminated by:
         1. Getting all PIDs (panes + descendants + orphans matched by MNGR_AGENT_ID env)
@@ -2953,69 +2963,68 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         3. Waiting briefly, then sending SIGKILL to any survivors
         4. Finally killing the tmux session itself
         """
-        failures: list[CleanupFailure] = []
         with log_span("Stopping {} agent(s) with timeout={}s", len(agent_ids), timeout_seconds):
-            all_pids: list[str] = []
+            with collecting_cleanup_failures() as failures:
+                all_pids: list[str] = []
 
-            current_agents: list[AgentInterface] = []
+                current_agents: list[AgentInterface] = []
 
-            for agent_id in agent_ids:
-                agent = self._get_agent_by_id(agent_id)
-                if agent is None:
-                    continue
+                for agent_id in agent_ids:
+                    agent = self._get_agent_by_id(agent_id)
+                    if agent is None:
+                        continue
 
-                current_agents.append(agent)
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
-                # Also pick up orphans (e.g. children of an OOM-killed claude) that
-                # reparented to PID 1 and so are invisible to the pane-descendant walk.
-                all_pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
+                    current_agents.append(agent)
+                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    all_pids.extend(self._collect_session_pids(session_name, failures, agent.name))
+                    # Also pick up orphans (e.g. children of an OOM-killed claude) that
+                    # reparented to PID 1 and so are invisible to the pane-descendant walk.
+                    all_pids.extend(self._collect_pids_by_agent_id_env(agent.id, failures, agent.name))
 
-            # Deduplicate while preserving order (a pid may appear in both lists).
-            all_pids = list(dict.fromkeys(all_pids))
+                # Deduplicate while preserving order (a pid may appear in both lists).
+                all_pids = list(dict.fromkeys(all_pids))
 
-            if all_pids:
-                pid_list = " ".join(all_pids)
+                if all_pids:
+                    pid_list = " ".join(all_pids)
 
-                # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
-                # This is done in a single shell command to avoid the issue where one non-responsive
-                # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
-                # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
-                #
-                # stderr is captured (no `2>/dev/null`) so kill failures can be classified: a pid
-                # that died between collection and the kill (ESRCH "No such process") is benign,
-                # while an unkillable process (e.g. EPERM "Operation not permitted") is a real
-                # PROCESSES_REMAIN failure. The kill is batched across all agents, so a failure here
-                # is not attributed to a single agent.
-                grace_seconds = min(1.0, timeout_seconds)
-                _result, failure = self._run_classified_cleanup_command(
-                    f"for p in {pid_list}; do kill -TERM $p; done; "
-                    f"sleep {grace_seconds}; "
-                    f"for p in {pid_list}; do kill -KILL $p; done",
-                    failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
-                    benign_stderr_substrings=_KILL_BENIGN_STDERR_SUBSTRINGS,
-                    agent_name=None,
-                    # Bound by the grace sleep plus a fixed margin so a stuck kill loop can't hang
-                    # cleanup; the command itself only sleeps once.
-                    timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
-                )
-                if failure is not None:
-                    failures.append(failure)
+                    # Send SIGTERM to all processes at once, then wait briefly and SIGKILL survivors.
+                    # This is done in a single shell command to avoid the issue where one non-responsive
+                    # process (e.g., interactive bash which ignores SIGTERM) would consume the entire
+                    # timeout budget in a serial loop, preventing SIGKILL from reaching other processes.
+                    #
+                    # stderr is captured (no `2>/dev/null`) so kill failures can be classified: a pid
+                    # that died between collection and the kill (ESRCH "No such process") is benign,
+                    # while an unkillable process (e.g. EPERM "Operation not permitted") is a real
+                    # PROCESSES_REMAIN failure. The kill is batched across all agents, so a failure here
+                    # is not attributed to a single agent.
+                    grace_seconds = min(1.0, timeout_seconds)
+                    _result, failure = self._run_classified_cleanup_command(
+                        f"for p in {pid_list}; do kill -TERM $p; done; "
+                        f"sleep {grace_seconds}; "
+                        f"for p in {pid_list}; do kill -KILL $p; done",
+                        failure_category=CleanupFailureCategory.PROCESSES_REMAIN,
+                        benign_stderr_substrings=_KILL_BENIGN_STDERR_SUBSTRINGS,
+                        agent_name=None,
+                        # Bound by the grace sleep plus a fixed margin so a stuck kill loop can't hang
+                        # cleanup; the command itself only sleeps once.
+                        timeout_seconds=grace_seconds + _STOP_AGENT_COMMAND_TIMEOUT_SECONDS,
+                    )
+                    if failure is not None:
+                        failures.append(failure)
 
-            # Finally kill the tmux sessions themselves. A session already gone (tmux
-            # "can't find session") is benign; a session that exists but cannot be killed
-            # is a real LOCAL_STATE_REMAINS failure.
-            for agent in current_agents:
-                session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
-                _result, failure = self._run_classified_cleanup_command(
-                    f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}",
-                    failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
-                    benign_stderr_substrings=_TMUX_BENIGN_STDERR_SUBSTRINGS,
-                    agent_name=agent.name,
-                )
-                if failure is not None:
-                    failures.append(failure)
-        return failures
+                # Finally kill the tmux sessions themselves. A session already gone (tmux
+                # "can't find session") is benign; a session that exists but cannot be killed
+                # is a real LOCAL_STATE_REMAINS failure.
+                for agent in current_agents:
+                    session_name = f"{self.mngr_ctx.config.prefix}{agent.name}"
+                    _result, failure = self._run_classified_cleanup_command(
+                        f"tmux kill-session -t {TmuxSessionTarget(session_name=session_name).as_shell_arg()}",
+                        failure_category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                        benign_stderr_substrings=_TMUX_BENIGN_STDERR_SUBSTRINGS,
+                        agent_name=agent.name,
+                    )
+                    if failure is not None:
+                        failures.append(failure)
 
     def _get_agent_by_id(self, agent_id: AgentId) -> AgentInterface | None:
         """Get an agent by ID."""

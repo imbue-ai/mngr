@@ -19,6 +19,7 @@ from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
@@ -146,9 +147,13 @@ def _execute_destroy(
                             for agent in online_host.get_agents():
                                 if agent.id == agent_details.id:
                                     mngr_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=online_host)
-                                    # destroy_agent is best-effort: it returns the real failures
-                                    # (resources left behind) rather than raising for them.
-                                    result.failures.extend(online_host.destroy_agent(agent))
+                                    # destroy_agent is best-effort: it raises a CleanupFailedGroup
+                                    # carrying the real failures (resources left behind) rather than
+                                    # failing fast. We still acted, so record the agent regardless.
+                                    try:
+                                        online_host.destroy_agent(agent)
+                                    except CleanupFailedGroup as group:
+                                        result.failures.extend(group.failures)
                                     mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=online_host)
                                     result.destroyed_agents.append(agent_details.name)
                                     logger.debug("Destroyed agent: {}", agent_details.name)
@@ -180,7 +185,12 @@ def _execute_destroy(
                 with log_span("Destroying offline host {} with {} agent(s)", host_id, len(host_agents)):
                     try:
                         mngr_ctx.pm.hook.on_before_host_destroy(host=offline_host, mngr_ctx=mngr_ctx)
-                        host_failures = provider.destroy_host(offline_host)
+                        # destroy_host is best-effort: it raises a CleanupFailedGroup carrying the
+                        # real failures (resources left behind) rather than failing fast.
+                        try:
+                            provider.destroy_host(offline_host)
+                        except CleanupFailedGroup as group:
+                            result.failures.extend(group.failures)
                         mngr_ctx.pm.hook.on_host_destroyed(host=offline_host, mngr_ctx=mngr_ctx)
                     except (MngrError, NotImplementedError) as e:
                         # Could not destroy the host at all.
@@ -194,7 +204,6 @@ def _execute_destroy(
                         if error_behavior == ErrorBehavior.ABORT:
                             return
                     else:
-                        result.failures.extend(host_failures)
                         for agent_details in host_agents:
                             result.destroyed_agents.append(agent_details.name)
                             logger.debug("Destroyed agent: {} (via host destruction)", agent_details.name)
@@ -232,9 +241,16 @@ def _execute_stop(
                 with log_span("Stopping agents on host {}", host_id):
                     agent_ids_to_stop = [agent_details.id for agent_details in host_agents]
                     try:
-                        # stop_agents is best-effort: it returns the real failures rather than
-                        # raising for them.
-                        stop_failures = online_host.stop_agents(agent_ids_to_stop)
+                        # stop_agents is best-effort: it raises a CleanupFailedGroup carrying the
+                        # real failures (resources left behind) rather than failing fast. We still
+                        # acted on these agents, so record them stopped regardless.
+                        try:
+                            online_host.stop_agents(agent_ids_to_stop)
+                        except CleanupFailedGroup as group:
+                            result.failures.extend(group.failures)
+                        for agent_details in host_agents:
+                            result.stopped_agents.append(agent_details.name)
+                            logger.debug("Stopped agent: {}", agent_details.name)
                     except MngrError as e:
                         error_msg = f"Error stopping agents on host {host_id}: {e}"
                         logger.warning(error_msg)
@@ -243,11 +259,6 @@ def _execute_stop(
                         )
                         if error_behavior == ErrorBehavior.ABORT:
                             return
-                    else:
-                        result.failures.extend(stop_failures)
-                        for agent_details in host_agents:
-                            result.stopped_agents.append(agent_details.name)
-                            logger.debug("Stopped agent: {}", agent_details.name)
             case HostInterface():
                 # The host is offline, so we cannot reach it to stop (or verify the state of)
                 # its agents. We do not know whether they are still running, so this is a real

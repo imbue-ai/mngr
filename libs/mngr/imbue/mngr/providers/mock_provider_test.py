@@ -101,7 +101,7 @@ class MockProviderInstance(BaseProviderInstance):
             for h in self.mock_hosts
         ]
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         raise NotImplementedError()
 
     def delete_host(self, host: HostInterface) -> None:

@@ -38,6 +38,7 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -356,10 +357,14 @@ def stop(ctx: click.Context, **kwargs: Any) -> None:
         # Ensure host is online (can't stop agents on offline hosts)
         match host:
             case OnlineHostInterface() as online_host:
-                # Stop each named agent on this host. stop_agents is best-effort and returns
-                # the real cleanup failures (resources left behind) rather than raising for them.
+                # Stop each named agent on this host. stop_agents is best-effort: it raises a
+                # CleanupFailedGroup carrying the real failures (resources left behind) rather
+                # than failing fast.
                 agent_ids_to_stop = [m.agent_id for m in agent_list]
-                failures.extend(online_host.stop_agents(agent_ids_to_stop))
+                try:
+                    online_host.stop_agents(agent_ids_to_stop)
+                except CleanupFailedGroup as group:
+                    failures.extend(group.failures)
 
                 for m in agent_list:
                     stopped_agents.append(str(m.agent_name))

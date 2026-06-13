@@ -241,7 +241,7 @@ class LocalProviderInstance(BaseProviderInstance):
 
         return local_host
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         """Destroy the host.
 
         Always raises LocalHostNotDestroyableError because the local computer

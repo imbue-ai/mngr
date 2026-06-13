@@ -197,7 +197,7 @@ class SSHProviderInstance(BaseProviderInstance):
     ) -> Host:
         raise NotImplementedError("SSH provider does not support starting hosts")
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         raise NotImplementedError("SSH provider does not support destroying hosts")
 
     def delete_host(self, host: HostInterface) -> None:

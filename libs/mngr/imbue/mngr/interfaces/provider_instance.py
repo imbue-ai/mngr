@@ -25,7 +25,6 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
-from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -392,16 +391,17 @@ class ProviderInstanceInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         """Permanently destroy a host.
 
         Providers that support snapshots should preserve snapshot records and
         mark the host as DESTROYED so that gc_snapshots can age-gate their
         deletion.
 
-        Returns the real cleanup failures (resources left behind, e.g. an infrastructure
-        resource that exists but could not be destroyed); empty on full success or benign
-        "already gone" outcomes. A resource that was already absent is not a failure. See
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes (a resource that was already absent is not a failure); raises
+        ``CleanupFailedGroup`` if any real infrastructure resource was left behind. See
         specs/cleanup-error-aggregation.md.
         """
         ...

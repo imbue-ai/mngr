@@ -43,6 +43,7 @@ from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostInterface
@@ -513,7 +514,13 @@ def _destroy_single_online_agent(
                         branches_to_remove.append((created_branch, source_repo_path))
 
         mngr_ctx.pm.hook.on_before_agent_destroy(agent=agent, host=host)
-        agent_failures = host.destroy_agent(agent)
+        # destroy_agent raises a CleanupFailedGroup carrying the real failures (resources
+        # left behind) rather than failing fast; we still acted, so record the agent.
+        agent_failures: tuple[CleanupFailure, ...] = ()
+        try:
+            host.destroy_agent(agent)
+        except CleanupFailedGroup as group:
+            agent_failures = group.failures
         mngr_ctx.pm.hook.on_agent_destroyed(agent=agent, host=host)
         with results_lock:
             destroyed_agents.append(agent.name)
@@ -550,7 +557,13 @@ def _destroy_single_offline_host(
     try:
         _output(f"Destroying offline host {host_name} with {len(offline.agent_names)} agent(s)...", output_opts)
         mngr_ctx.pm.hook.on_before_host_destroy(host=offline.host, mngr_ctx=mngr_ctx)
-        host_failures = offline.provider.destroy_host(offline.host)
+        # destroy_host raises a CleanupFailedGroup carrying the real failures (resources
+        # left behind) rather than failing fast; we still acted, so record the agents.
+        host_failures: tuple[CleanupFailure, ...] = ()
+        try:
+            offline.provider.destroy_host(offline.host)
+        except CleanupFailedGroup as group:
+            host_failures = group.failures
         mngr_ctx.pm.hook.on_host_destroyed(host=offline.host, mngr_ctx=mngr_ctx)
         with results_lock:
             destroyed_agents.extend(offline.agent_names)
@@ -774,12 +787,18 @@ def _destroy_emptied_hosts(
             continue
         try:
             mngr_ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=mngr_ctx)
-            host_failures = provider.destroy_host(host)
+            # destroy_host raises a CleanupFailedGroup carrying the real "destroyed but a
+            # resource leaked" failures (not an MngrError), which we surface; an MngrError
+            # means the destroy could not be attempted at all (handled below).
+            host_failures: tuple[CleanupFailure, ...] = ()
+            try:
+                provider.destroy_host(host)
+            except CleanupFailedGroup as group:
+                host_failures = group.failures
             mngr_ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host.id, [])
             _output(f"Destroyed empty host: {host_name}", output_opts)
             with results_lock:
-                # Real "destroyed but a resource leaked" failures are surfaced.
                 failures.extend(host_failures)
         except MngrError as exc:
             # Best-effort: this implicit host-destroy could not even be attempted (e.g. the
