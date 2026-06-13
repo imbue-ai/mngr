@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.changelog_release_utils import cut_changelog_unreleased_to_date
 from scripts.changelog_release_utils import finalize_changelog_unreleased
 
 
@@ -92,3 +93,48 @@ def test_finalize_errors_when_file_missing(tmp_path: Path) -> None:
     changelog = tmp_path / "missing.md"
     with pytest.raises(FileNotFoundError, match="Changelog file not found"):
         finalize_changelog_unreleased(changelog, "1.2.3", "2026-05-11")
+
+
+def test_cut_renames_unreleased_to_date_without_reinserting(tmp_path: Path) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\nIntro.\n\n## [Unreleased]\n\n### Added\n- New thing\n\n## 2026-05-11\n\n- Old thing\n"
+    )
+    assert cut_changelog_unreleased_to_date(changelog, "2026-06-13") is True
+    result = changelog.read_text()
+    # [Unreleased] is gone (no standing section for a never-released project);
+    # its content now sits under the dated heading, above the older date.
+    assert "## [Unreleased]" not in result
+    assert "## 2026-06-13\n\n### Added\n- New thing" in result
+    assert result.index("## 2026-06-13") < result.index("## 2026-05-11")
+
+
+def test_cut_is_noop_when_no_unreleased_heading(tmp_path: Path) -> None:
+    # The normal between-runs state for dev: date sections only, no [Unreleased].
+    original = "# Changelog\n\n## 2026-06-13\n\n- a\n\n## 2026-05-11\n\n- b\n"
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(original)
+    assert cut_changelog_unreleased_to_date(changelog, "2026-06-14") is False
+    assert changelog.read_text() == original
+
+
+def test_cut_is_noop_when_unreleased_is_empty(tmp_path: Path) -> None:
+    original = "# Changelog\n\n## [Unreleased]\n\n\n## 2026-05-11\n\n- b\n"
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(original)
+    assert cut_changelog_unreleased_to_date(changelog, "2026-06-14") is False
+    # An empty [Unreleased] is left untouched (nothing to date).
+    assert changelog.read_text() == original
+
+
+def test_cut_errors_when_multiple_unreleased(tmp_path: Path) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text("# Changelog\n\n## [Unreleased]\n\n- a\n\n## [Unreleased]\n\n- b\n")
+    with pytest.raises(RuntimeError, match=r"Multiple .* headings"):
+        cut_changelog_unreleased_to_date(changelog, "2026-06-13")
+
+
+def test_cut_errors_when_file_missing(tmp_path: Path) -> None:
+    changelog = tmp_path / "missing.md"
+    with pytest.raises(FileNotFoundError, match="Changelog file not found"):
+        cut_changelog_unreleased_to_date(changelog, "2026-06-13")

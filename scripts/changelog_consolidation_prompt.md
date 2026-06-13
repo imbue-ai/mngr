@@ -88,21 +88,29 @@ the right project's consolidated files.
 4. For each project that had at least one `SECTION` line: open that
    project's `CHANGELOG.md` (resolve `<project_dir>` as in step 2).
    Locate the `## [Unreleased]` heading (it sits directly below the
-   file header — `scripts/release.py` guarantees it is always present
-   after each release, and the initial one is created when the project's
-   changelog is set up). If it is *not* present, the invariant has been
-   broken for that project; emit a `failed` JSON object with "missing
-   [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and stop.
+   file header). For a publishable libs/apps project it is always present
+   (`scripts/release.py` guarantees it after each release, and the initial
+   one is created when the project's changelog is set up); if it is *not*
+   present, the invariant has been broken for that project — emit a
+   `failed` JSON object with "missing [Unreleased] heading in
+   <project_dir>/CHANGELOG.md" in `notes` and stop. The **`dev`** project
+   is the sole exception: its changelog is date-organized and carries no
+   standing `[Unreleased]` between runs (see step 9), so if
+   `dev/CHANGELOG.md` has no `## [Unreleased]` heading, create an empty one
+   (the line `## [Unreleased]` on its own) directly below the file's intro
+   paragraph and proceed.
 
    Group the bullets you generated in step 3 for that project by
    category and merge them into the `[Unreleased]` section under
    `### <Category>` subheadings, in the canonical order: Added, Changed,
    Deprecated, Removed, Fixed, Security. Append to any existing bullets
    under each subheading; do not delete or rewrite pre-existing bullets.
-   (`scripts/release.py` renames `[Unreleased]` to `[vX.Y.Z] -
-   YYYY-MM-DD` at release time and inserts a fresh empty `[Unreleased]`
-   above it, so each project's section accumulates across consolidation
-   runs within a release window.)
+   (For publishable projects, `scripts/release.py` renames `[Unreleased]`
+   to `[vX.Y.Z] - YYYY-MM-DD` at release time and inserts a fresh empty
+   `[Unreleased]` above it, so each project's section accumulates across
+   consolidation runs within a release window. For `dev`, step 9 instead
+   cuts this run's `[Unreleased]` into a `## <date>` section, since `dev`
+   is never released.)
 
    Apply special scrutiny to the `Fixed` category: only keep a `Fixed`
    bullet if it seems to fix a bug that existed in a *prior* release. A
@@ -162,15 +170,27 @@ the right project's consolidated files.
    retry it if that seems worthwhile; either way, do NOT fail the whole
    run on its account -- the consolidation commit is still valid.
 
-9. Capture the current branch name with `BRANCH=$(git rev-parse
+9. Date-organize the `dev` changelog. If the `dev` project gained
+   `[Unreleased]` bullets this run (i.e. one of step 2's `SECTION` lines
+   was for `dev`), run `python3 scripts/changelog_finalize_dev.py --date
+   "$RUN_DATE"`. `dev` is never released, so this renames its transient
+   `## [Unreleased]` heading to `## <RUN_DATE>` (leaving no standing
+   `[Unreleased]` behind), mirroring the per-date layout of every
+   project's `UNABRIDGED_CHANGELOG.md`. The script is a no-op if there is
+   nothing to cut. If it changed `dev/CHANGELOG.md`, `git add -A` and
+   `git commit -m "Date-organize dev changelog (run <RUN_DATE>)"`; if it
+   reported nothing to do, skip the commit.
+
+10. Capture the current branch name with `BRANCH=$(git rev-parse
    --abbrev-ref HEAD)` and push it: `git push --set-upstream origin
    "$BRANCH"`. The schedule's auto-merge step ran `git fetch && checkout
    && merge origin/main` before this agent started, so the per-run
    branch is forked off current `origin/main` and the eventual PR diff
-   contains only this run's commits (the consolidation commit plus any
-   per-project accuracy-review correction commits).
+   contains only this run's commits (the consolidation commit, any
+   per-project accuracy-review correction commits, and the dev
+   date-organize commit).
 
-10. Open a PR with `gh pr create --base main`. Title: `Changelog
+11. Open a PR with `gh pr create --base main`. Title: `Changelog
    consolidation (run <RUN_DATE>)`. Body: describe this automated
    changelog consolidation run (run <RUN_DATE>); what else to surface --
    e.g. anything notable the accuracy reviewers reported -- is up to you.
@@ -184,5 +204,5 @@ the right project's consolidated files.
    malformed invocation), correct it and retry, otherwise emit a `failed`
    JSON object with that stderr content in `notes`.
 
-11. Emit your final JSON object: `{"status": "done", "pr_url":
-    "<PR_URL>"}`, substituting the PR URL from step 10.
+12. Emit your final JSON object: `{"status": "done", "pr_url":
+    "<PR_URL>"}`, substituting the PR URL from step 11.

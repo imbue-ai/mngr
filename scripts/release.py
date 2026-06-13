@@ -928,9 +928,13 @@ def main() -> None:
     # fresh empty [Unreleased] above it. Covers both bumped packages (use
     # the new version) and confirmed first-time publications (use the
     # current version, since these publish without a bump). apps/<name>/
-    # and dev/ changelogs are not versioned and stay untouched -- their
-    # entries accumulate in [Unreleased] indefinitely (the consolidator
-    # keeps appending there).
+    # and dev/ changelogs are not versioned and stay untouched *here*.
+    # apps/<name>/ entries accumulate in [Unreleased] (the consolidator
+    # keeps appending there). dev/ is also never released, but its
+    # consolidated CHANGELOG.md is date-organized instead: the consolidator
+    # cuts its [Unreleased] into "## <date>" sections each run (see
+    # scripts/changelog_finalize_dev.py), so dev/ carries no standing
+    # [Unreleased] between runs.
     release_date = today_pacific()
     finalized_paths: list[Path] = []
     versions_to_finalize: dict[str, str] = {
