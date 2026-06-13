@@ -23,7 +23,8 @@ register_build_level()
 
 
 @pytest.mark.release
-@pytest.mark.timeout(1800)  # booting a real VM + baking a container far exceeds the package's 10s default
+# Booting a real VM + baking a container far exceeds the package's 10s default timeout.
+@pytest.mark.timeout(1800)
 @pytest.mark.skipif(shutil.which("limactl") is None, reason="requires limactl + a hypervisor")
 def test_slice_provider_bakes_a_reachable_host_on_a_real_lima_vm(
     temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
