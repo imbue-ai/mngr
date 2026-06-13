@@ -524,24 +524,6 @@ def test_is_provider_enabled_reflects_disabled_block(monkeypatch: pytest.MonkeyP
     assert is_imbue_cloud_provider_enabled_for_account("alice@example.com", root_name="minds-dev-tname") is False
 
 
-def test_is_provider_enabled_defaults_true_on_malformed_settings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A corrupt settings.toml must not crash the chip-rendering UI helper."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text("this is not = valid toml [[[")
-    assert is_imbue_cloud_provider_enabled_for_account("alice@example.com", root_name="minds-dev-tname") is True
-
-
-def test_is_provider_enabled_defaults_true_on_unreadable_settings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unreadable settings path (here, a directory) falls back to the default."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.mkdir()
-    assert is_imbue_cloud_provider_enabled_for_account("alice@example.com", root_name="minds-dev-tname") is True
-
-
 def test_list_disabled_provider_names_returns_disabled_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     set_imbue_cloud_provider_for_account(
@@ -554,21 +536,3 @@ def test_list_disabled_provider_names_returns_disabled_set(monkeypatch: pytest.M
         "imbue_cloud",
         "imbue_cloud_alice-example-com",
     ]
-
-
-def test_list_disabled_provider_names_empty_on_malformed_settings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A corrupt settings.toml must not crash the providers-panel enumeration."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.write_text("this is not = valid toml [[[")
-    assert list_disabled_provider_names(root_name="minds-dev-tname") == []
-
-
-def test_list_disabled_provider_names_empty_on_unreadable_settings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """An unreadable settings path (here, a directory) falls back to an empty list."""
-    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
-    settings_path.mkdir()
-    assert list_disabled_provider_names(root_name="minds-dev-tname") == []

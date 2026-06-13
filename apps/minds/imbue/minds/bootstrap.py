@@ -74,11 +74,6 @@ def resolve_minds_root_name() -> str:
             MINDS_ROOT_NAME_PATTERN,
             DEFAULT_MINDS_ROOT_NAME,
         )
-        # Intentional: a set-but-invalid value (e.g. a typo'd env name) falls
-        # back to production rather than raising, so every caller has *some*
-        # consistent host_dir. Callers for whom landing on production would be
-        # destructive (`minds env deploy/destroy`, `minds run`) instead gate on
-        # the stricter is_minds_root_name_set_to_active_env.
         return DEFAULT_MINDS_ROOT_NAME
     return value
 
@@ -610,18 +605,7 @@ def is_imbue_cloud_provider_enabled_for_account(email: str, *, root_name: str | 
         provider_name = imbue_cloud_provider_name_for_account(email)
     except BootstrapError:
         return True
-    # Like every other branch here, a read/parse failure falls back to "enabled"
-    # rather than crashing the chip-rendering path on a corrupt settings.toml.
-    try:
-        raw_settings = settings_path.read_text()
-    except OSError as e:
-        logger.warning("Could not read mngr settings {} for provider-enabled check: {}", settings_path, e)
-        return True
-    try:
-        parsed = tomllib.loads(raw_settings)
-    except tomllib.TOMLDecodeError as e:
-        logger.warning("Malformed mngr settings {} for provider-enabled check: {}", settings_path, e)
-        return True
+    parsed = tomllib.loads(settings_path.read_text())
     providers = parsed.get("providers")
     if not isinstance(providers, dict):
         return True
@@ -646,19 +630,7 @@ def list_disabled_provider_names(*, root_name: str | None = None) -> list[str]:
     settings_path = _resolve_active_settings_path(root_name)
     if settings_path is None or not settings_path.exists():
         return []
-    # Like the other branches here, a read/parse failure degrades to "nothing
-    # disabled" rather than crashing this passive providers-panel enumeration on
-    # a corrupt settings.toml.
-    try:
-        raw_settings = settings_path.read_text()
-    except OSError as e:
-        logger.warning("Could not read mngr settings {} to list disabled providers: {}", settings_path, e)
-        return []
-    try:
-        parsed = tomllib.loads(raw_settings)
-    except tomllib.TOMLDecodeError as e:
-        logger.warning("Malformed mngr settings {} while listing disabled providers: {}", settings_path, e)
-        return []
+    parsed = tomllib.loads(settings_path.read_text())
     providers = parsed.get("providers")
     if not isinstance(providers, dict):
         return []
