@@ -6,7 +6,6 @@ import re
 import shutil
 from collections.abc import Generator
 from collections.abc import Mapping
-from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -843,40 +842,6 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
                 any_added = True
 
     return merged if any_added else None
-
-
-_SETTINGS_FLAG: Final[str] = "--settings"
-
-
-@pure
-def partition_settings_args(tokens: Sequence[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split a token sequence into its ``--settings`` values and everything else.
-
-    Returns ``(settings_values, remaining_tokens)``. Recognizes both the
-    space-separated ``--settings VALUE`` form and the ``--settings=VALUE`` form.
-    A trailing ``--settings`` with no following value is dropped. The values are
-    returned exactly as they appear in ``tokens`` (no unquoting).
-    """
-    inline_prefix = f"{_SETTINGS_FLAG}="
-    settings_values: list[str] = []
-    remaining: list[str] = []
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == _SETTINGS_FLAG:
-            if index + 1 < len(tokens):
-                settings_values.append(tokens[index + 1])
-                index += 2
-            else:
-                index += 1
-            continue
-        if token.startswith(inline_prefix):
-            settings_values.append(token[len(inline_prefix) :])
-            index += 1
-            continue
-        remaining.append(token)
-        index += 1
-    return tuple(settings_values), tuple(remaining)
 
 
 @pure
