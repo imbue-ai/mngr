@@ -99,7 +99,7 @@ def _read_activated_minds_host_pool_dsn() -> str | None:
     return dsn
 
 
-def _resolve_pool_database_url(explicit: str | None) -> str:
+def resolve_pool_database_url(explicit: str | None) -> str:
     """Resolve the pool DSN for an admin pool command.
 
     Precedence (highest first):
@@ -810,7 +810,7 @@ def pool_create(
     is_recycle_enabled: bool,
 ) -> None:
     """Create pre-provisioned pool hosts."""
-    resolved_database_url = _resolve_pool_database_url(database_url)
+    resolved_database_url = resolve_pool_database_url(database_url)
     try:
         parsed_attributes = _json.loads(attributes_json)
     except _json.JSONDecodeError as exc:
@@ -890,7 +890,7 @@ def pool_create(
 )
 def pool_list(database_url: str | None) -> None:
     """List rows in pool_hosts."""
-    resolved_database_url = _resolve_pool_database_url(database_url)
+    resolved_database_url = resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
@@ -978,7 +978,7 @@ def pool_destroy(pool_host_id: str, database_url: str | None, force: bool, skip_
     already gone. Cancellation needs OVH credentials in the environment (the minds
     ``pool destroy`` wrapper injects them from Vault).
     """
-    resolved_database_url = _resolve_pool_database_url(database_url)
+    resolved_database_url = resolve_pool_database_url(database_url)
     conn = psycopg2.connect(resolved_database_url)
     try:
         with conn.cursor() as cur:
