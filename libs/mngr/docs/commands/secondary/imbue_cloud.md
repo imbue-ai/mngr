@@ -822,3 +822,87 @@ mngr imbue_cloud admin paid email list [OPTIONS]
 | `--paid-only` | boolean | Only show currently-active (is_paid) emails. | `False` |
 | `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin server
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin server list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+
+## mngr imbue_cloud admin server register
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server register [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--ovh-service-name` | text | OVH dedicated serviceName of the delivered box. | None |
+| `--plan-code` | text | Catalog planCode the box was ordered as. | None |
+| `--region` | text | OVH datacenter code (e.g. vin). | None |
+| `--public-address` | text | SSH-reachable public address of the box. | None |
+| `--ram-gb` | integer | Total RAM in GB (drives slot count). | None |
+| `--cpu-cores` | integer | Physical CPU cores. | None |
+| `--cpu-threads` | integer | CPU threads. | None |
+| `--raid-level` | text | RAID level configured at install (e.g. RAID1). | None |
+| `--lima-service-user` | text | Non-root OS user that owns the box's lima VMs. | `limahost` |
+| `--ovh-order-id` | text | OVH order id, if known. | None |
+| `--status` | text | Initial lifecycle status. | `ready` |
+| `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin server allocate-slice
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server allocate-slice [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--overcommit-ratio` | float |  | `1.5` |
+| `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin server set-status
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server set-status [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-id` | text | bare_metal_servers row id. | None |
+| `--status` | text | New lifecycle status. | None |
+| `--database-url` | text |  | None |
