@@ -115,7 +115,7 @@ def test_prevent_yaml_usage() -> None:
     # YAML only -- so lima_slice.py / lima_slice_client.py reference mngr_lima's
     # *_lima_yaml helpers. This is necessary lima usage, not a config-file
     # anti-pattern (mngr_lima itself allows YAML for the same reason).
-    rc.check_yaml_usage(_DIR, snapshot(18))
+    rc.check_yaml_usage(_DIR, snapshot(21))
 
 
 def test_prevent_functools_partial() -> None:

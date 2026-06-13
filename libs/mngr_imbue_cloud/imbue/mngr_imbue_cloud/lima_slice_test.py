@@ -72,3 +72,34 @@ def test_slice_yaml_provision_runs_base_setup_before_docker() -> None:
     # the btrfs disk and installs the host key) must run first.
     assert "get.docker.com" in scripts[-1]
     assert any("btrfs" in script.lower() for script in scripts[:-1])
+
+
+_POOL_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTpoolkey mngr-pool"
+
+
+def test_slice_yaml_authorizes_extra_root_keys_without_dropping_bake_key() -> None:
+    config = build_slice_lima_yaml(
+        host_dir="/mngr",
+        vcpus=3,
+        memory_mib=7680,
+        disk_gib=80,
+        disk_name="mngr-slice-deadbeef-data",
+        root_authorized_public_key=_ROOT_PUBKEY,
+        host_private_key_pem=_HOST_PRIV,
+        host_public_key_openssh=_HOST_PUB,
+        vm_ssh_host_port=22001,
+        container_ssh_host_port=22002,
+        extra_root_authorized_keys=(_POOL_PUBKEY,),
+    )
+    joined = "\n".join(step["script"] for step in config["provision"])
+    # Both the bake key (root_authorized_public_key) and the extra pool key are authorized.
+    assert _ROOT_PUBKEY in joined
+    assert _POOL_PUBKEY in joined
+    # The extra-key append is idempotent (guarded so re-provision doesn't duplicate).
+    assert "grep -qxF" in joined
+
+
+def test_slice_yaml_omits_extra_key_script_when_none_given() -> None:
+    config = _build()
+    joined = "\n".join(step["script"] for step in config["provision"])
+    assert "grep -qxF" not in joined

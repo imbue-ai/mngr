@@ -12,9 +12,11 @@ from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.bare_metal import next_server_status
+from imbue.mngr_imbue_cloud.bare_metal import plan_slice_placements
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
+from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
@@ -166,3 +168,61 @@ def test_choose_server_for_new_slice_ignores_non_ready_and_full_servers() -> Non
     full_ready = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=8)
     with pytest.raises(SliceCapacityError):
         choose_server_for_new_slice([installing, full_ready])
+
+
+def _capacity(server_id: str, status: str, slot_count: int, used_slots: int) -> BareMetalServerCapacity:
+    now = datetime.now(timezone.utc)
+    server = BareMetalServer(
+        id=BareMetalServerDbId(server_id),
+        plan_code="24rise02-v1-us",
+        region="vin",
+        slot_count=slot_count,
+        status=BareMetalServerStatus(status),
+        created_at=now,
+        updated_at=now,
+    )
+    return compute_capacity(server, used_slots)
+
+
+_SERVER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_SERVER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def test_plan_slice_placements_single_picks_most_free_server() -> None:
+    nearly_full = _capacity(_SERVER_A, SERVER_STATUS_READY, slot_count=8, used_slots=7)
+    roomy = _capacity(_SERVER_B, SERVER_STATUS_READY, slot_count=16, used_slots=2)
+    placements = plan_slice_placements([nearly_full, roomy], 1)
+    assert [str(p.server.id) for p in placements] == [_SERVER_B]
+
+
+def test_plan_slice_placements_spreads_across_servers_respecting_free_slots() -> None:
+    # server_a has 2 free slots, server_b has 1.
+    server_a = _capacity(_SERVER_A, SERVER_STATUS_READY, slot_count=8, used_slots=6)
+    server_b = _capacity(_SERVER_B, SERVER_STATUS_READY, slot_count=8, used_slots=7)
+    placements = plan_slice_placements([server_a, server_b], 3)
+    chosen_ids = [str(p.server.id) for p in placements]
+    assert len(chosen_ids) == 3
+    # Greedy by most-free keeps each server within its free-slot budget.
+    assert chosen_ids.count(_SERVER_A) == 2
+    assert chosen_ids.count(_SERVER_B) == 1
+
+
+def test_plan_slice_placements_raises_when_fleet_lacks_capacity() -> None:
+    # Two ready servers with 1 free slot each cannot satisfy a 3-slice request.
+    server_a = _capacity(_SERVER_A, SERVER_STATUS_READY, slot_count=8, used_slots=7)
+    server_b = _capacity(_SERVER_B, SERVER_STATUS_READY, slot_count=8, used_slots=7)
+    with pytest.raises(SliceCapacityError):
+        plan_slice_placements([server_a, server_b], 3)
+
+
+def test_plan_slice_placements_ignores_non_ready_servers() -> None:
+    installing = _capacity(_SERVER_A, SERVER_STATUS_INSTALLING, slot_count=16, used_slots=0)
+    ready = _capacity(_SERVER_B, SERVER_STATUS_READY, slot_count=8, used_slots=0)
+    placements = plan_slice_placements([installing, ready], 2)
+    assert {str(p.server.id) for p in placements} == {_SERVER_B}
+
+
+def test_plan_slice_placements_rejects_nonpositive_count() -> None:
+    ready = _capacity(_SERVER_A, SERVER_STATUS_READY, slot_count=8, used_slots=0)
+    with pytest.raises(BareMetalConfigError):
+        plan_slice_placements([ready], 0)

@@ -71,9 +71,18 @@ def build_slice_bake_remote_command(
         "MNGR_HOST_DIR=/mngr",
     ]
     quoted_args = " ".join(shlex.quote(arg) for arg in create_args)
+    # ``MNGR_PROJECT_CONFIG_DIR`` points mngr at the FCT workspace's ``.mngr``
+    # settings (templates, agent types) directly: the synced workspace has no
+    # ``.git`` (excluded from the rsync), so mngr's default git-root config
+    # discovery would otherwise find nothing and the templates would be missing.
+    project_config_dir = shlex.quote(f"{fct_dir}/.mngr")
     # ``mngr_bin`` is left unquoted so a leading ``$HOME`` expands in the remote
     # shell; it is a trusted constant, not user input.
-    return f"cd {shlex.quote(fct_dir)} && PATH=$HOME/.local/bin:$PATH {mngr_bin} {quoted_args}"
+    return (
+        f"cd {shlex.quote(fct_dir)} && "
+        f"MNGR_PROJECT_CONFIG_DIR={project_config_dir} PATH=$HOME/.local/bin:$PATH "
+        f"{mngr_bin} {quoted_args}"
+    )
 
 
 @pure

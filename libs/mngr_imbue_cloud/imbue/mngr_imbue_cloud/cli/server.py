@@ -434,8 +434,10 @@ def _sync_repos_to_box(
         address=address,
         ssh_user=ssh_user,
         private_key_path=private_key_path,
-        # Skip the FCT's own vendored mngr; we overwrite it with the monorepo next.
-        extra_excludes=(*_RSYNC_MANUAL_EXCLUDES, "vendor/mngr"),
+        # Keep the FCT's own uv.lock (its Dockerfile COPYs it); only drop .git
+        # (we git-init fresh on the box), .external_worktrees, and the vendored
+        # mngr (overwritten with the monorepo next).
+        extra_excludes=(".git", ".external_worktrees", "vendor/mngr"),
     )
     logger.info("Refreshing {}:{}/vendor/mngr from the synced monorepo", address, _BOX_FCT_REMOTE_NAME)
     vendor_sync = _run_remote(
@@ -454,6 +456,27 @@ def _sync_repos_to_box(
     )
     if vendor_sync.returncode != 0:
         raise BareMetalProvisioningError(f"vendor/mngr refresh on {address} failed: {vendor_sync.stderr.strip()}")
+    # mngr's source + project-config discovery is git-root based, and the FCT
+    # bootstrap expects /mngr/code to be a git checkout -- but the rsync excludes
+    # .git. Make the synced workspace a real (single-commit) git repo so the bake
+    # behaves exactly like the OVH pool bake from an operator's FCT checkout.
+    # Idempotent: re-runs just add a fresh commit (or no-op when unchanged).
+    git_init = _run_remote(
+        address=address,
+        ssh_user=ssh_user,
+        private_key_path=private_key_path,
+        port=22,
+        command=(
+            f"cd {_BOX_FCT_REMOTE_NAME} && git init -q && git add -A && "
+            "git -c user.email=bake@imbue.com -c user.name=slice-bake commit -q -m bake "
+            "--allow-empty >/dev/null 2>&1; git rev-parse --is-inside-work-tree"
+        ),
+        timeout_seconds=180.0,
+        label="git-init",
+        is_streaming=False,
+    )
+    if git_init.returncode != 0:
+        raise BareMetalProvisioningError(f"git init of FCT workspace on {address} failed: {git_init.stderr.strip()}")
 
 
 def _wait_for_container_sentinel(
