@@ -33,7 +33,7 @@ the right project's consolidated files.
    drifted from the assumption above; emit a `failed` JSON object with
    `pwd` + branch state in `notes`.
 
-2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
+2. Run `python3 scripts/changelog_consolidate.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
    `{"status": "skipped-no-entries"}` and stop.
    Otherwise stdout contains one `SECTION <project> <YYYY-MM-DD>
