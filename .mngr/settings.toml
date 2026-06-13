@@ -72,7 +72,7 @@ default_region = "us-west-2"
 default_instance_type = "t3.large"
 # Wall-clock safety net: cloud-init halts + terminates the instance after 2h, mirroring
 # the modal sandbox cap above. Guards against a forgotten host accruing EC2 cost.
-auto_shutdown_minutes = 120
+auto_shutdown_seconds = 7200
 # Build on depot's cached remote builders. Requires DEPOT_TOKEN at create time; depot.json
 # in the repo supplies the project id.
 builder = "DEPOT"
