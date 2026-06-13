@@ -13,15 +13,16 @@ The minds app creates and manages persistent Claude agents running in Docker con
 
 ## Getting started
 
+minds ships as a desktop app (Electron, packaged via ToDesktop; see
+[docs/desktop-app.md](./docs/desktop-app.md)). To run it from source in this
+monorepo, activate a minds env and start the dev client:
+
 ```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install.sh | bash
-
-# Start the desktop client
-minds run
-
-# Visit the URL printed in the terminal to create your first agent
+eval "$(uv run minds env activate <name>)"   # e.g. dev-<your-user>
+just minds-start
 ```
+
+Then visit the login URL printed in the terminal to create your first agent.
 
 ## How it works
 

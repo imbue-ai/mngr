@@ -19,11 +19,74 @@ for pid in $pids; do
   kill -9 "$pid" 2>/dev/null || true
 done
 
-if command -v limactl >/dev/null 2>&1; then
-  log "stopping and deleting Lima VM instances"
-  limactl stop --all >/dev/null 2>&1 || true
-  limactl delete --all >/dev/null 2>&1 || true
+BUNDLED_LIMACTL="/Applications/Minds.app/Contents/Resources/lima/bin/limactl"
+LIMACTL=""
+if [[ -x "$BUNDLED_LIMACTL" ]]; then
+  LIMACTL="$BUNDLED_LIMACTL"
+elif command -v limactl >/dev/null 2>&1; then
+  LIMACTL="limactl"
 fi
+if [[ -n "$LIMACTL" ]]; then
+  log "stopping and deleting Lima VM instances via $LIMACTL"
+  "$LIMACTL" stop --all >/dev/null 2>&1 || true
+  "$LIMACTL" delete --all >/dev/null 2>&1 || true
+fi
+
+# Belt and suspenders for the CI runner: rm any minds-e2e* dirs still
+# under ~/.lima/. limactl on the GitHub Actions PATH isn't reliable and
+# the `command -v` guard above silently skips when missing, leaving
+# 6.4GB diffdisk + supporting files per past run pinned forever. On the
+# self-hosted mac runner this accumulated to 70 zombie VMs / 446GB
+# (verified 2026-06-06) before catching it.
+#
+# limactl delete differs from rm -rf in two ways: (1) it stops the VM's
+# hypervisor process first, (2) it deregisters from limactl's index.
+# The index is rebuilt by scanning ~/.lima/ each invocation, so (2) is
+# bookkeeping. The hypervisor stop matters for a LIVE VM. Preserve that
+# semantic without depending on limactl: for each minds-e2e* dir, check
+# ha.pid -- if the hypervisor is still alive, SIGTERM (then SIGKILL on
+# 2s grace) before rm -rf so we never orphan a running VM.
+if [[ -d "$HOME/.lima" ]]; then
+  zombie_count=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-e2e*' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$zombie_count" -gt 0 ]]; then
+    log "cleaning $zombie_count minds-e2e* dir(s) under ~/.lima"
+    for vm_dir in "$HOME/.lima"/minds-e2e*; do
+      [[ -d "$vm_dir" ]] || continue
+      pid_file="$vm_dir/ha.pid"
+      if [[ -f "$pid_file" ]]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+          log "  $(basename "$vm_dir"): hypervisor pid=$pid alive, SIGTERM then SIGKILL"
+          kill "$pid" 2>/dev/null || true
+          for _ in 1 2 3 4; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+          done
+          kill -9 "$pid" 2>/dev/null || true
+        fi
+      fi
+      rm -rf "$vm_dir" 2>/dev/null || true
+    done
+  fi
+fi
+
+# Local Time Machine snapshots hold deleted-file blocks until purged.
+# After a sequence of CI runs that each create+destroy a Lima VM (whose
+# diffdisk is up to 100GB), those snapshots can pin ~50-100GB even after
+# limactl delete --all reclaims the user-visible files. Free them so the
+# next Lima diffdisk conversion ("no space left on device" -- run
+# 27060995662) has room.
+log "freeing local Time Machine snapshots (best effort)"
+sudo tmutil deletelocalsnapshots / 2>/dev/null || true
+
+log "disk usage after cleanup:"
+df -h "$HOME" / 2>&1 | sed 's/^/[reset]   /' >&2
+
+log "wiping leftover /tmp diagnostic artifacts from prior runs"
+# Only /tmp/minds-electron.log persists across runs (re-written each
+# launch); the deleted first-message-* artifacts were produced by
+# scripts that no longer exist.
+rm -f /tmp/minds-electron.log 2>/dev/null || true
 
 log "removing ~/.minds and /Applications/minds.app"
 # `rm -rf` can race against a not-yet-fully-dead Minds backend process that

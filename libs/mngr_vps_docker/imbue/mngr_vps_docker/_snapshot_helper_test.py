@@ -30,10 +30,14 @@ def test_snapshot_helper_script_passes_bash_syntax_check(tmp_path: Path) -> None
     assert result.returncode == 0, result.stderr
 
 
-def test_snapshot_helper_unit_is_loadable() -> None:
-    """The bundled systemd unit is loadable (pyproject `include` smoke test).
+def test_snapshot_helper_unit_loads_with_expected_systemd_directives() -> None:
+    """The bundled systemd unit loads with real content (pyproject `include` smoke test).
 
     Combined with the bash-syntax test above, this ensures both resource
-    files survive the wheel build.
+    files survive the wheel build. Asserting on the content (not merely that
+    the load did not raise) catches an empty or wrong file that still loads.
     """
-    load_resource_text("snapshot_helper.service")
+    content = load_resource_text("snapshot_helper.service")
+    assert content.strip(), "snapshot_helper.service resource loaded empty"
+    assert "[Unit]" in content
+    assert "ExecStart=/usr/local/sbin/snapshot_helper.sh" in content

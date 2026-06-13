@@ -28,6 +28,7 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.connect import connect_to_agent
 from imbue.mngr.api.connect import resolve_connect_command
 from imbue.mngr.api.connect import run_connect_command
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import destroy_new_host_on_create_failure
 from imbue.mngr.api.data_types import ConnectionOptions
@@ -61,7 +62,7 @@ from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -972,13 +973,14 @@ def _create_agent(
     # edit-message send (which happens outside api_create's own teardown guard)
     # can still tear the new host down on failure. None when we adopted an
     # existing host -- in that case the guard below is a no-op and never destroys.
-    # Pass is_for_host_creation=True (matching api_create's own resolution) so a
-    # backend with one-time per-user bootstrap (Modal's environment) does not
-    # raise ProviderEmptyError here on the very first create: this is the create
-    # path, and the environment is about to be bootstrapped, not listed.
+    # Bootstrap first so backends with one-time per-user bootstrap (Modal's
+    # environment) do not raise ProviderEmptyError here on the very first create.
+    # ``api_create`` re-bootstraps the same (cached) instance below; bootstrap is
+    # idempotent, so doing it here too is cheap.
     new_host_provider: ProviderInstanceInterface | None = None
     if _is_creating_new_host(address, opts.new_host) and isinstance(resolved_target_host, NewHostOptions):
-        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx, is_for_host_creation=True)
+        bootstrap_backend_for_host_creation(resolved_target_host.provider, mngr_ctx)
+        new_host_provider = get_provider_instance(resolved_target_host.provider, mngr_ctx)
 
     # Call the API create function
     with _editor_cleanup_scope(setup.editor_session):

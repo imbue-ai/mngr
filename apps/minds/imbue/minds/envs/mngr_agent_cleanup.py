@@ -31,6 +31,7 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.envs.primitives import DevEnvName
 from imbue.minds.errors import MindError
+from imbue.mngr.hosts.common import get_agents_root_dir
 
 _MNGR_DESTROY_TIMEOUT_SECONDS: float = 120.0
 
@@ -58,7 +59,7 @@ def list_agent_ids_in_env_root(name: DevEnvName) -> tuple[str, ...]:
     "no agents" as a clean no-op.
     """
     root_name = root_name_for_env_name(str(name))
-    agents_dir = mngr_host_dir_for(root_name) / "agents"
+    agents_dir = get_agents_root_dir(mngr_host_dir_for(root_name))
     if not agents_dir.is_dir():
         return ()
     return tuple(sorted(child.name for child in agents_dir.iterdir() if child.is_dir()))
