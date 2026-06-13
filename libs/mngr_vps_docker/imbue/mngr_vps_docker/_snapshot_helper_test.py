@@ -121,6 +121,43 @@ def test_snapshot_helper_snapshot_creates_at_request_id_named_path(
     shutil.which("bash") is None or shutil.which("jq") is None,
     reason="bash and jq required",
 )
+def test_snapshot_helper_snapshot_existing_path_fails_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    """A snapshot request whose target path already exists fails, never reusing it.
+
+    This is the core invariant of the fix: paths are never reused across a
+    delete+recreate, so a pre-existing snapshots/<name> must be refused rather
+    than deleted+recreated. btrfs must not be invoked.
+    """
+    name = "2026-06-12T03:43:57.123456Z"
+    (tmp_path / "mngr-btrfs" / "snapshots" / name).mkdir(parents=True)
+    result = _run_helper_once(tmp_path, {"request_id": name, "operation": "snapshot"})
+    assert result["exit_code"] == 1
+    stderr = result["stderr"]
+    assert isinstance(stderr, str)
+    assert "already exists" in stderr
+    assert not (tmp_path / "btrfs.log").exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="bash and jq required",
+)
+def test_snapshot_helper_snapshot_rejects_unsafe_name(tmp_path: Path) -> None:
+    """A snapshot request with an unsafe name is refused before btrfs runs."""
+    result = _run_helper_once(tmp_path, {"request_id": "..", "operation": "snapshot"})
+    assert result["exit_code"] == 2
+    stderr = result["stderr"]
+    assert isinstance(stderr, str)
+    assert "invalid snapshot name" in stderr
+    assert not (tmp_path / "btrfs.log").exists()
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="bash and jq required",
+)
 def test_snapshot_helper_cleanup_rejects_path_traversal_target(tmp_path: Path) -> None:
     """A cleanup target that escapes the snapshots dir is refused, btrfs never runs."""
     result = _run_helper_once(
