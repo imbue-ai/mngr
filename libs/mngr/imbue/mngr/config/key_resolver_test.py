@@ -121,6 +121,100 @@ def test_resolve_extends_shallow_merges_dict_field() -> None:
 
 
 # =============================================================================
+# resolve_extends -- recursive __extend (nested markers)
+# =============================================================================
+
+
+def test_apply_extend_recurses_into_nested_extend_marker() -> None:
+    """A nested ``key__extend`` inside an ``__extend`` value extends the
+    corresponding sub-value of the base rather than replacing it.
+
+    Against a base ``{permissions: {defaultMode: D, allow: [old]}}``, the patch
+    ``permissions__extend = {allow__extend: [X]}`` must preserve ``defaultMode``
+    and concatenate ``allow`` -> ``{defaultMode: D, allow: [old, X]}``.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    resolved = resolve_extends(
+        base,
+        {"permissions__extend": {"allow__extend": ["X"]}},
+    )
+    assert resolved == {"permissions": {"defaultMode": "acceptEdits", "allow": ["old", "X"]}}
+
+
+def test_apply_extend_nested_bare_key_replaces_sub_value_preserving_siblings() -> None:
+    """A nested *bare* key inside an ``__extend`` value assigns (replaces) that
+    sub-value while preserving sibling keys of the extended dict.
+
+    Against a base ``{permissions: {defaultMode: D, allow: [old]}}``, the patch
+    ``permissions__extend = {allow: [X]}`` replaces ``allow`` (bare = assign)
+    but keeps ``defaultMode`` -> ``{defaultMode: D, allow: [X]}``.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    resolved = resolve_extends(
+        base,
+        {"permissions__extend": {"allow": ["X"]}},
+    )
+    assert resolved == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
+
+
+def test_apply_extend_backcompat_no_nested_extend_unchanged() -> None:
+    """Back-compat invariant: an ``__extend`` value with NO nested ``__extend``
+    markers produces the same result as the old shallow ``{**current, **value}``.
+
+    The recursive change must only add meaning for nested ``__extend`` markers;
+    a value of only bare nested keys merges shallowly (bare = replace at that
+    level, siblings preserved), identical to the pre-recursion operator.
+    """
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    patch = {"permissions__extend": {"allow": ["X"], "deny": ["Y"]}}
+    resolved = resolve_extends(base, patch)
+    # Old shallow behavior: {**{defaultMode, allow:[old]}, **{allow:[X], deny:[Y]}}
+    expected = {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"], "deny": ["Y"]}}
+    assert resolved == expected
+
+
+def test_apply_extend_recurses_three_levels_deep() -> None:
+    """A three-level nest of ``__extend`` markers extends at the deepest level
+    while preserving siblings at every intermediate level."""
+    base: dict[str, Any] = {
+        "a": {
+            "keepA": 1,
+            "b": {
+                "keepB": 2,
+                "c": [1],
+            },
+        }
+    }
+    resolved = resolve_extends(
+        base,
+        {"a__extend": {"b__extend": {"c__extend": [2, 3]}}},
+    )
+    assert resolved == {
+        "a": {
+            "keepA": 1,
+            "b": {
+                "keepB": 2,
+                "c": [1, 2, 3],
+            },
+        }
+    }
+
+
+def test_apply_extend_nested_bare_dict_resolves_markers_against_empty() -> None:
+    """A nested *bare* dict value that itself contains an ``__extend`` marker is
+    resolved against an empty base (extend-against-nothing = assign), so no
+    marker survives in the assigned sub-value."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
+    resolved = resolve_extends(
+        base,
+        # ``permissions`` is bare (assign), so it replaces the whole sub-dict;
+        # its nested ``allow__extend`` resolves against nothing -> bare ``allow``.
+        {"permissions": {"allow__extend": ["X"]}},
+    )
+    assert resolved == {"permissions": {"allow": ["X"]}}
+
+
+# =============================================================================
 # resolve_extends -- error cases
 # =============================================================================
 

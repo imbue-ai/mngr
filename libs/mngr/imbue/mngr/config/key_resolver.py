@@ -135,7 +135,19 @@ def _apply_extend(
 ) -> Any:
     """Apply ``extend_value`` onto ``current_value`` and return the result.
 
-    Operates only at the leaf field, no recursion into nested aggregates.
+    The list/tuple/set/scalar branches operate only at the leaf field. The dict
+    branch is **recursive**: each key of ``extend_value`` is applied against the
+    matching sub-value of ``current_value`` -- a nested ``key__extend`` recurses
+    (extending ``current_value[key]``), while a nested bare ``key`` assigns
+    (replacing ``current_value[key]``). A bare value that is itself a dict is
+    resolved against an empty base so any markers nested inside it collapse
+    (extend-against-nothing = assign). Within a level, bare keys are applied
+    before sibling ``__extend`` keys, matching ``resolve_extends``.
+
+    This recursion is backward-compatible: an ``extend_value`` that nests no
+    ``__extend`` markers produces the same shallow ``{**current, **value}``
+    result as the pre-recursion operator (bare nested keys replace at their
+    level, preserving siblings of the extended dict).
     """
     if current_value is None:
         # Field unset in base. Extend acts like assign, but the shape must
@@ -145,6 +157,10 @@ def _apply_extend(
                 f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
                 f"got: {type(extend_value).__name__}"
             )
+        # Extend-against-nothing acts as assign, but a dict value may still carry
+        # nested markers that must resolve (against an empty base) so none leak.
+        if isinstance(extend_value, Mapping):
+            return _extend_dict({}, extend_value, field_path)
         return extend_value
     if isinstance(current_value, (list, tuple)):
         if not isinstance(extend_value, (list, tuple)):
@@ -168,11 +184,46 @@ def _apply_extend(
                 f"__extend on field '{field_path}' (dict) requires a JSON object value; "
                 f"got: {type(extend_value).__name__}"
             )
-        return {**current_value, **extend_value}
+        return _extend_dict(current_value, extend_value, field_path)
     raise ConfigParseError(
         f"__extend on field '{field_path}' is not valid: target field is a scalar "
         f"({type(current_value).__name__}); use bare assignment instead."
     )
+
+
+def _extend_dict(
+    current_value: Mapping[str, Any],
+    extend_value: Mapping[str, Any],
+    field_path: str,
+) -> dict[str, Any]:
+    """Recursively apply a dict ``extend_value`` onto ``current_value``.
+
+    Each key of ``extend_value`` is applied against the matching sub-value of
+    ``current_value``: a nested ``key__extend`` recurses via ``_apply_extend``
+    (extending ``current_value[key]``); a nested bare ``key`` assigns, replacing
+    ``current_value[key]`` (a dict value is resolved against an empty base so any
+    markers nested inside it collapse). Bare keys are applied before sibling
+    ``__extend`` keys, mirroring ``resolve_extends``'s within-level ordering.
+
+    The result starts as a shallow copy of ``current_value`` so sibling keys that
+    the patch does not mention are preserved.
+    """
+    result: dict[str, Any] = dict(current_value)
+    # First pass: bare keys assign (resolving nested markers against empty).
+    for key, value in extend_value.items():
+        if is_extend_key(key):
+            continue
+        if isinstance(value, Mapping):
+            result[key] = _extend_dict({}, value, f"{field_path}.{key}")
+        else:
+            result[key] = value
+    # Second pass: ``key__extend`` keys extend the (possibly just-assigned) value.
+    for key, value in extend_value.items():
+        if not is_extend_key(key):
+            continue
+        bare = bare_key(key)
+        result[bare] = _apply_extend(result.get(bare), value, f"{field_path}.{bare}")
+    return result
 
 
 def resolve_extends(
