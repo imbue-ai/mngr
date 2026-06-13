@@ -1936,6 +1936,21 @@ def _get_pool_db_connection() -> Any:
     return psycopg2.connect(database_url)
 
 
+@contextlib.contextmanager
+def _management_ssh_client(
+    host: str, port: int, user: str, management_key_pem: str, timeout_seconds: float
+) -> Iterator[paramiko.SSHClient]:
+    """Yield an SSHClient connected to ``host`` with the pool management key, closed on exit."""
+    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=timeout_seconds)
+        yield client
+    finally:
+        client.close()
+
+
 def _append_authorized_key(
     host: str,
     port: int,
@@ -1944,11 +1959,7 @@ def _append_authorized_key(
     public_key_to_add: str,
 ) -> None:
     """SSH into a host using the management key and append a public key to authorized_keys."""
-    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=15)
+    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=15) as client:
         key_line = public_key_to_add.strip()
         commands = (
             "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo {} >> ~/.ssh/authorized_keys && ".format(
@@ -1961,8 +1972,6 @@ def _append_authorized_key(
         if exit_status != 0:
             stderr_text = stderr.read().decode()
             raise paramiko.SSHException(f"SSH command failed (exit {exit_status}): {stderr_text}")
-    finally:
-        client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -2118,11 +2127,7 @@ def _run_ssh_commands_on_box(
     host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...]
 ) -> None:
     """SSH into the box with the pool management key and run each command, raising on failure."""
-    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=30)
+    with _management_ssh_client(host, port, user, management_key_pem, timeout_seconds=30) as client:
         for command in commands:
             _stdin, stdout, stderr = client.exec_command(command)
             exit_status = stdout.channel.recv_exit_status()
@@ -2131,8 +2136,6 @@ def _run_ssh_commands_on_box(
                 raise PoolHostCleanupError(
                     f"slice teardown command {command!r} failed (exit {exit_status}): {stderr_text}"
                 )
-    finally:
-        client.close()
 
 
 def clean_up_slice_on_box(
