@@ -183,7 +183,6 @@ uv run mngr schedule add "$TRIGGER_NAME" \
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
-echo "To trigger a run on demand and read its outcome JSON:"
-echo "  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \\"
-echo "    uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
+echo "To trigger a run on demand and read its outcome JSON, run:"
+echo "  just changelog-trigger"
 echo "(claude's final assistant message is a single JSON object: status, with pr_url on success or notes on failure)"
