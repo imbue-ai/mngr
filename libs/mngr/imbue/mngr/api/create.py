@@ -18,9 +18,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import MngrError
-from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import StreamingHeadlessAgentMixin
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import HostEnvironmentOptions
 from imbue.mngr.interfaces.host import HostLocation

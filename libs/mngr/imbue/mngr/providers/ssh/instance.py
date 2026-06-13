@@ -20,7 +20,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources

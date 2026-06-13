@@ -25,7 +25,6 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources

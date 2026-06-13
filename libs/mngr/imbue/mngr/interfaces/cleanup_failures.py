@@ -40,8 +40,19 @@ class CleanupFailedGroup(ExceptionGroup[CleanupFailedError]):
 
     @property
     def failures(self) -> tuple[CleanupFailure, ...]:
-        """The structured failures carried by this group's leaves, in order."""
-        return tuple(leaf.failure for leaf in self.exceptions)
+        """The structured failures carried by this group's leaves, in order.
+
+        ``ExceptionGroup.exceptions`` is typed as possibly holding nested groups; in practice
+        ``from_failures`` only ever builds a flat group of ``CleanupFailedError`` leaves, but we
+        recurse into any nested ``CleanupFailedGroup`` so no failure is dropped.
+        """
+        collected: list[CleanupFailure] = []
+        for leaf in self.exceptions:
+            if isinstance(leaf, CleanupFailedError):
+                collected.append(leaf.failure)
+            elif isinstance(leaf, CleanupFailedGroup):
+                collected.extend(leaf.failures)
+        return tuple(collected)
 
 
 @contextmanager

@@ -48,8 +48,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
+from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import PyinfraConnector
