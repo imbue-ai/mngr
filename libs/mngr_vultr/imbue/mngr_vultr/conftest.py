@@ -174,7 +174,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         api_key = os.environ.get("VULTR_API_KEY", "")
         if not api_key:
             return
-        client = VultrVpsClient(api_key=SecretStr(api_key))
+        # os_id is required by the VultrVpsClient constructor but only used by
+        # create_instance, which we never call from this cleanup path. The
+        # value mirrors the hardcoded id in test_release_vultr.py's _build_client.
+        client = VultrVpsClient(api_key=SecretStr(api_key), os_id=2136)
         leaked = _list_leaked_instances(client)
         if not leaked:
             return
