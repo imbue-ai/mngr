@@ -34,6 +34,7 @@ from imbue.mngr_codex.codex_config import get_codex_personality_migration_path
 from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
+from imbue.mngr_codex.plugin import CodexUpdatePolicy
 from imbue.mngr_codex.plugin import register_agent_type
 
 # =============================================================================
@@ -51,8 +52,7 @@ def test_codex_agent_config_has_correct_defaults() -> None:
     assert config.sandbox_mode == "workspace-write"
     assert config.auto_allow_permissions is False
     assert config.auto_dismiss_dialogs is False
-    assert config.check_for_updates is True
-    assert config.auto_update is False
+    assert config.update_policy is CodexUpdatePolicy.ASK
     assert config.config_overrides == {}
     assert config.emit_common_transcript is True
 
@@ -428,24 +428,21 @@ class _UnknownVersionCodexAgent(_OutdatedCodexAgent):
         return (None, None)
 
 
-class _ProbeRaisesCodexAgent(CodexAgent):
-    """`_read_codex_versions` raises, so a test can assert it is never called."""
-
-    def _read_codex_versions(self, host: object, user_codex_home: Path) -> tuple[str | None, str | None]:
-        raise AssertionError("the version probe should not run when the check is disabled")
-
-
 def _check_update(agent: CodexAgent) -> None:
     # user_codex_home is irrelevant in the decision tests (the probe is overridden).
     agent._maybe_check_for_codex_update(agent.host, agent.work_dir, agent.mngr_ctx)
 
 
-def test_auto_update_runs_codex_update_without_prompting(
+def test_auto_policy_runs_codex_update_without_prompting(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """auto_update applies the update directly and never consults the interactive prompt."""
+    """The AUTO policy applies the update directly and never consults the interactive prompt."""
     agent = _make_codex_agent(
-        _OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True), is_interactive=True
+        _OutdatedPromptRaisesAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO),
+        is_interactive=True,
     )
     with pytest.raises(_CodexUpdateRan):
         _check_update(agent)
@@ -488,12 +485,12 @@ def test_unattended_remote_host_only_notifies(local_provider: LocalProviderInsta
 
 
 def test_unattended_remote_host_still_auto_updates(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """``auto_update`` is an explicit opt-in, so it upgrades even on an unattended remote host."""
+    """The AUTO policy is an explicit opt-in, so it upgrades even on an unattended remote host."""
     agent = _make_codex_agent(
         _OutdatedPromptRaisesAgent,
         local_provider,
         tmp_path,
-        CodexAgentConfig(auto_update=True),
+        CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO),
         is_interactive=True,
     )
     remote_host = cast(OnlineHostInterface, FakeHost(is_local=False))
@@ -515,20 +512,32 @@ def test_auto_approve_does_not_trigger_global_update(local_provider: LocalProvid
 
 
 def test_up_to_date_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    agent = _make_codex_agent(_UpToDateCodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True))
+    agent = _make_codex_agent(
+        _UpToDateCodexAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
     _check_update(agent)
 
 
 def test_unknown_version_skips_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
     """An undeterminable version (codex absent / no cache) skips the check entirely."""
-    agent = _make_codex_agent(_UnknownVersionCodexAgent, local_provider, tmp_path, CodexAgentConfig(auto_update=True))
+    agent = _make_codex_agent(
+        _UnknownVersionCodexAgent, local_provider, tmp_path, CodexAgentConfig(update_policy=CodexUpdatePolicy.AUTO)
+    )
     _check_update(agent)
 
 
-def test_disabled_check_skips_the_probe(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
-    """With both check_for_updates and auto_update off, the version probe never runs."""
+def test_never_policy_only_notifies(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """The NEVER policy runs the (cheap) check but only notifies -- never prompts, never updates.
+
+    Even on an attended local interactive run, the prompt override raises if consulted and
+    the update sentinel fires if run, so reaching neither confirms NEVER just logs the notice.
+    """
     agent = _make_codex_agent(
-        _ProbeRaisesCodexAgent, local_provider, tmp_path, CodexAgentConfig(check_for_updates=False)
+        _OutdatedPromptRaisesAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(update_policy=CodexUpdatePolicy.NEVER),
+        is_interactive=True,
     )
     _check_update(agent)
 
