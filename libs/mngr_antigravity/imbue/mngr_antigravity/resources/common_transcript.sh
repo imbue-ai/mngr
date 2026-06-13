@@ -14,9 +14,8 @@
 #    "content":"...", "thinking":"...", "tool_calls":[{...}], ...}
 #
 # This converter emits:
-#   USER_EXPLICIT/USER_INPUT       -> user_message  (extracted from the
-#                                       <USER_REQUEST>...</USER_REQUEST>
-#                                       envelope; metadata is dropped)
+#   USER_EXPLICIT/USER_INPUT       -> user_message  (the clean typed text
+#                                       agy records in CortexStepUserInput.query)
 #   MODEL/PLANNER_RESPONSE         -> assistant_message  (any tool_calls
 #                                       attached as tool_calls[])
 #   MODEL/CODE_ACTION              -> tool_result (paired with the most
@@ -67,38 +66,24 @@ convert_new_events() {
     result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" python3 << 'CONVERT_SCRIPT' 2>"$convert_stderr" || true
 import json
 import os
-import re
 import sys
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
-# Strip Antigravity's USER_REQUEST/ADDITIONAL_METADATA/USER_SETTINGS_CHANGE
-# envelope from the raw user content. We keep only the inner text the user
-# actually typed; metadata about local time and model selection is noise
-# for transcript consumers.
-_USER_REQUEST_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.DOTALL)
-
-
 def _extract_user_text(content, conv_id, step_index):
     """Return the user's typed text from a USER_INPUT record.
 
-    The agy SQLite store (>= 1.0.4, the decode_agy_transcript.py source) records the
-    clean typed text directly in ``CortexStepUserInput.query``, so ``content`` is already
-    the user message. Older agy JSONL wrapped USER_INPUT in
-    ``<USER_REQUEST>...</USER_REQUEST>\\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>``;
-    when that envelope is present (agy could reintroduce it, and historical raw output may
-    still carry it) we keep only its inner text and drop the bookkeeping metadata. A
-    non-string content is a real schema break, so we log it and drop the event.
+    agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
+    directly in ``CortexStepUserInput.query``, so ``content`` is already the user's message --
+    we only strip surrounding whitespace. A non-string content is a real schema break, so we
+    log it and drop the event.
     """
     if not isinstance(content, str):
         sys.stderr.write(
             f"USER_INPUT content is not a string for conv={conv_id} step={step_index}; dropping event\n"
         )
         return None
-    match = _USER_REQUEST_RE.search(content)
-    if match is not None:
-        return match.group(1)
     return content.strip()
 
 
@@ -175,11 +160,9 @@ def convert():
                 if event_id in existing_ids:
                     continue
                 text = _extract_user_text(raw.get("content"), conv_id, step_index)
-                # _extract_user_text returns the typed text (the inner
-                # <USER_REQUEST> body when the envelope is present, otherwise the
-                # content as-is), or None (already logged) when content is not a
-                # string. Empty results -- a None, an empty USER_REQUEST body, or
-                # otherwise empty content -- are dropped here as they carry no signal.
+                # _extract_user_text returns the stripped typed text, or None (already logged)
+                # when content is not a string. Empty results -- a None or otherwise empty
+                # content -- are dropped here as they carry no signal.
                 if not text:
                     continue
                 new_events.append((timestamp, {

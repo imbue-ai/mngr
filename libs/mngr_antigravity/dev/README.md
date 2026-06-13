@@ -41,12 +41,12 @@ We do better: the `agy` binary is built with `google.golang.org/protobuf`, which
 each `.proto` file's `FileDescriptorProto`** as a raw byte slice. We extract those to get
 the real field names and enum values.
 
-## Recovering the schema (`extract_agy_proto_schema.py`, in the appendix)
+## Recovering the schema (`scripts/extract_antigravity_proto_schema.py`)
 
-Save the appendix script, then:
+Run the committed extractor:
 
 ```
-uv run python extract_agy_proto_schema.py "$(which agy)" --out /tmp/agy_descriptors --grep CortexStepType
+uv run python scripts/extract_antigravity_proto_schema.py "$(which agy)" --out /tmp/agy_descriptors --grep CortexStepType
 ```
 
 This scans the binary for embedded `FileDescriptorProto`s (anchored on the
@@ -72,7 +72,7 @@ gemini_coder.Step:
   f10 code_action   exa.cortex_pb.CortexStepCodeAction
   f19 user_input    exa.cortex_pb.CortexStepUserInput        { f1 query; f2 user_response }
   f20 planner_response exa.cortex_pb.CortexStepPlannerResponse { f1 response; f3 thinking; f7 tool_calls[] }
-  f24 error_message exa.cortex_pb.CortexStepErrorMessage
+  f24 error_message exa.cortex_pb.CortexStepErrorMessage { f3 error -> CortexErrorDetails { f1 user_error_message, f2 short_error, f3 full_error } }
   ... ~60 more tool/browser step types
 ```
 
@@ -112,226 +112,32 @@ unsafe against a concurrent writer.)
 
 agy ships ~weekly and can renumber fields/enums. To re-verify or update the field map:
 
-1. `extract_agy_proto_schema.py "$(which agy)" --grep CortexStep` and diff the
-   `gemini_coder.Step` / `CortexStepType` / `CortexStepSource` output against the tables above.
-2. If field numbers moved, update the constants in `decode_agy_conversation_db.py` (and the
-   production decoder) accordingly.
+1. Run the release-marked verification test. It extracts the live binary's descriptors via
+   `scripts/extract_antigravity_proto_schema.py` and asserts every field number / enum value the
+   production decoder relies on still matches -- turning the eyeball diff below into an exact
+   check. It requires `agy` on PATH (a missing binary is a hard failure, not a skip):
+
+   ```
+   just test libs/mngr_antigravity/imbue/mngr_antigravity/resources/test_antigravity_proto_schema.py::test_decoder_field_map_matches_installed_antigravity_binary
+   ```
+
+   To inspect the raw layout by hand instead, run the extractor and diff the `gemini_coder.Step`
+   / `CortexStepType` / `CortexStepSource` output against the tables above:
+   `uv run python scripts/extract_antigravity_proto_schema.py "$(which agy)" --grep CortexStep`.
+2. If anything moved, update the constants in `decode_agy_transcript.py` (the production decoder)
+   and `decode_agy_conversation_db.py` (the reference decoder below), then re-run the test.
 3. Decode a fresh `.db` and confirm user/assistant text round-trips.
 
-## Appendix: scripts
+## Appendix: the reference decoder
 
-Save and run these with `uv run python <file> ...` from the repo root (they use the venv's
-stdlib `sqlite3` and, for extraction only, the `google.protobuf` library already present in
-the dev venv). They live here as documentation rather than as committed `.py` files because
-the project's ratchet/pyright/ruff checks scan all in-tree `.py`, and these dev tools use
-patterns (raw `while True` varint loops, broad protobuf parse guards) that those checks
-intentionally discourage in production code.
-
-### extract_agy_proto_schema.py
-
-```python
-"""Recover agy's embedded protobuf schema from the ``agy`` binary.
-
-Why this exists
----------------
-agy stores each conversation as a SQLite ``.db`` (one file per conversation under
-``$HOME/.gemini/antigravity-cli/conversations/<id>.db``). The conversation rows live in
-the ``steps`` table, and ``steps.step_payload`` is a **protobuf** blob (``gemini_coder.Step``)
--- not JSON. agy publishes no ``.proto`` schema (the GitHub repo is distribution-only) and
-ships no export command, so to decode a conversation we need the field/enum layout.
-
-The ``agy`` binary is built with ``google.golang.org/protobuf``, which embeds each
-``.proto`` file's serialized ``FileDescriptorProto`` as a raw (uncompressed) byte slice.
-This script scans the binary for those, validates them, and writes them out. From the
-recovered descriptors you can read the real field names/numbers and enum values that
-``decode_agy_conversation_db.py`` keys off.
-
-agy ships ~weekly and may renumber fields, so re-run this against each new binary and
-diff the output (see ``dev/README.md`` for the full procedure and the schema map).
-
-Usage
------
-    uv run python libs/mngr_antigravity/dev/extract_agy_proto_schema.py "$(which agy)" \
-        --out /tmp/agy_descriptors [--grep Step]
-
-``--grep`` prints message/enum types whose fully-qualified name contains the substring
-(case-insensitive), e.g. ``--grep CortexStep``. Without ``--out`` nothing is written.
-
-Method
-------
-Each ``FileDescriptorProto`` begins with field 1 (``name``): tag ``0x0A``, a varint
-length, then ``"<path>.proto"``. We anchor on those, walk only top-level fields valid for
-``FileDescriptorProto`` (numbers 1..14) to find the extent, and accept the slice if it
-parses and carries content. A handful of large descriptors that protobuf-go registers via
-the legacy gzip path are not recovered this way (e.g. ``codeium_common.proto``); the
-targeted decoder does not need them (see the decoder's module docstring).
-"""
-
-from __future__ import annotations
-
-import argparse
-import os
-from pathlib import Path
-
-from google.protobuf import descriptor_pb2
-
-# Top-level field numbers defined by FileDescriptorProto (1..12 plus 13/14 for the
-# edition-era additions). The extent walker stops at the first field outside this set.
-_FDP_TOP_LEVEL_FIELDS = set(range(1, 15))
-
-
-def _read_varint(data: bytes, i: int) -> tuple[int, int]:
-    shift = 0
-    value = 0
-    while i < len(data):
-        byte = data[i]
-        i += 1
-        value |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return value, i
-        shift += 7
-        if shift > 63:
-            raise ValueError("varint too long")
-    raise ValueError("varint truncated")
-
-
-def _walk_extent(data: bytes, start: int) -> int | None:
-    """Return the end offset of a plausible FileDescriptorProto at ``start``, or None.
-
-    Walks only top-level fields whose number is valid for FileDescriptorProto and whose
-    wire type is varint (0) or length-delimited (2), skipping over nested sub-messages by
-    their length prefix. Stops at the first byte that is not such a field.
-    """
-    i = start
-    saw_name = False
-    n = len(data)
-    while i < n:
-        try:
-            tag, j = _read_varint(data, i)
-        except ValueError:
-            break
-        field = tag >> 3
-        wire = tag & 7
-        if field not in _FDP_TOP_LEVEL_FIELDS or wire not in (0, 2):
-            break
-        i = j
-        if wire == 0:
-            try:
-                _, i = _read_varint(data, i)
-            except ValueError:
-                return None
-        else:
-            try:
-                length, k = _read_varint(data, i)
-            except ValueError:
-                break
-            if k + length > n:
-                break
-            i = k + length
-        if field == 1:
-            saw_name = True
-    return i if saw_name and i > start + 2 else None
-
-
-def _find_anchors(data: bytes) -> list[int]:
-    """Find offsets where a FileDescriptorProto's name field (``0x0A <len> "...proto"``) starts."""
-    anchors: set[int] = set()
-    needle = b".proto"
-    pos = 0
-    while True:
-        p = data.find(needle, pos)
-        if p < 0:
-            break
-        pos = p + 1
-        end_name = p + len(needle)
-        # The name bytes precede ``.proto``; the tag (0x0A) + length varint precede the name.
-        for namelen in range(min(end_name, 120), 0, -1):
-            s_name = end_name - namelen
-            if s_name < 2:
-                continue
-            for vlen in (1, 2):
-                t = s_name - 1 - vlen
-                if t < 0 or data[t] != 0x0A:
-                    continue
-                try:
-                    length, after = _read_varint(data, t + 1)
-                except ValueError:
-                    continue
-                if length == namelen and after == s_name:
-                    name = data[s_name:end_name]
-                    if all(32 <= c < 127 for c in name):
-                        anchors.add(t)
-    return sorted(anchors)
-
-
-def extract(binary_path: Path) -> dict[str, bytes]:
-    """Return a mapping of ``.proto`` file name -> serialized FileDescriptorProto bytes."""
-    data = binary_path.read_bytes()
-    best: dict[str, tuple[int, bytes]] = {}
-    for anchor in _find_anchors(data):
-        end = _walk_extent(data, anchor)
-        if end is None:
-            continue
-        blob = data[anchor:end]
-        fdp = descriptor_pb2.FileDescriptorProto()
-        try:
-            fdp.ParseFromString(blob)
-        except Exception:
-            continue
-        if not fdp.name.endswith(".proto"):
-            continue
-        if not (fdp.message_type or fdp.enum_type or fdp.dependency):
-            continue
-        # The extent walker can over- or under-shoot; keep the candidate whose re-serialized
-        # size is closest to the slice (favours a clean, complete parse).
-        score = abs(len(fdp.SerializeToString()) - len(blob))
-        prev = best.get(fdp.name)
-        if prev is None or score < prev[0]:
-            best[fdp.name] = (score, blob)
-    return {name: blob for name, (_, blob) in best.items()}
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path, help="Path to the agy binary")
-    parser.add_argument("--out", type=Path, default=None, help="Directory to write <name>.fdp files")
-    parser.add_argument("--grep", default=None, help="Print message/enum FQNs containing this substring")
-    args = parser.parse_args()
-
-    descriptors = extract(args.binary)
-    print(f"recovered {len(descriptors)} FileDescriptorProtos")
-
-    if args.out is not None:
-        args.out.mkdir(parents=True, exist_ok=True)
-        for name, blob in descriptors.items():
-            (args.out / f"{name.replace('/', '__')}.fdp").write_bytes(blob)
-        print(f"wrote descriptors to {args.out}")
-
-    if args.grep is not None:
-        needle = args.grep.lower()
-        for fdp_bytes in descriptors.values():
-            fdp = descriptor_pb2.FileDescriptorProto()
-            fdp.ParseFromString(fdp_bytes)
-
-            def _walk(prefix: str, messages, enums) -> None:
-                for enum in enums:
-                    fqn = f"{prefix}.{enum.name}"
-                    if needle in fqn.lower():
-                        values = ", ".join(f"{v.number}={v.name}" for v in enum.value)
-                        print(f"ENUM {fqn} [{fdp.name}]: {values}")
-                for message in messages:
-                    fqn = f"{prefix}.{message.name}"
-                    if needle in fqn.lower():
-                        fields = ", ".join(f"f{f.number} {f.name}" for f in message.field)
-                        print(f"MSG  {fqn} [{fdp.name}]: {fields}")
-                    _walk(fqn, message.nested_type, message.enum_type)
-
-            _walk(fdp.package, fdp.message_type, fdp.enum_type)
-
-
-if __name__ == "__main__":
-    main()
-```
+The schema extractor now lives as a committed script at
+`scripts/extract_antigravity_proto_schema.py` -- under `scripts/`, where dev CLI tools may use
+`print` and `while True` (the `test_ratchets` checks that forbid those run only under `libs/`
+and `apps/`). The reference decoder below stays inline as documentation: it uses patterns (raw
+`while True` varint loops, broad parse guards) that the antigravity project's ratchets
+discourage, and unlike the extractor it already has a committed, checks-clean production
+counterpart (`decode_agy_transcript.py`) that is the real reader. Save and run it with
+`uv run python <file> ...` from the repo root (it uses only the stdlib `sqlite3`).
 
 ### decode_agy_conversation_db.py
 
@@ -354,7 +160,7 @@ Schema (recovered field map -- re-verify against new agy releases):
         f19 user_input        CortexStepUserInput        { f1 query; f2 user_response }
         f20 planner_response  CortexStepPlannerResponse  { f1 response; f3 thinking; f7 tool_calls[] }
         f10 code_action       CortexStepCodeAction
-        f24 error_message     CortexStepErrorMessage     { f1 text (best-effort) }
+        f24 error_message     CortexStepErrorMessage     { f3 error -> CortexErrorDetails { f1 user_error_message } }
 
     CortexStepType:   14=USER_INPUT 15=PLANNER_RESPONSE 5=CODE_ACTION 17=ERROR_MESSAGE
                       98=CONVERSATION_HISTORY (bookkeeping; dropped) 101=SYSTEM_MESSAGE ...
@@ -498,9 +304,12 @@ def decode_step(step_type: int, payload: bytes) -> tuple[str, str]:
                 extras.append(f"{tool_calls} tool_calls")
             return label, text + (f"  [{', '.join(extras)}]" if extras else "")
     elif step_type == _TYPE_ERROR_MESSAGE:
+        # CortexStepErrorMessage carries no text directly: f3 (error) is a CortexErrorDetails
+        # whose f1 (user_error_message) is the user-facing text.
         error = _first(payload, _STEP_ERROR_MESSAGE)
-        if isinstance(error, bytes):
-            return label, _text(_first(error, 1))
+        details = _first(error, 3) if isinstance(error, bytes) else None
+        if isinstance(details, bytes):
+            return label, _text(_first(details, 1))
     return label, ""
 
 

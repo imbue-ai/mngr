@@ -93,8 +93,13 @@ def assistant_step(
 
 
 def error_step(text: str, *, status: int = STATUS_DONE, seconds: int = 0) -> bytes:
-    """An ERROR_MESSAGE step (type 17) with ``text`` in ``CortexStepErrorMessage`` (f24.f1)."""
-    inner = _len_field(1, text.encode())
+    """An ERROR_MESSAGE step (type 17) carrying ``text`` as the user-facing error.
+
+    The text lands in ``CortexStepErrorMessage.error`` (f24.f3, a CortexErrorDetails) ->
+    ``user_error_message`` (f1).
+    """
+    details = _len_field(1, text.encode())
+    inner = _len_field(3, details)
     return step_blob(17, status, source=SOURCE_SYSTEM, seconds=seconds, content_field=24, content=inner)
 
 

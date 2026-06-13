@@ -130,6 +130,14 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(1500)
+# Known-flaky: the post-resume "recall" step occasionally hits agy's TUI "Timeout waiting for
+# message submission signal (waited 90.0s)" and fails -- the conversation restores correctly,
+# only the message submit into the resumed TUI hangs. Seen once in two local runs on agy 1.0.8.
+@pytest.mark.flaky
+# Outer wall-clock safety net around the harness's per-phase poll timeouts -- not a measure of
+# expected runtime. A healthy run is ~25s (measured: one local run passed in 24s; a flaky run
+# that hung 90s on the recall submit still finished in ~111s). Lowered from 1500s, which was
+# copied from the opencode/pi sibling tests before this test had ever completed a run.
+@pytest.mark.timeout(600)
 def test_antigravity_agent_full_lifecycle(tmp_path: Path) -> None:
     run_agent_release_lifecycle(_AntigravityReleaseProfile(), tmp_path)

@@ -51,8 +51,13 @@ _PLANNER_TOOL_CALLS = 7
 # ChatToolCall (exa.codeium_common_pb): f1 call id, f2 name, f3 args (a JSON string).
 _TOOL_CALL_NAME = 2
 _TOOL_CALL_ARGS = 3
-# CortexStepErrorMessage: f1 carries the surfaced text (best-effort).
-_ERROR_MESSAGE_TEXT = 1
+# CortexStepErrorMessage carries no text directly: its f3 (error) is a CortexErrorDetails
+# sub-message, whose f1 (user_error_message) is the user-facing text; f2 (short_error) and
+# f3 (full_error) are fallbacks when the user message is empty.
+_ERROR_MESSAGE_DETAILS = 3
+_ERROR_DETAILS_USER_MESSAGE = 1
+_ERROR_DETAILS_SHORT_ERROR = 2
+_ERROR_DETAILS_FULL_ERROR = 3
 
 # --- enum value -> the unprefixed name agy used in its JSONL records ----------------------
 # Only the names ``common_transcript.sh`` keys off need to be exact; others are informational
@@ -237,8 +242,13 @@ def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: by
                 record["tool_calls"] = tool_calls
     elif step_type == _TYPE_ERROR_MESSAGE:
         error = _first_message(payload, _STEP_ERROR_MESSAGE)
-        if error is not None:
-            record["content"] = _first_str(error, _ERROR_MESSAGE_TEXT)
+        details = _first_message(error, _ERROR_MESSAGE_DETAILS) if error is not None else None
+        if details is not None:
+            record["content"] = (
+                _first_str(details, _ERROR_DETAILS_USER_MESSAGE)
+                or _first_str(details, _ERROR_DETAILS_SHORT_ERROR)
+                or _first_str(details, _ERROR_DETAILS_FULL_ERROR)
+            )
     else:
         # Tool/browser/system steps carry no user-facing text in this decoder;
         # common_transcript.sh drops every type it does not recognise.

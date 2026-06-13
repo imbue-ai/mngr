@@ -30,3 +30,25 @@ after each (roughly weekly) agy release. Assistant tool calls (name + args) are 
 so they surface on assistant messages. (Tool *results* are not yet captured as `tool_result`
 events: agy records command output in step types the converter does not map, and file-edit
 `CODE_ACTION` steps do not occur in practice -- a follow-up if needed.)
+
+Added a release-marked test (`test_antigravity_proto_schema.py`) that mechanizes the
+"re-verify the schema after each agy release" procedure from `dev/README.md`: it runs the
+schema extractor against the installed `agy` binary and asserts every field number and enum
+value the transcript decoder hard-codes still matches. It requires `agy` on PATH (a missing
+binary is a hard failure, not a skip, since there is nothing to verify against without it).
+
+Fixed ERROR_MESSAGE transcript decoding, which that verification surfaced: agy's
+`CortexStepErrorMessage` carries no text directly -- the user-facing message lives in its
+nested `error` field (a `CortexErrorDetails`), so the decoder, which read a non-existent
+top-level text field, always produced empty content for error steps. It now descends into
+`CortexErrorDetails.user_error_message` (falling back to `short_error` / `full_error`).
+
+Lowered the antigravity full-lifecycle release test's wall-clock timeout from 1500s to 600s.
+The 1500s was copied from sibling agent tests before this test had ever completed a run; a
+healthy run measures ~25s. Also marked the test `flaky`: its post-resume "recall" step
+occasionally hangs on agy's TUI message-submission signal (observed on agy 1.0.8).
+
+Simplified the common-transcript converter's user-message handling to match agy's current
+store: it now passes through the clean typed text agy records in `CortexStepUserInput.query`,
+dropping the speculative `<USER_REQUEST>...</USER_REQUEST>` envelope stripping that existed
+only for the retired agy-1.0.0 JSONL format.
