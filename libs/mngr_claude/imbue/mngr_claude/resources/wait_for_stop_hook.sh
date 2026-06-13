@@ -154,8 +154,31 @@ upload_autofix_issues() {
     uv run modal volume put "${volume_name}" "$issues_file" "/${nested_path}/autofix.json" --force 2>/dev/null || true
 }
 
+# --- Flush the transcript pipeline so the WAITING signal can't outrun it ---
+# The raw streamer (1s poll) and common-transcript converter (5s poll) lag
+# behind Claude's session JSONL. mark_inactive (below) clears the `active`
+# marker, which is the turn-end signal `mngr wait --state WAITING` reads --
+# and consumers that harvest the final assistant message from the common
+# transcript on that signal (e.g. Catalyst's mngr_runner) would otherwise
+# race the converter. Forcing one synchronous pass of each, in pipeline order
+# (raw first, then common), guarantees the common transcript reflects the
+# final message before the marker is cleared. Best-effort: gated on the
+# scripts existing (the common transcript is opt-in) and `|| true` so a flush
+# failure can never strand the turn-end signal. The converter's mkdir lock
+# keeps this pass from racing the background daemon into duplicate events.
+flush_transcripts() {
+    local cmds="$MNGR_AGENT_STATE_DIR/commands"
+    [ -x "$cmds/stream_transcript.sh" ] && \
+        bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
+    [ -x "$cmds/common_transcript.sh" ] && \
+        bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
+}
+
 # --- Post-completion actions (run after all other stop hooks finish) ---
 run_post_completion() {
+    # Flush the transcript pipeline before mark_inactive clears the marker.
+    flush_transcripts
+
     # Only run post-completion if the orchestrator succeeded.
     # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
     # on success with the commit hash.

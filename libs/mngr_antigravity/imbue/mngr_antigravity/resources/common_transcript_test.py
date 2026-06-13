@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -549,3 +550,71 @@ def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> 
     assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
     for record in records:
         assert validate_common_transcript_record(record) is None, record
+
+
+# -- Convert-lock serialization (shared by the 5s daemon and on-demand flush) --
+
+
+def _lock_dir(state_dir: Path) -> Path:
+    return state_dir / ".common_transcript_convert.lock"
+
+
+def test_held_convert_lock_skips_pass(state_dir: Path) -> None:
+    """A pass that cannot take the convert lock (held by a concurrent pass)
+    skips conversion rather than racing into duplicate output. Simulated by
+    pre-creating the (fresh) lock dir and giving the pass a short timeout."""
+    _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "hello")])
+    _lock_dir(state_dir).mkdir(parents=True)
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert _read_common_events(state_dir) == []
+
+    _lock_dir(state_dir).rmdir()
+    _run_converter(state_dir)
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_stale_convert_lock_is_broken(state_dir: Path) -> None:
+    """A convert lock older than a minute is treated as stale and broken, so the
+    converter never wedges permanently."""
+    _write_raw_transcript(state_dir, [_user_input("conv-A", 0, "hello")])
+    lock = _lock_dir(state_dir)
+    lock.mkdir(parents=True)
+    stale = time.time() - 120
+    os.utime(lock, (stale, stale))
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir), "MNGR_CONVERT_LOCK_TIMEOUT": "1"}
+    result = subprocess.run(
+        ["bash", str(_SCRIPT_PATH), "--single-pass"], env=env, capture_output=True, text=True, check=True
+    )
+    assert "Traceback" not in result.stderr, result.stderr
+    assert len(_read_common_events(state_dir)) == 1
+
+
+def test_concurrent_passes_do_not_duplicate(state_dir: Path) -> None:
+    """Two passes racing over the same input must not both append the same
+    events: the lock serializes them so the second sees the first's output in
+    its dedup set. Without the lock this produces duplicate event_ids."""
+    _write_raw_transcript(state_dir, [_user_input(f"conv-{i}", i, f"msg {i}") for i in range(20)])
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)}
+    procs = [
+        subprocess.Popen(
+            ["bash", str(_SCRIPT_PATH), "--single-pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+
+    events = _read_common_events(state_dir)
+    event_ids = [e["event_id"] for e in events]
+    assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
+    assert len(events) == 20

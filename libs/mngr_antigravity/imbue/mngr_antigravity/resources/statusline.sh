@@ -69,10 +69,36 @@ if [ -n "$conv_id" ]; then
     printf '%s' "$conv_id" > "$root_file"
 fi
 
+# Flush the transcript pipeline so the WAITING signal can't outrun it. The
+# raw streamer (1s poll) and common-transcript converter (5s poll) lag behind
+# agy's per-conversation JSONL; clearing the `active` marker below is the
+# turn-end signal `mngr wait --state WAITING` reads, and consumers that
+# harvest the final assistant message from the common transcript on that
+# signal (e.g. Catalyst's mngr_runner) would otherwise race the converter.
+# Forcing one synchronous pass of each, in pipeline order (raw first, then
+# common), guarantees the common transcript reflects the final message before
+# the marker is cleared. Best-effort: gated on the scripts existing (the
+# common transcript is opt-in) and `|| true` so a flush failure can never
+# strand the turn-end signal. The converter's mkdir lock keeps this pass from
+# racing the background daemon into duplicate events.
+flush_transcripts() {
+    local cmds="$MNGR_AGENT_STATE_DIR/commands"
+    [ -x "$cmds/stream_transcript.sh" ] && \
+        bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
+    [ -x "$cmds/common_transcript.sh" ] && \
+        bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
+}
+
 # Busy = any state that is not a known not-working state. Denylist so any
 # current/future busy state (working, ...) keeps the agent RUNNING.
 case "$agent_state" in
     idle | initializing | authenticating | "")
+        # Only flush on the busy->idle edge (marker still present from a prior
+        # busy sample), not on every idle/startup sample: that bounds the
+        # synchronous conversion to once per turn, right as the turn ends.
+        if [ -e "$marker_file" ]; then
+            flush_transcripts
+        fi
         rm -f "$marker_file"
         ;;
     *)
