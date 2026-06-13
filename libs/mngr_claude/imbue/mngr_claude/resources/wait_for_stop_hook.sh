@@ -168,10 +168,12 @@ upload_autofix_issues() {
 # keeps this pass from racing the background daemon into duplicate events.
 flush_transcripts() {
     local cmds="$MNGR_AGENT_STATE_DIR/commands"
-    [ -x "$cmds/stream_transcript.sh" ] && \
+    if [ -x "$cmds/stream_transcript.sh" ]; then
         bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
-    [ -x "$cmds/common_transcript.sh" ] && \
+    fi
+    if [ -x "$cmds/common_transcript.sh" ]; then
         bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
+    fi
 }
 
 # --- Post-completion actions (run after all other stop hooks finish) ---

@@ -83,10 +83,12 @@ fi
 # racing the background daemon into duplicate events.
 flush_transcripts() {
     local cmds="$MNGR_AGENT_STATE_DIR/commands"
-    [ -x "$cmds/stream_transcript.sh" ] && \
+    if [ -x "$cmds/stream_transcript.sh" ]; then
         bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
-    [ -x "$cmds/common_transcript.sh" ] && \
+    fi
+    if [ -x "$cmds/common_transcript.sh" ]; then
         bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
+    fi
 }
 
 # Busy = any state that is not a known not-working state. Denylist so any
