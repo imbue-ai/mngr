@@ -52,7 +52,10 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Floor pinned just below CI-measured coverage; raise incrementally as tests are added.
+# Lower than concrete provider packages (e.g. mngr_vultr at 60%) because
+# most of `instance.py` is host-lifecycle code (create, snapshot, exec,
+# destroy) that's exercised end-to-end by each concrete provider's release
+# tests rather than at the unit level.
 fail_under = 45
 omit = [
   "*_test.py",

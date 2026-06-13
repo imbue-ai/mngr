@@ -1,4 +1,5 @@
 import time
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -272,10 +273,9 @@ class OvhVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         raise NotImplementedError(
             "OVH VPS provisioning is multi-step (order + rebuild + TOFU); "

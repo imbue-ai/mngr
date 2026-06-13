@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -171,6 +172,31 @@ def test_build_mngr_create_command_lifts_latchkey_env_to_host_env_flags() -> Non
             )
 
 
+def test_build_mngr_create_command_attaches_color_label_when_provided() -> None:
+    """The onboarding picker passes a hex through; the command builder
+    lifts it into a --label color=<hex> flag alongside the existing
+    workspace / is_primary / user_created labels so the workspace ships
+    with its color from create time onward (no post-create write needed)."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+        color="#0b292b",
+    )
+    # The label must be expressed as two consecutive argv tokens so the
+    # CLI parser binds the value to ``-l``/``--label``.
+    joined = " ".join(command)
+    assert "--label color=#0b292b" in joined
+
+
+def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.DOCKER,
+        host_name=HostName("hello"),
+    )
+    joined = " ".join(command)
+    assert "color=" not in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
@@ -235,8 +261,8 @@ def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
         host_name=HostName("hello"),
         region="lhr",
     )
-    # Vultr takes the region as the --vps-region build arg.
-    assert "--vps-region=lhr" in command
+    # Vultr takes the region as the --vultr-region build arg.
+    assert "--vultr-region=lhr" in command
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
@@ -257,7 +283,7 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
         region="US-WEST-OR",
     )
     joined = " ".join(command)
-    assert "region=" not in joined and "vps-region" not in joined
+    assert "region=" not in joined and "vultr-region" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
@@ -273,11 +299,26 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() -> None:
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
+    launch_mode: LaunchMode,
+) -> None:
+    """Non-IMBUE_CLOUD modes express "fresh host" via ``--new-host`` and never pass ``--reuse`` / ``--update``.
+
+    mngr's ``--reuse`` matches on agent name only (``system-services``
+    here) without scoping to a host, so passing it from the create-form
+    would adopt the wrong host's agent whenever any other workspace
+    shared the constant agent name. ``--new-host`` already encodes
+    fresh-host intent; ``--reuse`` is reserved for IMBUE_CLOUD where the
+    pool host comes pre-baked with a ``system-services`` agent.
+    """
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.DOCKER,
+        launch_mode=launch_mode,
         host_name=HostName("hello"),
     )
+    assert "--new-host" in command
+    assert "--reuse" not in command
+    assert "--update" not in command
     assert "--template" in command
     assert "main" in command
     # The /welcome message now lives in forever-claude-template's
@@ -286,10 +327,6 @@ def test_build_mngr_create_command_uses_main_template_and_omits_message_arg() ->
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
-    # ``--reuse --update`` keeps re-deploys of the same workspace name
-    # idempotent on local-host modes.
-    assert "--reuse" in command
-    assert "--update" in command
     # We always emit JSONL so the canonical agent id can be parsed from the
     # trailing ``"event": "created"`` line.
     assert "--format" in command
@@ -400,27 +437,28 @@ def _make_origin_repo_with_branch(origin: Path, branch: str) -> None:
     _git(origin, "checkout", "-q", "main")
 
 
-def test_clone_git_repo_branch_is_single_branch_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
-    """A branch clone fetches only that branch, keeps full ancestry (non-shallow),
-    and remains mirror-pushable.
+def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path: Path) -> None:
+    """Cloning then checking out a branch keeps full ancestry (non-shallow) and remains mirror-pushable.
 
-    This is the regression for the deep-clone fix: the previous ``--depth 1``
-    clone could not check out a non-default branch ("pathspec did not match") and,
-    even once it could, a shallow clone is rejected by mngr create's mirror-push
-    into the agent container ("shallow update not allowed"). A single-branch
-    non-shallow clone fixes both.
+    Regression for the deep-clone fix: a ``--depth 1`` clone is rejected
+    by mngr create's mirror-push into the agent container ("shallow update
+    not allowed"). The init + fetch implementation is non-shallow by
+    default; we assert that here.
+
+    The pair-of-calls (clone_git_repo then checkout_branch) mirrors
+    production usage in :func:`AgentCreator.create_agent`.
     """
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
 
     dest = tmp_path / "clone"
     clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("testing"))
+    checkout_branch(dest, GitBranch("testing"))
 
     # Checked out on the requested branch, with that branch's content.
     assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
     assert (dest / "f").read_text() == "on branch\n"
-    # Only the requested branch was fetched, and the clone is NOT shallow.
-    assert _git(dest, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+    # Clone is NOT shallow.
     assert not (dest / ".git" / "shallow").exists()
 
     # The mirror-push mngr create performs into the agent container's bare repo
@@ -444,6 +482,63 @@ def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
     dest = tmp_path / "clone"
     with pytest.raises(GitCloneError):
         clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("nonexistent"))
+
+
+def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> None:
+    """``clone_git_repo(branch=<40-hex sha>)`` works -- the previous
+    ``git clone --branch <sha>`` rejected SHAs outright.
+
+    Drives a SHA pointing at the tip of the non-default branch so the
+    resulting worktree must really land at that commit (not main).
+    HEAD's local branch name is ``sha-<sha>`` so subsequent operations
+    that type the SHA do not trigger git's "refname is ambiguous"
+    warning. Mirror-push still succeeds because the fetch was
+    non-shallow.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    target_sha = _git(origin, "rev-parse", "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch(target_sha))
+    checkout_branch(dest, GitBranch(target_sha))
+
+    # Worktree lands at the requested commit.
+    assert _git(dest, "rev-parse", "HEAD") == target_sha
+    assert (dest / "f").read_text() == "on branch\n"
+    # Local branch carries the sha- prefix (40-hex would otherwise warn).
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == f"sha-{target_sha}"
+    assert not (dest / ".git" / "shallow").exists()
+
+    # Mirror-push must succeed.
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    push = subprocess.run(
+        ["git", "-C", str(dest), "push", "--force", "--prune", str(bare), *GIT_MIRROR_PUSH_REFSPECS],
+        capture_output=True,
+        text=True,
+    )
+    assert push.returncode == 0, push.stderr
+
+
+def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> None:
+    """Annotated tags resolve through `git fetch` + `checkout -B name FETCH_HEAD` just like branches.
+
+    This is the FALLBACK_BRANCH="v0.3.0" path used by the released minds
+    binary: the input is a tag, not a branch.
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+    _git(origin, "tag", "-a", "v1.0.0", "testing", "-m", "release v1.0.0")
+    expected_sha = _git(origin, "rev-list", "-n1", "v1.0.0")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest, branch=GitBranch("v1.0.0"))
+    checkout_branch(dest, GitBranch("v1.0.0"))
+
+    assert _git(dest, "rev-parse", "HEAD") == expected_sha
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "v1.0.0"
+    assert (dest / "f").read_text() == "on branch\n"
 
 
 class _RecordingNotificationDispatcher(NotificationDispatcher):

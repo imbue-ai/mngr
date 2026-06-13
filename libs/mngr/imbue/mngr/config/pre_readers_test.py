@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
 from imbue.mngr.config.pre_readers import get_local_config_name
 from imbue.mngr.config.pre_readers import get_project_config_name
 from imbue.mngr.config.pre_readers import get_user_config_path
@@ -146,9 +147,51 @@ def test_read_default_command_independent_command_names(
 # =============================================================================
 
 
-def test_read_disabled_plugins_returns_empty_when_no_config(temp_git_repo_cwd: Path) -> None:
-    """read_disabled_plugins should return empty set when no config files exist."""
-    assert read_disabled_plugins() == frozenset()
+def test_read_disabled_plugins_returns_only_opt_in_plugins_when_no_config(temp_git_repo_cwd: Path) -> None:
+    """With no config files, only opt-in (disabled-by-default) plugins are disabled."""
+    assert read_disabled_plugins() == OPT_IN_PLUGINS
+
+
+def test_read_disabled_plugins_disables_opt_in_plugin_by_default(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """An opt-in plugin is disabled even when config mentions it without enabling it."""
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    (project_config_dir / "settings.toml").write_text(
+        f'is_allowed_in_pytest = true\n\n[plugins.{opt_in_name}]\nmode = "DENY"\n'
+    )
+
+    assert opt_in_name in read_disabled_plugins()
+
+
+def test_read_disabled_plugins_opt_in_plugin_enabled_when_explicitly_set(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """An opt-in plugin loads only when a config layer sets enabled = true."""
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    (project_config_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\n\n[plugins.{opt_in_name}]\nenabled = true\n"
+    )
+
+    assert opt_in_name not in read_disabled_plugins()
+
+
+def test_read_disabled_plugins_opt_in_plugin_local_overrides_project_enable(
+    project_config_dir: Path,
+    temp_git_repo_cwd: Path,
+) -> None:
+    """Local config can re-disable an opt-in plugin that the project layer enabled."""
+    opt_in_name = next(iter(OPT_IN_PLUGINS))
+    (project_config_dir / "settings.toml").write_text(
+        f"is_allowed_in_pytest = true\n\n[plugins.{opt_in_name}]\nenabled = true\n"
+    )
+    (project_config_dir / "settings.local.toml").write_text(
+        f"is_allowed_in_pytest = true\n\n[plugins.{opt_in_name}]\nenabled = false\n"
+    )
+
+    assert opt_in_name in read_disabled_plugins()
 
 
 def test_read_disabled_plugins_reads_from_project_config(

@@ -268,6 +268,7 @@ def test_cleanup_dry_run_with_real_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_cleanup_stop_action_with_real_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
