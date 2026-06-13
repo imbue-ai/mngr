@@ -45,7 +45,7 @@ backends: the depot CLI installs to `/root/.depot/bin` (not on the non-interacti
 PATH), but the build invoked it by bare name, failing with "depot: command not found". It
 is now invoked by absolute path. See the `mngr_vps_docker` changelog entry.
 
-## AWS provider support: root-level changes
+### AWS provider support: root-level changes
 
 - `mngr create` CLI markdown docs regenerated to include the new AWS provider's build-args help (removes the dropped Vultr/OVH `--vps-os=` line at the same time). The per-provider prefix rename (`--aws-region=`, `--aws-instance-type=`, `--vultr-region=`, `--vultr-plan=`, `--ovh-datacenter=`, `--ovh-plan=`) lands in the regenerated text too.
 - `scripts/make_cli_docs.py` SECONDARY_COMMANDS gains `"aws"` so the new `mngr aws prepare` / `mngr aws ami` command group renders a generated `libs/mngr/docs/commands/secondary/aws.md` page.
@@ -715,7 +715,7 @@ pre-existing local). Previously the rule only listed specific cases.
 
 ## 2026-05-26
 
-## dev
+### dev
 
 - TMR workflows (`tmr.yml`, `tmr-reintegrate.yml`) now re-assert `mngr tmr`'s exit code via `exit "${PIPESTATUS[0]}"` after the `| tee tmr-report/events.jsonl` pipeline. The implicit `pipefail` propagation was observed to not catch the left-side failure in this step, letting a failed run be reported as successful.
 
@@ -733,7 +733,7 @@ pre-existing local). Previously the rule only listed specific cases.
   - If the prior PR is more than 4 days old, the gate posts a closing comment, closes the PR (with `--delete-branch`), proceeds with a fresh run, and after the new PR is opened posts a follow-up "Superseded by #N" comment on the closed PR.
 - The auto-opened PR from scheduled runs is labeled `tmr-periodic` (the label is created on demand) and assigned to `qi-imbue` and `joshalbrecht`. Manual-run PRs are unlabeled, unassigned, and therefore invisible to the gate.
 
-## Spec: discovery providers and errors
+### Spec: discovery providers and errors
 
 - Add `specs/discovery-providers-and-errors/concise.md` describing the cross-project change that promotes per-provider state (successfully loaded providers, per-provider discovery errors) to first-class fields on `FullDiscoverySnapshotEvent`, replaces minds' silent auto-disable-on-auth-error machinery with a visible providers panel + explicit Enable/Disable toggle, adds a new `UNKNOWN` value to `AgentLifecycleState` / `HostState` for previously-tracked agents whose provider just failed, and teaches `mngr_notifications` to recognize the indirect `RUNNING -> UNKNOWN -> WAITING` transition. See the per-project changelog entries in `libs/mngr/`, `libs/mngr_forward/`, `libs/mngr_imbue_cloud/`, `libs/mngr_notifications/`, and `apps/minds/` for the actual code changes this spec describes.
 

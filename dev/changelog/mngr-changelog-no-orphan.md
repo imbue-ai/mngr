@@ -2,4 +2,6 @@
 
 - Fixed: `modal app stop` invocations now pass `--yes` (in `scripts/modal_nuke.py` and the new sweep), so they no longer abort with "no interactive terminal detected" under newer Modal CLIs when run non-interactively.
 
+- Fixed: Demoted three stray `## ` headings in `dev/UNABRIDGED_CHANGELOG.md` (`## AWS provider support...`, `## dev`, `## Spec: discovery providers and errors`) to `### ` -- they came from entry bodies that contained `## ` headings, copied verbatim, and collided with the `## <date>` section structure that the consolidation reads.
+
 - Changed: The `dev` project's `CHANGELOG.md` is now date-organized, mirroring `UNABRIDGED_CHANGELOG.md`, instead of carrying an ever-growing `[Unreleased]` section. `dev` is never released, so nothing ever finalized its `[Unreleased]`; the nightly consolidation now summarizes each landed date independently into its own `## <date>` section (dated when the entries landed, not when the bot ran), per `scripts/changelog_consolidation_prompt.md`. The existing backlog was collapsed under its consolidation date.
