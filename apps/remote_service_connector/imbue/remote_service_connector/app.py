@@ -2098,6 +2098,78 @@ def _delete_pool_host_row(conn: Any, host_db_id: Any) -> None:
     conn.commit()
 
 
+# pool_hosts.backend_kind values (kept in sync with migration 009 and the
+# mngr_imbue_cloud primitives). A real OVH VPS is cancelled in OVH on release;
+# a "slice" is a lima VM on one of our bare-metal boxes and is destroyed by
+# SSHing the box and running limactl.
+BACKEND_KIND_OVH_VPS = "ovh_vps"
+BACKEND_KIND_SLICE = "slice"
+
+
+def build_slice_teardown_commands(lima_instance_name: str, lima_disk_name: str | None) -> tuple[str, ...]:
+    """Commands to run on the bare-metal box to destroy a slice's lima VM + data disk."""
+    commands = [f"limactl delete --force {shlex.quote(lima_instance_name)}"]
+    if lima_disk_name:
+        commands.append(f"limactl disk delete --force {shlex.quote(lima_disk_name)}")
+    return tuple(commands)
+
+
+def _run_ssh_commands_on_box(
+    host: str, port: int, user: str, management_key_pem: str, commands: tuple[str, ...]
+) -> None:
+    """SSH into the box with the pool management key and run each command, raising on failure."""
+    private_key = paramiko.Ed25519Key.from_private_key(io.StringIO(management_key_pem))
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(hostname=host, port=port, username=user, pkey=private_key, timeout=30)
+        for command in commands:
+            _stdin, stdout, stderr = client.exec_command(command)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                stderr_text = stderr.read().decode()
+                raise PoolHostCleanupError(
+                    f"slice teardown command {command!r} failed (exit {exit_status}): {stderr_text}"
+                )
+    finally:
+        client.close()
+
+
+def clean_up_slice_on_box(
+    conn: Any,
+    host_db_id: Any,
+    bare_metal_server_id: Any,
+    lima_instance_name: str | None,
+    lima_disk_name: str | None,
+) -> None:
+    """Destroy a slice's lima VM (and data disk) on its owning bare-metal box.
+
+    Looks up the box's address + lima service user from ``bare_metal_servers``,
+    then SSHes in with the pool management key and runs limactl. Raises
+    ``PoolHostCleanupError`` if the slice's bookkeeping is incomplete or the box
+    can't be reached, so the row stays ``removing`` and the sweep retries (the
+    slot is only freed once the VM is really gone).
+    """
+    if not (bare_metal_server_id and lima_instance_name):
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id} is missing bare_metal_server_id or lima_instance_name; cannot tear down its VM"
+        )
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT public_address, lima_service_user FROM bare_metal_servers WHERE id = %s",
+            (str(bare_metal_server_id),),
+        )
+        server_row = cur.fetchone()
+    if server_row is None or not server_row[0]:
+        raise PoolHostCleanupError(
+            f"slice pool host {host_db_id}: bare_metal_servers row {bare_metal_server_id} is missing or has no public_address"
+        )
+    box_address, lima_service_user = server_row[0], server_row[1] or "root"
+    management_key_pem = os.environ["POOL_SSH_PRIVATE_KEY"]
+    commands = build_slice_teardown_commands(lima_instance_name, lima_disk_name)
+    _run_ssh_commands_on_box(box_address, 22, lima_service_user, management_key_pem, commands)
+
+
 def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) -> tuple[int, int]:
     """Clean up every ``removing`` pool host: strip tags, cancel, delete the row.
 
@@ -2109,23 +2181,47 @@ def run_pool_host_cleanup_sweep(conn: Any, ovh_ops: OvhOps, region_code: str) ->
     success_count = 0
     failure_count = 0
     with conn.cursor() as cur:
-        cur.execute("SELECT id, vps_instance_id FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED")
+        cur.execute(
+            "SELECT id, vps_instance_id, backend_kind, lima_instance_name, lima_disk_name, bare_metal_server_id "
+            "FROM pool_hosts WHERE status = 'removing' FOR UPDATE SKIP LOCKED"
+        )
         rows = cur.fetchall()
-        for host_db_id, vps_instance_id in rows:
+        for (
+            host_db_id,
+            vps_instance_id,
+            backend_kind,
+            lima_instance_name,
+            lima_disk_name,
+            bare_metal_server_id,
+        ) in rows:
             # Per-host savepoint so a DB error on one host's DELETE doesn't
             # abort the whole transaction (which would roll back every other
             # host's already-issued DELETE in this run and poison subsequent
             # statements). Rollback-to-savepoint leaves the transaction usable.
             cur.execute("SAVEPOINT pool_host_cleanup")
             try:
-                if vps_instance_id:
+                # Branch on backend: slices are torn down on their box via
+                # limactl; real VPSes are cancelled in OVH. A slice whose VM
+                # isn't destroyed must NOT have its row deleted (that would leak
+                # the VM and the slot), so clean_up_slice_on_box raises on any
+                # problem and the row stays ``removing`` for the next run.
+                if backend_kind == BACKEND_KIND_SLICE:
+                    clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
+                elif vps_instance_id:
                     clean_up_pool_host_in_ovh(ovh_ops, vps_instance_id, region_code)
                 else:
                     logger.warning("Removing pool host %s has no vps_instance_id; skipping OVH cleanup", host_db_id)
                 cur.execute("DELETE FROM pool_hosts WHERE id = %s", (str(host_db_id),))
                 cur.execute("RELEASE SAVEPOINT pool_host_cleanup")
                 success_count += 1
-            except (OvhApiError, OvhHttpError, psycopg2.Error) as exc:
+            except (
+                OvhApiError,
+                OvhHttpError,
+                psycopg2.Error,
+                PoolHostCleanupError,
+                paramiko.SSHException,
+                OSError,
+            ) as exc:
                 cur.execute("ROLLBACK TO SAVEPOINT pool_host_cleanup")
                 logger.warning("Cleanup failed for removing pool host %s; will retry next run: %s", host_db_id, exc)
                 failure_count += 1
@@ -2478,14 +2574,24 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
                 # Python ``UUID`` type that FastAPI parsed from the path
                 # (it raises "can't adapt type 'UUID'").
                 cur.execute(
-                    "SELECT leased_to_user, status, vps_instance_id FROM pool_hosts WHERE id = %s",
+                    "SELECT leased_to_user, status, vps_instance_id, backend_kind, "
+                    "lima_instance_name, lima_disk_name, bare_metal_server_id "
+                    "FROM pool_hosts WHERE id = %s",
                     (str(host_db_id),),
                 )
                 row = cur.fetchone()
                 # A missing row means cleanup already finished (idempotent).
                 if row is None:
                     return ReleaseHostResponse(status="already_released").model_dump()
-                leased_to_user, status, vps_instance_id = row
+                (
+                    leased_to_user,
+                    status,
+                    vps_instance_id,
+                    backend_kind,
+                    lima_instance_name,
+                    lima_disk_name,
+                    bare_metal_server_id,
+                ) = row
                 # Ownership check first: we don't want to leak a status
                 # signal to other users via the response code.
                 if leased_to_user != admin.username:
@@ -2503,27 +2609,45 @@ def release_host(request: Request, host_db_id: UUID) -> dict[str, object]:
             # Past the commit point: the row is durably ``removing`` and the
             # sweep will finish anything that fails below, so we always
             # return 200 from here.
-            _finish_releasing_pool_host(conn, host_db_id, vps_instance_id)
+            _finish_releasing_pool_host(
+                conn,
+                host_db_id,
+                vps_instance_id,
+                backend_kind,
+                lima_instance_name,
+                lima_disk_name,
+                bare_metal_server_id,
+            )
         finally:
             conn.close()
         return ReleaseHostResponse(status="released").model_dump()
 
 
-def _finish_releasing_pool_host(conn: Any, host_db_id: Any, vps_instance_id: str | None) -> None:
-    """Synchronous OVH cleanup + row delete for a host already marked ``removing``.
+def _finish_releasing_pool_host(
+    conn: Any,
+    host_db_id: Any,
+    vps_instance_id: str | None,
+    backend_kind: str | None,
+    lima_instance_name: str | None,
+    lima_disk_name: str | None,
+    bare_metal_server_id: Any,
+) -> None:
+    """Tear down a host already marked ``removing``, then delete the row.
 
-    Strips the per-lease OVH tags, cancels the VPS, then deletes the row -- and
-    **raises** on any failure rather than swallowing it. The caller has already
-    committed the row to ``removing`` (a durable, retryable in-progress marker),
-    so a failure here propagates to the HTTP layer as an error: the release
-    reports failure, the row stays ``removing``, and the client (or the hourly
-    sweep backstop) retries. A release that cannot actually cancel the VPS must
-    never report success -- that false success is what previously left VPSes
-    running and billing with no error anywhere.
+    Branches on ``backend_kind``: a real OVH VPS is cancelled in OVH; a slice
+    has its lima VM destroyed on its bare-metal box. **Raises** on any failure
+    rather than swallowing it -- the caller has already committed the row to
+    ``removing`` (a durable, retryable in-progress marker), so a failure here
+    propagates to the HTTP layer: the release reports failure, the row stays
+    ``removing``, and the client (or the hourly sweep) retries. A release that
+    cannot actually destroy the underlying machine must never report success.
     """
-    if not vps_instance_id:
+    if backend_kind == BACKEND_KIND_SLICE:
+        clean_up_slice_on_box(conn, host_db_id, bare_metal_server_id, lima_instance_name, lima_disk_name)
+    elif vps_instance_id:
+        clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
+    else:
         raise PoolHostCleanupError(f"pool host {host_db_id} has no vps_instance_id; cannot cancel its VPS")
-    clean_up_pool_host_in_ovh(_get_ovh_ops(), vps_instance_id, ovh_region_code_for_endpoint(_get_ovh_endpoint()))
     _delete_pool_host_row(conn, host_db_id)
 
 
