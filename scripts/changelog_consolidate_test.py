@@ -5,22 +5,22 @@ from pathlib import Path
 
 import pytest
 
-# scripts/consolidate_changelog.py uses bare imports of its sibling modules
+# scripts/changelog_consolidate.py uses bare imports of its sibling modules
 # (e.g. `from changelog_projects import ...`), matching how it's invoked
-# (`python3 scripts/consolidate_changelog.py`). Make those resolvable for
+# (`python3 scripts/changelog_consolidate.py`). Make those resolvable for
 # pytest by adding scripts/ to sys.path before importing.
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from scripts.consolidate_changelog import _build_dated_sections  # noqa: E402
-from scripts.consolidate_changelog import _collect_project_entries  # noqa: E402
-from scripts.consolidate_changelog import _consolidate_project  # noqa: E402
-from scripts.consolidate_changelog import _format_section_line  # noqa: E402
-from scripts.consolidate_changelog import _get_entry_added_datetime  # noqa: E402
-from scripts.consolidate_changelog import _group_entries_by_date  # noqa: E402
-from scripts.consolidate_changelog import _insert_section_into_changelog  # noqa: E402
-from scripts.consolidate_changelog import pending_changelog_entries  # noqa: E402
+from scripts.changelog_consolidate import _build_dated_sections  # noqa: E402
+from scripts.changelog_consolidate import _collect_project_entries  # noqa: E402
+from scripts.changelog_consolidate import _consolidate_project  # noqa: E402
+from scripts.changelog_consolidate import _format_section_line  # noqa: E402
+from scripts.changelog_consolidate import _get_entry_added_datetime  # noqa: E402
+from scripts.changelog_consolidate import _group_entries_by_date  # noqa: E402
+from scripts.changelog_consolidate import _insert_section_into_changelog  # noqa: E402
+from scripts.changelog_consolidate import pending_changelog_entries  # noqa: E402
 
 
 def _seed_libs_project(repo: Path, name: str) -> Path:
