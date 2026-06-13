@@ -71,6 +71,10 @@ class ImbueCloudBucketLimitError(ImbueCloudBucketError):
     """Raised when the account is already at the per-account bucket cap."""
 
 
+class OvhCatalogPricingError(ImbueCloudError):
+    """Raised when an OVH catalog plan or add-on cannot be priced (missing entry or no month-to-month price)."""
+
+
 class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
 

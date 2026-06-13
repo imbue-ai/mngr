@@ -303,3 +303,31 @@ class R2BucketCreateResult(FrozenModel):
 
     bucket: R2BucketInfo = Field(description="The created bucket")
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class PriceLineItem(FrozenModel):
+    """One priced component of an OVH order: the plan itself or a selected add-on."""
+
+    plan_code: str = Field(description="OVH planCode of this component (the plan or an add-on)")
+    description: str = Field(description="Human-readable label (the catalog invoiceName)")
+    monthly: Decimal = Field(description="Recurring month-to-month price in USD (no commitment)")
+    one_time_setup: Decimal = Field(description="One-time setup/installation fee in USD (month-to-month term)")
+
+
+class OrderPricing(FrozenModel):
+    """Full month-to-month pricing for an OVH plan plus its selected add-ons.
+
+    The point of this type is that ``recurring_monthly`` already includes every
+    selected add-on delta (RAM/storage/bandwidth upgrades), so callers can never
+    mistake the catalog's bare base price for the true recurring cost.
+    """
+
+    plan_code: str = Field(description="OVH planCode of the ordered plan")
+    line_items: tuple[PriceLineItem, ...] = Field(
+        description="The plan plus each selected add-on, individually priced"
+    )
+    recurring_monthly: Decimal = Field(
+        description="True monthly cost in USD: base plan plus all selected add-on deltas"
+    )
+    one_time_setup: Decimal = Field(description="Total one-time setup fee in USD (waived on committed terms)")
+    first_payment: Decimal = Field(description="Amount charged at checkout in USD: recurring_monthly + one_time_setup")
