@@ -932,9 +932,9 @@ def main() -> None:
     # apps/<name>/ entries accumulate in [Unreleased] (the consolidator
     # keeps appending there). dev/ is also never released, but its
     # consolidated CHANGELOG.md is date-organized instead: the consolidator
-    # writes each run's bullets straight under a "## <run-date>" section
-    # (see scripts/changelog_consolidation_prompt.md), so dev/ carries no
-    # [Unreleased] section at all.
+    # writes one summarized "## <date>" section per landed date, mirroring
+    # dev/UNABRIDGED_CHANGELOG.md (see scripts/changelog_consolidation_prompt.md),
+    # so dev/ carries no [Unreleased] section at all.
     release_date = today_pacific()
     finalized_paths: list[Path] = []
     versions_to_finalize: dict[str, str] = {

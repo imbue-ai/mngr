@@ -14,8 +14,9 @@ set -euo pipefail
 # are executed by claude itself (running changelog_consolidate.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md -- the
 # publishable libs/apps projects accumulate under [Unreleased] until release,
-# while the dev project (never released) is written straight under per-date
-# "## <run-date>" sections -- committing, spawning one or more subagents to
+# while the dev project (never released) gets one summarized "## <date>"
+# section per landed date, mirroring its UNABRIDGED_CHANGELOG.md -- committing,
+# spawning one or more subagents to
 # review the new bullets for factual accuracy against the code,
 # pushing a branch, opening a PR). Claude's final assistant message is a single JSON object describing the
 # outcome (status, with pr_url on success or notes on failure) -- visible in
