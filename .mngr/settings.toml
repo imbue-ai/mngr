@@ -103,9 +103,7 @@ default_machine_type = "e2-standard-2"
 # in the repo supplies the project id.
 builder = "DEPOT"
 
-# Shared AWS config consumed by the `aws` create-template above. The per-developer
-# allowed_ssh_cidrs lives in the gitignored .mngr/settings.local.toml and merges per-field
-# with this block (ProviderInstanceConfig.merge_with honors model_fields_set).
+# Shared AWS config consumed by the `aws` create-template above.
 [providers.aws]
 backend = "aws"
 # us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
