@@ -7,3 +7,5 @@ Two storage layouts mirroring the lima provider's flag: the default exposes host
 Image sources: bare Alpine VM (default, no image pull), an OCI reference (`--image`), an existing `.smolmachine` pack (`-b "--from PATH"`), or a locally built docker image via `-b "--image-archive PATH"` (a `docker save` tarball, converted to a content-hash-cached pack).
 
 Idle hosts stop themselves via smolvm's poweroff sentinel. Snapshots and rename are unsupported (lima parity).
+
+Host creation now logs progress at INFO for its long-running phases (building the image, exporting+packing it into a smolvm pack, booting the machine, provisioning and waiting for SSH), so `mngr create` no longer appears to hang silently after "Creating smolvm machine host ..." while a large image is packed.

@@ -555,8 +555,12 @@ class SmolvmProviderInstance(BaseProviderInstance):
         content_hash = _sha256_of_file(archive_path)
         sidecar_path = self._cached_sidecar_path(content_hash)
         if sidecar_path.exists():
-            logger.debug("Using cached pack for archive {}: {}", archive_path, sidecar_path)
+            logger.info("Using cached smolvm pack for image archive {}", content_hash[:12])
             return sidecar_path
+        logger.info(
+            "Packing image archive into a smolvm pack (content hash {}); this can take a minute ...",
+            content_hash[:12],
+        )
         with log_span("Packing image archive {} (content hash {})", archive_path, content_hash[:12]):
             return self._create_pack_sidecar(archive_path, content_hash)
 
@@ -570,6 +574,7 @@ class SmolvmProviderInstance(BaseProviderInstance):
         if not dockerfile.exists():
             raise MngrError(f"Dockerfile not found: {dockerfile}")
         context_dir = dockerfile.resolve().parent
+        logger.info("Building workspace image from Dockerfile {} (docker build) ...", dockerfile)
         with log_span("Building docker image from {}", dockerfile):
             build_result = self.mngr_ctx.concurrency_group.run_process_to_completion(
                 ["docker", "build", "-q", "-f", str(dockerfile.resolve()), str(context_dir)],
@@ -585,11 +590,15 @@ class SmolvmProviderInstance(BaseProviderInstance):
 
         sidecar_path = self._cached_sidecar_path(image_id_hex)
         if sidecar_path.exists():
-            logger.debug("Using cached pack for image {}: {}", image_id_hex[:12], sidecar_path)
+            logger.info("Using cached smolvm pack for image {}", image_id_hex[:12])
             return sidecar_path
 
         self._packs_dir.mkdir(parents=True, exist_ok=True)
         archive_path = self._packs_dir / f"{image_id_hex}.tar"
+        logger.info(
+            "Exporting and packing image {} into a smolvm pack; this can take a minute for large images ...",
+            image_id_hex[:12],
+        )
         try:
             with log_span("Exporting docker image {} to archive", image_id_hex[:12]):
                 save_result = self.mngr_ctx.concurrency_group.run_process_to_completion(
@@ -669,6 +678,7 @@ class SmolvmProviderInstance(BaseProviderInstance):
         is_creation_successful = False
         failure_reason = "smolvm host creation was interrupted by an unexpected error"
         try:
+            logger.info("Booting smolvm machine {} ...", machine_name)
             smolvm_machine_create(
                 self.mngr_ctx.concurrency_group,
                 self.config.smolvm_command,
@@ -689,8 +699,10 @@ class SmolvmProviderInstance(BaseProviderInstance):
                 machine_name,
                 timeout=self.config.vm_start_timeout_seconds,
             )
+            logger.info("Provisioning SSH in smolvm machine {} ...", machine_name)
             self._provision_ssh(machine_name, host_id)
 
+            logger.info("Waiting for SSH on smolvm machine {} to become ready ...", machine_name)
             with log_span("Waiting for SSH to be ready..."):
                 wait_for_sshd(_SSH_HOSTNAME, ssh_port, self.config.ssh_connect_timeout)
 
