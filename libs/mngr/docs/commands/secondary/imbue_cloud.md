@@ -833,6 +833,24 @@ mngr imbue_cloud admin server [OPTIONS] COMMAND [ARGS]...
 **Options:**
 
 
+## mngr imbue_cloud admin server prep
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server prep [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-address` | text | SSH-reachable address of the freshly-installed box. | None |
+| `--ssh-user` | text | Bootstrap SSH user (the OS image's default cloud user). | `debian` |
+| `--lima-service-user` | text | Dedicated non-root user to create for the lima VMs. | `limahost` |
+| `--lima-version` | text | Lima release to install on the box. | `2.1.2` |
+
 ## mngr imbue_cloud admin server list
 
 **Usage:**

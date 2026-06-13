@@ -9,6 +9,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -16,10 +18,13 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
+from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
@@ -305,3 +310,52 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
         _ensure_btrfs_subvolume_on_outer(outer, str(subvolume_path))
         return subvolume_path
+
+
+class SliceVpsDockerProviderBackend(ProviderBackendInterface):
+    """Backend for the slice provider (lima-VM "VPS" on a bare-metal box).
+
+    Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``) which
+    runs on the box; the lima client drives limactl locally there.
+    """
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return ProviderBackendName("imbue_cloud_slice")
+
+    @staticmethod
+    def get_description() -> str:
+        return "Runs agents in Docker containers inside lima VMs ('slices') on a bare-metal box"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return SliceVpsDockerProviderConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return (
+            "Slice args are passed through to the shared vps_docker bake (e.g. --file=Dockerfile, the build context)."
+        )
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "Start args are passed directly to 'docker run' inside the slice VM."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        if not isinstance(config, SliceVpsDockerProviderConfig):
+            raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
+        lima_client = LimaSliceVpsClient()
+        return SliceVpsDockerProvider(
+            name=name,
+            host_dir=config.host_dir,
+            mngr_ctx=mngr_ctx,
+            config=config,
+            vps_client=lima_client,
+            slice_config=config,
+            lima_client=lima_client,
+        )
