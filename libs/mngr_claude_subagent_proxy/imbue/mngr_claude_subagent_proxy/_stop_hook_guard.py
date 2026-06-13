@@ -22,7 +22,7 @@ from typing import Final
 
 from loguru import logger
 
-from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 
 PROXY_CHILD_GUARD_PREFIX: Final[str] = '[ -n "$MNGR_CLAUDE_SUBAGENT_PROXY_CHILD" ] && exit 0; '
 
@@ -154,7 +154,7 @@ def guard_per_agent_plugin_cache(state_dir: Path) -> None:
     Idempotent: ``wrap_with_proxy_child_guard`` no-ops on
     already-wrapped commands.
     """
-    cache_root = get_agent_claude_plugin_dir(state_dir) / "anthropic" / "plugins"
+    cache_root = get_agent_claude_config_dir(state_dir) / "plugins"
     if not cache_root.is_dir():
         return
     try:

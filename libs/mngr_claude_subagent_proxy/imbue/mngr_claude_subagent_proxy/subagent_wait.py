@@ -18,7 +18,7 @@ from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
-from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude_subagent_proxy.mngr_binary import get_mngr_command
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.2
@@ -73,7 +73,7 @@ class AgentLocation:
     @property
     def claude_projects_dir(self) -> Path:
         encoded = encode_claude_project_dir_name(self.work_dir)
-        return get_agent_claude_plugin_dir(self.state_dir) / "anthropic" / "projects" / encoded
+        return get_agent_claude_config_dir(self.state_dir) / "projects" / encoded
 
     @property
     def session_id_file(self) -> Path:
