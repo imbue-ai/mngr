@@ -1,1 +1,3 @@
 Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_os_disk_id` helper) from `AzureVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests, plus the now-unused `FakeSnapshotsOperations` test helper, were removed as well.
+
+`AzureProviderConfig.get_subscription_id` now raises the custom `AzureSubscriptionError` (in the new `mngr_azure.errors` module) instead of a bare `ValueError` when no subscription can be resolved. It subclasses both `MngrError` and `ValueError`, so the backend's `except ValueError` (which wraps the failure into `ProviderUnavailableError`) is unaffected.

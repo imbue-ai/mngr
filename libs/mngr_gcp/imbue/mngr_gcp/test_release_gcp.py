@@ -18,7 +18,7 @@ this package for the full picture):
    older than the TTL at session end, and fails the session.
 3. The subprocess that runs ``mngr create`` is pointed at a temporary
    ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``) that sets
-   ``[providers.gcp] auto_shutdown_minutes``. This launches each instance with
+   ``[providers.gcp] auto_shutdown_seconds``. This launches each instance with
    ``scheduling.max_run_duration`` + ``instance_termination_action=DELETE``, so
    the VM self-deletes even if pytest itself is killed. The production
    GcpProvider refuses to create instances under pytest without this set.
@@ -51,7 +51,7 @@ from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.testing import GCP_DEFAULT_REGION
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
-from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import GCP_TEST_NAME_PREFIX
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
@@ -93,7 +93,7 @@ def _write_release_settings(settings_dir: Path, project: str) -> None:
         f'default_zone = "{GCP_DEFAULT_ZONE}"\n'
         # Self-delete via max_run_duration if pytest is killed before the
         # per-test cleanup runs.
-        f"auto_shutdown_minutes = {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
+        f"auto_shutdown_seconds = {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS}\n"
         # Open the firewall to the public internet so the test SSH connection
         # (from the developer laptop / CI runner) works without caller-IP
         # discovery. Production callers must pick a tight CIDR; the instance only
@@ -168,7 +168,7 @@ def gcp_test_settings_dir(
 ) -> Iterator[Path]:
     """Write a project settings.toml that sets the GCP project + auto-shutdown TTL.
 
-    The release tests must set ``auto_shutdown_minutes`` on the GCP provider
+    The release tests must set ``auto_shutdown_seconds`` on the GCP provider
     config so the GCE-native self-delete safety net actually fires; the
     production GcpProvider refuses to create an instance under pytest without it.
     Using ``MNGR_PROJECT_CONFIG_DIR`` to point the subprocess at this settings

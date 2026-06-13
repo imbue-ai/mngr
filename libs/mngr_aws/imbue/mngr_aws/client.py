@@ -80,11 +80,10 @@ class AwsVpsClient(VpsClientInterface):
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "security group. Default ('0.0.0.0/0',) matches Vultr/OVH default reachability in "
-            "this monorepo (neither provider ships a managed firewall). Tighten for production "
-            "(e.g. ('203.0.113.4/32',) for a single IP). Empty tuple means 'add no ingress' -- "
-            "the SG ends up unreachable from outside its VPC; logged as a warning."
+            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
+            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
+            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched instances")

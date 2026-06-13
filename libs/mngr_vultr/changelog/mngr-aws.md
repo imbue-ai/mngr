@@ -6,3 +6,5 @@
 - Picks up the shared `wait_for_instance_active` interface change (now a default method on `VpsClientInterface`).
 - `is_for_host_creation` flag removed; the Vultr backend's `del`-of-`is_for_host_creation` is removed. No behavior change.
 - **Per-host build args renamed**: `--vps-region=` is now `--vultr-region=`; `--vps-plan=` is now `--vultr-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
+
+- **Vultr release test create timeout raised 300s -> 600s.** `_run_mngr`'s default subprocess timeout was too tight for a slow Vultr provision (provisioning alone can take ~90s; the full create adds cloud-init + Docker build + rsync), causing intermittent spurious `subprocess.TimeoutExpired` failures unrelated to any real defect.

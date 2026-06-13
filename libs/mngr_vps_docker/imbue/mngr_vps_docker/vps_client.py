@@ -97,8 +97,12 @@ class VpsClientInterface(MutableModel, ABC):
                             threshold,
                         )
                     return ip
-                except VpsProvisioningError:
-                    pass
+                except VpsProvisioningError as e:
+                    # Expected transient: the instance reports ACTIVE a moment
+                    # before its IP is assigned. Swallow and retry on the next
+                    # poll; debug-level so a stuck provision is still traceable
+                    # without spamming a line every 5s on the happy path.
+                    logger.debug("VPS {} is active but has no IP yet, retrying: {}", instance_id, e)
             time.sleep(5.0)
         raise VpsProvisioningError(f"VPS instance {instance_id} did not become active within {timeout_seconds}s")
 

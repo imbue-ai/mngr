@@ -48,7 +48,7 @@ from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
-from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import aws_credentials_available
 
 register_plugin_test_fixtures(globals())
@@ -97,19 +97,10 @@ def setup_test_mngr_env(
 
 # Orphan-scan grace period. A test-named instance younger than this is left
 # alone to avoid race-killing an in-flight test on a parallel worker.
-# Derived from the shared ``AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES`` constant
+# Derived from the shared ``AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS`` constant
 # (the same value release tests propagate into cloud-init) so the two TTLs
 # can never drift.
-_TEST_LEAK_TTL: Final[timedelta] = timedelta(minutes=AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
-
-
-def _force_terminate_instances(ec2: Any, instance_ids: list[str]) -> None:
-    if not instance_ids:
-        return
-    try:
-        ec2.terminate_instances(InstanceIds=instance_ids)
-    except (BotoCoreError, ClientError) as e:
-        logger.warning("Failed to terminate leaked EC2 instances {}: {}", instance_ids, e)
+_TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
 
 
 def _find_orphan_test_instances(ec2: Any) -> list[str]:
@@ -170,13 +161,16 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     if not orphans:
         return
 
-    _force_terminate_instances(ec2, orphans)
+    try:
+        ec2.terminate_instances(InstanceIds=orphans)
+    except (BotoCoreError, ClientError) as e:
+        logger.warning("Failed to terminate leaked EC2 instances {}: {}", orphans, e)
     message = (
         "=" * 70
         + "\nAWS SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked EC2 instances tagged {AWS_PYTEST_LAUNCHED_TAG}=true and "
-        + f"older than {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES} minutes:\n  "
+        + f"older than {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes:\n  "
         + "\n  ".join(orphans)
         + "\n\nInstances have been force-terminated, but tests should not leak.\n"
     )

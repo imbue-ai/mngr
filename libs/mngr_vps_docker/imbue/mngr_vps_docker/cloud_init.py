@@ -1,3 +1,4 @@
+import math
 import shlex
 
 from imbue.mngr_vps_docker.host_setup import HostSetupStep
@@ -8,7 +9,7 @@ def generate_cloud_init_user_data(
     host_private_key: str,
     host_public_key: str,
     install_gvisor_runtime: bool,
-    auto_shutdown_minutes: int | None = None,
+    auto_shutdown_seconds: int | None = None,
     authorized_user_public_key: str | None = None,
 ) -> str:
     """Generate a cloud-init user_data script for VPS provisioning.
@@ -36,7 +37,7 @@ def generate_cloud_init_user_data(
     mngr_vps_docker SSHes in as root and runs interactive shell-y commands via
     pyinfra, so that wrapper would silently break every poll.
 
-    When ``auto_shutdown_minutes`` is set, the VPS schedules a
+    When ``auto_shutdown_seconds`` is set, the VPS schedules a
     ``shutdown -P +N`` from cloud-init, so the OS halts itself after the
     deadline. On AWS, paired with ``InstanceInitiatedShutdownBehavior=
     terminate``, this means the EC2 instance auto-terminates and stops
@@ -59,10 +60,13 @@ def generate_cloud_init_user_data(
     via the default-user copy, so a duplicate line is a no-op).
     """
     shutdown_block = ""
-    if auto_shutdown_minutes is not None:
+    if auto_shutdown_seconds is not None:
+        # ``shutdown -P +N`` only accepts whole minutes. Round up so we never
+        # halt before the requested deadline, and floor at 1 minute so any
+        # positive sub-minute value still schedules a shutdown.
+        shutdown_minutes = max(1, math.ceil(auto_shutdown_seconds / 60))
         shutdown_block = (
-            f"  - shutdown -P +{auto_shutdown_minutes} "
-            f"'mngr_vps_docker auto-shutdown after {auto_shutdown_minutes} minutes'\n"
+            f"  - shutdown -P +{shutdown_minutes} 'mngr_vps_docker auto-shutdown after {shutdown_minutes} minutes'\n"
         )
     root_key_block = ""
     if authorized_user_public_key is not None:

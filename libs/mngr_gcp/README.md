@@ -2,7 +2,7 @@
 
 GCP Compute Engine provider backend plugin for mngr. Runs agents in Docker containers on Google Compute Engine (GCE) VMs.
 
-> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but GCP-specific defaults and the IAM permission set may change. Treat the security defaults (see "GCP-specific configuration" below) as a starting point: review the firewall rule, image choice, service account, and `auto_shutdown_minutes` before pointing this at production resources.
+> This plugin is **experimental** — it has not been exercised in a production setting at the same scale as `mngr_modal` or `mngr_vultr`. The shared `mngr_vps_docker` machinery underneath it is well-tested, but GCP-specific defaults and the IAM permission set may change. Treat the security defaults (see "GCP-specific configuration" below) as a starting point: review the firewall rule, image choice, service account, and `auto_shutdown_seconds` before pointing this at production resources.
 
 See `mngr_vps_docker` for the base architecture and shared infrastructure.
 
@@ -135,7 +135,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. |
 | `service_account_email` | `None` | Optional service account attached to launched instances. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
-| `auto_shutdown_minutes` | `None` | When set, instances launch with `scheduling.max_run_duration` + `instance_termination_action=DELETE` so the VM self-deletes after N minutes. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
+| `auto_shutdown_seconds` | `None` | When set, instances launch with `scheduling.max_run_duration` + `instance_termination_action=DELETE` so the VM self-deletes after N seconds. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
 ## Required IAM permissions
 
@@ -174,8 +174,8 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - cloud-init is delivered via the `user-data` metadata key. The GCE Ubuntu LTS images run cloud-init with the GCE datasource; the stock GCE Debian images do **not** run cloud-init (the guest agent ignores `user-data`), which is why Ubuntu is the default image. The shared cloud-init writes the provider key straight into root's authorized_keys (and also copies the `ubuntu` user's), so mngr's root SSH works regardless of guest-agent timing.
 - Discovery: `instances.list` filtered by the `mngr-provider` label, then SSH to each VPS to read host records from the state volume.
 - Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host`; run `mngr gcp cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists in the project).
-- Auto-delete: when `auto_shutdown_minutes` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
-- Spot capacity: the per-host `--gcp-spot` build arg launches the VM with `scheduling.provisioning_model=SPOT` (and `instance_termination_action=DELETE`, so a preempted Spot VM is deleted rather than left stopped -- mngr has no VM-level resume yet). It composes with `auto_shutdown_minutes` (both land on one `Scheduling`). GCE can preempt Spot VMs at any time with ~30s notice, so it is opt-in only: good for ephemeral / experimental agents, risky for long-lived ones. Mirrors the AWS `--aws-spot` flag.
+- Auto-delete: when `auto_shutdown_seconds` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
+- Spot capacity: the per-host `--gcp-spot` build arg launches the VM with `scheduling.provisioning_model=SPOT` (and `instance_termination_action=DELETE`, so a preempted Spot VM is deleted rather than left stopped -- mngr has no VM-level resume yet). It composes with `auto_shutdown_seconds` (both land on one `Scheduling`). GCE can preempt Spot VMs at any time with ~30s notice, so it is opt-in only: good for ephemeral / experimental agents, risky for long-lived ones. Mirrors the AWS `--aws-spot` flag.
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, this provider does not snapshot GCE instances automatically. `GcpVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented (boot-disk snapshots); you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created`.
 - **Stop/start operate on the container, not the GCE VM**: `mngr stop` / `mngr start` stop and start the agent's Docker container (Docker over SSH), not the GCE instance itself, so the instance keeps running and `compute.instances.stop` / `compute.instances.start` are not needed (they are intentionally absent from the IAM list above). This is the current shared `mngr_vps_docker` behavior across all VPS providers. VM-level stop/start is future work -- see below.
 
@@ -200,9 +200,9 @@ Three layers of damage control limit leaks from killed-mid-run tests:
 
 1. Every test's `finally` calls `mngr destroy --force`.
 2. A `pytest_sessionfinish` hook in `imbue/mngr_gcp/conftest.py` scans for any test-tagged GCE instance older than the TTL at session end, force-deletes leaks, and fails the session.
-3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.gcp] auto_shutdown_minutes`. This launches each test instance with `max_run_duration` + `instance_termination_action=DELETE`, so the VM auto-deletes after N minutes even if pytest is killed before any cleanup runs.
+3. Release tests point `mngr` at a tmp-path settings.toml (via `MNGR_PROJECT_CONFIG_DIR`) that sets `[providers.gcp] auto_shutdown_seconds`. This launches each test instance with `max_run_duration` + `instance_termination_action=DELETE`, so the VM auto-deletes after N seconds even if pytest is killed before any cleanup runs.
 
-Production code enforces this: `GcpProvider._validate_provider_args_for_create` refuses to launch a GCE instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_minutes` is configured (positive). Mirrors the pattern used by `mngr_aws` and `mngr_modal`.
+Production code enforces this: `GcpProvider._validate_provider_args_for_create` refuses to launch a GCE instance when `PYTEST_CURRENT_TEST` is set unless `auto_shutdown_seconds` is configured (positive). Mirrors the pattern used by `mngr_aws` and `mngr_modal`.
 
 ## Future improvements
 

@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from imbue.mngr.config.data_types import ScalarTuple
+from imbue.mngr.config.data_types import detect_settings_narrowing
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.testing import clear_aws_env
@@ -35,7 +38,7 @@ def test_default_config_values() -> None:
     assert config.associate_public_ip is True
     assert config.root_volume_size_gb == 30
     assert config.root_volume_type == "gp3"
-    assert config.auto_shutdown_minutes is None
+    assert config.auto_shutdown_seconds is None
 
 
 def test_backend_name_defaults_to_aws() -> None:
@@ -88,3 +91,40 @@ def test_get_ami_id_explicit_takes_precedence_over_region_map() -> None:
         default_ami_by_region={"us-east-1": "ami-region-specific"},
     )
     assert config.get_ami_id_for_region("us-east-1") == "ami-override"
+
+
+def test_allowed_ssh_cidrs_parses_to_scalar_tuple() -> None:
+    """``allowed_ssh_cidrs`` is declared ``ScalarStrTuple``, so ``model_validate``
+    (the path ``_parse_providers`` uses) marks both the explicit value and the
+    default as a ``ScalarTuple``.
+
+    The marker is what lets the settings-narrowing guard treat the field as
+    replace-by-default (see ``test_local_layer_tightening_allowed_ssh_cidrs_does_not_narrow``).
+    """
+    explicit = AwsProviderConfig.model_validate({"allowed_ssh_cidrs": ["203.0.113.4/32"]})
+    assert explicit.allowed_ssh_cidrs == ("203.0.113.4/32",)
+    assert isinstance(explicit.allowed_ssh_cidrs, ScalarTuple)
+    defaulted = AwsProviderConfig.model_validate({})
+    assert isinstance(defaulted.allowed_ssh_cidrs, ScalarTuple)
+
+
+def test_local_layer_tightening_allowed_ssh_cidrs_does_not_narrow() -> None:
+    """A developer's settings.local.toml narrowing ``allowed_ssh_cidrs`` to their
+    own IP must replace the committed default, not trip the settings-narrowing
+    guard.
+
+    The committed ``[providers.aws]`` block carries the non-empty default
+    ``("0.0.0.0/0",)``; a local layer overrides it with a single IP. Because the
+    field is a ``ScalarStrTuple``, the validated override is a ``ScalarTuple`` and
+    ``detect_settings_narrowing`` treats it as scalar replacement. A plain-tuple
+    override of the same shape (no marker -- e.g. via ``model_construct``) still
+    narrows, proving the marker is the discriminator and not some incidental
+    property.
+    """
+    project = AwsProviderConfig.model_validate({"backend": "aws"})
+    local_override = AwsProviderConfig.model_validate({"backend": "aws", "allowed_ssh_cidrs": ["203.0.113.4/32"]})
+    assert detect_settings_narrowing(project, local_override) == []
+    unmarked_override = AwsProviderConfig.model_construct(
+        backend=ProviderBackendName("aws"), allowed_ssh_cidrs=("203.0.113.4/32",)
+    )
+    assert detect_settings_narrowing(project, unmarked_override) == ["allowed_ssh_cidrs"]

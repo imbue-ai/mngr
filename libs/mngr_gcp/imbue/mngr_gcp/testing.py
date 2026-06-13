@@ -43,12 +43,12 @@ GCP_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_GCP_RELEASE_TESTS")
 # Single source of truth for the release-test instance lifetime. Used in two
 # places that must stay aligned:
 #   1. ``test_release_gcp.py`` writes it into a tmp-path settings.toml
-#      (``[providers.gcp] auto_shutdown_minutes``) so each instance launches
+#      (``[providers.gcp] auto_shutdown_seconds``) so each instance launches
 #      with scheduling.max_run_duration + instance_termination_action=DELETE.
 #   2. ``conftest.py`` derives the orphan-scan grace period from this value so
 #      the session-end leak detector never race-kills an in-flight test on a
 #      parallel worker.
-GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
+GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 
 
 def gcp_credentials_available() -> bool:

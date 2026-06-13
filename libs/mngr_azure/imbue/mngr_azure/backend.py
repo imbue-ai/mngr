@@ -87,30 +87,30 @@ class AzureProvider(VpsDockerProvider):
         return self.azure_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Refuse to create a VM under pytest without auto_shutdown_minutes set.
+        """Refuse to create a VM under pytest without auto_shutdown_seconds set.
 
         Mirrors the AWS guard: when ``PYTEST_CURRENT_TEST`` is set, the test
         harness is responsible for configuring a safety net so a killed pytest
         run cannot leak a billing VM. On Azure that net is two-layered --
-        cloud-init ``shutdown -P +N`` (from ``auto_shutdown_minutes``) powers off
+        cloud-init ``shutdown -P +N`` (from ``auto_shutdown_seconds``) powers off
         the agent, and the conftest session-end orphan scanner force-deletes any
         leaked VM tagged ``mngr-pytest-launched`` older than the TTL (derived
-        from the same ``auto_shutdown_minutes``). If it is unset, fail closed at
+        from the same ``auto_shutdown_seconds``). If it is unset, fail closed at
         the pre-create hook rather than silently leak a VM.
 
         NB: unlike AWS/GCP, an OS ``shutdown -P`` on Azure leaves the VM
         "Stopped (not deallocated)", which still bills for compute -- so on Azure
         the *cost* guarantee comes from the orphan scanner, not from
         auto_shutdown. The guard is still required so the TTL the scanner derives
-        from auto_shutdown_minutes is well-defined.
+        from auto_shutdown_seconds is well-defined.
         """
         if "PYTEST_CURRENT_TEST" not in os.environ:
             return
-        minutes = self._get_effective_auto_shutdown_minutes()
-        if not (minutes and minutes > 0):
+        seconds = self._get_effective_auto_shutdown_seconds()
+        if not (seconds and seconds > 0):
             raise MngrError(
-                "Refusing to create an Azure VM during pytest without auto_shutdown_minutes set on "
-                "the Azure provider config. Set [providers.<instance>] auto_shutdown_minutes = <N> "
+                "Refusing to create an Azure VM during pytest without auto_shutdown_seconds set on "
+                "the Azure provider config. Set [providers.<instance>] auto_shutdown_seconds = <N> "
                 "in the project settings.toml so the session-end orphan scanner has a well-defined "
                 "TTL (and cloud-init schedules 'shutdown -P +N')."
             )

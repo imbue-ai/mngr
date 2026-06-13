@@ -23,6 +23,7 @@ from click.testing import CliRunner
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
@@ -193,6 +194,7 @@ def test_cleanup_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["cleanup", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
 
@@ -233,6 +235,7 @@ def test_prepare_command_help_is_reachable() -> None:
     runner = CliRunner()
     result = runner.invoke(aws_cli_group, ["prepare", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--region" in result.output
     assert "--sg-name" in result.output
     assert "--allowed-ssh-cidr" in result.output
@@ -251,51 +254,72 @@ def test_prepare_command_help_is_reachable() -> None:
 # ``MngrContext``; these tests pin that behavior.
 
 
+def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: ProviderInstanceConfig) -> MngrContext:
+    """Return ``temp_mngr_ctx`` with ``config`` registered under ``name`` in ``providers``."""
+    provider_name = ProviderInstanceName(name)
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: config})
+    )
+    return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+
 def test_resolve_provider_config_uses_user_provider_block(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
+    """The happy path returns the configured ``AwsProviderConfig`` verbatim, silently.
+
+    Pins the third leg of the three-case contract: configured AWS block ->
+    return as-is, no warning. The two sibling tests cover the missing-block
+    and non-AWS-block fallbacks (silent and warning respectively); pinning
+    silence here too closes the {AWS / non-AWS / missing} x {warn / silent}
+    matrix so a future regression that always-warns can't slip through.
+    """
     user_config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_region="us-west-2", vpc_id="vpc-user")
-    name = ProviderInstanceName("aws-prod")
-    new_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().providers, {name: user_config})
-    )
-    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws-prod", user_config)
 
     resolved = _resolve_provider_config(ctx_with_provider, "aws-prod")
 
     assert resolved.default_region == "us-west-2"
     assert resolved.vpc_id == "vpc-user"
+    assert log_warnings == [], f"happy path must be silent, got {log_warnings!r}"
 
 
 def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """When the named provider block doesn't exist, class defaults are used.
+    """When the named provider block doesn't exist, class defaults are used silently.
 
     Operator commands must work for first-run users who haven't yet pinned a
-    ``[providers.aws]`` block, so the fallback is a feature not a bug.
+    ``[providers.aws]`` block, so the fallback is a feature not a bug -- and
+    no warning is emitted because this is the expected shape (distinct from
+    the wrong-type case, which does warn).
     """
     resolved = _resolve_provider_config(temp_mngr_ctx, "aws-does-not-exist")
 
     assert resolved == AwsProviderConfig()
+    assert log_warnings == [], f"missing-block fallback must be silent, got {log_warnings!r}"
 
 
 def test_resolve_provider_config_falls_back_when_named_block_is_non_aws(
     temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
 ) -> None:
-    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back.
+    """If the user pointed ``[providers.aws]`` at a non-AWS backend, fall back and warn.
 
     The operator CLI still works against the class defaults plus whatever the
     user passes on the command line; refusing here would block a legitimate
-    out-of-band run.
+    out-of-band run. But the user's ``--provider`` selection did not have the
+    intended effect, so a warning is emitted to make the silent-fallback
+    visible (distinct from the missing-block case, which is silent because it
+    is the expected first-run shape).
     """
-    non_aws = LocalProviderConfig()
-    name = ProviderInstanceName("aws")
-    new_config = temp_mngr_ctx.config.model_copy_update(
-        to_update(temp_mngr_ctx.config.field_ref().providers, {name: non_aws})
-    )
-    ctx_with_provider = temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "aws", LocalProviderConfig())
 
     resolved = _resolve_provider_config(ctx_with_provider, "aws")
 
     assert resolved == AwsProviderConfig()
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "'aws'" in log_warnings[0]
+    assert "LocalProviderConfig" in log_warnings[0]

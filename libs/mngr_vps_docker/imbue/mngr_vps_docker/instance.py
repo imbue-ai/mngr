@@ -110,6 +110,7 @@ from imbue.mngr_vps_docker.container_setup import seed_host_volume_layout_on_out
 from imbue.mngr_vps_docker.container_setup import setup_container_ssh
 from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps_docker.container_setup import start_container
+from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
@@ -423,7 +424,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Default no-op. Subclasses override to enforce provider-specific
         pre-create invariants (e.g. GCP's firewall-rule existence, AWS's
-        pytest-only "must have auto_shutdown_minutes set" guard). It runs before
+        pytest-only "must have auto_shutdown_seconds set" guard). It runs before
         any provider API write -- in particular before the SSH key upload and
         instance creation -- so a failed precondition surfaces cleanly with no
         leaked resources and no cleanup path. Keep these checks cheap (local
@@ -909,7 +910,7 @@ class VpsDockerProvider(BaseProviderInstance):
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
             install_gvisor_runtime=self.config.install_gvisor_runtime,
-            auto_shutdown_minutes=self._get_effective_auto_shutdown_minutes(),
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
             authorized_user_public_key=vps_public_key,
         )
 
@@ -1276,6 +1277,15 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             with log_span("Starting container on VPS"):
                 start_container(outer, host_record.config.container_name)
+            # sshd is launched via `docker exec`, not the container's entrypoint, so a
+            # `docker start` brings the container back WITHOUT sshd (the idle watcher's
+            # container stop, a manual `mngr stop`, or a VPS reboot all land here). Re-exec
+            # it before waiting, or `_wait_for_container_sshd` would block until timeout and
+            # the agent would be unrecoverable via `mngr start`/`conn`. `docker start` is a
+            # no-op on an already-running container, so this also repairs the
+            # container-up-but-sshd-down state.
+            with log_span("Restarting sshd in container"):
+                start_container_sshd(outer, host_record.config.container_name)
 
         # Wait for sshd in container
         with log_span("Waiting for container SSH"):
@@ -1578,14 +1588,14 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
-    def _get_effective_auto_shutdown_minutes(self) -> int | None:
-        """Return the auto-shutdown TTL (in minutes) to inject into cloud-init.
+    def _get_effective_auto_shutdown_seconds(self) -> int | None:
+        """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
 
         Subclasses can override this to add provider-specific escape hatches
         (e.g., a test-only env-var that forces a TTL regardless of project
         config). The base implementation simply returns the configured value.
         """
-        return self.config.auto_shutdown_minutes
+        return self.config.auto_shutdown_seconds
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH-reachable hostnames for VPSes owned by this provider instance.

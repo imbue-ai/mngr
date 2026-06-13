@@ -20,7 +20,7 @@ Three layers of damage control prevent leaked EC2 cost (see
    set) and older than the TTL at session end, and fails the session.
 3. The subprocess that runs ``mngr create`` is pointed at a temporary
    ``settings.toml`` (via ``MNGR_PROJECT_CONFIG_DIR``) that sets
-   ``[providers.aws] auto_shutdown_minutes``. This propagates into
+   ``[providers.aws] auto_shutdown_seconds``. This propagates into
    cloud-init as ``shutdown -P +N`` on each test instance; combined with
    the launch flag ``InstanceInitiatedShutdownBehavior=terminate``, this
    auto-terminates the instance from the inside even if pytest itself
@@ -49,7 +49,7 @@ from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
-from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import AWS_TEST_NAME_PREFIX
 from imbue.mngr_aws.testing import aws_credentials_available
 
@@ -88,7 +88,7 @@ def _write_release_settings(settings_dir: Path) -> None:
         'backend = "aws"\n'
         # Auto-terminate via cloud-init if pytest is killed before the
         # per-test cleanup runs (combined with InstanceInitiatedShutdownBehavior=terminate).
-        f"auto_shutdown_minutes = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES}\n"
+        f"auto_shutdown_seconds = {AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS}\n"
         # Default is already ("0.0.0.0/0",), but write it explicitly so the
         # test settings file is self-documenting -- the test SSH connection
         # from the developer laptop / CI runner needs ingress from any IP.
@@ -166,7 +166,7 @@ def _aws_release_test_security_group_prepared(tmp_path_factory: pytest.TempPathF
 def aws_test_settings_dir(tmp_path: Path, _aws_release_test_security_group_prepared: None) -> Iterator[Path]:
     """Write a project settings.toml that sets the AWS auto-shutdown TTL.
 
-    The release tests must set ``auto_shutdown_minutes`` on the AWS
+    The release tests must set ``auto_shutdown_seconds`` on the AWS
     provider config so the cloud-init self-shutdown safety net actually
     fires; the production AwsProvider refuses to create an EC2 instance
     under pytest without it. Using ``MNGR_PROJECT_CONFIG_DIR`` to point

@@ -93,6 +93,32 @@ def test_schedule_add_rejects_unsupported_provider(
     assert "not supported for schedules" in result.output
 
 
+def test_schedule_add_rejects_timezone_for_local_provider(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """Test that --timezone is rejected for the local provider (modal-only option)."""
+    result = cli_runner.invoke(
+        schedule,
+        [
+            "add",
+            "--command",
+            "create",
+            "--args",
+            "--reuse",
+            "--schedule",
+            "0 2 * * *",
+            "--provider",
+            "local",
+            "--timezone",
+            "America/Los_Angeles",
+        ],
+        obj=plugin_manager,
+    )
+    assert result.exit_code != 0
+    assert "only supported for the modal provider" in result.output
+
+
 def test_schedule_update_raises_not_implemented(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

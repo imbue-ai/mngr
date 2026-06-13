@@ -30,6 +30,13 @@ AZURE_TEST_NAME_PREFIX: Final[str] = "test-azure-"
 # time so conftest and test_release_azure observe the same value.
 AZURE_DEFAULT_REGION: Final[str] = os.environ.get("MNGR_AZURE_REGION", "westus")
 
+# VM size the lifecycle release tests provision. Defaults to a D-series size
+# because B-series (the provider default, ``Standard_B2s``) is currently
+# ``NotAvailableForSubscription`` in westus -- so without this override the
+# create/exec/destroy and stop/start tests would fail on ``SkuNotAvailable``
+# before exercising anything. Override via ``MNGR_AZURE_VM_SIZE``.
+AZURE_TEST_VM_SIZE: Final[str] = os.environ.get("MNGR_AZURE_VM_SIZE", "Standard_D2s_v3")
+
 # Resource group the release tests + scanner operate in. Read once at import time.
 AZURE_DEFAULT_RESOURCE_GROUP: Final[str] = os.environ.get("MNGR_AZURE_RESOURCE_GROUP", "mngr")
 
@@ -41,12 +48,12 @@ AZURE_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_AZURE_RELEASE_TES
 # Single source of truth for the release-test VM lifetime. Used in two places
 # that must stay aligned:
 #   1. ``test_release_azure.py`` writes it into a tmp-path settings.toml
-#      (``[providers.azure] auto_shutdown_minutes``) so cloud-init runs
+#      (``[providers.azure] auto_shutdown_seconds``) so cloud-init runs
 #      ``shutdown -P +N`` on every test VM.
 #   2. ``conftest.py`` derives the orphan-scan grace period from this value so
 #      the session-end leak detector never race-kills an in-flight test on a
 #      parallel worker.
-AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES: Final[int] = 60
+AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 
 
 def azure_credentials_available() -> bool:

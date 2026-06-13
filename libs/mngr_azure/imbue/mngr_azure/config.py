@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import Field
 
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 # Tag written on the resource group by ``mngr azure prepare`` so the inverse
@@ -201,7 +202,7 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         return DefaultAzureCredential()
 
     def get_subscription_id(self) -> str:
-        """Return the subscription ID, raising ``ValueError`` if unresolvable.
+        """Return the subscription ID, raising ``AzureSubscriptionError`` if unresolvable.
 
         Priority: the configured ``subscription_id`` > the ``AZURE_SUBSCRIPTION_ID``
         env var > the Azure CLI's active subscription (from ``azureProfile.json``;
@@ -220,7 +221,7 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         az_default_subscription = read_az_cli_default_subscription()
         if az_default_subscription:
             return az_default_subscription
-        raise ValueError(
+        raise AzureSubscriptionError(
             "No Azure subscription resolved. Run `az login` (and optionally "
             "`az account set --subscription <id>`) so the active subscription is used automatically, "
             "or run 'mngr config set providers.azure.subscription_id <your-subscription-id>', "

@@ -40,7 +40,7 @@ from imbue.mngr.utils.testing import setup_mngr_test_environment
 from imbue.mngr_gcp.client import GCP_PYTEST_LAUNCHED_LABEL
 from imbue.mngr_gcp.testing import GCP_DEFAULT_ZONE
 from imbue.mngr_gcp.testing import GCP_RELEASE_TESTS_OPT_IN
-from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES
+from imbue.mngr_gcp.testing import GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_gcp.testing import gcp_credentials_available
 from imbue.mngr_gcp.testing import get_default_project
 
@@ -80,13 +80,17 @@ def setup_test_mngr_env(
 # race-killing an in-flight test on a parallel worker. Derived from the shared
 # auto-shutdown TTL (the same value release tests propagate into the instance's
 # max_run_duration) so the two TTLs can never drift.
-_TEST_LEAK_TTL: Final[timedelta] = timedelta(minutes=GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES)
+_TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS)
 
 
 def _force_delete_instances(instances_client: Any, project: str, zone: str, instance_names: list[str]) -> None:
     for instance_name in instance_names:
         try:
-            instances_client.delete(project=project, zone=zone, instance=instance_name)
+            # GCE delete() returns an async operation; await it (like production
+            # destroy_instance) so a server-side failure is caught here rather
+            # than silently dropped after a fire-and-forget call.
+            operation = instances_client.delete(project=project, zone=zone, instance=instance_name)
+            operation.result()
         except google_api_exceptions.GoogleAPICallError as e:
             logger.warning("Failed to delete leaked GCE instance {}: {}", instance_name, e)
 
@@ -150,7 +154,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         + "\nGCP SESSION CLEANUP FOUND LEAKED RESOURCES!\n"
         + "=" * 70
         + f"\n\nLeaked GCE instances labeled {GCP_PYTEST_LAUNCHED_LABEL}=true and "
-        + f"older than {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_MINUTES} minutes:\n  "
+        + f"older than {GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS // 60} minutes:\n  "
         + "\n  ".join(orphans)
         + "\n\nInstances have been force-deleted, but tests should not leak.\n"
     )

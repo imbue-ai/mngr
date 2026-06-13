@@ -6,6 +6,7 @@ from pydantic import Field
 from pydantic import model_validator
 
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
@@ -121,7 +122,7 @@ class DockerProviderConfig(ProviderInstanceConfig):
     @model_validator(mode="after")
     def _validate_isolation_requires_volume(self) -> "DockerProviderConfig":
         if self.isolate_host_volumes is True and not self.is_host_volume_created:
-            raise ValueError(
+            raise DockerConfigValidationError(
                 "isolate_host_volumes=True requires is_host_volume_created=True "
                 "(host-volume isolation is meaningless without a host volume)"
             )

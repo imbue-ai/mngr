@@ -143,11 +143,11 @@ class GcpVpsClient(VpsClientInterface):
         default=("https://www.googleapis.com/auth/cloud-platform",),
         description="OAuth scopes for the attached service account",
     )
-    auto_shutdown_minutes: int | None = Field(
+    auto_shutdown_seconds: int | None = Field(
         default=None,
         description=(
             "When set, instances are launched with scheduling.max_run_duration + "
-            "instance_termination_action=DELETE so the VM self-deletes after N minutes -- the "
+            "instance_termination_action=DELETE so the VM self-deletes after N seconds -- the "
             "GCE-native analog of AWS InstanceInitiatedShutdownBehavior=terminate."
         ),
     )
@@ -415,7 +415,7 @@ class GcpVpsClient(VpsClientInterface):
                 compute_v1.ServiceAccount(email=self.service_account_email, scopes=list(self.service_account_scopes))
             ]
         # Scheduling composes two independent opt-ins onto one Scheduling object:
-        #   - auto_shutdown_minutes -> max_run_duration (GCE-native auto-delete:
+        #   - auto_shutdown_seconds -> max_run_duration (GCE-native auto-delete:
         #     the VM self-deletes after the deadline even if the orchestrating
         #     process is killed -- the analog of AWS
         #     InstanceInitiatedShutdownBehavior=terminate).
@@ -426,8 +426,8 @@ class GcpVpsClient(VpsClientInterface):
         # VM would just be cost/cruft.
         scheduling = compute_v1.Scheduling()
         has_scheduling = False
-        if self.auto_shutdown_minutes is not None and self.auto_shutdown_minutes > 0:
-            scheduling.max_run_duration = compute_v1.Duration(seconds=self.auto_shutdown_minutes * 60)
+        if self.auto_shutdown_seconds is not None and self.auto_shutdown_seconds > 0:
+            scheduling.max_run_duration = compute_v1.Duration(seconds=self.auto_shutdown_seconds)
             scheduling.instance_termination_action = "DELETE"
             has_scheduling = True
         if spot:

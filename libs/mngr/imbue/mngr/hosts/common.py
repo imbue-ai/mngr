@@ -14,11 +14,29 @@ from imbue.mngr.config.agent_config_registry import is_known_agent_type
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import ActivitySource
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 
 LOCAL_CONNECTOR_NAME: Final[str] = "LocalConnector"
+
+
+@pure
+def get_agents_root_dir(host_dir: Path) -> Path:
+    """Return the directory under which all agents' state directories live.
+
+    This is the single source of truth for where agent state lives on disk, so
+    code that needs to enumerate agents (rather than address a single one) can do
+    so without duplicating the path structure.
+    """
+    return host_dir / "agents"
+
+
+@pure
+def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Compute the state directory path for an agent given the host directory and agent ID."""
+    return get_agents_root_dir(host_dir) / str(agent_id)
 
 
 def get_ssh_known_hosts_file(host: OnlineHostInterface) -> Path | None:
