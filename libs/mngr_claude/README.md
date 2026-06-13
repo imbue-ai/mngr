@@ -26,6 +26,15 @@ When enabled:
   complete onboarding, log in).
 - Other sync/override/auto-dismiss fields on the agent config are silently
   ignored since shared mode has no per-agent dir to write into.
+- Reduced settings support (a scoped, documented limitation of this mode). In
+  normal mode mngr bakes its hooks and `settings_overrides` into the per-agent
+  config-dir `settings.json`, and a user `--settings` passes through so Claude
+  layers it natively. With no per-agent config dir here, instead:
+  - mngr injects only its own hooks via `claude --settings`;
+  - `settings_overrides` is **not** applied;
+  - a user-supplied `--settings` (in `cli_args`/`agent_args`) **collides** with
+    mngr's (Claude honors only the last `--settings`), so one silently clobbers
+    the other.
 
 ## Approximate response streaming (`streaming_snapshot_interval_seconds`)
 

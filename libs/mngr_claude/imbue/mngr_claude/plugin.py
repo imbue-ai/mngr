@@ -310,8 +310,10 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value overrides merged into settings.json at provisioning time. "
-        "Example: {'model': 'opus[1m]', 'fastMode': True}.",
+        description="Key-value overrides **deep-merged** into settings.json at provisioning time "
+        "(nested keys preserve sibling values from the home base; lists concatenate). "
+        "Example: {'model': 'opus[1m]', 'fastMode': True}. "
+        "Not applied in use_env_config_dir mode (there is no per-agent settings.json to merge into).",
     )
     emit_common_transcript: bool = Field(
         default=True,
@@ -335,7 +337,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
         "provisioning a per-agent config dir. Local hosts only; $CLAUDE_CONFIG_DIR must be set. "
         "When set, mngr never writes to the user's Claude config; the user is responsible for "
         "interactive `claude` setup (trust dialogs, onboarding, credentials) ahead of time. "
-        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode.",
+        "Other sync/override/auto-dismiss fields on this config are silently ignored in this mode. "
+        "Reduced-support limitation: with no per-agent settings.json, mngr injects only its own hooks "
+        "via `claude --settings`, settings_overrides is NOT applied, and a user-supplied `--settings` "
+        "collides with mngr's (Claude is last-wins across --settings flags), so one silently clobbers "
+        "the other.",
     )
     streaming_snapshot_interval_seconds: float = Field(
         default=0.0,

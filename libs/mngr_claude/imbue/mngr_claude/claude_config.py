@@ -515,11 +515,15 @@ def encode_claude_project_dir_name(path: Path) -> str:
 _AGENT_CLAUDE_PLUGIN_SUBPATH: Final[tuple[str, ...]] = ("plugin", "claude")
 
 # Filename of the file holding all of mngr's Claude hooks, loaded via
-# ``claude --settings``. It lives in the agent's private state dir rather than the
-# project's ``.claude/settings.local.json``, which every claude session in that
-# directory reads (including plain non-mngr ones) -- so mngr's hooks take effect
-# only inside the agent and never run in a plain ``claude`` session. mngr owns the
-# file outright and rewrites it fresh each provision.
+# ``claude --settings``. Now used only in ``use_env_config_dir`` mode: there is no
+# per-agent config dir to bake hooks into, so mngr loads them from this file
+# instead. (In normal mode the hooks live in the per-agent config-dir
+# ``settings.json`` -- the "user" layer Claude reads -- and this file is unused.)
+# It lives in the agent's private state dir rather than the project's
+# ``.claude/settings.local.json``, which every claude session in that directory
+# reads (including plain non-mngr ones) -- so mngr's hooks take effect only inside
+# the agent and never run in a plain ``claude`` session. mngr owns the file
+# outright and rewrites it fresh each provision.
 MANAGED_SETTINGS_FILENAME: Final[str] = "mngr_managed_settings.json"
 MANAGED_SETTINGS_RELATIVE_PATH: Final[tuple[str, ...]] = (*_AGENT_CLAUDE_PLUGIN_SUBPATH, MANAGED_SETTINGS_FILENAME)
 
