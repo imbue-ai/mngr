@@ -46,7 +46,11 @@ from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import would_assignment_narrow
+from imbue.mngr.config.key_resolver import is_extend_key
+from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.errors import AgentStartError
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
@@ -88,7 +92,6 @@ from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_co
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import check_claude_dialogs_dismissed
 from imbue.mngr_claude.claude_config import complete_onboarding
-from imbue.mngr_claude.claude_config import deep_merge_settings
 from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
@@ -506,26 +509,55 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
+def _find_extend_marker_paths(data: Any, path: tuple[str, ...] = ()) -> list[str]:
+    """Return dotted paths of any ``__extend``-suffixed keys anywhere in ``data``.
+
+    Used by ``_build_settings_json`` to assert that the provision-time fold
+    consumed every deferred marker. The list is empty for a fully-resolved
+    settings dict; a non-empty result indicates a fold bug, not a user typo
+    (every marker resolves against the concrete base ``B``).
+    """
+    markers: list[str] = []
+    if isinstance(data, Mapping):
+        for key, value in data.items():
+            key_path = path + (str(key),)
+            if isinstance(key, str) and is_extend_key(key):
+                markers.append(".".join(key_path))
+            markers.extend(_find_extend_marker_paths(value, key_path))
+    elif isinstance(data, (list, tuple)):
+        for index, item in enumerate(data):
+            markers.extend(_find_extend_marker_paths(item, path + (str(index),)))
+    return markers
+
+
 def _build_settings_json(
     source_claude_dir: Path,
     config: ClaudeAgentConfig,
     ctx: ProvisioningContext,
     sync_local: bool,
+    *,
+    allow_narrowing: bool = False,
 ) -> str:
     """Build settings.json content for per-agent config dirs.
 
-    Uses the local file as a base when sync_local is True and the file exists,
-    otherwise uses generated defaults. Applies context-dependent flags
-    (e.g. skipDangerousModePermissionPrompt for unattended), folds in mngr's
-    own Claude hooks (readiness; optional credential-sync on macOS; optional
-    permission auto-allow), and deep-merges the user's ``settings_overrides``.
+    Builds the provision base ``B`` (home settings.json or generated defaults +
+    context flags + mngr's own hooks), normalizes it (so a stray ``__extend`` in
+    a user's home settings.json degrades to a plain key), then folds the user's
+    ``settings_overrides`` patch onto ``B`` with config-consistent semantics:
+
+    - a bare key assigns (replacing the base value), and the narrowing guard
+      hard-errors when the assignment would drop a non-empty aggregate sibling
+      from the base unless ``allow_narrowing`` is set;
+    - a ``key__extend`` merges onto the base value (list concat / set union /
+      recursive dict merge), with nested ``__extend`` markers merging deeper.
 
     The hooks land in the config-dir ``settings.json`` (the "user" layer Claude
     reads from ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file,
     so a user's own ``--settings`` passes through and Claude layers it natively.
-    ``settings_overrides`` is deep-merged (not shallow ``dict.update``) so nested
-    siblings survive (e.g. a ``permissions.allow`` override does not wipe a
-    ``permissions.defaultMode`` from the home base -- the #1647 fix).
+
+    After the fold the result is asserted to contain no ``__extend`` key anywhere
+    (every deferred marker is consumed against the concrete base) -- a survivor
+    indicates a fold bug.
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
@@ -540,7 +572,7 @@ def _build_settings_json(
     data.update(compute_settings_json_flags(ctx))
 
     # Fold in mngr's own hooks (concatenated into the hook event lists by
-    # merge_hooks_config), then deep-merge the user's settings_overrides.
+    # merge_hooks_config).
     hook_configs = [build_readiness_hooks_config()]
     if config.sync_credentials_on_login and is_macos():
         hook_configs.append(build_credential_sync_hooks_config())
@@ -549,8 +581,57 @@ def _build_settings_json(
     for hook_config in hook_configs:
         data = merge_hooks_config(data, hook_config) or data
 
-    data = deep_merge_settings(data, config.settings_overrides)
+    # Normalize the base ``B``: resolve any ``__extend`` a user may have placed in
+    # their home settings.json against an empty base (extend-against-empty =
+    # assign), so ``B`` is concrete by construction. mngr's own flags/hooks carry
+    # no markers, so in practice only the synced home file could contribute one.
+    data = resolve_extends({}, data)
+
+    # Fold the settings_overrides patch onto the concrete base ``B``. ``__extend``
+    # markers merge against ``B``; bare keys assign (resolved here too).
+    resolved = resolve_extends(data, config.settings_overrides)
+
+    # Narrowing guard: a bare top-level override key that drops a non-empty
+    # aggregate from ``B`` hard-errors unless the escape hatch is set.
+    if not allow_narrowing:
+        narrowing_keys = [
+            key
+            for key in config.settings_overrides
+            if not is_extend_key(key) and would_assignment_narrow(data.get(key), resolved.get(key))
+        ]
+        if narrowing_keys:
+            raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowing_keys))
+
+    data = {**data, **resolved}
+
+    leaked_markers = _find_extend_marker_paths(data)
+    if leaked_markers:
+        raise PluginMngrError(
+            "Internal error building Claude settings.json: unresolved __extend marker(s) "
+            f"survived the provision fold at: {', '.join(leaked_markers)}. "
+            "Every deferred settings marker must resolve against the concrete base; "
+            "this indicates a bug in the settings fold."
+        )
     return json.dumps(data, indent=2) + "\n"
+
+
+def _build_settings_overrides_narrowing_message(narrowing_keys: Sequence[str]) -> str:
+    """Construct the user-facing error when a bare ``settings_overrides`` key would
+    silently drop entries from a non-empty aggregate in the home settings base.
+
+    Same advice shape as the config-layer narrowing error: name the keys, point
+    at the ``__extend`` suffix for additive merges, and at the escape-hatch flag.
+    """
+    keys_str = ", ".join(narrowing_keys)
+    return (
+        f"Settings narrowing detected: the settings_overrides key(s) [{keys_str}] would assign "
+        "over a non-empty list/dict/set value from your home Claude settings, silently dropping "
+        "the earlier entries.\n"
+        "To merge onto the home value instead (concatenate lists / union sets / merge dicts), "
+        'use the `__extend` suffix on the key (e.g. `permissions__extend = {allow__extend = ["..."]}`).\n'
+        "To opt into the assign-by-default (drop) behavior, set "
+        "`allow_settings_key_assignment_narrowing = true` in your mngr config."
+    )
 
 
 def _build_claude_json(
@@ -1960,7 +2041,13 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # approval missed the key and claude blocked on the custom-key TUI prompt.
         approve_api_key_for_claude(claude_json_data, host=host, options=options)
 
-        settings_json = _build_settings_json(source_claude_dir, config, ctx, sync_local=config.sync_home_settings)
+        settings_json = _build_settings_json(
+            source_claude_dir,
+            config,
+            ctx,
+            sync_local=config.sync_home_settings,
+            allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
+        )
 
         generated_files: dict[Path, str] = {
             Path("settings.json"): settings_json,
@@ -2659,7 +2746,11 @@ def get_files_for_deploy(
 
     # settings.json always ships (generated, not a direct copy)
     files[Path("~/.claude/settings.json")] = _build_settings_json(
-        local_claude_dir, deploy_config, deploy_ctx, sync_local=include_user_settings
+        local_claude_dir,
+        deploy_config,
+        deploy_ctx,
+        sync_local=include_user_settings,
+        allow_narrowing=mngr_ctx.config.allow_settings_key_assignment_narrowing,
     )
 
     # Always ship .claude.json to $HOME/.claude/ in the deploy image.

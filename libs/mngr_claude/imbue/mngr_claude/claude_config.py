@@ -864,25 +864,3 @@ def merge_hooks_config(existing_settings: dict[str, Any], hooks_config: dict[str
                 any_added = True
 
     return merged if any_added else None
-
-
-@pure
-def deep_merge_settings(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge ``overlay`` into ``base`` for Claude settings dicts.
-
-    Nested dicts merge key-by-key, lists concatenate (skipping items already
-    present, so the merge is idempotent), and any other value type takes the
-    overlay's value. Used to fold a user-supplied ``--settings`` payload into
-    mngr's managed settings so both sets of hooks survive instead of one
-    replacing the other. Does not mutate the inputs.
-    """
-    merged = copy.deepcopy(base)
-    for key, overlay_value in overlay.items():
-        base_value = merged.get(key)
-        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
-            merged[key] = deep_merge_settings(base_value, overlay_value)
-        elif isinstance(base_value, list) and isinstance(overlay_value, list):
-            merged[key] = base_value + [item for item in overlay_value if item not in base_value]
-        else:
-            merged[key] = copy.deepcopy(overlay_value)
-    return merged

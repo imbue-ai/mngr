@@ -30,6 +30,7 @@ from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import split_cli_args_string
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
@@ -4544,12 +4545,14 @@ def test_build_settings_json_includes_readiness_hooks() -> None:
     assert "SessionStart" in data["hooks"]
 
 
-def test_build_settings_json_deep_merges_settings_overrides_preserving_siblings() -> None:
-    """settings_overrides deep-merges so a nested override preserves sibling keys (#1647).
+def test_build_settings_json_extend_override_preserves_siblings() -> None:
+    """A deferred ``__extend`` settings_override merges onto the home base so a
+    nested override preserves sibling keys (#1647).
 
     A base settings.json with ``permissions.defaultMode`` plus a settings_overrides
-    setting ``permissions.allow`` must end up with BOTH keys -- the override must not
-    wipe the sibling from the home base.
+    patch ``permissions__extend = {allow__extend: [...]}`` must end up with BOTH
+    keys -- the extend merges rather than replacing, so the home ``defaultMode``
+    survives alongside the new ``allow``.
     """
     claude_dir = Path.home() / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
@@ -4557,12 +4560,114 @@ def test_build_settings_json_deep_merges_settings_overrides_preserving_siblings(
 
     ctx = ProvisioningContext(is_unattended=False)
     config = ClaudeAgentConfig(
-        check_installation=False, settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}}
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
     )
     content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
     data = json.loads(content)
     assert data["permissions"]["defaultMode"] == "acceptEdits"
     assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_bare_override_narrows_raises() -> None:
+    """A *bare* settings_override that drops a non-empty sibling aggregate from the
+    home base raises the narrowing error (bare = assign + narrowing guard).
+
+    Base ``permissions = {defaultMode, allow:[X]}``; a bare override
+    ``permissions = {allow:[Y]}`` drops ``defaultMode`` and ``allow:[X]`` -> error.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError, match="narrow"):
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+
+
+def test_build_settings_json_bare_override_narrows_allowed_with_escape_hatch() -> None:
+    """The narrowing escape hatch lets a bare override replace the sibling aggregate."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True, allow_narrowing=True)
+    data = json.loads(content)
+    assert data["permissions"] == {"allow": ["Bash(npm *)"]}
+
+
+def test_build_settings_json_normalizes_extend_marker_in_home_base() -> None:
+    """A literal ``__extend`` key in the home settings.json is stripped (normalized
+    to a bare key) by folding ``B`` against an empty base before the patch fold.
+
+    Home ``permissions__extend = {allow: [X]}`` -> base ``permissions = {allow:[X]}``;
+    output has no ``__extend`` key.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions__extend": {"allow": ["Bash(git *)"]}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert "permissions__extend" not in data
+    assert data["permissions"] == {"allow": ["Bash(git *)"]}
+    assert "__extend" not in content
+
+
+def test_build_settings_json_extend_hooks_concatenates_session_start() -> None:
+    """A ``hooks__extend.SessionStart__extend`` override concatenates onto mngr's
+    own readiness ``SessionStart`` group instead of replacing it -- both groups
+    present -- while preserving the other hook events mngr installed.
+
+    Writing the intermediate ``hooks`` key as ``hooks__extend`` is what merges
+    onto the base hooks dict; a bare ``hooks`` would assign-and-narrow (dropping
+    mngr's other hook events).
+    """
+    ctx = ProvisioningContext(is_unattended=False)
+    user_group = {"matcher": "*", "hooks": [{"type": "command", "command": "echo user"}]}
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"hooks__extend": {"SessionStart__extend": [user_group]}},
+    )
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    session_start = data["hooks"]["SessionStart"]
+    # mngr's readiness group plus the user's appended group.
+    assert len(session_start) >= 2
+    assert user_group in session_start
+    # Other hook events mngr installed (e.g. Notification) survive the extend.
+    assert len(data["hooks"]) >= 2
+
+
+def test_build_settings_json_output_has_no_extend_markers() -> None:
+    """After the provision fold the built settings.json contains no ``__extend``
+    key anywhere (every deferred marker is consumed against the concrete base)."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "acceptEdits"}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    assert "__extend" not in content
 
 
 # =============================================================================
