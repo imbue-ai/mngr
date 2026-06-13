@@ -44,31 +44,6 @@ systemctl enable --now docker 2>/dev/null || true
 """
 
 
-def _disable_other_forwards() -> list[dict[str, Any]]:
-    """Lima rules that suppress auto-forwarding of every other guest port to the host.
-
-    Mirrors mngr_lima's default disable rules (one per bind address, since Lima
-    matches the guest bind literally). Placed AFTER the slice's two explicit
-    allow rules so only the VM sshd and the container sshd are reachable from the
-    box; nothing else leaks.
-    """
-    return [
-        {
-            "guestIPMustBeZero": True,
-            "guestIP": "0.0.0.0",
-            "proto": "any",
-            "guestPortRange": [1, 65535],
-            "ignore": True,
-        },
-        {
-            "guestIP": "127.0.0.1",
-            "proto": "any",
-            "guestPortRange": [1, 65535],
-            "ignore": True,
-        },
-    ]
-
-
 def build_slice_lima_yaml(
     *,
     host_dir: str,
@@ -103,12 +78,15 @@ def build_slice_lima_yaml(
     )
     config["cpus"] = vcpus
     config["memory"] = f"{memory_mib}MiB"
-    # Expose exactly the VM sshd and the container sshd on the box's external
-    # interface; the trailing disable rules keep every other guest port private.
+    # generate_default_lima_yaml already populated portForwards with mngr_lima's
+    # rules that disable auto-forwarding of every guest port. Prepend the slice's
+    # two explicit allow rules (matched first) so only the VM sshd and the inner
+    # container sshd are reachable on the box's external interface; the inherited
+    # disable rules that follow keep every other guest port private.
     config["portForwards"] = [
         {"guestPort": _VM_SSH_GUEST_PORT, "hostPort": vm_ssh_host_port, "hostIP": "0.0.0.0"},
         {"guestPort": _CONTAINER_SSH_GUEST_PORT, "hostPort": container_ssh_host_port, "hostIP": "0.0.0.0"},
-        *_disable_other_forwards(),
+        *config["portForwards"],
     ]
     # After the base provisioning (packages, sshd, root key, btrfs disk mount):
     # make sshd listen on the extra forwardable port, then install Docker so the
