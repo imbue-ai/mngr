@@ -8,7 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
-- Changed: Per-host build args renamed -- `--vps-region=` is now `--vultr-region=` and `--vps-plan=` is now `--vultr-plan=`. The `--vps-os=` build arg is removed (`VultrVpsClient` now carries `os_id` locally; per-host overrides require a separate Vultr provider instance with its own `default_os_id`). The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
+- Changed: **Breaking** -- per-host build args renamed: `--vps-region=` is now `--vultr-region=` and `--vps-plan=` is now `--vultr-plan=`. The `--vps-os=` build arg is removed (`VultrVpsClient` now carries `os_id` locally; per-host overrides require a separate Vultr provider instance with its own `default_os_id`). The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
 - Changed: Replaced a direct ValueError raise in Vultr provider config with a dedicated custom exception type.
 
 ## [v0.1.5] - 2026-06-08
