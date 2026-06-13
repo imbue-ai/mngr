@@ -1,3 +1,0 @@
-The desktop client's latchkey services catalog (`ServicesCatalog` / `ServicePermissionInfo`) moved to `imbue.mngr_latchkey.services_catalog` and now reads the bundled `services.json` directly instead of fetching it from the running gateway's `GET /permissions/available` endpoint.
-
-This removes the catalog's dependency on gateway liveness for what is static package data, and lets the same catalog serve both the desktop permission dialog and the server-side credential-sync path. The gateway client's now-unused `get_available_services` method (and its `AvailableServiceEntry` wire model) were removed; the client is otherwise unchanged and still drives the live `permission-requests` and `permissions` extensions.

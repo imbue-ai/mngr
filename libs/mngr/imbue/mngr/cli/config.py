@@ -19,8 +19,6 @@ from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_formatter import show_help_with_pager
-from imbue.mngr.cli.model_schema import render_annotation
-from imbue.mngr.cli.model_schema import walk_model_fields
 from imbue.mngr.cli.output_helpers import AbortError
 from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import write_human_line
@@ -44,6 +42,8 @@ from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
+from imbue.mngr.utils.model_schema import render_annotation
+from imbue.mngr.utils.model_schema import walk_model_fields
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 from imbue.mngr.utils.toml_config import set_nested_value

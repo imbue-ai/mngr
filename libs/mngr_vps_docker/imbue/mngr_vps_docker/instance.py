@@ -1040,8 +1040,9 @@ class VpsDockerProvider(BaseProviderInstance):
                     # above; host_backup writes request.json / reads result.json).
                     f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
                     # Read-only view of the outer's <btrfs-mount>/snapshots/
-                    # directory so restic-in-container can read the snapshot
-                    # the outer helper produced at <btrfs-mount>/snapshots/current.
+                    # directory so restic-in-container can read the per-request
+                    # snapshots the outer helper produces at
+                    # <btrfs-mount>/snapshots/<name>.
                     f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
                 ],
                 labels=labels,
