@@ -1384,6 +1384,25 @@ class AgentCreator(MutableModel):
                             on_output=emit_log,
                             parent_cg=self.root_concurrency_group,
                         )
+                        # Materialise the fetched ref into the clone's working
+                        # tree BEFORE overlaying the worktree. clone_git_repo
+                        # only does `git init` + `git fetch` (no checkout), so
+                        # the clone's working tree is empty at this point.
+                        # _rsync_worktree_over_clone is documented to overlay
+                        # over a *checked-out* clone; without this checkout the
+                        # rsync'd files land untracked and the trailing
+                        # checkout_branch aborts with "untracked working tree
+                        # files would be overwritten by checkout". Checking out
+                        # first makes those files tracked, so the rsync just
+                        # updates them (uncommitted edits survive) and the
+                        # trailing checkout is a safe no-op for this path.
+                        if branch:
+                            checkout_branch(
+                                clone_target,
+                                GitBranch(branch),
+                                on_output=emit_log,
+                                parent_cg=self.root_concurrency_group,
+                            )
                         # Rsync the worktree's working directory over so that
                         # uncommitted changes (e.g. a locally-rsynced
                         # vendor/mngr/) are included in the Docker build context.
