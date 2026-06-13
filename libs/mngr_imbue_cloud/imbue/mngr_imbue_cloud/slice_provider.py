@@ -109,6 +109,17 @@ class SliceVpsDockerProvider(VpsDockerProvider):
     def get_outer_ssh_port(self, host_id: HostId) -> int | None:
         return self._outer_port_by_host_id.get(host_id)
 
+    def set_forwarded_ports(self, *, outer_port: int, container_port: int) -> None:
+        """Point the per-host-port seams at known box-forwarded ports.
+
+        Used when rebuilding the container on an *already-leased* slice (the
+        imbue_cloud slow path): the VM + its lima port-forwards already exist, so
+        instead of allocating ports the provider must reach the lease's recorded
+        VM-root (outer) and inner-container forwarded ports.
+        """
+        self._current_outer_port = outer_port
+        self._current_container_port = container_port
+
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this
         # mirrors MinimalVpsDockerProvider: extract git-depth, pass the rest

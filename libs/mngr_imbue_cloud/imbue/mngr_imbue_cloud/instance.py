@@ -110,9 +110,12 @@ from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.host import ImbueCloudHost
+from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import MinimalVpsDockerProvider
@@ -1370,7 +1373,15 @@ class ImbueCloudProvider(BaseProviderInstance):
         ``authorized_keys`` so the returned ``ImbueCloudHost`` (which uses the
         per-host key) can reach it.
         """
-        delegated_provider = self._build_delegated_vps_provider()
+        # A slice's container is reached at a box-forwarded host port that differs
+        # from the in-VM publish port, so its rebuild must use the slice provider
+        # (which splits publish vs connect ports) rather than the plain vps_docker
+        # one. Detected by the lease's container port differing from the standard
+        # publish port -- true only for slices (forwarded ports), never OVH VPSes.
+        is_slice = lease_result.container_ssh_port != self.config.container_ssh_port
+        delegated_provider: VpsDockerProvider = (
+            self._build_slice_rebuild_provider(lease_result) if is_slice else self._build_delegated_vps_provider()
+        )
         # The VPS root host key (port 22) feeds the rebuilt host's record; best
         # effort -- it is bookkeeping the imbue_cloud paths do not read back.
         vps_host_public_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.ssh_port) or ""
@@ -1388,11 +1399,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             # ``install_gvisor_runtime=true`` into the per-account block), so the
             # rebuilt container can run under ``--runtime runsc``. qemu purge is
             # enabled because the pool is OVH-backed (a no-op when no qemu).
-            apply_host_setup_on_outer(
-                outer,
-                install_gvisor_runtime=self.config.install_gvisor_runtime,
-                is_qemu_purge_enabled=True,
-            )
+            # Skipped for slices: the lima VM is already provisioned (Docker +
+            # sshd from the bake's provision script) and uses runc (the VM is the
+            # isolation boundary), so the OVH/runsc/qemu host-setup does not apply.
+            if not is_slice:
+                apply_host_setup_on_outer(
+                    outer,
+                    install_gvisor_runtime=self.config.install_gvisor_runtime,
+                    is_qemu_purge_enabled=True,
+                )
             delegated_provider.create_host_on_existing_vps(
                 outer=outer,
                 host_id=host_id,
@@ -1436,6 +1451,40 @@ class ImbueCloudProvider(BaseProviderInstance):
             config=vps_config,
             vps_client=ExternallyManagedVpsClient(),
         )
+
+    def _build_slice_rebuild_provider(self, lease_result: LeaseResult) -> SliceVpsDockerProvider:
+        """Construct a slice provider to rebuild the container on a leased slice VM.
+
+        A slice's container is published inside the VM on the standard guest port
+        (``container_ssh_port``, which lima forwards to a box host port) but is
+        reached from outside at the lease's forwarded ``container_ssh_port`` / VM
+        root ``ssh_port``. The slice provider already splits publish vs connect
+        ports via these per-host-port fields, so the rebuild (teardown +
+        ``create_host_on_existing_vps``) targets the right ports. runsc/gVisor is
+        not used (the VM is the isolation boundary; its Docker is plain runc).
+        """
+        slice_config = SliceVpsDockerProviderConfig(
+            host_dir=self.config.host_dir,
+            container_ssh_port=self.config.container_ssh_port,
+            box_public_address=lease_result.vps_address,
+        )
+        lima_client = LimaSliceVpsClient()
+        provider = SliceVpsDockerProvider(
+            name=self.name,
+            host_dir=self.config.host_dir,
+            mngr_ctx=self.mngr_ctx,
+            config=slice_config,
+            vps_client=lima_client,
+            slice_config=slice_config,
+            lima_client=lima_client,
+        )
+        # Point the per-host-port seams at the lease's box-forwarded ports so the
+        # rebuild's outer (VM root) and container connections target the box.
+        provider.set_forwarded_ports(
+            outer_port=lease_result.ssh_port,
+            container_port=lease_result.container_ssh_port,
+        )
+        return provider
 
     @contextmanager
     def _outer_for_leased_vps(self, host_id: HostId, lease_result: LeaseResult) -> Iterator[OuterHostInterface]:
