@@ -29,8 +29,11 @@ set -euo pipefail
 #                                                       container.
 #
 # Optional environment:
-#   CHANGELOG_VERIFY - Verification mode (default: "none"). Set to "quick" or
-#                      "full" to run the agent once during deploy.
+#   CHANGELOG_VERIFY             - Verification mode (default: "none"). Set to
+#                                  "quick" or "full" to run the agent once
+#                                  during deploy.
+#   VAULT_ADDR / VAULT_NAMESPACE - override the Vault endpoint (default: the
+#                                  imbue HCP cluster).
 #
 # The provider is read from the shared `PROVIDER` constant in
 # scripts/changelog_schedule_utils.py so the `changelog-trigger` justfile
