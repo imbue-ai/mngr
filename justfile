@@ -833,7 +833,7 @@ destroy-pool-host pool_host_id *extra_args:
 release *args:
     uv run scripts/release.py {{args}}
 
-# Requires GH_TOKEN and ANTHROPIC_API_KEY in the environment; set
+# Reads GH_TOKEN + ANTHROPIC_API_KEY from Vault (run `vault login -method=oidc` first); set
 # CHANGELOG_VERIFY=quick|full to run the agent once during deploy. Idempotent:
 # removes any existing schedule before recreating, so this is also how you
 # redeploy after editing scripts/changelog_consolidation_prompt.md or

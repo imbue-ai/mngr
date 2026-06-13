@@ -22,13 +22,19 @@ set -euo pipefail
 # Usage:
 #   ./scripts/changelog_deploy.sh
 #
-# Required environment:
-#   GH_TOKEN          - token for bot@imbue.com.
-#   ANTHROPIC_API_KEY - used by claude inside the cron container.
+# Secrets are read from Vault at deploy time (no env vars are consulted) and
+# baked into the schedule via the --pass-env flags below. Run `vault login -method=oidc`
+# first:
+#   secrets/mngr/dev/github    key GH_TOKEN          - token for bot@imbue.com.
+#   secrets/mngr/dev/anthropic key ANTHROPIC_API_KEY - claude key for the cron
+#                                                       container.
 #
 # Optional environment:
-#   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
-#                        or "full" to run the agent once during deploy.
+#   CHANGELOG_VERIFY             - Verification mode (default: "none"). Set to
+#                                  "quick" or "full" to run the agent once
+#                                  during deploy.
+#   VAULT_ADDR / VAULT_NAMESPACE - override the Vault endpoint (default: the
+#                                  imbue HCP cluster).
 #
 # The provider is read from the shared `PROVIDER` constant in
 # scripts/changelog_schedule_utils.py so the `changelog-trigger` justfile
@@ -36,9 +42,8 @@ set -euo pipefail
 # providers, edit that constant and re-run this script.
 #
 # To trigger a fire on demand and read its JSON outcome (status, with pr_url on
-# success or notes on failure):
-#   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
-#     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
+# success or notes on failure), use the justfile recipe:
+#   just changelog-trigger
 # (claude's final assistant message is the structured outcome; see also Modal app logs)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,13 +65,44 @@ export MNGR_ROOT_NAME="mngr-changelog-schedule"
 unset MNGR_HOST_DIR
 unset MNGR_PREFIX
 
-# Validate that required env vars are set so the agent can function.
-for var in GH_TOKEN ANTHROPIC_API_KEY; do
-    if [ -z "${!var:-}" ]; then
-        echo "Error: $var is not set. The scheduled agent needs this to operate." >&2
-        exit 1
-    fi
-done
+# Pull the agent's credentials from Vault (the source of truth -- no ambient
+# env vars are consulted) and export them so the --pass-env flags below bake
+# them into the schedule. Requires a valid `vault login -method=oidc`. VAULT_ADDR /
+# VAULT_NAMESPACE default to the imbue HCP cluster (matching
+# apps/minds/imbue/minds/envs/vault_reader.py) so this works from a shell that
+# hasn't exported them; without a default, the vault CLI would hit
+# https://127.0.0.1:8200.
+export VAULT_ADDR="${VAULT_ADDR:-https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200}"
+export VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
+if ! command -v vault >/dev/null 2>&1; then
+    echo "Error: 'vault' CLI not found on PATH. Install it and run 'vault login -method=oidc'." >&2
+    exit 1
+fi
+
+# Echo secrets/<$1> key <$2>, or exit non-zero. pipefail propagates a failed
+# `vault kv get` (e.g. not logged in); the extractor exits 1 if the key is
+# absent/empty. The value itself is never printed by this script.
+read_vault_secret() {
+    vault kv get -format=json -mount=secrets "$1" | python3 -c '
+import json, sys
+
+data = json.load(sys.stdin).get("data", {}).get("data", {})
+value = data.get(sys.argv[1])
+if not value:
+    sys.exit(1)
+sys.stdout.write(value)
+' "$2"
+}
+
+if ! GH_TOKEN=$(read_vault_secret mngr/dev/github GH_TOKEN); then
+    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    exit 1
+fi
+if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/dev/anthropic ANTHROPIC_API_KEY); then
+    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    exit 1
+fi
+export GH_TOKEN ANTHROPIC_API_KEY
 
 # IS_SANDBOX=1 lets claude accept --dangerously-skip-permissions as root
 # inside the Modal container.

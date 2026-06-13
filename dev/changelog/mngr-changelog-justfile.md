@@ -19,3 +19,9 @@ schedule runs nightly), opening a PR.
 `scripts/release.py`'s pre-release gate now points users at `just
 changelog-trigger` to consolidate pending entries, instead of printing a long
 `mngr schedule run ... --disable-plugin ...` one-liner.
+
+`changelog_deploy.sh` now reads the agent's `GH_TOKEN` and `ANTHROPIC_API_KEY`
+from Vault (`secrets/mngr/dev/github` and `secrets/mngr/dev/anthropic`) at
+deploy time instead of from the operator's environment; run `vault login
+-method=oidc` first. `VAULT_ADDR`/`VAULT_NAMESPACE` default to the imbue HCP
+cluster.
