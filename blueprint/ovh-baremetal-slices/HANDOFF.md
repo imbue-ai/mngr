@@ -70,7 +70,39 @@ All in `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/` unless noted. Every modul
 
 ---
 
-## Remaining work — the live end-to-end validation (NOT done)
+## Live end-to-end validation — DONE (2026-06-13, both fast + slow paths)
+
+Validated live against the real box (`15.204.140.221`, dev-josh-1 env, josh@imbue.com).
+See `blueprint/slice-fast-path-fixes/plan-slice-fast-path-fixes.md` for the design of the
+fixes this required.
+
+- **`admin server allocate-slice` actually bakes** (codified): syncs this branch's mngr +
+  the FCT workspace to the box once, bakes the slice(s) in parallel (`--count`, `--dry-run`),
+  authorizes the pool key on the VM root + container, tears down the bootstrap chat agent +
+  sentinel, and inserts an `available` slice `pool_hosts` row. Confirmed: VM carved, FCT image
+  built inside it, row written with the box-forwarded ports + lima names + `{cpus:3,memory_gb:8}`.
+- **Fast path** (`-b fast_mode=require`): leased the slice, connector injected the user key on
+  both forwarded ports, adopted the pre-baked `system-services` agent; `mngr list` shows HOST
+  STATE RUNNING (D1 fix), `mngr exec` works, `/mngr` is btrfs.
+- **Slow path** (`-b fast_mode=prevent`): leased + tore down the baked container + rebuilt it on
+  the slice VM (slice-aware rebuild: publish guest 2222 → connect box-forwarded 22001); `mngr
+  exec` works, `nproc=3` (matches advertised cpus), `/mngr` btrfs, FCT workspace present.
+- **Release teardown**: the connector's exact `limactl delete` / `disk delete` commands were run
+  against the box and destroyed the VM + disk cleanly (slot freed).
+
+### Known gap (not a code bug): connector deployment
+The dev-josh-1 connector is deployed from `20260608T180019Z`, which **predates this branch's
+slice-release fork**. So the full `release_host` *endpoint* (which branches on `backend_kind` →
+`clean_up_slice_on_box`) was NOT exercised end-to-end there: `mngr destroy` reports success but
+the old connector leaves the slice VM + row behind. Leasing works because the old connector's
+lease path is unchanged. The slice-release **code** is on this branch + unit-tested, and the
+**teardown commands it issues were verified live on the box**. To close this fully: redeploy the
+connector for the tier (`minds env deploy`), then re-run `mngr destroy` on a leased slice and
+confirm the VM is gone. (Deploying is outward-facing; left for an operator to trigger.)
+
+---
+
+## Original remaining-work notes (now superseded by the validation above)
 
 Goal (user's words): "allocate a real slice on it, bake an available host for that slice, then create a new workspace that uses that fast-path imbue_cloud host and make sure it actually works." The user wants the **FCT** bake (a real minds workspace), not a plain image.
 
