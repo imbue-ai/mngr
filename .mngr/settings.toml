@@ -84,12 +84,7 @@ default_memory = 8
 default_idle_timeout = 600
 default_sandbox_timeout = 7200
 
-# Shared GCP config consumed by the `gcp` create-template above. The per-developer
-# allowed_ssh_cidrs is intentionally absent here: it lives in the gitignored
-# .mngr/settings.local.toml, and the firewall rule itself is created once per project by
-# `mngr gcp prepare --allowed-ssh-cidr <cidr>` (the hot create path only resolves it
-# read-only). project_id is likewise omitted -- it falls back to the gcloud/ADC default;
-# pin it here if you have access to several projects.
+# Shared GCP config consumed by the `gcp` create-template above.
 [providers.gcp]
 backend = "gcp"
 default_region = "us-west1"
