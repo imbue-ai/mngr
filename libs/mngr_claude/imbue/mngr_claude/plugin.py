@@ -408,23 +408,6 @@ _MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MAN
 MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
 
 
-def _unquote_cli_settings_value(value: str) -> str:
-    """Recover the literal payload of a shell-quoted ``cli_args`` ``--settings`` value.
-
-    String-form ``cli_args`` are tokenized by ``split_cli_args_string`` (non-POSIX
-    shlex, which keeps quote characters), so a value reaches us still wrapped in
-    the user's shell quoting. ``shlex.split`` unwraps it exactly as the shell
-    would before claude sees it. A token that does not resolve to a single shell
-    word is a malformed config and raises.
-    """
-    words = shlex.split(value)
-    if len(words) != 1:
-        raise UserInputError(
-            f"Could not parse the --settings value {value!r} from cli_args: it must be a single shell-quoted argument."
-        )
-    return words[0]
-
-
 _PLUGINS_DIR_MARKER: Final[str] = "/plugins/"
 """Generic marker for extracting relative plugin paths.
 
@@ -1807,26 +1790,25 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
 
         return transfers
 
-    def _configure_agent_hooks(self, host: OnlineHostInterface, agent_args: tuple[str, ...] = ()) -> None:
+    def _configure_agent_hooks(self, host: OnlineHostInterface) -> None:
         """Write mngr's Claude hooks to the agent's managed settings file.
 
-        Loaded at launch via ``claude --settings`` (see ``assemble_command``)
-        from a file mngr owns under the agent state dir -- not the project's
+        This is the ``use_env_config_dir``-mode channel only. In that mode there
+        is no per-agent config dir to bake hooks into, so mngr loads them at
+        launch via ``claude --settings`` (see ``assemble_command``) from a file
+        it owns under the agent state dir -- not the project's
         ``.claude/settings.local.json``, which plain ``claude`` also reads (see
         ``get_managed_settings_path``). Overwritten fresh each provision, so it
         never accumulates stale hooks.
+
+        In normal mode the same hooks are baked into the per-agent config-dir
+        ``settings.json`` by ``_build_settings_json`` instead; this method is not
+        called.
 
         Always writes the readiness hooks (which mark the agent active/idle via
         files in its state dir). Adds the macOS keychain-sync hook when
         sync_credentials_on_login is set, and the permission auto-allow hook
         when auto_allow_permissions is set.
-
-        Any user-supplied ``--settings`` (from config ``cli_args`` or CLI
-        passthrough ``agent_args``) is merged in too, so the user's hooks and
-        mngr's both fire. claude honors only the last ``--settings`` on the
-        command line, so folding the user's payload into this single managed
-        file is what keeps mngr's hooks from being clobbered (or vice versa);
-        ``assemble_command`` drops the user's own ``--settings`` flag in turn.
         """
         # The always-on readiness hooks, plus the optional credential-sync
         # (macOS) and permission auto-allow hooks.
@@ -1840,48 +1822,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         for hook_config in hook_configs:
             settings = merge_hooks_config(settings, hook_config) or settings
 
-        for user_settings_value in self._collect_user_settings_values(agent_args):
-            settings = deep_merge_settings(settings, self._resolve_user_settings(host, user_settings_value))
-
         settings_path = get_managed_settings_path(self._get_agent_dir())
-        # The plugin/claude/ parent may not exist yet (e.g. in use_env_config_dir
-        # mode, where the per-agent config dir is not provisioned), so create it.
+        # The plugin/claude/ parent may not exist yet (in use_env_config_dir
+        # mode the per-agent config dir is not provisioned), so create it.
         host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
         with log_span("Configuring agent hooks in {}", settings_path):
             host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
-
-    def _collect_user_settings_values(self, agent_args: tuple[str, ...]) -> tuple[str, ...]:
-        """Return the literal value of every user ``--settings`` flag.
-
-        ``cli_args`` tokens are shell-quoted (``split_cli_args_string`` keeps the
-        quote characters), so each value is run back through ``shlex.split`` to
-        recover the payload the shell would have handed to claude. ``agent_args``
-        are raw argv and are used as-is.
-        """
-        cli_values, _ = partition_settings_args(self.agent_config.cli_args)
-        agent_values, _ = partition_settings_args(agent_args)
-        return tuple(_unquote_cli_settings_value(value) for value in cli_values) + agent_values
-
-    def _resolve_user_settings(self, host: OnlineHostInterface, value: str) -> dict[str, Any]:
-        """Resolve a user ``--settings`` value -- inline JSON or a file path -- to a dict."""
-        stripped = value.strip()
-        if stripped.startswith("{"):
-            raw = stripped
-        else:
-            settings_file = Path(value)
-            if not settings_file.is_absolute():
-                settings_file = self.work_dir / settings_file
-            try:
-                raw = host.read_text_file(settings_file)
-            except OSError as error:
-                raise UserInputError(f"Could not read --settings file '{settings_file}': {error}") from error
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise UserInputError(f"Invalid JSON in --settings value '{value}': {error}") from error
-        if not isinstance(parsed, dict):
-            raise UserInputError(f"--settings value '{value}' must be a JSON object, got {type(parsed).__name__}.")
-        return parsed
 
     def interactively_dismiss_claude_dialogs(self, source_path: Path | None, mngr_ctx: MngrContext) -> None:
         """Ensure all known Claude startup dialogs are dismissed in the global config.
@@ -2193,9 +2139,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
             if not config.use_env_config_dir:
                 self._setup_per_agent_config_dir(host, options, mngr_ctx)
 
-            # Configure readiness hooks (for both local and remote hosts), folding in
-            # any user-supplied --settings from cli_args / agent_args.
-            self._configure_agent_hooks(host, options.agent_args)
+            # Configure mngr's hooks. In normal mode they are baked into the
+            # per-agent config-dir settings.json by _setup_per_agent_config_dir
+            # (-> _build_settings_json) above. In use_env_config_dir mode there is
+            # no per-agent config dir, so write the managed --settings file instead.
+            if config.use_env_config_dir:
+                self._configure_agent_hooks(host)
 
             # should be done by now, just wanted to do in parallel for latency reasons
             provision_backgroun_script_thread.join(60.0)

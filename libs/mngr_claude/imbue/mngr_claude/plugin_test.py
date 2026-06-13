@@ -8,7 +8,6 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 from typing import cast
 from unittest.mock import patch
 from uuid import UUID
@@ -1234,7 +1233,9 @@ def test_configure_agent_hooks_writes_managed_file_not_settings_local(
     # Init git but do NOT add a .gitignore entry: this used to raise.
     init_git_repo(work_dir, initial_commit=False)
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     agent._configure_agent_hooks(host)
 
@@ -1256,7 +1257,9 @@ def test_configure_agent_hooks_works_without_a_git_repo(
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     agent._configure_agent_hooks(host)
 
@@ -1275,7 +1278,9 @@ def test_configure_agent_hooks_creates_managed_settings_file(
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     agent._configure_agent_hooks(host)
 
@@ -1307,7 +1312,9 @@ def test_configure_agent_hooks_does_not_touch_existing_settings_local(
     original_text = json.dumps(user_settings)
     settings_local.write_text(original_text)
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     agent._configure_agent_hooks(host)
 
@@ -1335,7 +1342,9 @@ def test_configure_agent_hooks_overwrites_managed_file_fresh(
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     managed_path = get_managed_settings_path(agent._get_agent_dir())
     managed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1359,7 +1368,10 @@ def test_configure_agent_hooks_adds_credential_sync_on_macos(
     work_dir.mkdir()
 
     agent = _make_hooks_test_agent(
-        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True)
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=True, use_env_config_dir=True),
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
@@ -1386,7 +1398,10 @@ def test_configure_agent_hooks_skips_credential_sync_when_disabled(
     work_dir.mkdir()
 
     agent = _make_hooks_test_agent(
-        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False)
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, sync_credentials_on_login=False, use_env_config_dir=True),
     )
 
     with patch(f"{_CLAUDE_AGENT_MODULE}.is_macos", return_value=True):
@@ -1467,7 +1482,10 @@ def test_configure_agent_hooks_adds_permission_auto_allow_when_enabled(
     _init_git_with_gitignore(work_dir)
 
     agent = _make_hooks_test_agent(
-        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True)
+        host,
+        temp_mngr_ctx,
+        work_dir,
+        ClaudeAgentConfig(check_installation=False, auto_allow_permissions=True, use_env_config_dir=True),
     )
 
     agent._configure_agent_hooks(host)
@@ -1497,7 +1515,9 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     work_dir = tmp_path / "work"
     work_dir.mkdir()
 
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
+    agent = _make_hooks_test_agent(
+        host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False, use_env_config_dir=True)
+    )
 
     agent._configure_agent_hooks(host)
 
@@ -1510,125 +1530,13 @@ def test_configure_agent_hooks_does_not_add_permission_auto_allow_by_default(
     assert len(auto_allow_hooks) == 0
 
 
-def _session_start_commands(settings: dict[str, Any]) -> list[str]:
-    """Flatten every SessionStart hook command in a settings dict."""
-    return [
-        inner["command"] for entry in settings["hooks"].get("SessionStart", []) for inner in entry.get("hooks", [])
-    ]
-
-
-def test_configure_agent_hooks_merges_user_settings_from_cli_args(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A user ``--settings`` in cli_args is folded into the managed file alongside mngr's hooks.
-
-    This mirrors a real config that injects its own SessionStart hook via
-    ``cli_args = "--settings '{...}'"``. Both the user's hook and mngr's
-    readiness hooks must end up in the managed file, since claude would
-    otherwise honor only one ``--settings``.
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    user_hook_command = "echo user-session-start"
-    user_settings_json = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}})
-    config = ClaudeAgentConfig(
-        cli_args=split_cli_args_string(f"--settings '{user_settings_json}'"), check_installation=False
-    )
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
-
-    agent._configure_agent_hooks(host)
-
-    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
-    commands = _session_start_commands(settings)
-    # The user's hook is present...
-    assert user_hook_command in commands
-    # ...and so are mngr's own readiness SessionStart hooks (more than just the user's one).
-    assert len(commands) > 1
-
-
-def test_configure_agent_hooks_merges_user_settings_from_agent_args(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A user ``--settings`` passed via agent_args (raw argv) is also merged in."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    user_hook_command = "echo agent-arg-session-start"
-    user_settings_json = json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}})
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
-
-    agent._configure_agent_hooks(host, agent_args=("--settings", user_settings_json))
-
-    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
-    assert user_hook_command in _session_start_commands(settings)
-
-
-def test_configure_agent_hooks_merges_user_settings_from_file_path(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A user ``--settings`` that names a file is read and merged (resolved against work_dir)."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    user_hook_command = "echo file-session-start"
-    settings_file = work_dir / "user-settings.json"
-    settings_file.write_text(json.dumps({"hooks": {"SessionStart": [{"hooks": [{"command": user_hook_command}]}]}}))
-    # Reference it with a relative path, which must resolve against work_dir.
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, ClaudeAgentConfig(check_installation=False))
-
-    agent._configure_agent_hooks(host, agent_args=("--settings", "user-settings.json"))
-
-    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
-    assert user_hook_command in _session_start_commands(settings)
-
-
-def test_configure_agent_hooks_preserves_user_non_hook_settings(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """Non-hook keys in a user ``--settings`` (e.g. model) survive the merge."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    user_settings_json = json.dumps({"model": "opus"})
-    config = ClaudeAgentConfig(
-        cli_args=split_cli_args_string(f"--settings '{user_settings_json}'"), check_installation=False
-    )
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
-
-    agent._configure_agent_hooks(host)
-
-    settings = json.loads(get_managed_settings_path(agent._get_agent_dir()).read_text())
-    assert settings["model"] == "opus"
-    # mngr's hooks are still there too.
-    assert "SessionStart" in settings["hooks"]
-
-
-def test_configure_agent_hooks_rejects_invalid_user_settings_json(
-    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
-) -> None:
-    """A malformed inline ``--settings`` JSON raises a clear UserInputError."""
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-
-    config = ClaudeAgentConfig(
-        cli_args=split_cli_args_string("--settings '{not valid json}'"), check_installation=False
-    )
-    agent = _make_hooks_test_agent(host, temp_mngr_ctx, work_dir, config)
-
-    with pytest.raises(UserInputError):
-        agent._configure_agent_hooks(host)
-
-
 def test_provision_configures_readiness_hooks(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """provision should configure agent hooks."""
+    """Normal mode bakes mngr's hooks into the per-agent config-dir settings.json.
+
+    No managed --settings file and no project settings.local.json are written.
+    """
     # check_installation=False avoids running `claude --version` which would fail in test env
     agent, host = make_claude_agent(
         local_provider,
@@ -1642,13 +1550,50 @@ def test_provision_configures_readiness_hooks(
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # Verify the managed hooks file was created (and not the project settings.local.json)
+    # The hooks live in the per-agent config-dir settings.json.
+    settings_path = agent.get_claude_config_dir() / "settings.json"
+    assert settings_path.exists()
+    settings = json.loads(settings_path.read_text())
+    assert "hooks" in settings
+    assert "SessionStart" in settings["hooks"]
+
+    # The managed --settings file is NOT written in normal mode, and neither is
+    # the project settings.local.json.
+    assert not get_managed_settings_path(agent._get_agent_dir()).exists()
+    assert not (agent.work_dir / ".claude" / "settings.local.json").exists()
+
+
+def test_provision_configures_readiness_hooks_in_env_config_dir_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, provision writes the managed --settings file.
+
+    There is no per-agent config dir to bake hooks into, so the managed file is
+    the only channel.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
+    )
+    _init_git_with_gitignore(agent.work_dir)
+
+    options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
+    agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # The managed --settings file holds the hooks in this mode.
     managed_path = get_managed_settings_path(agent._get_agent_dir())
     assert managed_path.exists()
     settings = json.loads(managed_path.read_text())
     assert "hooks" in settings
     assert "SessionStart" in settings["hooks"]
-    assert not (agent.work_dir / ".claude" / "settings.local.json").exists()
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
