@@ -27,6 +27,12 @@ SLICE_VM_DISK_GIB: Final[int] = 80
 # never overcommitted; CPU is, mildly, depending on the box's thread count.
 DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 1.5
 
+# Fallback thread count when a server's cpu_threads is unknown (NULL/0), so the
+# vCPU computation has a sane positive value instead of dividing by missing data.
+# A ready box in production always has cpu_threads populated; this only guards the
+# pre-ready / not-yet-detected case.
+DEFAULT_SLICE_FALLBACK_CPU_THREADS: Final[int] = 8
+
 # Range of host ports on each box reserved for slice port-forwards. Each slice
 # claims two: one -> the VM's root sshd (22), one -> the inner container sshd (2222).
 DEFAULT_SLICE_PORT_RANGE_START: Final[int] = 22000

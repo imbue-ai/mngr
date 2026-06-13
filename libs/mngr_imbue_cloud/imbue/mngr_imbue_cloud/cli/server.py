@@ -21,6 +21,7 @@ import psycopg2
 from loguru import logger
 
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
+from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_FALLBACK_CPU_THREADS
 from imbue.mngr_imbue_cloud.bare_metal import SLICE_ADVERTISED_RAM_GB
 from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
@@ -171,7 +172,7 @@ def plan_next_slice_attributes(capacity: BareMetalServerCapacity, overcommit_rat
     with mild overcommit, so a lease matches a slice or a VPS identically.
     """
     server = capacity.server
-    threads = server.cpu_threads or SLICE_ADVERTISED_RAM_GB
+    threads = server.cpu_threads or DEFAULT_SLICE_FALLBACK_CPU_THREADS
     slot_count = server.slot_count or 1
     return {
         "memory_gb": SLICE_ADVERTISED_RAM_GB,
