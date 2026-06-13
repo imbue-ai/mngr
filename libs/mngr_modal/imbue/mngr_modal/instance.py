@@ -2151,7 +2151,13 @@ log "=== Shutdown script completed ==="
         self._destroy_agents_on_host(host.id)
         self._delete_host_record(host.id)
         if self.config.is_host_volume_created:
-            self._delete_host_volume(host.id)
+            # delete_host returns None per the interface; a volume that could not be removed
+            # is surfaced through destroy_host, not here (GC calls delete_host after the grace
+            # period and must not abort the sweep). Log and swallow the CleanupFailedGroup.
+            try:
+                self._delete_host_volume(host.id)
+            except CleanupFailedGroup as group:
+                logger.warning("Cleanup left resources behind while deleting host {}: {}", host.id, group)
 
     def _delete_host_volume(self, host_id: HostId) -> None:
         """Delete the persistent host volume.
