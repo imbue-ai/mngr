@@ -591,7 +591,6 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "start": frozenset({"--connect-command"}),
     "stop": frozenset({"--graceful-timeout"}),
     "destroy": frozenset(),
-    "message": frozenset({"--provider"}),
     "exec": frozenset(),
     "cleanup": frozenset({"--action", "--snapshot-before"}),
     "limit": frozenset(
