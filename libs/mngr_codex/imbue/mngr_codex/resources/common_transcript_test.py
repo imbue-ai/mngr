@@ -24,6 +24,8 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
 
 
@@ -249,6 +251,29 @@ def test_empty_user_message_is_dropped(state_dir: Path) -> None:
     _run_converter(state_dir)
 
     assert _read_common_events(state_dir) == []
+
+
+def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:
+    """Every record codex's converter emits must validate against the shared envelope schema.
+
+    Guards against the codex emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    _write_raw_stream(
+        state_dir,
+        [
+            _user("hello"),
+            _assistant("hi there"),
+            _function_call("shell", '{"command": "ls"}', "call_1"),
+            _function_call_output("call_1", "file.txt"),
+        ],
+    )
+    _run_converter(state_dir)
+    records = _read_common_events(state_dir)
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
 
 
 def test_converter_is_idempotent_across_runs(state_dir: Path) -> None:
