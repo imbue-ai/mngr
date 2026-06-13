@@ -68,8 +68,13 @@ def fake_host(host_dir: Path) -> FakeHost:
     return FakeHost(host_dir)
 
 
+def _settings_json_path(host_dir: Path, agent_id: AgentId) -> Path:
+    """Path of the agent's per-agent config-dir settings.json (where proxy hooks go in normal mode)."""
+    return get_agent_state_dir_path(host_dir, agent_id) / "plugin" / "claude" / "anthropic" / "settings.json"
+
+
 def _managed_settings_path(host_dir: Path, agent_id: AgentId) -> Path:
-    """Path of the agent's mngr-managed Claude settings file (where proxy hooks go)."""
+    """Path of the agent's mngr-managed Claude --settings file (env-config-dir mode only)."""
     return get_managed_settings_path(get_agent_state_dir_path(host_dir, agent_id))
 
 
@@ -85,7 +90,7 @@ def test_plugin_hooks_register_on_claude_agent(work_dir: Path, fake_host: FakeHo
 
     _provision(agent, fake_host, None)
 
-    settings_path = _managed_settings_path(fake_host.host_dir, agent_id)
+    settings_path = _settings_json_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -190,11 +195,11 @@ def test_plugin_allows_mngr_baseline_stop_hook_for_subagent_proxy_child(work_dir
     _provision(agent, fake_host, None)
 
     # The inherited mngr baseline Stop hook is recognized as safe and left in
-    # settings.local.json; the proxy's own hooks go to the managed file.
+    # settings.local.json; the proxy's own hooks go to the config-dir settings.json.
     settings = json.loads(settings_path.read_text())
     assert "Stop" in settings["hooks"]
 
-    managed = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    managed = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
     assert "PreToolUse" in managed["hooks"]
 
 
@@ -434,7 +439,7 @@ def test_deny_mode_installs_pretooluse_deny_and_sessionstart_reaper(
 
     _provision(agent, fake_host, ctx)
 
-    settings_path = _managed_settings_path(fake_host.host_dir, agent.id)
+    settings_path = _settings_json_path(fake_host.host_dir, agent.id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]
@@ -663,7 +668,7 @@ def test_proxy_mode_default_when_config_absent(
     # temp_mngr_ctx has no subagent_proxy plugin config -- defaults apply.
     _provision(agent, fake_host, temp_mngr_ctx)
 
-    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    settings = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     # PROXY mode installs all three hook events.
     assert "PreToolUse" in hooks
@@ -680,7 +685,7 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
 
     _provision(agent, fake_host, ctx)
 
-    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    settings = json.loads(_settings_json_path(fake_host.host_dir, agent.id).read_text())
     hooks = settings["hooks"]
     pre_cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
     assert "imbue.mngr_claude_subagent_proxy.hooks.spawn" in pre_cmd
@@ -688,16 +693,45 @@ def test_explicit_proxy_mode_installs_full_proxy_hooks(
     assert "SessionStart" in hooks
 
 
-def test_deny_mode_merges_into_existing_managed_settings(
+def test_proxy_hooks_land_in_managed_file_in_env_config_dir_mode(
+    work_dir: Path, fake_host: FakeHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In use_env_config_dir mode the proxy hooks land in the managed --settings file.
+
+    There is no per-agent config dir, so the managed file is the only channel
+    (mirroring mngr_claude's own _configure_agent_hooks in that mode). The
+    config-dir settings.json is NOT written.
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent = FakeAgent(
+        AgentId.generate(),
+        work_dir,
+        ClaudeAgentConfig(use_env_config_dir=True),
+        name=AgentName("reviewer"),
+    )
+
+    _provision(agent, fake_host, None)
+
+    settings = json.loads(_managed_settings_path(fake_host.host_dir, agent.id).read_text())
+    hooks = settings["hooks"]
+    assert "PreToolUse" in hooks
+    assert "SessionStart" in hooks
+    # The per-agent config-dir settings.json is not used in this mode.
+    assert not _settings_json_path(fake_host.host_dir, agent.id).exists()
+
+
+def test_deny_mode_merges_into_existing_settings_json(
     work_dir: Path, fake_host: FakeHost, temp_mngr_ctx: MngrContext
 ) -> None:
-    """Deny mode preserves pre-existing entries in the managed settings file.
+    """Deny mode preserves pre-existing entries in the config-dir settings.json.
 
     mngr_claude provisioning writes its readiness / user-prompt hooks into the
-    managed settings file before this plugin runs (we are ``trylast``). Deny
-    mode must merge its single PreToolUse:Agent entry without clobbering those.
+    settings.json before this plugin runs (we are ``trylast``). Deny mode must
+    merge its single PreToolUse:Agent entry without clobbering those.
     """
-    managed_path = _managed_settings_path(fake_host.host_dir, agent_id := AgentId.generate())
+    managed_path = _settings_json_path(fake_host.host_dir, agent_id := AgentId.generate())
     managed_path.parent.mkdir(parents=True, exist_ok=True)
     managed_path.write_text(
         json.dumps(
@@ -743,10 +777,10 @@ def test_plugin_strip_hooks_is_safe_when_settings_missing(work_dir: Path, fake_h
 
     _provision(agent, fake_host, None)
 
-    # Provisioning still wrote the merged managed settings
+    # Provisioning still wrote the merged config-dir settings
     # (PreToolUse/PostToolUse/SessionStart), and the to-be-stripped keys were
     # never present to begin with.
-    settings_path = _managed_settings_path(fake_host.host_dir, agent_id)
+    settings_path = _settings_json_path(fake_host.host_dir, agent_id)
     assert settings_path.exists()
     settings = json.loads(settings_path.read_text())
     hooks = settings["hooks"]

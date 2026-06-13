@@ -25,6 +25,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_managed_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
@@ -312,34 +313,33 @@ def _write_proxy_skill(host: OnlineHostInterface, work_dir: Path) -> None:
     host.write_text_file(skill_path, content)
 
 
-def _merge_hooks_into_managed_settings(
-    host: OnlineHostInterface, managed_settings_path: Path, hooks_config: dict[str, Any]
-) -> None:
-    """Layer ``hooks_config`` onto the agent's mngr-managed settings file.
+def _merge_hooks_into_settings(host: OnlineHostInterface, settings_path: Path, hooks_config: dict[str, Any]) -> None:
+    """Layer ``hooks_config`` onto the agent's Claude settings file.
 
-    mngr's hooks live in this per-agent file (loaded via ``claude --settings``;
-    see ``get_managed_settings_path``), not the project's settings.local.json.
-    mngr_claude provisioning writes the base file before this plugin's
-    ``on_after_provisioning`` runs, so it normally already exists.
+    In normal mode this is the per-agent config-dir ``settings.json`` (the "user"
+    layer Claude reads from ``$CLAUDE_CONFIG_DIR``); in ``use_env_config_dir`` mode
+    it is the mngr-managed ``--settings`` file (see ``get_managed_settings_path``).
+    Either way mngr_claude provisioning writes the base file before this plugin's
+    ``on_after_provisioning`` runs, so it normally already exists; this read-merge-
+    write tolerates a missing file regardless. ``merge_hooks_config`` preserves
+    sibling (non-hook) keys.
     """
     existing_settings: dict[str, Any] = {}
     try:
-        existing_settings = json.loads(host.read_text_file(managed_settings_path))
+        existing_settings = json.loads(host.read_text_file(settings_path))
     except FileNotFoundError:
         pass
     except json.JSONDecodeError:
-        logger.warning(
-            "Could not parse managed settings at {}; skipping subagent-proxy hook merge", managed_settings_path
-        )
+        logger.warning("Could not parse settings at {}; skipping subagent-proxy hook merge", settings_path)
         return
 
     merged = merge_hooks_config(existing_settings, hooks_config)
     if merged is None:
-        logger.debug("Subagent-proxy hooks already configured in {}", managed_settings_path)
+        logger.debug("Subagent-proxy hooks already configured in {}", settings_path)
         return
     # Ensure the parent exists so this doesn't depend on mngr_claude creating it first.
-    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(managed_settings_path.parent))}", timeout_seconds=5.0)
-    host.write_text_file(managed_settings_path, json.dumps(merged, indent=2) + "\n")
+    host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(settings_path.parent))}", timeout_seconds=5.0)
+    host.write_text_file(settings_path, json.dumps(merged, indent=2) + "\n")
 
 
 def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_dir: Path) -> None:
@@ -368,8 +368,8 @@ def _guard_user_stop_hooks_in_project_settings(host: OnlineHostInterface, work_d
         host.write_text_file(settings_path, json.dumps(settings, indent=2) + "\n")
 
 
-def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, managed_settings_path: Path) -> None:
-    """Merge the deny-mode hooks into the agent's mngr-managed settings file.
+def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, hook_settings_path: Path) -> None:
+    """Merge the deny-mode hooks into the agent's Claude settings file.
 
     Deny mode installs two hooks: a PreToolUse:Agent hook that denies
     Task calls with a short skill-pointer reason pointing at the
@@ -386,20 +386,20 @@ def _merge_subagent_proxy_deny_hooks(host: OnlineHostInterface, managed_settings
     project ``settings.json`` for un-guarded Stop hooks (same reason).
     The surface is deliberately much smaller than PROXY mode.
     """
-    _merge_hooks_into_managed_settings(host, managed_settings_path, build_subagent_proxy_deny_hooks_config())
+    _merge_hooks_into_settings(host, hook_settings_path, build_subagent_proxy_deny_hooks_config())
 
 
-def _merge_subagent_proxy_hooks(host: OnlineHostInterface, managed_settings_path: Path, work_dir: Path) -> None:
+def _merge_subagent_proxy_hooks(host: OnlineHostInterface, hook_settings_path: Path, work_dir: Path) -> None:
     """Install the subagent-proxy hooks and guard user-installed Stop hooks.
 
-    The proxy's own hooks go into the agent's mngr-managed settings file
-    (``managed_settings_path``). Separately, every user-defined
+    The proxy's own hooks go into the agent's Claude settings file
+    (``hook_settings_path``). Separately, every user-defined
     Stop/SubagentStop command in the project's settings.local.json and in
     the plugin caches is wrapped with the MNGR_CLAUDE_SUBAGENT_PROXY_CHILD
     guard so it no-ops inside spawned proxy children -- see
     ``_guard_user_stop_hooks_in_project_settings``.
     """
-    _merge_hooks_into_managed_settings(host, managed_settings_path, build_subagent_proxy_hooks_config())
+    _merge_hooks_into_settings(host, hook_settings_path, build_subagent_proxy_hooks_config())
 
     _guard_user_stop_hooks_in_project_settings(host, work_dir)
 
@@ -648,27 +648,37 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
       via Bash. The reaper still picks up terminal children spawned
       that way via the shared parent-id label.
     """
-    if not isinstance(agent.agent_config, ClaudeAgentConfig):
+    config = agent.agent_config
+    if not isinstance(config, ClaudeAgentConfig):
         return
 
     mode = _resolve_plugin_mode(mngr_ctx)
-    managed_settings_path = get_managed_settings_path(get_agent_state_dir_path(host.host_dir, agent.id))
+    # Where mngr's hooks live, matching mngr_claude: in normal mode the per-agent
+    # config-dir settings.json (the "user" layer Claude reads, built by
+    # _build_settings_json); in use_env_config_dir mode the managed --settings file
+    # (no per-agent config dir exists). Both paths are derived from the same shared
+    # claude_config helpers mngr_claude uses, so they never drift.
+    agent_state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    if config.use_env_config_dir:
+        hook_settings_path = get_managed_settings_path(agent_state_dir)
+    else:
+        hook_settings_path = get_agent_claude_config_dir(agent_state_dir) / "settings.json"
     if mode == SubagentProxyMode.DENY:
-        _merge_subagent_proxy_deny_hooks(host, managed_settings_path)
+        _merge_subagent_proxy_deny_hooks(host, hook_settings_path)
         _write_proxy_skill(host, agent.work_dir)
         return
 
     _check_project_settings_stop_hooks_guarded(host, agent.work_dir)
     _write_proxy_agent_definition(host, agent.work_dir)
-    _merge_subagent_proxy_hooks(host, managed_settings_path, agent.work_dir)
+    _merge_subagent_proxy_hooks(host, hook_settings_path, agent.work_dir)
 
     if _is_subagent_proxy_child(agent):
         _check_subagent_hooks_compat(host, agent)
         _strip_user_hooks_from_subagent(host, agent.work_dir)
-        _install_proxy_child_auto_allow(host, managed_settings_path)
+        _install_proxy_child_auto_allow(host, hook_settings_path)
 
 
-def _install_proxy_child_auto_allow(host: OnlineHostInterface, managed_settings_path: Path) -> None:
+def _install_proxy_child_auto_allow(host: OnlineHostInterface, hook_settings_path: Path) -> None:
     """Auto-allow all permission dialogs in spawned mngr-proxy-child agents.
 
     Why: a proxy child is a Haiku dispatcher constrained to running our
@@ -685,9 +695,9 @@ def _install_proxy_child_auto_allow(host: OnlineHostInterface, managed_settings_
     structurally restricted (single Bash tool, agent definition limits
     commands) and is never user-driven. Top-level (non-child) agents
     are unaffected -- they keep whatever permissions config the user
-    set. The hook goes into the child's mngr-managed settings file.
+    set. The hook goes into the child's Claude settings file.
     """
-    _merge_hooks_into_managed_settings(host, managed_settings_path, build_permission_auto_allow_hooks_config())
+    _merge_hooks_into_settings(host, hook_settings_path, build_permission_auto_allow_hooks_config())
 
 
 def _strip_user_hooks_from_subagent(host: OnlineHostInterface, work_dir: Path) -> None:

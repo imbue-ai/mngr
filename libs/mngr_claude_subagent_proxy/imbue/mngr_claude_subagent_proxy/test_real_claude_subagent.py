@@ -48,7 +48,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr_claude.claude_config import MANAGED_SETTINGS_RELATIVE_PATH
 from imbue.mngr_claude_subagent_proxy.hooks.mngr_api import PARENT_ID_LABEL
 
 _CLAUDE_BINARY: Final[str] = "claude"
@@ -441,14 +440,15 @@ def _agent_settings_local_json(agent_name: str, work_dir: Path) -> str:
 
 
 def _agent_managed_settings_json(agent_id: str, host_dir: Path) -> str:
-    """Return the contents of the agent's mngr-managed Claude settings file or '<missing>'.
+    """Return the contents of the agent's per-agent config-dir settings.json or '<missing>'.
 
-    mngr's own hooks (readiness + subagent-proxy) live in this per-agent file --
-    loaded via ``claude --settings`` -- not in the project's settings.local.json.
+    In normal mode mngr's own hooks (readiness + subagent-proxy) live in the
+    per-agent config-dir ``settings.json`` (the "user" layer Claude reads from
+    $CLAUDE_CONFIG_DIR), not in the project's settings.local.json.
     """
-    settings = host_dir / "agents" / agent_id / Path(*MANAGED_SETTINGS_RELATIVE_PATH)
+    settings = host_dir / "agents" / agent_id / "plugin" / "claude" / "anthropic" / "settings.json"
     if not settings.is_file():
-        return f"<managed settings missing for {agent_id} at {settings}>"
+        return f"<config-dir settings.json missing for {agent_id} at {settings}>"
     try:
         return settings.read_text(errors="replace")
     except OSError as e:
@@ -496,16 +496,17 @@ def _diagnose_subagent_proxy_failure(
 
     parent = next((a for a in mngr.list_agents() if a.get("name") == parent_name), None)
 
-    # mngr's proxy hooks live in the per-agent managed settings file (loaded
-    # via `claude --settings`), not the project's settings.local.json.
+    # mngr's proxy hooks live in the per-agent config-dir settings.json (the
+    # "user" layer Claude reads from $CLAUDE_CONFIG_DIR), not the project's
+    # settings.local.json.
     parent_id = parent.get("id") if isinstance(parent, dict) else None
     if isinstance(parent_id, str):
         managed_text = _agent_managed_settings_json(parent_id, host_dir)
     else:
-        managed_text = f"<parent {parent_name} not found in mngr list; cannot locate managed settings>"
+        managed_text = f"<parent {parent_name} not found in mngr list; cannot locate config-dir settings.json>"
     has_pretooluse_agent = '"matcher": "Agent"' in managed_text or '"matcher":"Agent"' in managed_text
-    parts.append(f"managed settings has PreToolUse:Agent matcher: {has_pretooluse_agent}")
-    parts.append("managed settings (truncated to 4000 chars):")
+    parts.append(f"config-dir settings.json has PreToolUse:Agent matcher: {has_pretooluse_agent}")
+    parts.append("config-dir settings.json (truncated to 4000 chars):")
     parts.append(managed_text[:4000])
     # settings.local.json should now contain only user hooks (if any).
     parts.append("settings.local.json (truncated to 2000 chars):")

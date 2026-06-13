@@ -534,6 +534,24 @@ def get_agent_claude_plugin_dir(agent_state_dir: Path) -> Path:
     return agent_state_dir.joinpath(*_AGENT_CLAUDE_PLUGIN_SUBPATH)
 
 
+# Subdirectory of the per-agent ``plugin/claude/`` dir that is the agent's isolated
+# Claude config dir (the per-agent replacement for ``~/.claude/``). It holds the
+# config-dir ``settings.json`` (the "user" layer Claude reads from
+# $CLAUDE_CONFIG_DIR) and the session ``projects/`` subtree.
+_AGENT_CLAUDE_CONFIG_SUBDIR: Final[str] = "anthropic"
+
+
+def get_agent_claude_config_dir(agent_state_dir: Path) -> Path:
+    """Return the agent's isolated Claude config dir (per-agent replacement for ~/.claude/).
+
+    This is the directory Claude reads as ``$CLAUDE_CONFIG_DIR`` in normal mode;
+    its ``settings.json`` is the "user" settings layer mngr builds. Single source
+    of truth shared by ``ClaudeAgent.get_claude_config_dir`` and the
+    subagent-proxy plugin so the path never drifts between them.
+    """
+    return get_agent_claude_plugin_dir(agent_state_dir) / _AGENT_CLAUDE_CONFIG_SUBDIR
+
+
 def get_managed_settings_path(agent_state_dir: Path) -> Path:
     """Return the agent's mngr-managed Claude settings file. See ``MANAGED_SETTINGS_FILENAME``."""
     return get_agent_claude_plugin_dir(agent_state_dir) / MANAGED_SETTINGS_FILENAME
