@@ -8,11 +8,14 @@ workspaces use for in-guest snapshots.
 The test needs hardware virtualization (/dev/kvm; smolvm has no emulation
 fallback) and a smolvm build with btrfs data-disk support, which is not yet
 publicly distributed. It therefore skips cleanly unless both are present,
-and runs for real on developer machines: put a binary (or wrapper script
-exporting SMOLVM_LIB_DIR / SMOLVM_AGENT_ROOTFS for a source checkout)
-named exactly ``smolvm`` on PATH before starting pytest -- the resource
-guard for the ``smolvm`` mark resolves the binary from PATH at session
-start, so MNGR_SMOLVM_COMMAND alone is not sufficient.
+and runs for real on developer machines: point MNGR_SMOLVM_COMMAND at a
+suitable binary (or a wrapper script exporting SMOLVM_LIB_DIR /
+SMOLVM_AGENT_ROOTFS for a source checkout), or have ``smolvm`` on PATH.
+
+There is intentionally no smolvm binary resource guard: a guard would
+create a PATH wrapper named ``smolvm`` in every test sandbox, which makes
+the provider's installed-check pass in environments with no real smolvm
+and breaks unrelated tests that exercise generic provider discovery.
 """
 
 import os
@@ -30,7 +33,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_smolvm.config import SmolvmProviderConfig
 from imbue.mngr_smolvm.instance import SmolvmProviderInstance
 
-pytestmark = [pytest.mark.release, pytest.mark.smolvm]
+pytestmark = [pytest.mark.release]
 
 _TEST_TIMEOUT_SECONDS = 900
 

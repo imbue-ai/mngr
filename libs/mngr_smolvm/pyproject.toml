@@ -11,9 +11,6 @@ dependencies = [
 [project.entry-points.mngr]
 smolvm = "imbue.mngr_smolvm.backend"
 
-[project.entry-points.resource_guards]
-smolvm = "imbue.mngr_smolvm.register_guards:register_smolvm_guard"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

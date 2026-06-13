@@ -34,7 +34,9 @@ def check_smolvm_installed(provider_name: ProviderInstanceName, smolvm_command: 
 
 def get_smolvm_version(cg: ConcurrencyGroup, smolvm_command: str) -> tuple[int, int, int]:
     """Get the installed smolvm version as (major, minor, patch) from `smolvm --version`."""
-    result = cg.run_process_to_completion([smolvm_command, "--version"], timeout=10.0)
+    result = cg.run_process_to_completion([smolvm_command, "--version"], timeout=10.0, is_checked_after=False)
+    if result.returncode != 0:
+        raise SmolvmCommandError("--version", result.returncode, result.stderr or result.stdout)
     version_str = result.stdout.strip()
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", version_str)
     if match is None:
