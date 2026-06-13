@@ -18,11 +18,11 @@ Usage:
 
 The script refuses to cut a release while there are unconsolidated entries in
 any project's ``<project_dir>/changelog/`` (those bullets would otherwise be
-omitted from the version's release notes). When the gate fires it prints the
-on-demand invocation of the
-``changelog-consolidation`` schedule on stderr; run that, land the resulting
-PR, then re-run this script. ``--dry-run`` downgrades the gate to a warning
-so the preview still works.
+omitted from the version's release notes). When the gate fires it points the
+user at ``just changelog-trigger`` on stderr (which runs the
+``changelog-consolidation`` schedule on demand and opens a PR); land that PR,
+then re-run this script. ``--dry-run`` downgrades the gate to a warning so the
+preview still works.
 """
 
 import argparse
