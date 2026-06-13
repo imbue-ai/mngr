@@ -13,7 +13,10 @@ are exercised without OVH.
 import base64
 import json
 import os
+import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -71,18 +74,26 @@ def server() -> None:
     """Bare-metal server + slice management (OVH + Neon)."""
 
 
-def _pool_private_key_path() -> Path:
-    """Write the pool management private key (from POOL_SSH_PRIVATE_KEY) to a temp file."""
+@contextmanager
+def _pool_private_key_path() -> Iterator[Path]:
+    """Yield a 0600 temp file holding the pool management private key (from POOL_SSH_PRIVATE_KEY).
+
+    The temp directory is removed on exit so the sensitive private key never
+    lingers on the operator's disk after the command finishes.
+    """
     pem = os.environ.get("POOL_SSH_PRIVATE_KEY")
     if not pem:
         raise BareMetalProvisioningError(
             "POOL_SSH_PRIVATE_KEY is not set; needed to SSH the box. Export it from the env's pool-ssh secret."
         )
     key_dir = Path(tempfile.mkdtemp(prefix="mngr-pool-key-"))
-    key_path = key_dir / "id"
-    key_path.write_text(pem if pem.endswith("\n") else pem + "\n")
-    key_path.chmod(0o600)
-    return key_path
+    try:
+        key_path = key_dir / "id"
+        key_path.write_text(pem if pem.endswith("\n") else pem + "\n")
+        key_path.chmod(0o600)
+        yield key_path
+    finally:
+        shutil.rmtree(key_dir, ignore_errors=True)
 
 
 def _derive_public_key(private_key_path: Path) -> str:
@@ -139,17 +150,17 @@ def prep_box(server_address: str, ssh_user: str, lima_service_user: str, lima_ve
     service user so the admin CLI can bake slices and the connector can tear them
     down. Run after the OS install, before ``allocate-slice``.
     """
-    private_key_path = _pool_private_key_path()
-    pool_public_key = _derive_public_key(private_key_path)
-    script = build_box_prep_script(
-        pool_public_key=pool_public_key,
-        lima_service_user=lima_service_user,
-        lima_version=lima_version,
-    )
-    logger.info(
-        "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
-    )
-    _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
+    with _pool_private_key_path() as private_key_path:
+        pool_public_key = _derive_public_key(private_key_path)
+        script = build_box_prep_script(
+            pool_public_key=pool_public_key,
+            lima_service_user=lima_service_user,
+            lima_version=lima_version,
+        )
+        logger.info(
+            "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
+        )
+        _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
     logger.info("Box {} prepped: qemu+lima installed, {} ready", server_address, lima_service_user)
 
 
