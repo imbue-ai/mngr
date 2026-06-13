@@ -12,11 +12,11 @@ set -euo pipefail
 # depend on the deploying machine's local timezone. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running changelog_consolidate.py, summarizing
-# each project's new dated sections into its per-project CHANGELOG.md
-# [Unreleased], committing, spawning one or more subagents to review the new
-# bullets for factual accuracy against the code, date-organizing the dev
-# changelog via changelog_finalize_dev.py (dev is never released, so its
-# CHANGELOG.md uses date sections instead of an accumulating [Unreleased]),
+# each project's new dated sections into its per-project CHANGELOG.md -- the
+# publishable libs/apps projects accumulate under [Unreleased] until release,
+# while the dev project (never released) is written straight under per-date
+# "## <run-date>" sections -- committing, spawning one or more subagents to
+# review the new bullets for factual accuracy against the code,
 # pushing a branch, opening a PR). Claude's final assistant message is a single JSON object describing the
 # outcome (status, with pr_url on success or notes on failure) -- visible in
 # `mngr schedule run` stdout and Modal logs.
