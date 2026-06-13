@@ -71,7 +71,6 @@ from imbue.minds.desktop_client.request_events import load_response_events
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
-from imbue.minds.plugin_bundle import unbundled_plugin_names
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
@@ -179,12 +178,7 @@ def run(
 
     # Bootstrap couldn't write provider entries without the connector URL,
     # so the reconcile happens here once we've loaded the client config.
-    # This is also the first mngr-aware point, so it computes the plugins
-    # this bundle did not install and disables them in mngr's config -- the
-    # pre-mngr `apply_bootstrap` startup call cannot.
-    reconcile_imbue_cloud_providers_from_sessions(
-        connector_url_str, root_name=root_name, disabled_plugin_names=unbundled_plugin_names()
-    )
+    reconcile_imbue_cloud_providers_from_sessions(connector_url_str, root_name=root_name)
 
     paths = WorkspacePaths(data_dir=data_directory)
     auth_store = FileAuthStore(data_directory=paths.auth_dir)

@@ -1496,9 +1496,22 @@ async def amain() -> int:
                 # array comes back empty even though the host_dir has W1.
                 minds_resources = MINDS_APP_PATH.parent.parent / "Resources"
                 bundled_lima_bin = minds_resources / "lima" / "bin"
+                # This cross-check runs the bundled mngr from the e2e's cwd
+                # (the mngr monorepo checkout), whose own `.mngr/settings.toml`
+                # declares an `[providers.aws]` block for the repo's image
+                # builds. The bundled mngr ships a subset of provider plugins
+                # (no `aws`), so loading that project-layer block aborts config
+                # parse with "references unknown backend" before any agent is
+                # listed -- a pure artifact of the cwd, not of minds' own
+                # state. minds.app itself never runs mngr from the monorepo, so
+                # pin the project-config root at the minds data dir (no
+                # `.mngr/`) to read only the host profile, exactly as minds
+                # does. Strict parse is preserved: a real bad host-profile
+                # config still fails loudly.
                 mngr_env = {
                     **os.environ,
                     "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
+                    "MNGR_PROJECT_CONFIG_DIR": str(MINDS_HOME),
                     "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
                 }
                 # ``--on-error continue`` puts each provider's discovery error

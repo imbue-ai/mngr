@@ -138,7 +138,7 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
-def _ensure_mngr_settings(root_name: str, *, disabled_plugin_names: frozenset[str] = frozenset()) -> None:
+def _ensure_mngr_settings(root_name: str) -> None:
     """Ensure the mngr settings.toml has minds-side overrides configured.
 
     Disables the ``recursive`` plugin for every ``mngr`` subprocess minds
@@ -169,14 +169,6 @@ def _ensure_mngr_settings(root_name: str, *, disabled_plugin_names: frozenset[st
     real providers, and delete the stale data file (and its associated
     leased-host SSH key dir) so even direct readers see a clean slate.
 
-    Also marks ``disabled_plugin_names`` -- the cataloged mngr plugins this
-    bundle did not install -- as ``[plugins.<name>] enabled = false`` so the
-    strict config loader skips any synced ``[providers.<name>]`` block that
-    references an un-bundled backend instead of aborting with "references
-    unknown backend". Computed by the mngr-aware caller (see
-    ``plugin_bundle.unbundled_plugin_names``); empty on the pre-mngr
-    ``apply_bootstrap`` startup call.
-
     Skips silently when mngr hasn't been initialized in this host_dir
     yet (no ``config.toml`` / no profile dir) -- there's nothing to
     write to.
@@ -200,20 +192,15 @@ def _ensure_mngr_settings(root_name: str, *, disabled_plugin_names: frozenset[st
         plugins = existing.get("plugins", {})
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
-        all_unbundled_disabled = all(
-            isinstance(plugins.get(name), dict) and plugins[name].get("enabled") is False
-            for name in disabled_plugin_names
-        )
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
             and default_imbue_cloud.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
             and default_imbue_cloud.get("is_enabled") is False
-            and all_unbundled_disabled
         ):
             # Already in the desired shape -- recursive disabled, no stale
-            # ssh provider section, default imbue_cloud instance suppressed,
-            # un-bundled plugins disabled -- no need to rewrite + fsync.
+            # ssh provider section, default imbue_cloud instance suppressed --
+            # no need to rewrite + fsync.
             _cleanup_legacy_dynamic_hosts(root_name)
             return
         doc = tomlkit.loads(settings_path.read_text())
@@ -242,14 +229,6 @@ def _ensure_mngr_settings(root_name: str, *, disabled_plugin_names: frozenset[st
     recursive_block = tomlkit.table()
     recursive_block["enabled"] = False
     plugins_section["recursive"] = recursive_block
-
-    # Disable the cataloged plugins this bundle did not install so mngr's
-    # strict config loader skips, rather than aborts on, a synced provider
-    # block referencing an un-bundled backend (e.g. an `aws` pool host).
-    for name in sorted(disabled_plugin_names):
-        disabled_block = tomlkit.table()
-        disabled_block["enabled"] = False
-        plugins_section[name] = disabled_block
 
     settings_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = settings_path.with_suffix(".tmp")
@@ -345,9 +324,7 @@ def apply_bootstrap() -> None:
     # loading the client config.
 
 
-def reconcile_imbue_cloud_providers_from_sessions(
-    connector_url: str, *, root_name: str | None = None, disabled_plugin_names: frozenset[str] = frozenset()
-) -> None:
+def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root_name: str | None = None) -> None:
     """Re-register ``[providers.imbue_cloud_<slug>]`` for every active session.
 
     The mngr_imbue_cloud plugin owns the SuperTokens session list -- emails
@@ -377,10 +354,8 @@ def reconcile_imbue_cloud_providers_from_sessions(
     # startup ``apply_bootstrap`` call no-ops on a freshly-created
     # MINDS_ROOT_NAME (mngr profile dir doesn't exist yet). Re-run here
     # so existing users who never re-signin still get the suppression
-    # block -- and the un-bundled-plugin disables -- on their next minds
-    # startup. ``apply_bootstrap`` runs before mngr is importable, so the
-    # plugin set can only be computed and threaded in here.
-    _ensure_mngr_settings(root_name, disabled_plugin_names=disabled_plugin_names)
+    # block on their next minds startup.
+    _ensure_mngr_settings(root_name)
     accounts_path = _imbue_cloud_accounts_path(root_name)
     if accounts_path is None or not accounts_path.is_file():
         return
