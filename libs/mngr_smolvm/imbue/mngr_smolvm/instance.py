@@ -196,9 +196,10 @@ class SmolvmProviderInstance(BaseProviderInstance):
         """Lazily check that smolvm is installed and meets version requirements.
 
         Called on the first operation that needs smolvm. Raises
-        ProviderUnavailableError if smolvm is not installed or is too old.
-        The deferred check allows the provider to be registered without
-        smolvm being present (e.g. in CI).
+        ProviderUnavailableError if smolvm is not installed or is too old,
+        and SmolvmCommandError if the binary is present but the version
+        probe itself fails. The deferred check allows the provider to be
+        registered without smolvm being present (e.g. in CI).
         """
         if self._smolvm_checked:
             return
