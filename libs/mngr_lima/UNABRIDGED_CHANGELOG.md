@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The Lima backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 50% to 65% to match the coverage CI already measures (~67%).
