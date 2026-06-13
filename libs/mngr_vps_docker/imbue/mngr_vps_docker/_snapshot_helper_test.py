@@ -128,7 +128,9 @@ def test_snapshot_helper_cleanup_rejects_path_traversal_target(tmp_path: Path) -
         {"request_id": "req1", "operation": "cleanup", "target": "../evil"},
     )
     assert result["exit_code"] == 2
-    assert "invalid cleanup target" in result["stderr"]
+    stderr = result["stderr"]
+    assert isinstance(stderr, str)
+    assert "invalid cleanup target" in stderr
     assert not (tmp_path / "btrfs.log").exists()
 
 
