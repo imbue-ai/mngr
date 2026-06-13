@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `mngr_file` project, consolidated night
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Internal: import `get_agent_state_dir_path` from its new canonical location `imbue.mngr.hosts.common` (relocated there from `imbue.mngr.hosts.host` to avoid circular-import issues). No behavior change.
+
 ## 2026-06-10
 
 Improved the quality of the mngr-file test suite (test-only changes, no behavior change):
