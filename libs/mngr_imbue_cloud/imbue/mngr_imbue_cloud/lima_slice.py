@@ -78,11 +78,11 @@ def build_slice_lima_yaml(
     )
     config["cpus"] = vcpus
     config["memory"] = f"{memory_mib}MiB"
-    # generate_default_lima_yaml already populated portForwards with mngr_lima's
-    # rules that disable auto-forwarding of every guest port. Prepend the slice's
-    # two explicit allow rules (matched first) so only the VM sshd and the inner
-    # container sshd are reachable on the box's external interface; the inherited
-    # disable rules that follow keep every other guest port private.
+    # The base config already populated portForwards with mngr_lima's rules that
+    # disable auto-forwarding of every guest port. Prepend the slice's two explicit
+    # allow rules (matched first) so only the VM sshd and the inner container sshd
+    # are reachable on the box's external interface; the inherited disable rules
+    # that follow keep every other guest port private.
     config["portForwards"] = [
         {"guestPort": _VM_SSH_GUEST_PORT, "hostPort": vm_ssh_host_port, "hostIP": "0.0.0.0"},
         {"guestPort": _CONTAINER_SSH_GUEST_PORT, "hostPort": container_ssh_host_port, "hostIP": "0.0.0.0"},
