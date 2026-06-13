@@ -10,9 +10,13 @@ and are validated against a delivered box; ``list`` / ``register`` / ``allocate`
 are exercised without OVH.
 """
 
+import base64
 import json
+import os
+import tempfile
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +24,7 @@ import click
 import psycopg2
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_FALLBACK_CPU_THREADS
 from imbue.mngr_imbue_cloud.bare_metal import SLICE_ADVERTISED_RAM_GB
@@ -29,9 +34,12 @@ from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.bare_metal_db import update_server
+from imbue.mngr_imbue_cloud.bare_metal_prep import DEFAULT_LIMA_VERSION
+from imbue.mngr_imbue_cloud.bare_metal_prep import build_box_prep_script
 from imbue.mngr_imbue_cloud.cli.admin import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
@@ -61,6 +69,88 @@ def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
 @click.group(name="server")
 def server() -> None:
     """Bare-metal server + slice management (OVH + Neon)."""
+
+
+def _pool_private_key_path() -> Path:
+    """Write the pool management private key (from POOL_SSH_PRIVATE_KEY) to a temp file."""
+    pem = os.environ.get("POOL_SSH_PRIVATE_KEY")
+    if not pem:
+        raise BareMetalProvisioningError(
+            "POOL_SSH_PRIVATE_KEY is not set; needed to SSH the box. Export it from the env's pool-ssh secret."
+        )
+    key_dir = Path(tempfile.mkdtemp(prefix="mngr-pool-key-"))
+    key_path = key_dir / "id"
+    key_path.write_text(pem if pem.endswith("\n") else pem + "\n")
+    key_path.chmod(0o600)
+    return key_path
+
+
+def _derive_public_key(private_key_path: Path) -> str:
+    """Derive the OpenSSH public key from a private key file via ssh-keygen -y."""
+    cg = ConcurrencyGroup(name="ssh-keygen")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=["ssh-keygen", "-y", "-f", str(private_key_path)],
+            timeout=30.0,
+            is_checked_after=False,
+        )
+    if result.returncode != 0:
+        raise BareMetalProvisioningError(f"ssh-keygen -y failed: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_path: Path, script: str) -> None:
+    """Pipe a bash script to ``sudo bash`` on the box over SSH (base64 to dodge quoting)."""
+    encoded = base64.b64encode(script.encode()).decode()
+    remote = f"echo {encoded} | base64 -d | sudo bash"
+    cg = ConcurrencyGroup(name="box-prep-ssh")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=[
+                "ssh",
+                "-i",
+                str(private_key_path),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=30",
+                f"{ssh_user}@{server_address}",
+                remote,
+            ],
+            timeout=600.0,
+            is_checked_after=False,
+            on_output=lambda line, _is_stdout: logger.info("  [box] {}", line.rstrip()),
+        )
+    if result.returncode != 0:
+        raise BareMetalProvisioningError(
+            f"box prep on {server_address} failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+
+@server.command(name="prep")
+@click.option("--server-address", required=True, help="SSH-reachable address of the freshly-installed box.")
+@click.option("--ssh-user", default="debian", help="Bootstrap SSH user (the OS image's default cloud user).")
+@click.option("--lima-service-user", default="limahost", help="Dedicated non-root user to create for the lima VMs.")
+@click.option("--lima-version", default=DEFAULT_LIMA_VERSION, help="Lima release to install on the box.")
+def prep_box(server_address: str, ssh_user: str, lima_service_user: str, lima_version: str) -> None:
+    """Install QEMU + lima + tooling on a delivered box and create the lima service user.
+
+    Idempotent. Authorizes the pool management key (POOL_SSH_PRIVATE_KEY) for the
+    service user so the admin CLI can bake slices and the connector can tear them
+    down. Run after the OS install, before ``allocate-slice``.
+    """
+    private_key_path = _pool_private_key_path()
+    pool_public_key = _derive_public_key(private_key_path)
+    script = build_box_prep_script(
+        pool_public_key=pool_public_key,
+        lima_service_user=lima_service_user,
+        lima_version=lima_version,
+    )
+    logger.info(
+        "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
+    )
+    _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
+    logger.info("Box {} prepped: qemu+lima installed, {} ready", server_address, lima_service_user)
 
 
 @server.command(name="list")
