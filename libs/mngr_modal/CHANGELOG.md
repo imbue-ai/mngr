@@ -9,6 +9,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: Offline hosts produced by this provider are now readable via the new `HostFileReadInterface` — the offline-host construction path (used by both `get_host` and `to_offline_host`) returns an `OfflineHostWithVolume` via the shared `make_readable_offline_host` helper, with lazy volume resolution (no per-host probe). The new `get_volume_reference_for_host` is wrapped so missing/expired Modal credentials surface as the user-friendly `ModalAuthError` (consistent with the other provider methods), including during offline-host construction.
+- Changed: AWS-provider shared-layer refactor — Modal now overrides a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on `ProviderBackendInterface`, where the per-user environment registration moves. `mngr create` invokes this hook before `build_provider_instance`. No behavior change for Modal.
 
 ### Removed
 

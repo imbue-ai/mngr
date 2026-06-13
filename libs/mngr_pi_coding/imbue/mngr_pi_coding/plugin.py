@@ -748,3 +748,9 @@ class PiCodingAgent(BaseAgent[PiCodingAgentConfig], HasCommonTranscriptMixin):
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the pi-coding agent type."""
     return ("pi-coding", PiCodingAgent, PiCodingAgentConfig)
+
+
+@hookimpl
+def register_agent_aliases() -> dict[str, str]:
+    """Register ``pi`` as a short alias for the ``pi-coding`` agent type."""
+    return {"pi": "pi-coding"}

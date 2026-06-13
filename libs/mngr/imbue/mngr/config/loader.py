@@ -16,6 +16,9 @@ from pydantic import ValidationError
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.agent_alias_registry import is_agent_alias
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
+from imbue.mngr.config.agent_alias_registry import unregister_agent_alias
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
@@ -736,12 +739,34 @@ def _parse_agent_types(
     # read normalized `plugin` / `parent_type` fields as it walks the chain.
     raw_types = {name: _normalize_field_keys(raw, f"agent_types.{name}") for name, raw in raw_types.items()}
 
+    # A user-defined custom type shadows a plugin-registered alias of the same
+    # name: the user's concrete type wins (mirroring how a registered type
+    # beats an alias at plugin-load time), so drop the colliding alias before
+    # resolving anything. Done as a pre-pass so a shadowed alias is never
+    # consulted when normalizing a parent_type in the loop below.
+    for name in raw_types:
+        if is_agent_alias(name):
+            shadowed_canonical = normalize_agent_type_name(name)
+            unregister_agent_alias(name)
+            if not silent:
+                logger.warning(
+                    "Custom agent type '{}' shadows the built-in alias for '{}'; '{}' now "
+                    "refers to your custom type and no longer resolves to '{}'.",
+                    name,
+                    shadowed_canonical,
+                    name,
+                    shadowed_canonical,
+                )
+
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
         # has auto_dismiss_dialogs). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
-        parent_type = raw_config.get("parent_type")
+        # A parent_type may itself be an alias (e.g. parent_type = "agy"), so
+        # resolve it to the canonical type before looking up the config class.
+        raw_parent_type = raw_config.get("parent_type")
+        parent_type = normalize_agent_type_name(raw_parent_type) if raw_parent_type is not None else None
         # Walk the parent chain through raw_types to check if this type or
         # any ancestor depends on a disabled plugin.
         if _has_disabled_ancestor(name, raw_types, disabled_plugins):
@@ -780,6 +805,10 @@ def _parse_agent_types(
             extra_hint=extra_hint,
         )
         normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
+        # Persist the alias-resolved parent_type so downstream resolution sees
+        # the canonical type rather than the alias the user wrote.
+        if parent_type is not None:
+            normalized_config["parent_type"] = parent_type
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types

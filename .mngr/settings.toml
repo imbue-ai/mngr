@@ -31,12 +31,11 @@ pass_env__extend = ["GH_TOKEN"]
 pass_host_env = ["EDITOR"]
 target_path = "/code/mngr"
 
-# Run an agent on this repo on an AWS EC2 host (the analogue of the `modal` template above).
-# Differs from modal because the VPS backend resolves `--file=` inside the uploaded context,
-# so modal's `.mngr/dev/build/` keyframe tarball can't be used: the context is `.` (the
-# worktree), which the mngr_vps_docker build flow clones + overlays with uncommitted changes
-# and the Dockerfile's `COPY . /code/mngr/` consumes. The image builds on depot's remote
-# builders (builder=DEPOT on [providers.aws] below).
+# Run an agent on this repo on an AWS EC2 host. Differs from modal because the VPS backend
+# resolves `--file=` inside the uploaded context, so modal's `.mngr/dev/build/` keyframe
+# tarball can't be used: the context is `.`, which the mngr_vps_docker build flow clones +
+# overlays with uncommitted changes and the Dockerfile's `COPY . /code/mngr/` consumes. The
+# image builds on depot's remote builders (builder=DEPOT on [providers.aws] below).
 #
 # Requires DEPOT_TOKEN (forwarded to the remote depot build) and GH_TOKEN (git/gh in the
 # container) exported at `mngr create -t aws` time.
@@ -114,12 +113,7 @@ default_sandbox_timeout = 7200
 [providers.azure]
 builder = "DEPOT"
 
-# Shared GCP config consumed by the `gcp` create-template above. The per-developer
-# allowed_ssh_cidrs is intentionally absent here: it lives in the gitignored
-# .mngr/settings.local.toml, and the firewall rule itself is created once per project by
-# `mngr gcp prepare --allowed-ssh-cidr <cidr>` (the hot create path only resolves it
-# read-only). project_id is likewise omitted -- it falls back to the gcloud/ADC default;
-# pin it here if you have access to several projects.
+# Shared GCP config consumed by the `gcp` create-template above.
 [providers.gcp]
 backend = "gcp"
 default_region = "us-west1"
@@ -133,9 +127,7 @@ default_machine_type = "e2-standard-2"
 # in the repo supplies the project id.
 builder = "DEPOT"
 
-# Shared AWS config consumed by the `aws` create-template above. The per-developer
-# allowed_ssh_cidrs lives in the gitignored .mngr/settings.local.toml and merges per-field
-# with this block (ProviderInstanceConfig.merge_with honors model_fields_set).
+# Shared AWS config consumed by the `aws` create-template above.
 [providers.aws]
 backend = "aws"
 # us-west-2 (Oregon): has a pinned default Debian 12 AMI; no region is set in ~/.aws.
