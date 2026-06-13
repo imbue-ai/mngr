@@ -204,6 +204,26 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 
 ## Provider Build/Start Arguments
 
+Provider: aws
+  EC2-specific args (consumed by provider, not passed to docker):
+    --aws-region=REGION         Must match the provider config's default_region;
+                                the client is bound to one region at construction
+                                and refuses cross-region creates. To target multiple
+                                regions, define one [providers.aws-<region>] block
+                                per region (see mngr_aws README 'Multiple regions').
+    --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
+    --aws-ami=AMI-ID            Override the per-host AMI for this create only
+                                (default: provider config's default_ami_id /
+                                default_ami_by_region for the chosen region)
+    --aws-spot                  Run on EC2 spot capacity (presence-only flag).
+                                AWS may reclaim with ~2 min notice; the host is
+                                terminated, not stopped, on reclaim. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the EC2 instance.
+  Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
+
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
