@@ -9,6 +9,8 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr_imbue_cloud.errors import InvalidBuildArgError
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import DEFAULT_FAST_MODE
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -303,6 +305,40 @@ class R2BucketCreateResult(FrozenModel):
 
     bucket: R2BucketInfo = Field(description="The created bucket")
     key: R2KeyMaterial = Field(description="The default key minted alongside the bucket")
+
+
+class BareMetalServer(FrozenModel):
+    """A rented OVH bare-metal server that we carve into lima-VM slices.
+
+    Mirrors one ``bare_metal_servers`` row. Resource fields and ``raid_level`` /
+    ``lima_service_user`` / ``ovh_service_name`` / ``public_address`` are filled
+    in as the box advances through its lifecycle, so they are optional until the
+    box reaches the state that populates them.
+    """
+
+    id: BareMetalServerDbId = Field(description="Database id (server-side UUID)")
+    ovh_order_id: str | None = Field(default=None, description="OVH order id captured at checkout")
+    ovh_service_name: str | None = Field(default=None, description="OVH dedicated serviceName (set on delivery)")
+    plan_code: str = Field(description="Catalog planCode the box was ordered as")
+    region: str = Field(description="OVH datacenter code (e.g. 'vin')")
+    public_address: str | None = Field(default=None, description="SSH-reachable public address (set once known)")
+    cpu_cores: int | None = Field(default=None, description="Physical CPU cores (detected during install)")
+    cpu_threads: int | None = Field(default=None, description="CPU threads (detected during install)")
+    ram_gb: int | None = Field(default=None, description="Total RAM in GB (detected during install)")
+    slot_count: int = Field(description="Number of 8GB slices this box can hold (floor(ram_gb / 8))")
+    raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
+    lima_service_user: str | None = Field(default=None, description="Non-root OS user that owns the box's lima VMs")
+    status: BareMetalServerStatus = Field(description="Lifecycle state: ordered/delivered/installing/ready/failed")
+    created_at: datetime = Field(description="When the row was created")
+    updated_at: datetime = Field(description="When the row was last updated")
+
+
+class BareMetalServerCapacity(FrozenModel):
+    """A bare-metal server plus its slice-slot accounting, for the admin list view."""
+
+    server: BareMetalServer = Field(description="The bare-metal server")
+    used_slots: int = Field(description="Number of baked slices currently on this server")
+    free_slots: int = Field(description="Slots still available to bake (slot_count - used_slots)")
 
 
 class PriceLineItem(FrozenModel):

@@ -75,6 +75,18 @@ class OvhCatalogPricingError(ImbueCloudError):
     """Raised when an OVH catalog plan or add-on cannot be priced (missing entry or no month-to-month price)."""
 
 
+class BareMetalConfigError(ImbueCloudError, ValueError):
+    """Raised when a bare-metal server / slice has an invalid configuration (bad size, disk count, etc.)."""
+
+
+class SliceCapacityError(ImbueCloudError):
+    """Raised when no bare-metal server has free slots (or ports) to allocate a new slice."""
+
+
+class BareMetalProvisioningError(ImbueCloudError):
+    """Raised when ordering, installing, or carving a bare-metal server / slice fails."""
+
+
 class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
 

@@ -39,6 +39,66 @@ class LeaseDbId(NonEmptyStr):
     """Database id of a leased host (server-side UUID)."""
 
 
+class BareMetalServerDbId(NonEmptyStr):
+    """Database id of a bare_metal_servers row (server-side UUID)."""
+
+
+# Wire / DB values for pool_hosts.backend_kind. Kept lowercase to match the
+# connector's existing lowercase column conventions (status = available/leased/...).
+BACKEND_KIND_OVH_VPS: Final[str] = "ovh_vps"
+BACKEND_KIND_SLICE: Final[str] = "slice"
+_BACKEND_KINDS: Final[frozenset[str]] = frozenset({BACKEND_KIND_OVH_VPS, BACKEND_KIND_SLICE})
+
+
+class InvalidBackendKind(ValueError):
+    """Raised when a pool-host backend_kind is not a recognized value."""
+
+
+class BackendKind(NonEmptyStr):
+    """How a pool host's underlying machine is provided: 'ovh_vps' or 'slice'."""
+
+    def __new__(cls, value: str) -> Self:
+        normalized = value.strip().lower()
+        if normalized not in _BACKEND_KINDS:
+            raise InvalidBackendKind(f"backend_kind must be one of {sorted(_BACKEND_KINDS)}, got '{value}'")
+        return super().__new__(cls, normalized)
+
+
+# Wire / DB values for bare_metal_servers.status, in lifecycle order. The box
+# advances ORDERED -> DELIVERED -> INSTALLING -> READY (or -> FAILED from any
+# non-terminal state); the admin command moves it forward one step per run.
+SERVER_STATUS_ORDERED: Final[str] = "ordered"
+SERVER_STATUS_DELIVERED: Final[str] = "delivered"
+SERVER_STATUS_INSTALLING: Final[str] = "installing"
+SERVER_STATUS_READY: Final[str] = "ready"
+SERVER_STATUS_FAILED: Final[str] = "failed"
+_SERVER_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        SERVER_STATUS_ORDERED,
+        SERVER_STATUS_DELIVERED,
+        SERVER_STATUS_INSTALLING,
+        SERVER_STATUS_READY,
+        SERVER_STATUS_FAILED,
+    }
+)
+
+
+class InvalidBareMetalServerStatus(ValueError):
+    """Raised when a bare-metal server status is not a recognized value."""
+
+
+class BareMetalServerStatus(NonEmptyStr):
+    """Lifecycle state of a bare-metal server: ordered/delivered/installing/ready/failed."""
+
+    def __new__(cls, value: str) -> Self:
+        normalized = value.strip().lower()
+        if normalized not in _SERVER_STATUSES:
+            raise InvalidBareMetalServerStatus(
+                f"server status must be one of {sorted(_SERVER_STATUSES)}, got '{value}'"
+            )
+        return super().__new__(cls, normalized)
+
+
 class ImbueCloudKeyType(UpperCaseStrEnum):
     """The class of secret being requested."""
 
