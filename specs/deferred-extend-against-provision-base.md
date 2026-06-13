@@ -1,169 +1,213 @@
-# Deferred `__extend` resolved against the provision base (settings_overrides)
+# Config-consistent `settings_overrides` via a recursive `__extend` fold
 
-Status: **spec only -- not yet implemented.** Makes the `settings_overrides`-onto-home
-merge follow mngr's config-consistent semantics (bare = assign + narrowing guard;
-`__extend` = merge) instead of the interim deep-merge-by-default. Generalizes the
-`create_templates` deferred-`__extend` mechanism. Part of the `mngr/claude-hook-leak` PR.
+Status: **spec only -- not yet implemented.** Makes `settings_overrides` merge onto the
+user's home Claude settings with mngr's normal config semantics (bare = assign + narrowing
+guard; `__extend` = merge), by treating it as a **patch** folded onto the provision base.
+Generalizes the `create_templates` deferred-`__extend` precedent. Part of the
+`mngr/claude-hook-leak` PR. Supersedes this file's earlier cross-scope-combination-as-
+special-case draft.
 
 Audience: developers in `libs/mngr/imbue/mngr/config/` and `libs/mngr_claude`.
 
-## The model (one left fold)
+## The model: one associative `fold`, B at the bottom
 
-Conceptually, the agent's effective Claude settings are a single left fold, lowest to
-highest precedence:
+The agent's effective Claude settings are a single left fold, lowest precedence first:
 
 ```
-merge( merge( merge( merge(B, U), P), L), <env>, <--setting> )
+fold( fold( fold( fold(B, U), P), L), <env>, <--setting> )
 ```
 
-- `B` = the **provision base**: the synced `~/.claude/settings.json` (or generated defaults)
-  + unattended flags + mngr's own hooks. Built at **provision** time.
-- `U` / `P` / `L` / ... = the `settings_overrides` contributed by each mngr config scope
-  (user / project / local / env / `--setting`).
-- Each `merge(acc, X)` applies mngr's standard rules: a **bare** key in `X` **assigns**
-  (replaces) the accumulator's value -- and if that drops a non-empty aggregate entry, the
-  **narrowing guard** hard-errors (unless `allow_settings_key_assignment_narrowing`); a
-  `key__extend` in `X` **extends** the accumulator's value (concat list / union set /
-  one-level dict merge), narrowing-exempt.
+- `B` = the **provision base**: synced `~/.claude/settings.json` (or generated defaults) +
+  unattended flags + mngr's own hooks. Built at **provision**. Concrete (no markers).
+- `U/P/L/...` = each config scope's `settings_overrides` (a **patch**, may contain `__extend`
+  markers at any depth).
+- `fold(acc, patch)` applies mngr's standard per-key rules **recursively**:
+  - **bare `key`** in patch -> **assign**: replaces `acc[key]` (and any `acc[key__extend]`).
+    If `acc[key]` is a non-empty aggregate that the assignment would drop entries from, the
+    **narrowing guard** hard-errors (unless `allow_settings_key_assignment_narrowing`).
+  - **`key__extend`** in patch -> **extend** `acc[key]`:
+    - `acc[key]` concrete: extend it (list concat / set union / **recurse** for dicts,
+      threading `acc[key]` as the base for the nested patch).
+    - `acc[key]` absent: extend-of-nothing acts as **assign** (`acc[key]` = the value, with
+      its own nested markers resolved against an empty base). (Existing `_apply_extend`
+      `current is None` branch.)
+    - `acc[key__extend]` present (i.e. `acc` is itself a patch, cross-scope case):
+      **combine** the two markers -> `fold` their values, keep the `__extend` (still a patch).
 
-There is exactly one accumulator and one base at each step, so the result is unambiguous.
-`B` is just the bottom layer. This replaces `deep_merge_settings` (deep-by-default).
+Because `fold` is **associative** (proof below), the scopes can be condensed into one patch
+at config-load and applied to `B` at provision -- same result as folding `B` first:
 
-The wrinkle: `B` does not exist at config-load (it is built at provision), but `U/P/L` are
-condensed at config-load by the normal config merge. So the fold is realized in two phases
-that must equal the single fold:
+```
+fold(B, fold(fold(U, P), L))  ==  fold(fold(fold(B, U), P), L)
+```
 
-1. **Config-load:** condense `U/P/L/...` into one `settings_overrides` value, **preserving**
-   any `__extend` whose base is not present in a lower config scope (it is destined for `B`).
-2. **Provision:** `merge(B, condensed_settings_overrides)` -- resolve the preserved
-   `__extend` against `B` and apply the narrowing guard against `B`.
+This is the whole design: `settings_overrides` is a **patch**; config-load **combines** the
+per-scope patches into one (markers preserved/combined); provision **applies** the combined
+patch to `B` (markers all resolved). Same `fold` in both phases -- it branches on whether the
+accumulator's value at a key is concrete or itself a marker.
 
-## Deferred-`__extend` mechanism (generalize `create_templates`)
+### Associativity (the four cases) -- these become tests
 
-Today `resolve_extends` (`key_resolver.py`) preserves an `__extend` verbatim (instead of
-collapsing it to an assign) when `current is None and _is_create_template_option_path(path)`
-(its base lookup found nothing AND the path is a create-template option). Generalize:
+For a key `f`, with `B[f] = V` (or absent), lower patch `X`, higher patch `Y`:
 
-- Replace `_is_create_template_option_path` with an `is_deferred_extend_path(path)`
-  predicate backed by a small registry of deferred-path matchers. Two matcher shapes:
-  - **exact-depth** (create_templates options: `('create_templates', '<name>')`, depth 2);
-  - **prefix** (settings_overrides: any path under `('agent_types', '<name>', 'settings_overrides')`).
-- When `current is None` and the path is a deferred path, preserve the `__extend` key
-  verbatim (as today for templates) for later resolution against a runtime base.
-- The **resolution site stays per-consumer**: `create_templates` resolves at
-  `apply_create_template` (create time, against command params); `settings_overrides`
-  resolves at provision (against `B`). Only the config-load **preservation** is shared.
-- De-dup `_apply_template_extend` (a bespoke copy of `_apply_extend`'s leaf logic) into a
-  single shared `_apply_extend` used by both consumers.
+| X | Y | `combine(X,Y)` | `fold(B, combine)` | `fold(fold(B,X),Y)` |
+|---|---|---|---|---|
+| `f__extend=A` | `f__extend=B` | `f__extend = A⊕B` | `V⊕A⊕B` | `(V⊕A)⊕B` |
+| `f=A` | `f__extend=B` | `f = A⊕B` | `A⊕B` | `A⊕B` |
+| `f__extend=A` | `f=B` | `f = B` | `B` | `B` |
+| `f=A` | `f=B` | `f = B` | `B` | `B` |
 
-## Cross-scope condensation of preserved markers (the part to get right)
+`⊕` is the per-type extend (list concat / set union / recursive dict fold). Rows 1/2 rely on
+`⊕`'s associativity; 3/4 on "higher bare wins" (a bare key drops a lower marker for the same
+key). The table applies recursively for nested dict values.
 
-`settings_overrides` is a `dict[str, Any]` field whose `merge_with` is assign-by-default:
-a higher scope's whole `settings_overrides` replaces the lower scope's. That is wrong when
-both scopes carry preserved `__extend` for the same key -- the higher would clobber the
-lower's additions. The condensation must instead behave like the left fold. Rules
-(applied per nested key, recursively, as scopes fold low->high):
+## Back-compatibility of recursive `__extend`
 
-- **higher bare key vs lower anything** -> the bare key **wins** (assign). It also removes a
-  lower preserved `key__extend` for the same path (a bare assign replaces the base below,
-  including its pending extend). Narrowing applies vs the lower value at provision-time only
-  when the lower value is a concrete aggregate; vs a *preserved marker* there is nothing
-  concrete to narrow yet.
-- **higher `key__extend` vs lower bare key** -> resolve the extend against the lower bare
-  value now (normal one-level extend); result stays **bare** (it still replaces `B`).
-- **higher `key__extend` vs lower `key__extend`** -> **combine** into one preserved
-  `key__extend` whose value is `_apply_extend(lower_value, higher_value)` (extend-of-extends:
-  concat/union/one-level-merge). Stays preserved (still destined for `B`).
-- **higher `key__extend` vs lower absent** -> preserved (destined for `B`).
+Today `__extend` is one-level (env-settings-overrides: "No recursion into nested
+aggregates"). Making it recursive is **backward-compatible for every input that does not nest
+an `__extend` inside an `__extend` value**:
 
-Net invariant: after config-load, `settings_overrides` is one dict in which each key is
-either a concrete **bare** value (assign vs `B`) or a single `key__extend` (extend vs `B`),
-never both for the same key.
+- A bare nested key behaves identically: old shallow `{**current, **value}` *replaces*
+  `current`'s keys at that level; new "bare = assign at that level" does the same (including
+  dropping nested siblings -- to keep them you write the nested `__extend`).
+- The only inputs whose meaning changes are ones with an `__extend` **inside** an `__extend`
+  value (e.g. `permissions__extend = {allow__extend: [...]}`). Under the old operator those
+  were never meaningful -- an unknown `__extend` key on a typed field (error) or a literal
+  garbage `"allow__extend"` key forwarded to Claude on a schemaless field. They now gain the
+  intended recursive meaning.
 
-Implementation note: this likely means `settings_overrides` (and any deferred-path field)
-needs a **combine-not-assign** merge for `__extend`-bearing keys in `merge_with` (or the
-condensation handled in `resolve_extends` against the accumulated config before
-`merge_with`). The exact seam (extend the `merge_with` carveout vs do it in
-`resolve_extends`) is an implementation choice; the tests below pin the *behavior*, not the
-seam.
+So no existing, meaningful config changes behavior. (A test pins this invariant.)
 
-## Provision-time resolution against `B`
+## Where each phase lives
 
-In `_build_settings_json` (replacing `data = deep_merge_settings(data, settings_overrides)`):
+- **`resolve_extends` (config-load):** does **not** resolve `__extend` inside a deferred-path
+  subtree (`settings_overrides`); it leaves those markers intact for the provision fold.
+  (Generalize `_is_create_template_option_path` into an `is_deferred_extend_path` predicate
+  backed by a small registry: exact-depth for `create_templates` options, **prefix** for
+  `agent_types.<name>.settings_overrides`.) Markers on non-deferred fields resolve as today.
+- **`merge_with` (config-load):** for a deferred-path dict field (`settings_overrides`),
+  **combine** the patches across scopes via `fold`'s combine mode instead of assign-by-default.
+  This is the only field-merge behavior change, and only for deferred-path fields.
+- **provision (`_build_settings_json`, mngr_claude):** build `B` (home/defaults + flags +
+  mngr hooks), then `data = fold(B, agent_config.settings_overrides)` -- resolve all markers
+  against `B`, applying the narrowing guard for bare keys. Replaces `deep_merge_settings`.
+- **`create_templates`:** keeps deferring, now via the shared registry; de-dup
+  `_apply_template_extend` into the shared recursive `fold`/`_apply_extend`.
 
-1. Build `B` = base (home/defaults) + unattended flags + mngr hooks (as today).
-2. `resolved = resolve_extends(B, settings_overrides)` -- preserved `key__extend` resolves
-   against `B`'s value (extend); bare keys pass through.
-3. Run the narrowing guard: for each bare key in `settings_overrides`,
-   `would_assignment_narrow(B[key], settings_overrides[key])` -> if it drops a `B` entry,
-   raise the standard narrowing error unless `allow_settings_key_assignment_narrowing`.
-4. Overlay: `data = {**B, **resolved}` (top-level; depth already done inside
-   `resolve_extends`/`_apply_extend`).
-5. **Assert no `__extend` key remains** anywhere in `data` (deferred-consumption check).
+## Narrowing guard at provision
+
+The guard currently runs in the loader across config layers. Add a call in the provision
+fold: when a bare `settings_overrides` key assigns over a non-empty `B[key]` aggregate and
+drops an entry, `would_assignment_narrow(B[key], value)` -> raise the standard narrowing
+error unless `allow_settings_key_assignment_narrowing`. (One base `B`, so call
+`would_assignment_narrow` directly per key; no layer-stack plumbing.)
 
 ## Deferred-consumption enforcement
 
-"Everything deferred must be picked up later" -- enforce, not assume:
+- **Final assertion (schema-independent):** after the provision fold, assert the built
+  `settings.json` contains **no** `__extend` key anywhere. This always holds when `B` is
+  concrete -- every marker resolves (extend-against-present -> merge; extend-against-absent
+  -> assign), so a survivor indicates a **fold bug**, not a user typo. This is the
+  "everything deferred is picked up" guarantee.
+- **Registry/consumer test:** a unit test enumerates the deferred-path registry and asserts
+  each entry has a wired consumer (adding a deferred path without a consumer fails CI).
+- Note: because `settings_overrides` is schemaless, mngr cannot validate at config-load that
+  a preserved `key__extend` names a real Claude key (a typo is forwarded). That is the
+  accepted schema-free tradeoff; the final assertion still guarantees no *marker* leaks to
+  Claude (a typo'd `fooo__extend` resolves to a bare `fooo` key -- garbage, but Claude's
+  problem, not a marker).
 
-- **Config-load:** after parsing, any surviving `__extend` key in the resolved config must be
-  inside a **registered** deferred subtree. A stray `foo__extend` on a non-deferred field
-  still errors at load (as today). (Recursively scan the parsed structure / the open dict
-  fields.)
-- **Per consumer:** after a consumer resolves its deferred markers, assert its output has
-  **zero** `__extend` keys -- `settings_overrides` at the end of `_build_settings_json`
-  (step 5), `create_templates` after `apply_create_template`. A leftover marker means a
-  registered deferred path had no consumer -> loud failure.
-- **Unit/ratchet test:** enumerate the deferred-path registry and assert each entry has a
-  wired consumer that consumes it (so adding a deferred path without a consumer fails CI).
+## The base is explicitly normalized (dissolves the `__extend`-in-base wart)
+
+`__extend` is an mngr config operator (`settings.toml`, `--setting`, env, `mngr config`). The
+home `~/.claude/settings.json` is **Claude's own file** and the bottom of the fold, where
+`__extend` has nothing below it to extend. Rather than special-case or warn about a stray
+`__extend` there, **normalize `B` up front**: in the fold model the true bottom is the empty
+dict, and `B_raw` (home settings + flags + mngr hooks) is just the *first patch*, so
+
+```
+B = fold({}, B_raw)
+```
+
+resolves any `__extend` in `B_raw` against nothing -- which strips the suffix (extend-against-
+empty = assign). After this `B` is **concrete by construction** (no markers), so:
+
+- the fold invariant ("`B` concrete at the bottom") holds without a runtime check;
+- the zero-marker assertion on the final output is clean (only patch markers had to resolve,
+  and they all do against a concrete `B`);
+- a stray `permissions__extend` in someone's home `settings.json` simply degrades to a plain
+  `permissions` key -- no warning, no crash, no special case.
+
+mngr's own contributions to `B_raw` (flags, hooks) never carry markers, so in practice only
+the home file could contribute one, and it normalizes away harmlessly. Declare `B` explicitly
+in `_build_settings_json` and normalize it before folding the `settings_overrides` patch.
 
 ## Worked examples == the up-front tests
 
-`B.permissions = {"defaultMode": "auto"}` throughout.
+`B.permissions = {"defaultMode": "acceptEdits"}` unless noted.
 
-1. **#1647, single scope, extend.** `P: settings_overrides.permissions__extend = {allow:[X]}`.
-   -> preserved at load; at provision extends `B.permissions` -> `{defaultMode: auto, allow:[X]}`.
-2. **#1647, single scope, bare -> narrows.** `P: settings_overrides.permissions = {allow:[X]}`.
-   -> bare; at provision assign over `B.permissions` drops `defaultMode` -> **narrowing error**
-   (unless the escape hatch, which yields `{allow:[X]}`).
-3. **Two scopes, extend+extend combine.** `U: permissions__extend={allow:[X]}`,
-   `P: permissions__extend={deny:[Y]}` -> condense to one `permissions__extend={allow:[X],deny:[Y]}`
-   -> provision -> `{defaultMode:auto, allow:[X], deny:[Y]}`.
-4. **Two scopes, lower bare + higher extend.** `U: permissions={allow:[X]}` (bare),
-   `P: permissions__extend={deny:[Y]}` -> resolve extend vs U now -> bare
-   `permissions={allow:[X],deny:[Y]}` -> provision assign over `B` -> **narrowing** (drops
-   defaultMode) -> escape-hatch result `{allow:[X],deny:[Y]}`.
-5. **Two scopes, lower extend + higher bare wipes it.** `U: permissions__extend={allow:[X]}`,
-   `P: permissions={deny:[Y]}` (bare) -> higher bare wipes lower preserved extend -> bare
-   `permissions={deny:[Y]}` -> provision assign over `B` -> narrowing (drops defaultMode).
-6. **Non-overlapping keys, no narrowing.** `B` has `permissions`; `settings_overrides` sets a
-   new `model="opus"` (scalar) -> assign, no narrowing (scalar, no base aggregate dropped).
-7. **Hooks coexist via list concat.** `settings_overrides.hooks.SessionStart__extend=[{group}]`
-   -> extends `B.hooks.SessionStart` (mngr's readiness group) -> both groups present.
-8. **Deferred-consumption failure (negative test).** Construct a preserved `__extend` on a
-   non-deferred field -> errors at config-load; and a deferred marker left unconsumed ->
-   the step-5 assertion fires.
-
-Associativity check (must hold for phases to equal the single fold): examples 3/4/5 each
-verify two-phase (condense then merge-`B`) == `merge(merge(merge(B,U),P))`.
+1. **Back-compat invariant.** `permissions__extend = {allow: [X], deny: [Y]}` (no nested
+   markers) -> identical result under old and new: `{defaultMode, allow:[X], deny:[Y]}`.
+2. **#1647, single scope, nested extend.** `permissions__extend = {allow__extend: [X]}` ->
+   `{defaultMode, allow:[X]}` (home `defaultMode` preserved).
+3. **#1647, single scope, bare -> narrows.** `permissions = {allow:[X]}` -> bare assign drops
+   `defaultMode` -> **narrowing error** (escape hatch yields `{allow:[X]}`).
+4. **Cross-scope extend+extend accumulate.** `U: permissions__extend={allow__extend:[X]}`,
+   `P: permissions__extend={allow__extend:[Y]}` -> combine -> provision ->
+   `{defaultMode, allow:[X,Y]}`.
+5. **Cross-scope lower-bare + higher-extend.** `U: permissions={allow:[X]}` (bare),
+   `P: permissions__extend={allow__extend:[Y]}` -> combine -> bare `permissions={allow:[X,Y]}`
+   -> provision assign over B -> **narrowing** (drops defaultMode).
+6. **Cross-scope higher-bare wipes lower-extend.** `U: permissions__extend={allow__extend:[X]}`,
+   `P: permissions={allow:[Y]}` (bare) -> combine -> bare `permissions={allow:[Y]}` ->
+   provision -> **narrowing**.
+7. **Associativity.** Examples 4/5/6: assert `fold(B, combine(U,P)) == fold(fold(B,U),P)`.
+8. **Hooks coexist (list concat).** `settings_overrides.hooks.SessionStart__extend=[{group}]`
+   -> extends B's mngr readiness `SessionStart` list -> both groups present.
+9. **Non-overlap scalar.** `settings_overrides.model = "opus"` over a B without `model` ->
+   assign, no narrowing.
+10. **Zero-marker output.** After any of the above, the built `settings.json` has no
+    `__extend` key. Negative: a deliberately-unconsumed marker (simulated fold bug) trips the
+    assertion.
+11. **Base normalization.** A home `settings.json` containing a literal `permissions__extend`
+    -> `B = fold({}, B_raw)` strips it to a plain `permissions` key; the build succeeds and
+    the output has no marker (no warning, no crash).
 
 ## Changes (sketch)
 
-- `key_resolver.py`: deferred-path registry + `is_deferred_extend_path`; preserve on
-  `current is None and is_deferred_extend_path(path)`; de-dup `_apply_template_extend` into
-  `_apply_extend`; cross-scope marker-combination (extend-of-extends; bare wipes preserved).
-- `data_types.py` / `merge_with`: combine (not assign) `__extend`-bearing keys for
-  deferred-path dict fields, OR move that into the resolve step -- whichever is cleaner.
-- `loader.py` / parse: deferred-consumption check (no unconsumed/registered-only markers).
-- `mngr_claude/plugin.py` `_build_settings_json`: replace `deep_merge_settings` with
-  `resolve_extends(B, settings_overrides)` + narrowing + top-level overlay + the
-  zero-marker assertion. Remove `deep_merge_settings` (+ its tests) once unused.
-- Field help: `settings_overrides` description -> bare assigns (narrowing-guarded),
-  `__extend` merges, against the home/base layer.
+`libs/mngr/imbue/mngr/config/key_resolver.py`:
+
+- Make `_apply_extend`'s dict branch **recursive** (the `fold`): for each key in the extend
+  value, `key__extend` -> recurse/extend against `current[key]`; bare -> assign. Lists concat,
+  sets union, scalars assign (unchanged). This is the single shared extend primitive.
+- `is_deferred_extend_path(path)` + registry (exact-depth `create_templates`; prefix
+  `settings_overrides`); `resolve_extends` preserves markers inside deferred subtrees.
+- De-dup `_apply_template_extend` into the shared primitive.
+
+`libs/mngr/imbue/mngr/config/data_types.py`:
+
+- `merge_with` for deferred-path dict fields: **combine** patches via the fold (preserve/combine
+  markers, higher-bare-wins) rather than assign-by-default.
+
+`libs/mngr/imbue/mngr/config/loader.py`:
+
+- (If needed) thread the deferred-path registry; no new narrowing call here.
+
+`libs/mngr_claude/imbue/mngr_claude/plugin.py` (`_build_settings_json`):
+
+- Replace `deep_merge_settings(data, settings_overrides)` with `fold(B, settings_overrides)`
+  (resolve markers against `B`) + per-key narrowing + the zero-marker assertion. Remove
+  `deep_merge_settings` (and its tests) once unused.
+
+Field help: `settings_overrides` -> "a patch merged onto your home Claude settings: a bare
+key replaces (and warns if it drops a sibling); `key__extend` merges; nest `__extend` to
+merge deeper."
 
 ## Open implementation choices (not blockers)
 
-- Seam for cross-scope combination: `merge_with` carveout vs `resolve_extends` accumulation.
-  Pick by which keeps the marker-combination logic in one place.
-- Whether the narrowing guard at provision reuses `_collect_layer_narrowing`'s plumbing or
-  calls `would_assignment_narrow` directly per key (likely the latter -- there is one base
-  `B`, not a layer stack).
+- Whether the cross-scope combine lives in `merge_with` or in a `resolve_extends`
+  accumulation step -- pick whichever keeps the marker logic in one place. (Tests pin
+  behavior, not seam.)
+- The `fold` primitive likely belongs in `key_resolver.py` (shared by config core and, via
+  import, by `mngr_claude`'s provision step). Confirm no layering issue importing it into
+  `mngr_claude`.
