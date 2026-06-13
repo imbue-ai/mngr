@@ -164,3 +164,37 @@ def choose_server_for_new_slice(capacities: Sequence[BareMetalServerCapacity]) -
     if not eligible:
         raise SliceCapacityError("no ready bare-metal server has free slots; order or install more capacity")
     return max(eligible, key=lambda capacity: capacity.free_slots)
+
+
+@pure
+def plan_slice_placements(
+    capacities: Sequence[BareMetalServerCapacity],
+    slice_count: int,
+) -> list[BareMetalServerCapacity]:
+    """Choose which ready server each of ``slice_count`` new slices should bake onto.
+
+    Greedily assigns each slice to the ready server with the most remaining free
+    slots, decrementing as it goes so a single box is not over-subscribed.
+    Returns a list of length ``slice_count`` (a server's capacity may repeat).
+    Raises ``SliceCapacityError`` if the ready fleet has fewer than
+    ``slice_count`` total free slots.
+    """
+    if slice_count <= 0:
+        raise BareMetalConfigError(f"slice_count must be positive, got {slice_count}")
+    capacity_by_id = {capacity.server.id: capacity for capacity in capacities}
+    remaining_by_id = {
+        capacity.server.id: capacity.free_slots
+        for capacity in capacities
+        if str(capacity.server.status) == SERVER_STATUS_READY and capacity.free_slots > 0
+    }
+    placements: list[BareMetalServerCapacity] = []
+    for _ in range(slice_count):
+        candidates = [(server_id, free) for server_id, free in remaining_by_id.items() if free > 0]
+        if not candidates:
+            raise SliceCapacityError(
+                f"ready fleet has only {len(placements)} free slot(s); cannot place {slice_count} slice(s)"
+            )
+        chosen_id = max(candidates, key=lambda item: item[1])[0]
+        placements.append(capacity_by_id[chosen_id])
+        remaining_by_id[chosen_id] -= 1
+    return placements

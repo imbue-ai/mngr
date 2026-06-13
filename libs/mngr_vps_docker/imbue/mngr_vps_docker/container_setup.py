@@ -646,6 +646,19 @@ def prepare_btrfs_on_outer(
     """
     subvolume_path = btrfs_mount_path / host_id.get_uuid().hex
 
+    # Pre-mounted-btrfs case (slices): the btrfs filesystem is already mounted at
+    # ``btrfs_mount_path`` -- it's the VM's lima ``additionalDisk``, not a loop
+    # image we manage -- so there is nothing to allocate/mount/fstab. Detected as
+    # "mount present AND our loop file absent" so a normal loop-backed VPS re-run
+    # (loop file present) still takes the full path below. Just ensure btrfs-progs
+    # and the per-host subvolume, then return.
+    if is_path_mounted_on_outer(outer, btrfs_mount_path) and not check_file_exists_on_outer(outer, loop_file_path):
+        with log_span("Using pre-mounted btrfs at {} (no loop image)", btrfs_mount_path):
+            if not is_btrfs_progs_installed_on_outer(outer):
+                install_btrfs_progs_on_outer(outer)
+            ensure_btrfs_subvolume_on_outer(outer, subvolume_path)
+        return subvolume_path
+
     with log_span("Ensuring btrfs-progs is installed on outer"):
         if not is_btrfs_progs_installed_on_outer(outer):
             install_btrfs_progs_on_outer(outer)

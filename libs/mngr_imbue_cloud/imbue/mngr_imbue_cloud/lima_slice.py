@@ -1,3 +1,4 @@
+import shlex
 from typing import Any
 from typing import Final
 
@@ -44,6 +45,31 @@ systemctl enable --now docker 2>/dev/null || true
 """
 
 
+def _append_root_authorized_keys_script(extra_root_authorized_keys: tuple[str, ...]) -> str:
+    """Bash that appends each key to the VM root's authorized_keys (idempotent).
+
+    The base lima config already authorizes the provider's bake key for root
+    (``root_authorized_public_key``); this adds further keys -- e.g. the pool
+    management key the connector uses at lease time to inject the user's key and
+    at release time to reach the VM -- without dropping the bake key.
+    """
+    append_lines = "\n".join(
+        f'grep -qxF {shlex.quote(key)} "$AK" || printf \'%s\\n\' {shlex.quote(key)} >> "$AK"'
+        for key in extra_root_authorized_keys
+    )
+    return f"""\
+#!/bin/bash
+set -eux -o pipefail
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+AK=/root/.ssh/authorized_keys
+touch "$AK"
+{append_lines}
+chmod 600 "$AK"
+chown -R root:root /root/.ssh
+"""
+
+
 def build_slice_lima_yaml(
     *,
     host_dir: str,
@@ -56,6 +82,7 @@ def build_slice_lima_yaml(
     host_public_key_openssh: str,
     vm_ssh_host_port: int,
     container_ssh_host_port: int,
+    extra_root_authorized_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Build the Lima YAML for a VPS-parity slice VM.
 
@@ -95,4 +122,11 @@ def build_slice_lima_yaml(
         {"mode": "system", "script": _vm_ssh_extra_port_script(_VM_SSH_GUEST_PORT)},
         {"mode": "system", "script": _DOCKER_INSTALL_SCRIPT},
     ]
+    # Authorize any extra keys for root (e.g. the pool management key the
+    # connector uses at lease/release time), in addition to the bake key already
+    # authorized by the base config.
+    if extra_root_authorized_keys:
+        config["provision"] = list(config["provision"]) + [
+            {"mode": "system", "script": _append_root_authorized_keys_script(extra_root_authorized_keys)},
+        ]
     return config

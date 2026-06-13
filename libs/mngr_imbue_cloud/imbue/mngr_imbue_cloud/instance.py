@@ -787,19 +787,22 @@ class ImbueCloudProvider(BaseProviderInstance):
         return host_details, agent_details_list
 
     def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
-        """Best-effort: scan the VPS root sshd's host key and add it to known_hosts.
+        """Best-effort: scan the outer (VPS-root) sshd's host key and add it to known_hosts.
 
         ``outer_host_for`` connects with strict host-key checking, but the
-        lease step only added the inner container's host key (port 2222)
-        to ``known_hosts``. Without this scan, the very first outer-SSH
-        connection always fails. The scan and add are both idempotent and
-        safe to run multiple times; on scan failure (e.g. the VPS itself
-        is unreachable) or on local disk failure we just leave
+        lease step only added the inner container's host key (the container
+        sshd port) to ``known_hosts``. Without this scan, the very first
+        outer-SSH connection always fails. The outer sshd is reached at
+        ``lease.ssh_port`` -- ``22`` for an OVH VPS (root sshd on :22) and
+        the box-forwarded VM-root port for a slice (where ``:22`` is the
+        bare-metal box's own sshd, not the VM). The scan and add are both
+        idempotent and safe to run multiple times; on scan failure (e.g. the
+        VPS itself is unreachable) or on local disk failure we just leave
         ``known_hosts`` alone and let the connection produce its natural
         error -- the caller's outer-SSH guard then maps that to the
         lease-only fallback.
         """
-        scanned_key = _scan_ssh_host_key(lease.vps_address, 22)
+        scanned_key = _scan_ssh_host_key(lease.vps_address, lease.ssh_port)
         if scanned_key is None:
             return
         host_id = HostId(lease.host_id)
@@ -808,7 +811,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
             if not known_hosts_path.exists():
                 known_hosts_path.touch()
-            add_host_to_known_hosts(known_hosts_path, lease.vps_address, 22, scanned_key)
+            add_host_to_known_hosts(known_hosts_path, lease.vps_address, lease.ssh_port, scanned_key)
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
@@ -1822,10 +1825,13 @@ class ImbueCloudProvider(BaseProviderInstance):
 
     @contextmanager
     def outer_host_for(self, host_id: HostId) -> Iterator[OuterHostInterface | None]:
-        """Open the outer host (the leased VPS itself, root@vps_address:22).
+        """Open the outer host (the leased VPS itself, root@vps_address:ssh_port).
 
         Uses the per-host SSH key already on disk (the lease step authorized
-        this key on both the container's sshd and the VPS root account).
+        this key on both the container's sshd and the VPS root account). The
+        outer sshd port is ``lease.ssh_port`` -- ``22`` for an OVH VPS, and
+        the box-forwarded VM-root port for a slice (``:22`` on a slice's
+        ``vps_address`` is the bare-metal box's own sshd, not the VM).
         """
         leased = self._find_leased(host_id)
         if leased is None:
@@ -1841,7 +1847,7 @@ class ImbueCloudProvider(BaseProviderInstance):
 
         pyinfra_host = create_pyinfra_host(
             hostname=leased.vps_address,
-            port=22,
+            port=leased.ssh_port,
             private_key_path=private_key_path,
             known_hosts_path=known_hosts_path,
             ssh_user="root",

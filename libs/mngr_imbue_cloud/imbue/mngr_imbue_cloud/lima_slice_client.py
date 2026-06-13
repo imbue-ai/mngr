@@ -87,6 +87,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         host_public_key_openssh: str,
         vm_ssh_host_port: int,
         container_ssh_host_port: int,
+        extra_root_authorized_keys: tuple[str, ...] = (),
     ) -> SliceProvisionResult:
         """Create and start a VPS-parity lima VM for ``host_id`` and return its handle.
 
@@ -107,6 +108,7 @@ class LimaSliceVpsClient(VpsClientInterface):
             host_public_key_openssh=host_public_key_openssh,
             vm_ssh_host_port=vm_ssh_host_port,
             container_ssh_host_port=container_ssh_host_port,
+            extra_root_authorized_keys=extra_root_authorized_keys,
         )
         if self.vm_image_url is not None:
             config["images"] = [{"location": self.vm_image_url}]

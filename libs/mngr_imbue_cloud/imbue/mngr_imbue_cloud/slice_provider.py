@@ -57,24 +57,19 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
         default="127.0.0.1",
         description="Address external consumers use to reach slices on this box (recorded on the pool row).",
     )
+    pool_authorized_public_key: str | None = Field(
+        default=None,
+        description=(
+            "Pool management public key to authorize for the slice's VM root and inner container, so the "
+            "connector can inject the leasing user's key at lease time and reach the VM at release time. "
+            "Set by the bake (``admin server allocate-slice``) from POOL_SSH_PRIVATE_KEY."
+        ),
+    )
     slice_vcpus: int = Field(default=2, description="vCPUs per slice VM")
     slice_memory_mib: int = Field(default=SLICE_VM_MEMORY_MIB, description="RAM per slice VM in MiB")
     slice_disk_gib: int = Field(default=SLICE_VM_DISK_GIB, description="btrfs data-disk size per slice VM in GiB")
     slice_port_range_start: int = Field(default=DEFAULT_SLICE_PORT_RANGE_START)
     slice_port_range_end: int = Field(default=DEFAULT_SLICE_PORT_RANGE_END)
-
-
-def _ensure_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: str) -> None:
-    """Create a btrfs subvolume at ``subvolume_path`` if it doesn't already exist (idempotent)."""
-    script = (
-        f"set -e\n"
-        f"if ! btrfs subvolume show {subvolume_path} >/dev/null 2>&1; then\n"
-        f"    btrfs subvolume create {subvolume_path}\n"
-        f"fi\n"
-    )
-    result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
-    if not result.success:
-        raise MngrError(f"failed to create btrfs subvolume {subvolume_path}: {result.stderr.strip()}")
 
 
 class SliceVpsDockerProvider(VpsDockerProvider):
@@ -102,10 +97,17 @@ class SliceVpsDockerProvider(VpsDockerProvider):
 
     _current_outer_port: int | None = PrivateAttr(default=None)
     _current_container_port: int | None = PrivateAttr(default=None)
+    # Per-host VM-root (outer) forwarded port, recorded at bake time so
+    # ``get_outer_ssh_port`` can surface it through ``mngr create --format json``
+    # (the row's ``ssh_port``; the agent connection uses the container port).
+    _outer_port_by_host_id: dict[HostId, int] = PrivateAttr(default_factory=dict)
 
     @property
     def supports_snapshots(self) -> bool:
         return False
+
+    def get_outer_ssh_port(self, host_id: HostId) -> int | None:
+        return self._outer_port_by_host_id.get(host_id)
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this
@@ -169,6 +171,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         vm_ssh_port, container_ssh_port = self._find_two_free_box_ports()
         self._current_outer_port = vm_ssh_port
         self._current_container_port = container_ssh_port
+        self._outer_port_by_host_id[host_id] = vm_ssh_port
 
         # The provider's VPS keypair authorizes root on the VM; the VPS host
         # keypair is pre-injected as the VM's sshd host key (no first-connect TOFU).
@@ -176,6 +179,12 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
 
         instance_id = VpsInstanceId(slice_lima_instance_name(host_id))
+        # The pool management key (when configured) is authorized on both the VM
+        # root and the inner container so the connector can inject the leasing
+        # user's key at lease time and reach the VM at release time.
+        pool_key = self.slice_config.pool_authorized_public_key
+        extra_root_keys = (pool_key,) if pool_key else ()
+        effective_authorized_keys = [pool_key, *(authorized_keys or ())] if pool_key else list(authorized_keys or ())
         # Destroy the VM on ANY failure after provisioning (a try/finally + success
         # flag, so we clean up unconditionally without a broad ``except``).
         is_baked = False
@@ -191,6 +200,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
                 host_public_key_openssh=vps_host_public_key,
                 vm_ssh_host_port=vm_ssh_port,
                 container_ssh_host_port=container_ssh_port,
+                extra_root_authorized_keys=extra_root_keys,
             )
             # Pin the VM's (pre-injected) host key for the forwarded outer port.
             add_host_to_known_hosts(
@@ -218,7 +228,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
                     start_args=start_args,
                     lifecycle=lifecycle,
                     known_hosts=known_hosts,
-                    authorized_keys=authorized_keys,
+                    authorized_keys=effective_authorized_keys,
                 )
             logger.info("Slice host {} created (instance {})", name, instance_id)
             is_baked = True
@@ -302,14 +312,6 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         # Same intent as the base (sync data.json into the host volume), but the
         # outer is reached via the forwarded port that _make_outer_for_vps_ip uses.
         super()._on_certified_host_data_updated(host_id, certified_data, vps_ip)
-
-    def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId):
-        # The lima VM already mounts a btrfs fs at btrfs_mount_path (the data
-        # disk), so there is no loopback to create -- just make the per-host
-        # subvolume the shared bake binds the unified docker volume from.
-        subvolume_path = self.config.btrfs_mount_path / host_id.get_uuid().hex
-        _ensure_btrfs_subvolume_on_outer(outer, str(subvolume_path))
-        return subvolume_path
 
 
 class SliceVpsDockerProviderBackend(ProviderBackendInterface):
