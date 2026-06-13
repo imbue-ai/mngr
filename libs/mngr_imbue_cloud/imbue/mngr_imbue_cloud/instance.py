@@ -1822,7 +1822,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                         host_id=host_id,
                     )
                 )
-                raise CleanupFailedGroup.from_failures(failures)
+                raise CleanupFailedGroup.from_failures(failures) from exc
         self._cleanup_local_host_state(host_id)
         if failures:
             raise CleanupFailedGroup.from_failures(failures)
