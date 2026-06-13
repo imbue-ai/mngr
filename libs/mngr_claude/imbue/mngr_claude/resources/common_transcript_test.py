@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+
 # -- Helpers --
 
 
@@ -757,6 +759,38 @@ def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path:
     events = runner.get_output_events()
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
+
+
+def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Every record claude's converter emits must validate against the shared envelope schema.
+
+    Guards against the claude emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    assistant = _make_assistant_event(
+        "uuid-assistant",
+        "2026-01-01T00:00:01Z",
+        text="hi there",
+        tool_calls=[{"id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}],
+        stop_reason="tool_use",
+    )
+    user = _make_user_event(
+        "uuid-user",
+        "2026-01-01T00:00:02Z",
+        text="hello",
+        tool_results=[{"tool_use_id": "toolu_1", "content": "file.txt", "is_error": False}],
+    )
+    runner.write_input([assistant, user])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    records = runner.get_output_events()
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
 
 
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
