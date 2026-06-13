@@ -38,6 +38,7 @@ from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.events import EventsTarget
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import try_build_events_target_for_agent
+from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.find import resolve_to_started_host_and_running_agent
 from imbue.mngr.api.list import list_agents
@@ -296,14 +297,23 @@ def _create_agent(session: LiveSession, initial_message: str | None) -> None:
 def _send_message(session: LiveSession, prompt: str) -> None:
     """Deliver a follow-up turn to the already-running agent."""
     agent = session.agent
-    if agent is None:
+    host = session.host
+    if agent is None or host is None:
         raise TurnDeliveryError("Cannot send a message before the agent is created")
+    # The SDK only runs against locally-created Claude agents (see _build_create_options),
+    # so the provider is fixed; constructing the AgentMatch directly avoids a discovery
+    # round-trip.
+    match = AgentMatch(
+        agent_id=agent.id,
+        agent_name=agent.name,
+        host_id=agent.host_id,
+        host_name=host.get_name(),
+        provider_name=LOCAL_PROVIDER_NAME,
+    )
     result = send_message_to_agents(
         mngr_ctx=session.mngr_ctx,
         message_content=prompt,
-        include_filters=(f'id == "{agent.id}"',),
-        exclude_filters=(),
-        all_agents=False,
+        agents_to_message=(match,),
         error_behavior=ErrorBehavior.ABORT,
         is_start_desired=False,
     )

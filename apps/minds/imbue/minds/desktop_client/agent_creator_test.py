@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
@@ -472,6 +473,61 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     )
     assert push.returncode == 0, push.stderr
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+
+
+def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
+    """``clone_git_repo`` materialises a checked-out, tracked working tree --
+    exactly what ``git clone`` produces.
+
+    Regression for the SHA-support rewrite that swapped ``git clone`` for
+    ``git init`` + ``git fetch`` and dropped the checkout, leaving an empty
+    working tree. Callers that overlay a worktree via
+    ``rsync_worktree_over_clone`` depend on the clone being checked out: with
+    an empty tree the overlaid files land untracked and the follow-up
+    ``checkout_branch`` aborts with "untracked working tree files would be
+    overwritten by checkout", which silently broke every local-worktree
+    create (docker, lima, smolvm).
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    # Working tree is populated from the fetched HEAD (origin is left on main)...
+    assert (dest / "f").read_text() == "base\n"
+    # ...and the files are TRACKED (clean status), not untracked -- this is the
+    # property the worktree overlay relies on.
+    assert _git(dest, "status", "--porcelain") == ""
+
+
+@pytest.mark.rsync
+def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
+    """The local-worktree create flow (clone -> rsync overlay -> checkout)
+    succeeds and keeps the worktree's uncommitted edits.
+
+    Regression for the create failure where ``clone_git_repo`` stopped
+    checking out, so the overlay rsync'd files landed untracked and
+    ``checkout_branch`` aborted with "untracked working tree files would be
+    overwritten by checkout". Mirrors production's ordering for a git-worktree
+    source on a branch (the ``minds-start`` dev flow).
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    # A real git worktree on "testing" with an UNCOMMITTED edit (stands in for
+    # minds-start's locally-rsynced vendor/mngr/ changes).
+    worktree = tmp_path / "wt"
+    _git(origin, "worktree", "add", "-q", str(worktree), "testing")
+    (worktree / "f").write_text("uncommitted edit\n")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
+    _rsync_worktree_over_clone(worktree, dest)
+    checkout_branch(dest, GitBranch("testing"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
+    assert (dest / "f").read_text() == "uncommitted edit\n"
 
 
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
