@@ -162,8 +162,13 @@ in `_build_settings_json` and normalize it before folding the `settings_override
    `P: permissions={allow:[Y]}` (bare) -> combine -> bare `permissions={allow:[Y]}` ->
    provision -> **narrowing**.
 7. **Associativity.** Examples 4/5/6: assert `fold(B, combine(U,P)) == fold(fold(B,U),P)`.
-8. **Hooks coexist (list concat).** `settings_overrides.hooks.SessionStart__extend=[{group}]`
-   -> extends B's mngr readiness `SessionStart` list -> both groups present.
+8. **Hooks coexist (list concat).** `settings_overrides.hooks__extend.SessionStart__extend =
+   [{group}]` -> `hooks__extend` merges onto B's hooks dict (preserving mngr's other events
+   like `UserPromptSubmit`), and `SessionStart__extend` concats onto B's readiness
+   `SessionStart` list -> both groups present, sibling events preserved. (Note: a *bare*
+   `hooks` intermediate would assign-replace B's whole hooks dict, dropping mngr's other
+   events and tripping the narrowing guard -- `__extend` must be marked at each level you
+   want merged, including `hooks` itself.)
 9. **Non-overlap scalar.** `settings_overrides.model = "opus"` over a B without `model` ->
    assign, no narrowing.
 10. **Zero-marker output.** After any of the above, the built `settings.json` has no
