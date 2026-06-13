@@ -55,10 +55,13 @@ class FakeModal:
         raise AssertionError(f"unexpected modal args: {args}")
 
 
-def test_stop_all_apps_stops_running_apps_in_matching_envs_only() -> None:
+@pytest.mark.parametrize("env_name_key", ["Name", "name"])
+def test_stop_all_apps_stops_running_apps_in_matching_envs_only(env_name_key: str) -> None:
+    # Modal's environment-name column casing has shifted across CLI versions
+    # ("Name" in 1.4.x, "name" in older builds); both must be handled.
     target_env = f"{MNGR_ROOT_NAME}-aaa"
     fake = FakeModal(
-        environments=[{"name": target_env}, {"name": "mngr-other-user-bbb"}],
+        environments=[{env_name_key: target_env}, {env_name_key: "mngr-other-user-bbb"}],
         apps_by_env={
             target_env: [
                 {"App ID": "ap-1", "State": "deployed"},
@@ -71,6 +74,12 @@ def test_stop_all_apps_stops_running_apps_in_matching_envs_only() -> None:
     # already-stopped app and the unrelated environment are left alone.
     assert result == [(target_env, "ap-1")]
     assert fake.stopped == [(target_env, "ap-1")]
+
+
+def test_stop_all_apps_raises_on_missing_environment_name_key() -> None:
+    fake = FakeModal(environments=[{"unexpected": "x"}], apps_by_env={})
+    with pytest.raises(ModalSchemaError):
+        stop_all_apps_in_changelog_envs(fake)
 
 
 def test_stop_all_apps_dry_run_reports_without_stopping() -> None:

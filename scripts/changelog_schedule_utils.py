@@ -73,8 +73,12 @@ def disable_plugin_args() -> list[str]:
 
 # Keys emitted by ``modal environment list --json`` and ``modal app list
 # --json`` (the column headers from the Modal CLI's table output, which are
-# the JSON keys verbatim). Mirrors the constants in scripts/modal_nuke.py.
-_ENV_NAME_KEY: Final[str] = "name"
+# the JSON keys verbatim). The app keys match the working callers in
+# libs/mngr_schedule (testing.py, implementations/modal/deploy.py) and
+# scripts/modal_nuke.py. The environment-name column casing has shifted across
+# Modal versions ("Name" in 1.4.x, "name" in older builds -- see
+# apps/minds/imbue/minds/deployment_tests/helpers.py), so we accept either.
+_ENV_NAME_KEYS: Final[tuple[str, ...]] = ("Name", "name")
 _APP_ID_KEY: Final[str] = "App ID"
 _APP_STATE_KEY: Final[str] = "State"
 # App states (lowercased) that mean the app is already not running, so there
@@ -111,6 +115,22 @@ def _require_key(entry: Mapping[str, object], key: str, kind: str) -> str:
     return str(entry[key])
 
 
+def _require_first_key(entry: Mapping[str, object], keys: Sequence[str], kind: str) -> str:
+    """Return the value of the first of ``keys`` present in ``entry``.
+
+    Tolerates Modal's column-casing drift across CLI versions while still
+    failing loudly (rather than acting on a placeholder identifier) if none of
+    the expected keys are present.
+    """
+    for key in keys:
+        if key in entry:
+            return str(entry[key])
+    raise ModalSchemaError(
+        f"Modal {kind} entry is missing all expected keys {list(keys)!r}; got keys {sorted(entry)!r}. "
+        "Refusing to act on an unknown identifier; the modal --json schema may have changed."
+    )
+
+
 def _changelog_environment_names(run_modal: ModalRunner) -> list[str]:
     """Return the names of the changelog schedule's isolated Modal environment(s).
 
@@ -122,7 +142,7 @@ def _changelog_environment_names(run_modal: ModalRunner) -> list[str]:
     if result.returncode != 0:
         raise ModalCommandError(f"`modal environment list` failed: {result.stderr.strip()}")
     environments = json.loads(result.stdout)
-    names = [_require_key(env, _ENV_NAME_KEY, "environment") for env in environments]
+    names = [_require_first_key(env, _ENV_NAME_KEYS, "environment") for env in environments]
     return sorted(name for name in names if name.startswith(MNGR_ROOT_NAME))
 
 
