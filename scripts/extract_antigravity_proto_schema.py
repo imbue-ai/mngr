@@ -17,7 +17,7 @@ descriptors you can read the real field names/numbers and enum values that
 antigravity ships ~weekly and may renumber fields, so re-run this against each new binary and
 diff the output (see ``libs/mngr_antigravity/dev/README.md`` for the full procedure and the
 schema map). ``test_antigravity_proto_schema.py`` mechanizes that diff as a release-marked
-test that calls :func:`extract` against the installed ``agy`` binary.
+test that runs this script (as a subprocess) against the installed ``agy`` binary.
 
 Usage
 -----
