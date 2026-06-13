@@ -12,8 +12,7 @@
  * non-styleguide code is --shadow-seam (titlebar drop shadow, templates/pages/Chrome.jinja)
  * and the implicit --workspace-accent / --titlebar-bg / --titlebar-fg
  * (set per-workspace via inline style by chrome.js; consumed by the
- * .accent-spine / .sidebar-item / .accent-swatch / .titlebar-* rules
- * below).
+ * .accent-spine / .accent-swatch / .titlebar-* rules below).
  */
 
 :root {
@@ -38,26 +37,6 @@ html {
   bottom: 0;
   width: 3px;
   background: var(--workspace-accent, #0b292b);
-}
-
-.sidebar-item {
-  position: relative;
-}
-.sidebar-item::before {
-  content: '';
-  position: absolute;
-  left: 4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 2px;
-  background: var(--workspace-accent, #0b292b);
-  opacity: 0.55;
-  transition: opacity 100ms;
-}
-.sidebar-item:hover::before,
-.sidebar-item.is-current::before {
-  opacity: 1;
 }
 
 .accent-swatch {
@@ -106,14 +85,6 @@ html {
 .titlebar-btn-danger:hover {
   color: #ffffff;
   background-color: #dc2626; /* red-600 */
-}
-.titlebar-account {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.7);
-  transition: color 100ms, background-color 100ms;
-}
-.titlebar-account:hover {
-  color: rgb(var(--titlebar-fg, 255 255 255) / 0.95);
-  background-color: rgb(var(--titlebar-fg, 255 255 255) / 0.06);
 }
 
 /*

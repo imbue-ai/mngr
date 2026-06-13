@@ -365,12 +365,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         # per-session channel whenever the agent enters a busy state -- i.e. once
         # it starts processing the just-submitted message (see statusline.sh).
         # Wait for that, exactly as Claude waits for its UserPromptSubmit hook.
-        # ``accept_marker_command=None``: agy supplies no acceptance-marker
-        # command, so the marker-based fallback stays disabled; the statusLine
-        # busy-signal already covers the normal and queue-while-busy cases.
-        # (Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
+        # Known edge: a model that *refuses* the prompt -- e.g. quota exhausted
         # -- never enters a busy state, so this times out even though the prompt
-        # was enqueued.)
+        # was enqueued.
         send_enter_via_tmux_wait_for_hook(
             self,
             tmux_target,
@@ -1032,3 +1029,9 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the antigravity agent type."""
     return ("antigravity", AntigravityAgent, AntigravityAgentConfig)
+
+
+@hookimpl
+def register_agent_aliases() -> dict[str, str]:
+    """Register ``agy`` as a short alias for the ``antigravity`` agent type."""
+    return {"agy": "antigravity"}
