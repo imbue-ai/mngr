@@ -8,7 +8,7 @@ Extend the imbue_cloud pool with a second way to produce VPS-like hosts: instead
 - Slices reuse the **exact** OVH split of responsibilities: a new lima-backed `VpsClientInterface` (in `mngr_imbue_cloud`) handles only the "make/destroy the machine" step; the shared `VpsDockerProvider` does the docker container + FCT bake from the laptop, identical to OVH. The only divergence is the btrfs branch: the VM hands over an already-mounted btrfs disk, so vps_docker skips the loopback image.
 - VPS-backed and slice-backed hosts live in **one shared pool**: a lease takes whichever `available` row matches first, fully transparent to minds and the `mngr_imbue_cloud` provider. The VPS-vs-slice distinction lives only in the connector's release path and in admin tooling, keyed off a new `backend_kind` discriminator.
 - New admin surface in `mngr_imbue_cloud` covers the bare-metal lifecycle (order → register → install → reconcile → list → destroy) and slice allocation. Every step is independently runnable and resumable, because ordering/install can take a long time and partial failures are expected. The connector is not involved in provisioning, only in lease/release (mirroring today).
-- First box to order: **`24adv01-v2-us`** (AMD EPYC 4244P 6c/12t, 64 GB, dual NVMe softraid → RAID1, US `hil`/`vin`) → 8 × 8 GB slices.
+- First box (ordered): **`24rise02-v1-us`** / RISE-2 (Intel Xeon-E 2388G 8c/16t, 64 GB, 2×512 GB NVMe softraid → RAID1, `vin`/US-EAST-VA) → 8 × 8 GB slices. OVH order `8144904` placed 2026-06-13, month-to-month ($80 one-time setup + $93/mo).
 
 ## Expected behavior
 
@@ -50,6 +50,8 @@ Extend the imbue_cloud pool with a second way to produce VPS-like hosts: instead
 - In `release_host`, branch on the `pool_hosts.backend_kind`: for `ovh_vps`, keep today's OVH cancel; for `slice`, SSH to the bare-metal box as the lima service-user (pool management key) and run `limactl delete` + drop the btrfs disk, then delete the row to free the slot.
 - `lease_host` and `GET /hosts` are unchanged (slices are ordinary `pool_hosts` rows).
 
-### Bare metal to order
+### Bare metal — first box (already ordered)
 
-- Order **`24adv01-v2-us`** in a US datacenter (`hil` or `vin`), dual-NVMe RAID1, 64 GB → 8 × 8 GB slices. Get the exact all-in price + precise planCode/addons via a cart dry-run, then place the order before implementation begins (delivery can take a while).
+- **Ordered:** `24rise02-v1-us` (RISE-2, Intel Xeon-E 2388G 8c/16t, 64 GB → 8 × 8 GB slices), datacenter `vin` (US-EAST-VA), storage `softraid-2x512nvme` (2×512 GB NVMe, RAID1-capable), OS `none_64.en` (we install Debian 12 + RAID1 ourselves via the OVH install API), month-to-month (`P1M`).
+- OVH order `8144904`, placed 2026-06-13 via the eco order cart (`/order/cart/{id}/eco`), auto-paid; $80 one-time setup + $93/mo. Delivery in progress at order time.
+- Once delivered, this box is the target for the `admin server register` → `install` → slice-allocation flow during implementation.
