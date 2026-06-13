@@ -11,7 +11,7 @@ set -euo pipefail
 # --timezone (see SCHEDULE / TIMEZONE below) so the fire time does not
 # depend on the deploying machine's local timezone. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
-# are executed by claude itself (running consolidate_changelog.py, summarizing
+# are executed by claude itself (running changelog_consolidate.py, summarizing
 # each project's new dated sections into its per-project CHANGELOG.md
 # [Unreleased], committing, spawning one or more subagents to review the new
 # bullets for factual accuracy against the code, pushing a branch, opening a
@@ -20,25 +20,29 @@ set -euo pipefail
 # `mngr schedule run` stdout and Modal logs.
 #
 # Usage:
-#   ./scripts/setup_changelog_agent.sh
+#   ./scripts/changelog_deploy.sh
 #
-# Required environment:
-#   GH_TOKEN          - token for bot@imbue.com.
-#   ANTHROPIC_API_KEY - used by claude inside the cron container.
+# Secrets are read from Vault at deploy time and baked into the schedule via
+# the --pass-env flags below. Run `vault login -method=oidc` first:
+#   secrets/mngr/dev/github    key GH_TOKEN          - token for bot@imbue.com.
+#   secrets/mngr/dev/anthropic key ANTHROPIC_API_KEY - claude key for the cron
+#                                                       container.
 #
 # Optional environment:
-#   CHANGELOG_VERIFY   - Verification mode (default: "none"). Set to "quick"
-#                        or "full" to run the agent once during deploy.
+#   CHANGELOG_VERIFY             - Verification mode (default: "none"). Set to
+#                                  "quick" or "full" to run the agent once
+#                                  during deploy.
+#   VAULT_ADDR / VAULT_NAMESPACE - override the Vault endpoint (default: the
+#                                  imbue HCP cluster).
 #
 # The provider is read from the shared `PROVIDER` constant in
-# scripts/trigger_changelog_consolidation.py so release.py's printed
-# on-demand command targets the same deployment. To change providers,
-# edit that constant and re-run this script.
+# scripts/changelog_schedule_utils.py so the `changelog-trigger` justfile
+# recipe's on-demand command targets the same deployment. To change
+# providers, edit that constant and re-run this script.
 #
 # To trigger a fire on demand and read its JSON outcome (status, with pr_url on
-# success or notes on failure):
-#   env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \
-#     uv run mngr schedule run changelog-consolidation --provider modal $DISABLE_PLUGIN_ARGS
+# success or notes on failure), use the justfile recipe:
+#   just changelog-trigger
 # (claude's final assistant message is the structured outcome; see also Modal app logs)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +54,7 @@ TRIGGER_NAME="changelog-consolidation"
 # Pacific regardless of where this deploy script runs).
 SCHEDULE="0 0 * * *"
 TIMEZONE="America/Los_Angeles"
-PROVIDER=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-provider)
+PROVIDER=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-provider)
 VERIFY="${CHANGELOG_VERIFY:-none}"
 
 # Use an isolated mngr config namespace so we don't load the repo's
@@ -60,22 +64,42 @@ export MNGR_ROOT_NAME="mngr-changelog-schedule"
 unset MNGR_HOST_DIR
 unset MNGR_PREFIX
 
-# Validate that required env vars are set so the agent can function.
-for var in GH_TOKEN ANTHROPIC_API_KEY; do
-    if [ -z "${!var:-}" ]; then
-        echo "Error: $var is not set. The scheduled agent needs this to operate." >&2
-        exit 1
-    fi
-done
+# Pull the agent's credentials from Vault and export them so the --pass-env
+# flags below bake them into the schedule. Requires a valid `vault login
+# -method=oidc`. VAULT_ADDR / VAULT_NAMESPACE default to the imbue HCP cluster
+# (matching apps/minds/imbue/minds/envs/vault_reader.py).
+export VAULT_ADDR="${VAULT_ADDR:-https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200}"
+export VAULT_NAMESPACE="${VAULT_NAMESPACE:-admin}"
+if ! command -v vault >/dev/null 2>&1; then
+    echo "Error: 'vault' CLI not found on PATH. Install it and run 'vault login -method=oidc'." >&2
+    exit 1
+fi
+
+# Echo secrets/<$1> key <$2>, or exit non-zero. pipefail propagates a failed
+# `vault kv get` (e.g. not logged in); `jq -e` with the `// "" | select` guard
+# exits non-zero when the key is absent or empty. The value is never printed.
+read_vault_secret() {
+    vault kv get -format=json -mount=secrets "$1" | jq -er --arg k "$2" '.data.data[$k] // "" | select(. != "")'
+}
+
+if ! GH_TOKEN=$(read_vault_secret mngr/dev/github GH_TOKEN); then
+    echo "Error: could not read GH_TOKEN from secrets/mngr/dev/github. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    exit 1
+fi
+if ! ANTHROPIC_API_KEY=$(read_vault_secret mngr/dev/anthropic ANTHROPIC_API_KEY); then
+    echo "Error: could not read ANTHROPIC_API_KEY from secrets/mngr/dev/anthropic. Run 'vault login -method=oidc' and confirm the entry exists." >&2
+    exit 1
+fi
+export GH_TOKEN ANTHROPIC_API_KEY
 
 # IS_SANDBOX=1 lets claude accept --dangerously-skip-permissions as root
 # inside the Modal container.
 export IS_SANDBOX=1
 
 # Compute --disable-plugin args via the shared helper so the deploy and
-# the on-demand trigger (scripts/release.py) stay in sync about which
-# plugins must be disabled around `mngr schedule` invocations.
-DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/trigger_changelog_consolidation.py" --print-disable-plugin-args)
+# the on-demand trigger (the `changelog-trigger` justfile recipe) stay in
+# sync about which plugins must be disabled around `mngr schedule` invocations.
+DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-disable-plugin-args)
 
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.
@@ -147,7 +171,6 @@ uv run mngr schedule add "$TRIGGER_NAME" \
 
 echo "Schedule '${TRIGGER_NAME}' created successfully."
 echo ""
-echo "To trigger a run on demand and read its outcome JSON:"
-echo "  env -u MNGR_HOST_DIR -u MNGR_PREFIX MNGR_ROOT_NAME=mngr-changelog-schedule \\"
-echo "    uv run mngr schedule run $TRIGGER_NAME --provider $PROVIDER $DISABLE_PLUGIN_ARGS"
+echo "To trigger a run on demand and read its outcome JSON, run:"
+echo "  just changelog-trigger"
 echo "(claude's final assistant message is a single JSON object: status, with pr_url on success or notes on failure)"
