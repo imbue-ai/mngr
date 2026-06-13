@@ -26,6 +26,7 @@ from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.common import get_seconds_since_last_activity
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
@@ -417,7 +418,17 @@ def _gc_single_host(
 
         if not dry_run:
             mngr_ctx.pm.hook.on_before_host_destroy(host=host, mngr_ctx=mngr_ctx)
-            provider.destroy_host(host)
+            # destroy_host raises a CleanupFailedGroup when the host was torn down but left a
+            # resource behind. Record the leak and continue the sweep (the host is gone, so it
+            # still counts as destroyed) rather than letting one host's leak abort GC.
+            try:
+                provider.destroy_host(host)
+            except CleanupFailedGroup as group:
+                with results_lock:
+                    result.errors.extend(
+                        f"Host {host_ref.host_id} left a resource behind during GC: {failure.message}"
+                        for failure in group.failures
+                    )
             mngr_ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host_ref.host_id, [])
 

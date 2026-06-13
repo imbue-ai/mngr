@@ -49,7 +49,9 @@ from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
@@ -2373,6 +2375,55 @@ def test_gc_machines_destroys_old_online_host_with_no_agents(
 
     assert len(result.machines_destroyed) == 1
     assert provider.destroyed_hosts == [host.id]
+
+
+def test_gc_machines_records_leaked_resource_but_continues_when_destroy_host_raises(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """A leaked resource during GC destroy is recorded but does not abort the sweep.
+
+    destroy_host raises a CleanupFailedGroup when the host was torn down but left a resource
+    behind. GC records the leak in result.errors and still counts the host as destroyed (it
+    is gone), rather than letting one host's leak propagate and abort the whole sweep.
+    """
+
+    class _LeakyDestroyProvider(_DestroyableProvider):
+        def destroy_host(self, host: HostInterface | HostId) -> None:
+            host_id = host.id if isinstance(host, HostInterface) else host
+            self.destroyed_hosts.append(host_id)
+            raise CleanupFailedGroup.from_failures(
+                [
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message="droplet could not be destroyed",
+                        host_id=host_id,
+                    )
+                ]
+            )
+
+    host = _make_remote_host(local_provider, last_activity_seconds_ago=_DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS + 60)
+    provider = _LeakyDestroyProvider(
+        name=ProviderInstanceName("test-remote-leaky"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[host],
+    )
+    result = GcResult()
+    gc_machines(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=_hosts_for(provider),
+        dry_run=False,
+        error_behavior=ErrorBehavior.ABORT,
+        result=result,
+    )
+
+    # The host is gone (destroy attempted), so it still counts as destroyed...
+    assert provider.destroyed_hosts == [host.id]
+    assert len(result.machines_destroyed) == 1
+    # ...but the leak is recorded rather than swallowed or allowed to abort the sweep.
+    assert any("droplet could not be destroyed" in error for error in result.errors)
 
 
 @pytest.mark.allow_warnings(match=r"^Failed to authenticate with host")
