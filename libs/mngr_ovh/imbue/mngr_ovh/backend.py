@@ -53,6 +53,7 @@ from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")
@@ -81,40 +82,25 @@ class OvhProvider(VpsDockerProvider):
         self._vps_iam_cache = None
 
     # =========================================================================
-    # Build-args parsing -- OVH uses string image names and --vps-datacenter
+    # Build-args parsing -- OVH uses --ovh-datacenter (alias for --ovh-region)
     # =========================================================================
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        region = self.config.default_region
-        plan = self.config.default_plan
-        os_id: int | str = self.ovh_config.default_image_name
-        git_depth: int | None = None
-        docker_build_args: list[str] = []
-        if build_args:
-            for arg in build_args:
-                if arg.startswith("--vps-datacenter="):
-                    region = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-region="):
-                    region = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-plan="):
-                    plan = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-os="):
-                    os_id = arg.split("=", 1)[1]
-                elif arg.startswith("--git-depth="):
-                    git_depth = int(arg.split("=", 1)[1])
-                elif arg.startswith("--vps-"):
-                    raise MngrError(
-                        f"Unknown OVH build arg: {arg}. "
-                        "Valid args: --vps-datacenter=, --vps-plan=, --vps-os=, --git-depth="
-                    )
-                else:
-                    docker_build_args.append(arg)
-        return ParsedVpsBuildOptions(
-            region=region,
-            plan=plan,
-            os_id=os_id,
-            git_depth=git_depth,
-            docker_build_args=tuple(docker_build_args),
+        """Parse OVH-prefixed build args. ``--ovh-datacenter=`` is an alias for ``--ovh-region=``."""
+        # Rewrite the OVH datacenter alias to the canonical region form so the
+        # shared parser handles the lookup uniformly.
+        normalized: list[str] | None = None
+        if build_args is not None:
+            normalized = [
+                arg.replace("--ovh-datacenter=", "--ovh-region=", 1) if arg.startswith("--ovh-datacenter=") else arg
+                for arg in build_args
+            ]
+        return parse_vps_build_args(
+            normalized,
+            provider_prefix="ovh",
+            default_region=self.ovh_config.default_region,
+            default_plan=self.ovh_config.default_plan,
+            plan_arg_name="plan",
         )
 
     # =========================================================================
@@ -350,9 +336,7 @@ class OvhProvider(VpsDockerProvider):
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
-        os_id: int | str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -374,12 +358,19 @@ class OvhProvider(VpsDockerProvider):
         time. The locally-generated host key files are left on disk; they
         do no harm and keep the base ``create_host`` flow uniform.
 
+        The OS image is taken from ``OvhProviderConfig.default_image_name``;
+        per-host image overrides are not supported via build args, matching
+        the Vultr convention. (AWS now allows a per-host override via
+        ``--aws-ami=<ami-id>``.)
+
         Returns the OVH ``serviceName`` for both the instance id *and* the
         SSH-reachable hostname -- OVH's serviceName is itself a DNS name
         like ``vps-eec8860b.vps.ovh.us`` that resolves to the VPS's IP.
         """
         del vps_host_key_path, vps_host_public_key
-        image_name = str(os_id)
+        region = parsed.region
+        plan = parsed.plan
+        image_name = self.ovh_config.default_image_name
 
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
@@ -435,11 +426,11 @@ class OvhProvider(VpsDockerProvider):
                             image_name=image_name,
                             pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
                             duration=self.ovh_config.duration,
-                            deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                            deliver_timeout_seconds=self.ovh_config.instance_boot_timeout,
                         )
                     except OvhOrderDeliveryTimeoutError as exc:
                         # OVH accepted the order but the VPS didn't deliver
-                        # within ``vps_boot_timeout``. Without intervention,
+                        # within ``instance_boot_timeout``. Without intervention,
                         # any later delivery becomes an unmanaged orphan
                         # (no ``mngr-provider`` tag => invisible to
                         # ``list_vps_resources_for_provider`` => the next
@@ -623,14 +614,14 @@ class OvhProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)\n"
-            "  --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)\n"
-            "  --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')\n"
+            "OVH-specific args (consumed by provider, not passed to docker):\n"
+            "  --ovh-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)\n"
+            "                        (alias: --ovh-region=)\n"
+            "  --ovh-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)\n"
             "  --git-depth=N         Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
-            "Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .\n"
+            "Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod
@@ -642,15 +633,7 @@ class OvhProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build an OVH provider instance.
-
-        ``is_for_host_creation`` is ignored: the OVH backend has no one-time
-        bootstrap resources to gate on (compare the Modal backend, which uses
-        this flag to authorize creating a missing per-user env).
-        """
-        del is_for_host_creation
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)

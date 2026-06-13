@@ -1,1 +1,0 @@
-Fixed the e2e tutorial test fixture: removed a duplicate `type = "claude"` key in the generated `settings.local.toml`, which caused a TOML parse error ("Cannot overwrite a value") that broke all e2e tutorial tests using the shared fixture.

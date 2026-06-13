@@ -6,12 +6,25 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `claude_process_started` marker file (touched by the `SessionStart` hook) whose mtime gives consumers a restart boundary — any transcript event older than it belongs to a turn the current process did not run.
+
+### Changed
+
+- Changed: Claude session preservation rewritten onto core mngr's shared `preserve_agent_data` machinery, working against either an online host or a volume-backed offline host. Sessions, the raw and common transcripts, and the session-id history are still preserved before the agent state directory is deleted, but preserved files now mirror the agent state directory verbatim under `<local_host_dir>/preserved/<agent-name>--<agent-id>/` instead of the old `preserved_sessions` location — a switch-forward change (previously preserved sessions are left in place).
+- Changed: `ClaudeAgent` now supplies its own "message accepted" probe (a shell command that reads the latest `enqueue` event from the Claude transcript event log and prints its ISO-8601 timestamp) to mngr's shared submission-confirm path. This is the Claude-specific knowledge that previously lived hardcoded in the shared `tui_utils` module; moving it into the plugin keeps `tui_utils` agent-neutral while preserving the fast-confirm-on-enqueue behavior for Claude agents.
+
+### Fixed
+
+- Fixed: A Claude agent restarted or resumed mid-turn no longer stays stuck at the `RUNNING` lifecycle state. The `active` marker (set on `UserPromptSubmit`, cleared by `Stop` / idle `Notification`) used to outlive a turn abandoned by an abnormal exit (container restart, OOM, crash); the `SessionStart` hook now clears the `active` / `permissions_waiting` markers on `startup`/`resume` (a fresh, not-mid-turn process), so the lifecycle state self-heals on the next (re)start. `compact` is excluded because auto-compaction fires mid-turn while Claude is genuinely active.
+
 ## [v0.2.12] - 2026-06-08
 
 ### Added
 
-- Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer is written atomically (temp file + `mv`) with line 1 carrying the `uuid` of the last complete assistant message and lines 2+ the in-progress text reverse-mapped from the terminal rendering back into markdown; it is cleared on watcher startup and emptied (body cleared, id line kept) when the agent goes idle.
-- Added: `resources/stream_snapshot.py` watcher script (stdlib-only) that captures the tmux pane via `tmux capture-pane -e -J`, identifies the latest assistant-text block by the `●` marker's color (assistant markers are the achromatic default text color; chromatic tool-call and mid-gray status markers are ignored), and reverse-maps bold/italic, inline code, OSC 8 links, blockquotes, lists, code blocks, and tables (box-drawing back to pipe syntax). Body is strict-append within a message via overlap-stitched snapshots; trailing tables are held back until raw form is stable. The poll interval is provisioned to a per-agent `plugin/claude/stream_interval` file rather than env-var propagated; provisioning fails fast if streaming is enabled but the host lacks `python3`.
+- Added: Approximate response streaming for Claude agents, driven by watching the agent's tmux pane. A new `streaming_snapshot_interval_seconds` (float, default `0.0`) on the `claude` agent type config enables a background watcher that writes the in-progress assistant text to `$MNGR_AGENT_STATE_DIR/plugin/claude/stream_buffer` every N seconds; `<= 0` (the default) leaves existing behavior unchanged. The buffer carries the id of the last complete assistant message plus the in-progress text reverse-mapped from the terminal rendering back into markdown, and is emptied when the agent goes idle.
+- Added: `resources/stream_snapshot.py` watcher script (stdlib-only) that captures the tmux pane, identifies the latest assistant-text block, and reverse-maps markdown formatting (bold/italic, inline code, links, blockquotes, lists, code blocks, tables) from the rendered pane. Provisioning fails fast if streaming is enabled but the host lacks `python3`.
 - Added: `ClaudeAgent.get_stream_buffer_path()` so other code (e.g. `mngr robinhood`) can locate and read the buffer.
 
 ## [v0.2.11] - 2026-06-05
