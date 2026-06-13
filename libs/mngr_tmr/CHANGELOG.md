@@ -8,6 +8,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ### Changed
 
+- Changed: `--use-snapshot` launch path now calls `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` before `get_provider_instance` (matching how `mngr create` triggers one-time backend bootstrap, e.g. Modal's per-user environment), replacing the call that passed the removed `is_for_host_creation` parameter.
 - Changed: `mngr tmr` testing agents now publish a single `outputs.tar.gz` archive into the per-agent volume API, replacing the rsync + git-pull finalization; SSH provider no longer supported for testing-agent outputs.
 - Changed: TMR run names are now a single compact timestamp `YYYYMMDDHHMMSS` used consistently across the output directory, the `mapreduce_run_name` agent label, and every TMR-spawned entity's agent / host / branch names. Testing agents are `tmr-<run>-<suffix>`, branches `tmr/<run>/<suffix>`, and the random hex id is gone.
 - Changed: Added `--run-name` flag to override the auto-generated run name.

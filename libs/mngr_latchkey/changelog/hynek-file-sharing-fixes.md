@@ -1,3 +1,0 @@
-Fixed file-sharing permission grants for paths containing spaces or non-ASCII characters (e.g. an agent-requested or user-selected directory like `My Documents`). The per-file permission pattern is now built from the same WHATWG-URL-normalized (percent-encoded) form that the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter now matches instead of silently never granting access.
-
-File-sharing permission requests now accept paths that use `~` / `~/...` notation for the current user's home directory; the gateway expands them to an absolute path (the same root the WebDAV home mount is served from) before storing the grant. `~user` notation for another user's home is rejected with a clear error.

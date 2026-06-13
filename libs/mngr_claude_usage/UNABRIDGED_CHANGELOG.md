@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Internal: routed `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now in `imbue.mngr.hosts.common`). No behavior change.
+
 ## 2026-06-10
 
 Hardened the plugin test suite. Replaced the ad-hoc BaseModel agent/host stubs in the `on_before_provisioning` filter test with a real non-Claude `BaseAgent` on the real local host, so the test fails for the right reason if the agent-type guard regresses. Moved the `claude_statusline.sh` shim subprocess test into its own `test_shim.py` integration file (with a bash-availability skip), and moved the shared `writer_path` / `events_file` fixtures into `conftest.py`. Strengthened the writer event-timestamp assertion to validate the full nanosecond-precision UTC ISO 8601 shape, and the concurrent-append test to confirm every distinct event survives exactly once.

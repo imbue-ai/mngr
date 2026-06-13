@@ -4,6 +4,10 @@ Full, unedited changelog entries for the `skitwright` project, consolidated nigh
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced a direct TypeError raise in expect() with a dedicated custom exception type.
+
 ## 2026-06-10
 
 Raised the stale coverage floor from 92% to 95% to match the coverage CI already measures (~100%), and removed the now-obsolete comment referencing per-package offload coverage drift (the offload bug that caused that drift has since been fixed).

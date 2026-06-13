@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-11
+
+Replaced a direct ValueError raise in concurrency group exception handling with a dedicated custom exception type.
+
 ## 2026-06-10
 
 Hardened the concurrency_group test suite (no production behavior change):
