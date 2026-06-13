@@ -529,6 +529,10 @@ def _find_extend_marker_paths(data: Any, path: tuple[str, ...] = ()) -> list[str
     elif isinstance(data, (list, tuple)):
         for index, item in enumerate(data):
             markers.extend(_find_extend_marker_paths(item, path + (str(index),)))
+    else:
+        # Scalar leaf (str/int/bool/None): cannot hold an __extend marker, so
+        # there is nothing to collect here.
+        pass
     return markers
 
 
