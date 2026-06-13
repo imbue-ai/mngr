@@ -51,13 +51,13 @@ uv run python scripts/extract_antigravity_proto_schema.py "$(which agy)" --out /
 
 This scans the binary for embedded `FileDescriptorProto`s (anchored on the
 `0x0A <len> "<name>.proto"` name field), validates them, and writes/greps them. On agy
-1.0.7 it recovers ~164 descriptors. `--grep` prints matching message/enum layouts.
+1.0.8 it recovers ~163 descriptors. `--grep` prints matching message/enum layouts.
 
 A few large descriptors registered via protobuf-go's legacy gzip path are not recovered
 (e.g. `codeium_common.proto`, which defines `ChatToolCall`/`ModelUsageStats`). The decoder
 below does not need them for the message text -- only for full tool-call/usage detail.
 
-## The recovered schema (agy 1.0.7 -- re-verify on each release)
+## The recovered schema (agy 1.0.8 -- re-verify on each release)
 
 SQLite tables map to `exa.analytics_pb` "Cortex trajectory" messages:
 `trajectory_meta` <- `RecordCortexTrajectoryRequest`; each `steps` row's `step_payload`
