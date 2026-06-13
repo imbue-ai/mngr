@@ -1727,9 +1727,14 @@ class ImbueCloudProvider(BaseProviderInstance):
         of the same flow -- it's a no-op for an already-released lease
         and a recovery path if a previous destroy crashed mid-wipe.
         """
-        # delete_host returns None per the interface; any cleanup failures from
-        # the shared flow are surfaced through destroy_host, not here.
-        self._wipe_and_release_pool_host(host)
+        # delete_host returns None per the interface; cleanup failures are surfaced through
+        # destroy_host, not here. GC calls delete_host after the grace period as a recovery
+        # re-run, so a residual leftover-resource failure must not abort the GC sweep -- the
+        # shared flow's CleanupFailedGroup is logged and swallowed.
+        try:
+            self._wipe_and_release_pool_host(host)
+        except CleanupFailedGroup as group:
+            logger.warning("Cleanup left resources behind while deleting host {}: {}", host.id, group)
 
     def _wipe_and_release_pool_host(self, host: HostInterface | HostId) -> None:
         """Shared implementation for ``destroy_host`` and ``delete_host``.
