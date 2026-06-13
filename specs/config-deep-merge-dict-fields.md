@@ -1,12 +1,14 @@
 # Recursive (deep) `__extend` for config dict fields
 
-Status: **spec only -- not yet implemented.** A libs/mngr config-system change: make the
-`__extend` operator merge dict values **recursively (deep)** instead of one level (shallow),
-so nested sibling keys are preserved. Assign-by-default and the narrowing guard are
-**unchanged** -- a bare re-assign that drops keys still hard-errors; `field__extend` is how
-you opt into merging. Motivated by `ClaudeAgentConfig.settings_overrides` (see
-[claude-settings-overrides](./claude-settings-overrides.md)) and the shallow-merge problem
-that closed PR #1647.
+Status: **CONCLUDED -- no change needed (kept for the reasoning).** After review, the
+decision is to **keep `__extend` one-level** (consistent with mngr's deliberately
+non-recursive operator): a user places `__extend` at the level they want merged
+(`permissions__extend`), and the existing one-level shallow merge already preserves siblings
+one level down -- which covers #1647 and Claude's essentially 2-level settings. Deep
+recursion is unnecessary and would depart from the documented semantics. The
+`settings_overrides` work (see [claude-settings-overrides](./claude-settings-overrides.md))
+therefore needs **no** change to `libs/mngr`'s `__extend`. The recursive design below is
+retained only as a record of what was considered and why it was rejected.
 
 Audience: developers working in `libs/mngr/imbue/mngr/config/`.
 

@@ -1,339 +1,174 @@
-# Consolidated Claude settings via mngr's assign/extend/narrowing semantics
+# Claude settings: hooks + overrides via the per-agent config-dir settings.json
 
-Status: **spec only -- not yet implemented.** Extends the `mngr/claude-hook-leak` PR
-(which fixed the `--settings` collision; see "Background"). Collapses mngr's two Claude
-settings artifacts (config-dir `settings.json` + managed `--settings` file) into the single
-managed `--settings` file, and routes user overrides through mngr's config-merge model.
-Builds directly on [env-settings-overrides](./env-settings-overrides/concise.md), reusing
-its `resolve_extends`, narrowing guard, and `parse_scalar_value`.
+Status: **spec only -- not yet implemented.** Supersedes the earlier `--settings`-merge
+design in this file's history. Builds on the `mngr/claude-hook-leak` fix but **reverts most
+of its `--settings` machinery** in favor of letting Claude do the layering natively.
 
-Audience: developers implementing the change in `libs/mngr_claude` (and a small reuse
-of `libs/mngr` config helpers).
+Audience: developers in `libs/mngr_claude` (+ `libs/mngr_claude_subagent_proxy`).
 
-## Overview
+> **KNOWN LIMITATION (must be documented in user-facing docs + the field help).**
+> This design fully supports `settings_overrides` and a user `--settings` **only in normal
+> mode** (mngr provisions a per-agent config dir). In **`use_env_config_dir` mode** there is
+> no per-agent config dir to write `settings.json` into, so mngr injects only its own hooks
+> via `--settings`, and:
+> - a user-supplied `--settings` (in `cli_args`/`agent_args`) will **collide** with mngr's
+>   (Claude is last-wins across `--settings` flags) -- one silently clobbers the other;
+> - `settings_overrides` is **not applied** in this mode.
+>
+> This is an accepted, scoped limitation (the mode is not yet used in production -- only
+> planned for forever-claude-template's primary-agent swap). It must be called out clearly
+> in the `use_env_config_dir` field description and the settings docs so users in that mode
+> aren't silently surprised. Lifting it later means adding the `--settings`-merge path back
+> for that mode only. See "use_env_config_dir mode" below.
 
-- **Consolidate onto a single mngr-owned settings file.** Stop writing the per-agent
-  config-dir `settings.json` (`_build_settings_json`). Everything mngr injects --
-  generated defaults / the synced `~/.claude/settings.json`, unattended flags,
-  `settings_overrides`, the user's raw `--settings`, and mngr's runtime hooks -- is
-  built into the one managed `--settings` file at provision. This unifies the normal and
-  `use_env_config_dir` modes (today only the latter relies on `--settings`) and removes
-  the "two settings artifacts that each carry part of the picture" split.
-- Route the user-controllable parts (`settings_overrides`, raw `--settings`) through
-  mngr's **existing** config-merge model -- assign-by-default, opt-in `__extend`, and the
-  narrowing guard -- instead of the special-purpose `deep_merge_settings` (hook
-  concatenation) added by the collision fix.
-- Stay **schema-free**: `ClaudeAgentConfig.settings_overrides` remains `dict[str, Any]`, so
-  pydantic never enumerates or validates Claude's `settings.json` keys. The config-merge
-  machinery (`resolve_extends`, narrowing) operates *structurally* over whatever nesting the
-  TOML tables / JSON produce -- it descends into nested tables and resolves inner `__extend`
-  just as it does for the existing open `commands.<cmd>.defaults: dict[str, Any]` field. A
-  Claude key mngr doesn't know about is simply forwarded.
-- Let the user **control merge recursion depth via TOML nesting**: a nested TOML table
-  recurses (sibling-preserving); a JSON-blob string leaf is parsed and treated as a
-  **collection** value subject to the narrowing guard -- not an opaque scalar.
-- Treat the raw `--settings` flag (in `cli_args` / `agent_args`) as a single one-level
-  override under the same rules. The flag still must be **stripped and folded in**: two
-  `--settings` flags collide (last-wins; see "Background"), so the user's value cannot
-  simply pass through alongside mngr's.
+## The core decision
 
-## Background
+mngr injects everything it owns into the **per-agent config-dir `settings.json`** (the
+"user" layer Claude reads from `$CLAUDE_CONFIG_DIR`), and passes **no `--settings`** of its
+own. The user's raw `--settings` flag passes through untouched; Claude natively layers it on
+top. This works because Claude's native settings layering (verified, v2.1.173):
 
-What exists today, and what this builds on:
+- **deep-merges nested dicts** across layers (a project-file `env` sibling survives a
+  different `env` sibling set via `--settings`), and
+- **concatenates same-event hooks** across layers (a project-file `SessionStart` hook and a
+  `--settings` `SessionStart` hook both fire).
 
-- **mngr config merge** (`libs/mngr/imbue/mngr/config/key_resolver.py`,
-  `config/data_types.py`): bare key = **assign**; `key__extend` = **extend** (list/tuple
-  concat, set union, **shallow** dict key-merge -- leaf-level only, no recursion into
-  nested aggregates). The **narrowing guard** (`detect_settings_narrowing` /
-  `would_assignment_narrow`) is a **hard error** when an assign would drop at least one
-  entry from a non-empty base aggregate, unless `allow_settings_key_assignment_narrowing`
-  is set. `__extend` results (supersets), no-ops, scalars, and `StringDerivedTuple` are
-  exempt. See [env-settings-overrides](./env-settings-overrides/concise.md).
-- **Deferred `__extend` precedent**: `create_templates.<name>` options keep their
-  `__extend` suffix through config-load when the base lookup is `None`
-  (`resolve_extends` + `_is_create_template_option_path`), so they resolve lazily at
-  `mngr create` time against the runtime command's params rather than against config
-  layers.
-- **The config-dir `settings.json` today** (`_build_settings_json`): mngr writes a
-  `settings.json` into the per-agent config dir carrying (a) generated defaults or, when
-  `sync_home_settings`, a copy of the user's `~/.claude/settings.json`; (b) unattended
-  flags (`compute_settings_json_flags`); (c) `settings_overrides` via shallow `dict.update`.
-  This is the channel by which the user's own home settings reach the agent in normal mode.
-  (The config *dir* also holds `.claude.json`, `installedPlugins`, marketplace data, and
-  plugin-path rewrites -- those are **not** affected here; only `settings.json` is removed.)
-- **The collision fix (this PR)**: mngr's hooks moved out of the project's
-  `settings.local.json` into a private per-agent managed `--settings` file
-  (`$MNGR_AGENT_STATE_DIR/plugin/claude/mngr_managed_settings.json`). A user `--settings`
-  from `cli_args`/`agent_args` is currently deep-merged (hook-concat) into that file via
-  `deep_merge_settings` and stripped from Claude's argv.
+So mngr does **not** reimplement Claude's merge. It builds one settings file; Claude merges
+the user's own layers (`--settings`, work-dir `.claude/settings.local.json`, etc.) over it.
 
-### Empirical findings (native Claude, v2.1.173)
+This is leak-safe: the per-agent config dir is `$MNGR_AGENT_STATE_DIR/plugin/claude/anthropic/`,
+which a plain `claude` run in the work dir never reads (it reads `~/.claude`). The original
+bug was hooks in the **work-dir** `.claude/settings.local.json`, which plain `claude` *does*
+read.
 
-Verified with isolated `CLAUDE_CONFIG_DIR` runs (hooks/settings resolve at session start,
-before auth, so a "Not logged in" exit still exercises resolution):
+## Why not the managed `--settings` file (the interim PR approach)
 
-- **Two `--settings` flags collide -- last-wins, full replacement, no merge.** This is why
-  a user `--settings` must be stripped and folded into mngr's single managed file rather
-  than passed as a second flag.
-- **`--settings` is an additive layer over the file hierarchy.** A `SessionStart` hook in a
-  project `.claude/settings.json` and a *different* `SessionStart` hook in `--settings`
-  **both fire** (`managed > --settings > local > project > user`). So Claude still natively
-  layers project/local/enterprise settings on top of mngr's `--settings` file.
-- **`--settings` faithfully carries non-hook keys.** An `env` block passed via `--settings`
-  took effect (a hook saw the injected variable) exactly as it would from `settings.json`.
-  This is what licenses moving the config-dir `settings.json`'s contents into the managed
-  `--settings` file. (Caveat: `env` + `hooks` were tested as representatives of the
-  settings-layer mechanism; no exhaustive per-key audit -- low residual risk that an
-  obscure key is on-disk-only.)
+The interim fix put mngr's hooks in a managed file passed via `claude --settings <file>`.
+Problem: Claude honors only the **last** `--settings` on the command line (last-wins, no
+merge -- verified), so a user's own `--settings` (the reviewer's `cli_args = "--settings
+'{...}'"`) collides with mngr's and one silently clobbers the other. The interim fix then
+had to extract, unquote, strip, and merge the user's `--settings` into mngr's file -- a lot
+of machinery to reimplement what Claude's native layering already does for free when mngr
+uses the config-dir `settings.json` instead. **This spec removes that machinery.**
 
-## Expected behavior
+## Expected behavior (normal mode)
 
-### The managed file's base (built at provision)
+### Building the config-dir settings.json
 
-The single managed `--settings` file is assembled at provision from these layers, lowest
-to highest, by plain `deep_assign` (later layers win per leaf; the user-controllable layers
-additionally go through `__extend`/narrowing -- see below):
+At provision, `settings.json` is built by deep-merging, lowest to highest:
 
-1. **Generated defaults**, or the synced `~/.claude/settings.json` when `sync_home_settings`
-   (today's `_build_settings_json` base).
+1. **Base:** the synced `~/.claude/settings.json` when `sync_home_settings`, else generated
+   defaults.
 2. **Unattended flags** (`compute_settings_json_flags`).
-3. **mngr's runtime hooks** (always-on readiness, plus optional credential-sync and
-   permission-auto-allow). These are the entries the narrowing guard most wants to protect.
+3. **mngr's hooks** (always-on readiness; optional credential-sync on macOS; optional
+   permission-auto-allow) -- concatenated into the hook event lists.
+4. **`settings_overrides`** -- deep-merged so nested siblings survive (the #1647 fix:
+   `permissions.allow` from `settings_overrides` does not wipe `permissions.defaultMode`
+   from the home base).
 
-This composite is the **base** that `settings_overrides` and the raw `--settings` flag
-then merge onto.
+The merge is a Claude-aware recursive merge (`deep_merge_settings`, generalized from the
+#1647 fix): dict values recurse; **hook-event lists concatenate** (so mngr's and the user's
+hooks coexist); other leaves take the higher layer's value. See Open Question 1 on
+non-hook leaf lists.
 
-### The override merge model (uniform with mngr config)
+### The user's raw --settings passes through
 
-- **Base** = the composite above (home settings + flags + mngr hooks).
-- **Override** = `settings_overrides` (and any raw `--settings` blob), a schema-free
-  nested dict.
-- A nested **TOML table** in the override recurses, preserving the base's sibling keys at
-  that level. A **leaf** value (scalar, or a JSON-blob string) is parsed with
-  `parse_scalar_value` (JSON first, raw-string fallback).
-- A **bare leaf** = **assign**: it replaces the base value. Assigning over a **non-empty
-  base collection** is **narrowing** -> hard error naming the dotted path, unless
-  `allow_settings_key_assignment_narrowing`. Scalars and empty/absent bases never narrow.
-- A **`key__extend` leaf** = **extend** the base value (concat / union / shallow
-  dict-merge), via `resolve_extends`. Extends are narrowing-exempt (supersets).
+- mngr no longer injects `--settings`. A user `--settings` in `cli_args` / `agent_args` is
+  left in the launch command verbatim (no extraction, unquoting, or stripping).
+- Claude layers it (command-line layer, highest) over the config-dir `settings.json`:
+  nested dicts deep-merge, same-event hooks concat. So the reviewer's `--settings` adds its
+  `SessionStart` hook *and* mngr's readiness hooks still fire -- natively, no mngr code.
 
-This is exactly the model from [env-settings-overrides](./env-settings-overrides/concise.md),
-applied to an open `dict[str, Any]` field, with the **base being mngr's runtime hooks**
-rather than a lower-precedence config layer.
+### settings_overrides across config scopes (user < project < local)
 
-### Deferred resolution against the runtime base (the crux)
+- Condensed at config-load by the **normal mngr config machinery**: bare key = assign (a
+  drop of a non-empty base aggregate still hard-errors via the narrowing guard); `__extend`
+  = merge. `__extend` stays **one-level** (a nested `permissions__extend` preserves a
+  sibling `defaultMode`); see [config-deep-merge-dict-fields](./config-deep-merge-dict-fields.md)
+  -- which concludes no change to `__extend` is needed.
+- The condensed `settings_overrides` is then deep-merged into `settings.json` at provision
+  (step 4 above). Note this provision-time merge onto the home base is **deep by default**
+  (so #1647 works without the user needing `__extend` against home); the bare-vs-`__extend`
+  narrowing semantics apply to the cross-*config-scope* merge, not to the
+  settings_overrides-onto-home merge. See Open Question 2.
 
-> **REVISED (pending architecture lock).** Two corrections from review, to be folded in once
-> the deferral approach is settled:
-> 1. **No `deep_assign`.** Reuse the existing machinery: `resolve_extends(provision_base,
->    settings_overrides)` resolves `__extend` against the base (the depth lives inside
->    `_apply_extend`), then a trivial **top-level** `{**provision_base, **resolved}` overlays
->    the override's keys. The overlay is shallow precisely because `resolve_extends` already
->    did the depth -- same as how `merge_with` overlays at config-load. No new merge function.
-> 2. **Deferral only where the base is runtime-built.** Cross-config-scope condensation
->    (user < project < local `settings_overrides`) happens at config-load via normal
->    `resolve_extends` + `merge_with` (a left fold). Deferral to provision is needed only for
->    `__extend` that must resolve against the **provision base** (synced home settings + mngr
->    hooks), which doesn't exist at config-load. Make this a **canonical shared "deferred
->    `__extend` paths"** mechanism (generalize the `create_templates` carveout in
->    `key_resolver.py`, and de-dup `_apply_template_extend` into `_apply_extend`), not a
->    second special case.
+### Schema-free
 
-mngr's hooks are **built at provision time**, not present as a config layer at config-load.
-So `settings_overrides`' `__extend` keys that target mngr's hooks/home base cannot resolve at
-config-load -- a `hooks.SessionStart__extend` is meant to extend **mngr's runtime readiness
-hooks**, which don't exist yet during config loading.
+`settings_overrides` stays `dict[str, Any]`; pydantic never validates Claude's keys. mngr
+forwards them verbatim. Claude itself may reject an unknown key; mngr neither catches nor
+suppresses that.
 
-Therefore:
+### use_env_config_dir mode (reduced support, future work)
 
-- Such `settings_overrides` `__extend` keys are **deferred**: `resolve_extends` preserves them
-  through config-load (following the `create_templates` precedent), and mngr resolves them
-  at **provision time** via `resolve_extends(provision_base, settings_overrides)`, then
-  overlays the result top-level onto `provision_base` (see REVISED note above).
-- Run the narrowing check (`would_assignment_narrow` / `detect_settings_narrowing`) against
-  `provision_base`; on any violation, raise the standard narrowing error unless the escape
-  hatch is set.
+In this mode there is no per-agent config dir (Claude reads the user's shared
+`$CLAUDE_CONFIG_DIR`), so mngr cannot write a config-dir `settings.json`. mngr still injects
+its hooks via `--settings` (the only channel), and the user's shared `~/.claude/settings.json`
+is read natively by Claude. Full `settings_overrides` / raw-`--settings`-collision support in
+this mode is **out of scope** here (it's the only case that needs the `--settings` merge
+machinery, and the mode is not yet used in production -- only planned for
+forever-claude-template's primary-agent swap). Revisit if/when that ships.
 
-**Note:** because resolution is deferred to provision, the base for `__extend` and for
-narrowing is **mngr's built hooks**, which is precisely what makes "extend mngr's
-SessionStart" work and "silently replace mngr's SessionStart" fail loudly.
+## Worked examples
 
-### One file, both modes
-
-- mngr writes exactly one settings artifact: the managed `--settings` file, assembled in
-  `_configure_agent_hooks`. The config-dir `settings.json` is no longer written.
-- This works identically in normal and `use_env_config_dir` mode (the managed file lives in
-  the agent state dir, always per-agent), removing the mode-specific branch.
-- **Precedence change:** the user's home settings + overrides move from the config-dir
-  `settings.json` layer to the `--settings` layer of Claude's hierarchy
-  (`managed > --settings > local > project > user`). For keys the user *also* sets in a
-  project/local `.claude/settings.json`, those file layers now sit **below** `--settings`,
-  so mngr's composite wins where they overlap (it previously sat at the config-dir
-  `settings.json` level). Document in the changelog; see the `sync_home_settings` resolved
-  decision below.
-
-### Raw `--settings` flag
-
-- Still extracted from `cli_args` / `agent_args` (`partition_settings_args`), unquoted
-  (`_unquote_cli_settings_value` for `cli_args`), resolved (inline JSON or a file path read
-  via the host), and **stripped from Claude's argv** so only mngr's combined `--settings`
-  reaches Claude.
-- Its resolved value is applied as a **one-level override** under the same rules:
-  assign-by-default with the narrowing guard. A raw blob that drops mngr's `hooks` (or any
-  base collection) -> narrowing error directing the user to `settings_overrides` + `__extend`.
-- `deep_merge_settings` (the collision fix's hook-concat) is **removed**. The raw flag no
-  longer silently concatenates hooks; the additive path is `__extend`. (This changes the
-  interim PR behavior, but that behavior was never released.)
-
-### Claude's hook schema (important for the examples)
-
-A hook event is a **list of groups**, each group a dict with an optional `matcher` and a
-`hooks` list. mngr emits a singleton group, e.g.:
-
-```json
-"SessionStart": [ { "hooks": [ {"type": "command", "command": "<mngr readiness>"} ] } ]
-```
-
-For a given event, Claude runs **every** group whose `matcher` matches (no matcher =
-always). So a non-singleton `SessionStart` list is just multiple independent hook groups,
-all active. This means:
-
-- Adding a user hook = **appending a group to the event list** (a *list* concat), not a dict
-  merge. The additive operator is therefore `SessionStart__extend = [ {group} ]`.
-- You cannot target mngr's existing group's inner `hooks` list via a dotted path
-  (`SessionStart.hooks__extend`) -- `SessionStart` is a **list**, and dotted paths have no
-  array index. Append a new group instead; both groups' hooks run.
-
-### Worked examples
-
-Reviewer's case -- add a `SessionStart` hook without dropping mngr's readiness hooks (append
-a group via list-concat `__extend`):
-
+Reviewer's config -- works with **no mngr merge code**:
 ```toml
-[agent_types.coder.settings_overrides.hooks]
-SessionStart__extend = '[{"hooks": [{"type": "command", "command": "..."}]}]'
+[agent_types.coder]
+cli_args = """--settings '{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "..."}]}]}}'"""
 ```
--> appends a second group; mngr's group and the user's group both run.
+-> passes through; Claude concats the user's `SessionStart` group with mngr's readiness
+group; both fire.
 
+#1647 -- add a permission without wiping a sibling:
 ```toml
-[agent_types.coder.settings_overrides]
-model = "opus"        # scalar assign, no narrowing
+[agent_types.coder.settings_overrides.permissions]
+allow = ["Bash(npm *)"]
 ```
-
-Preserve a sibling under a nested dict (the #1647 case) -- `__extend` at the nested level:
-
-```toml
-[agent_types.coder.settings_overrides.permissions__extend]
-allow = ["Bash(npm *)"]   # mngr/home permissions.defaultMode survives the one-level merge
-```
-
-```toml
-[agent_types.coder.settings_overrides.hooks]
-SessionStart = '[{"hooks": [{"type": "command", "command": "..."}]}]'
-```
--> bare assign replaces mngr's `SessionStart` list (drops its group) -> **narrowing error**.
-Fix by using `SessionStart__extend`, or set `allow_settings_key_assignment_narrowing`.
-
-Raw flag full-replace -> **narrowing error** (drops mngr's `hooks`):
-```
-mngr create coder -- --settings '{"hooks": {"SessionStart": [...]}}'
-```
-
-### Schema-free guarantee
-
-No code path enumerates Claude's settings keys. `resolve_extends`,
-`would_assignment_narrow`/`detect_settings_narrowing`, and `parse_scalar_value` operate
-structurally over `Mapping` / `list` / `set`. pydantic does not validate the inner content of
-`settings_overrides`: a mistyped Claude key is not validated *by mngr* -- we forward it
-verbatim. Claude itself may reject an unknown key; mngr neither catches nor suppresses that.
-This is the intended trade-off of schema-free passthrough (mngr does not track Claude's
-settings schema).
+-> deep-merged into `settings.json`; the home base's `permissions.defaultMode` survives.
 
 ## Changes
 
-`libs/mngr_claude`:
+`libs/mngr_claude/imbue/mngr_claude/plugin.py`:
 
-- `ClaudeAgentConfig.settings_overrides`: update the field description -- assign + `__extend`
-  with narrowing; merged into the managed `--settings` file; examples updated.
-- `_configure_agent_hooks` becomes the single builder of the managed file. Assemble the
-  base by `deep_assign`-ing, in order: generated-defaults-or-synced-home-settings ->
-  unattended flags -> mngr's runtime hooks. Then apply `settings_overrides` and the resolved
-  raw `--settings` blob(s) via `resolve_extends(base, override)` -> `deep_assign` ->
-  `would_assignment_narrow` guard. Replace the `deep_merge_settings` call.
-- `_build_settings_json`: **stop writing the config-dir `settings.json`** -- fold its base
-  construction (defaults / `sync_home_settings` seeding, `compute_settings_json_flags`) into
-  the managed-file builder above and remove the `settings.json` entry from `generated_files`.
-  Keep the config dir's other generated files (`.claude.json`, installed-plugins/marketplace
-  rewrites) untouched.
-- Raw `--settings`: keep `partition_settings_args` + argv strip +
-  `_unquote_cli_settings_value` + inline-JSON/file-path resolver; route through the same
-  apply pipeline as `settings_overrides`.
+- **Revert the `--settings` machinery** added by the interim fix: remove
+  `MANAGED_SETTINGS_LAUNCH_ARG` from the launch command, the `partition_settings_args` /
+  `_unquote_cli_settings_value` / `_resolve_user_settings` / `_collect_user_settings_values`
+  helpers and their use in `assemble_command` / `_configure_agent_hooks`. The user's
+  `cli_args` / `agent_args` flow to `claude` unmodified.
+- Move mngr's hooks into `_build_settings_json`: build the hook config and deep-merge it
+  (plus `settings_overrides`) into the config-dir `settings.json`. `_configure_agent_hooks`
+  (the managed-file writer) is removed or folded in.
+- Keep `settings_overrides` deep-merged (not shallow `dict.update`) -- the #1647 fix.
 
 `libs/mngr_claude/imbue/mngr_claude/claude_config.py`:
 
-- Add `deep_assign(base, override)` (recurse dicts, override leaf/list/scalar replaces,
-  siblings preserved). **Remove** `deep_merge_settings` and its tests.
-- Keep `partition_settings_args`, `_unquote_cli_settings_value`, and the blob resolver.
+- Keep `merge_hooks_config` / a recursive `deep_merge_settings` for building `settings.json`.
+- Remove `partition_settings_args` / the `--settings`-flag helpers (no longer needed).
 
-`libs/mngr` (reuse, minimal change):
+`libs/mngr_claude_subagent_proxy`:
 
-- Reuse `resolve_extends`, `would_assignment_narrow` / `detect_settings_narrowing`,
-  `parse_scalar_value`.
-- Generalize the deferred-`__extend` carveout so `settings_overrides`' `__extend` keys are
-  preserved through config-load for provision-time resolution (see Open Questions for the
-  exact mechanism).
+- The proxy's hooks that currently target the managed `--settings` file move to the same
+  config-dir `settings.json` channel. (Its Stop-hook *guard* on the work-dir
+  `settings.local.json` is a separate mechanism and stays; see its gitignore check.)
 
-Docs / changelog: update the mngr_claude README/settings docs; add changelog entries for
-both packages; include a **breaking-change** migration note (target move + assign-with-
-narrowing for `settings_overrides`).
+`use_env_config_dir`: retains a minimal `--settings`-for-hooks path (or is explicitly noted
+as reduced-support), per the scope decision above.
 
-## Resolved decisions
-
-- **Narrowing escape hatch:** reuse the existing global
-  `allow_settings_key_assignment_narrowing`. No per-agent-type flag.
-- **File-path `--settings` on remote hosts:** read via the host; missing/unreadable file or
-  invalid JSON raises `UserInputError`; the narrowing guard applies to the file's parsed
-  content identically to inline JSON.
-- **`sync_home_settings`:** the user's home settings are no longer a separate config-dir
-  `settings.json` layer -- they are folded into the managed file's base (layer 1), so mngr's
-  hooks/flags/overrides `deep_assign` on top of them. The user's *project/local*
-  `.claude/settings.json` remain native file layers below `--settings` (Claude merges them;
-  see "One file, both modes" for precedence).
+Docs / changelog: update mngr_claude settings docs; changelog notes the leak fix now lands
+hooks in the per-agent config-dir `settings.json`, `settings_overrides` deep-merges
+(#1647), and a user `--settings` passes through and is layered natively by Claude.
 
 ## Open questions
 
-1. **Cross-layer `settings_overrides.__extend`.** How do `x__extend` keys from multiple
-   config layers (user / project / local / env / `--setting`) combine *before* the
-   provision-time resolution against mngr's base? Options: (a) stack them additively across
-   layers as raw `__extend` ops, resolve once at provision; (b) resolve cross-layer extends
-   at config-load against each other, defer only the final extend against mngr's base.
-   Prefer (a) for a single, predictable resolution point. (Low stakes -- only matters when
-   the *same* `__extend` key is set in two layers.)
-2. **Deferred-resolution mechanism.** Extend `resolve_extends`' create-template carveout
-   into a generic "deferred paths" set that includes `settings_overrides` (under any
-   `agent_types.<name>` / plugin path), or add a dedicated preserve-path. Prefer a small
-   generic mechanism so the two deferred cases share code.
-3. **`settings_overrides` vs raw `--settings` ordering.** When both are present, define
-   which applies first (and thus what the other narrows against). Proposal: apply
-   `settings_overrides` first, then the raw flag, so an explicit per-invocation flag layers
-   on top -- both guarded against mngr's base.
-
-## Tests
-
-- `deep_assign` unit: recurse, replace leaves/lists, preserve siblings, no mutation.
-- `resolve_extends` applied to Claude-settings dicts: `hooks.SessionStart__extend` concat
-  onto a built base; `model` scalar assign; nested-table recursion preserving base events.
-- Narrowing: hard error on `hooks`/`hooks.SessionStart` assign that drops mngr entries;
-  passes on `__extend` superset and on pure additions; scalar assign exempt; escape hatch
-  bypasses.
-- Raw `--settings` blob: full-replace -> narrowing error; additive (`__extend` or
-  non-overlapping keys) -> ok; file-path value resolved and guarded.
-- Base assembly: synced-home-settings (`sync_home_settings`) + unattended flags + mngr
-  hooks `deep_assign` into the managed file in order; no config-dir `settings.json` is
-  written (assert it's absent from `generated_files`).
-- `use_env_config_dir`: the managed file is built identically (and nothing is written to the
-  user's real config dir).
-- Reviewer's exact config, migrated to `settings_overrides.hooks.SessionStart__extend` ->
-  both hook sets present in the managed file; a synced home `env`/`model` also survives.
-- Migration: an existing config-dir-targeted `settings_overrides` config -> documented
-  behavior change (and narrowing guard fires where it would drop base entries).
+1. **Non-hook leaf lists in the build merge.** When deep-merging `settings_overrides` onto
+   the home base, a leaf list like `permissions.allow` set in both -- concat or replace? The
+   original #1647 `deep_merge_settings` concatenated (skipping dups). Hook-event lists must
+   concat. Confirm concat is right for all lists, or distinguish.
+2. **settings_overrides-onto-home: deep-by-default vs `__extend`.** This spec deep-merges at
+   provision so #1647 works without `__extend`. Earlier discussion leaned toward "same as
+   the rest of our settings" (bare = replace + narrow), which would require deferring
+   `__extend` resolution to provision against the home base (the `create_templates` pattern)
+   -- the complexity this design avoids. Confirm deep-by-default onto home is acceptable
+   (the narrowing guard still applies across config scopes).
+3. **PR scoping.** This reworks green code on the current branch. Land as a rework of this
+   PR, or land the interim `--settings` leak fix and do this as a follow-up? (See the
+   accompanying decision.)
