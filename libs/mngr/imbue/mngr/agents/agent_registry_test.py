@@ -7,7 +7,7 @@ from imbue.mngr.agents.agent_registry import _register_agent
 from imbue.mngr.agents.agent_registry import list_available_agent_types
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.agents.base_agent import BaseAgent
-from imbue.mngr.agents.default_plugins.codex_agent import CodexAgentConfig
+from imbue.mngr.agents.default_plugins.headless_command_agent import HeadlessCommandConfig
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import register_agent_config
@@ -27,20 +27,14 @@ def test_get_agent_config_class_returns_base_for_unregistered_type() -> None:
 
 def test_get_agent_config_class_returns_registered_type() -> None:
     """Registered agent types should return their specific config class."""
-    config_class = get_agent_config_class("codex")
-    assert config_class == CodexAgentConfig
+    config_class = get_agent_config_class("headless_command")
+    assert config_class == HeadlessCommandConfig
 
 
 def test_list_registered_agent_types_includes_builtin_types() -> None:
     """Built-in agent types should be in the registry."""
     agent_types = list_registered_agent_types()
-    assert "codex" in agent_types
-
-
-def test_codex_agent_config_has_default_command() -> None:
-    """Codex agent config should have a default command."""
-    config = CodexAgentConfig()
-    assert config.command == CommandString("codex")
+    assert "command" in agent_types
 
 
 def test_register_custom_agent_type() -> None:
@@ -167,14 +161,14 @@ def test_list_available_agent_types_unions_registered_and_user_config() -> None:
     """
     config = MngrConfig(
         agent_types={
-            AgentTypeName("my-custom"): AgentTypeConfig(parent_type=AgentTypeName("codex")),
+            AgentTypeName("my-custom"): AgentTypeConfig(parent_type=AgentTypeName("command")),
         },
     )
 
     available = list_available_agent_types(config)
 
-    # The codex agent type ships in-tree, so it must always appear.
-    assert "codex" in available
+    # The command agent type is registered directly in core, so it must always appear.
+    assert "command" in available
     # And the user-config-defined name must appear too.
     assert "my-custom" in available
     # Output is sorted for stable display.

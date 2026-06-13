@@ -52,7 +52,7 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type | None
     - agent_type_name: The string name for this agent type (e.g., "claude", "codex")
     - agent_class: The AgentInterface implementation class. Return ``BaseAgent``
       explicitly if all you need is a config-driven shell command (see
-      ``command_agent.py``/``codex_agent.py``). Returning ``None`` skips class
+      ``command_agent.py``). Returning ``None`` skips class
       registration entirely, which means ``resolve_agent_type`` will reject the
       name for ``mngr create``; only do this for config-only registrations that
       pair with a separate class registration elsewhere.
