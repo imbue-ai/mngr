@@ -105,17 +105,19 @@ class _OfflineHostSuccessProvider(_OfflineHostProvider):
     Used to test the success path in _execute_destroy for offline hosts.
     """
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
-        return []
+    def destroy_host(self, host: HostInterface | HostId) -> None:
+        return None
 
 
 class _StopFailingHost(Host):
     """Host subclass whose stop_agents always raises MngrError.
 
-    Used to test that _execute_stop records stop errors and respects ABORT.
+    Used to test that _execute_stop records stop errors and respects ABORT. A bare
+    MngrError (not a CleanupFailedGroup) models "could not stop at all", distinct from
+    aggregated leftover-resource failures.
     """
 
-    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> list[CleanupFailure]:
+    def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
         raise MngrError("Simulated stop error")
 
 

@@ -69,7 +69,7 @@ Rationale: leaked paid infrastructure is worst; live processes next; local state
 
 ## Data model
 
-`CleanupFailureCategory` and `CleanupFailure` live in `libs/mngr/imbue/mngr/interfaces/data_types.py` (alongside `CommandResult`), so the `hosts` and `providers` layers can return them without importing `api`. `CleanupResult` stays in `libs/mngr/imbue/mngr/api/data_types.py`. `CleanupFailureCategory` is an `UpperCaseStrEnum` (member values `TIMEOUT`, `PROCESSES_REMAIN`, ...). The low-level methods **return** these (no `CleanupIncompleteError` carrier exception is needed).
+`CleanupFailureCategory` and `CleanupFailure` live in `libs/mngr/imbue/mngr/interfaces/data_types.py` (alongside `CommandResult`), so the `hosts` and `providers` layers can produce them without importing `api`. `CleanupResult` stays in `libs/mngr/imbue/mngr/api/data_types.py`. `CleanupFailureCategory` is an `UpperCaseStrEnum` (member values `TIMEOUT`, `PROCESSES_REMAIN`, ...). The low-level methods **raise** these (wrapped in a `CleanupFailedGroup`; see the **Propagation** paragraph below) rather than returning them, so a forgotten return value can never silently drop a real failure.
 
 ```python
 class CleanupFailureCategory(StrEnum):
@@ -109,9 +109,15 @@ def exit_code_for_failures(failures: Sequence[CleanupFailure]) -> int:
     # returns EXIT_CODE_SUCCESS if empty, else the code of the most-severe category present
 ```
 
-**Propagation: return, don't raise.** Because the model is aggregate-and-continue, the low-level cleanup methods **return** their collected failures rather than raising. `Host.stop_agents`, `Host.destroy_agent`, and each provider's `destroy_host` change their return type from `None` to `list[CleanupFailure]` (empty = fully clean). This is an interface change on `HostInterface`/`OnlineHostInterface` (`stop_agents`, `destroy_agent`) and `ProviderInstanceInterface` (`destroy_host`).
+**Propagation: raise an exception group.** Because the model is aggregate-and-continue, the low-level cleanup methods attempt every step, collect every real failure, and **raise them once at the end** wrapped in a `CleanupFailedGroup`. `Host.stop_agents`, `Host.destroy_agent`, and each provider's `destroy_host` keep their `None` return type: returning normally means fully clean (or only benign "already gone" outcomes), and a non-empty set of real failures is raised. This is an interface change on `HostInterface`/`OnlineHostInterface` (`stop_agents`, `destroy_agent`) and `ProviderInstanceInterface` (`destroy_host`).
 
-Returning (rather than raising a carrier exception) keeps the success-accounting clean: `execute_cleanup` can record both "we acted on this agent" (append to `stopped_agents`/`destroyed_agents`) and "and here are the failures" without exception control-flow skipping the append. Exceptions are still used at the **orchestration boundary** for operations that fail so hard we could not act at all (e.g. `get_provider_instance` / `get_host` raising `HostNotFoundError`): `execute_cleanup` catches those `MngrError`s and converts them to a `PROVIDER_INACCESSIBLE` (or `OTHER`) `CleanupFailure` (see [Orchestration](#orchestration)). A `CommandTimeoutError` is **not** raised out of `stop_agents`; it is caught internally and returned as a `TIMEOUT` failure.
+Raising (rather than returning a `list[CleanupFailure]`) is what makes "a real failure is never silently swallowed" a property of the *type system* rather than of caller discipline: a returned list can be discarded with no diagnostic, whereas an unhandled `CleanupFailedGroup` propagates loudly. The carrier types live in `libs/mngr/imbue/mngr/interfaces/cleanup_failures.py`:
+
+- `CleanupFailedError(MngrError)` -- one leaf, wrapping a single structured `CleanupFailure` (recoverable via `.failure`).
+- `CleanupFailedGroup(ExceptionGroup[CleanupFailedError])` -- the group actually raised; `.failures` returns the tuple of structured `CleanupFailure`s, and `.from_failures(seq)` builds it. This mirrors the existing `ConcurrencyExceptionGroup` precedent.
+- `collecting_cleanup_failures()` -- a context manager yielding a list the operation appends to; on exit it raises `CleanupFailedGroup.from_failures(...)` if the list is non-empty, else returns normally. Each cleanup method wraps its body in this. A sub-operation that itself raises a group (e.g. `destroy_agent` calling `stop_agents`) is absorbed into the enclosing aggregate via `collect_cleanup_failures(sink, group)` so the remaining steps still run.
+
+Exception-group leaves are `CleanupFailedError`, an `MngrError` subclass; the *group* is **not** an `MngrError`. This keeps the two failure modes type-distinct at the **orchestration boundary**: a `CleanupFailedGroup` means "we acted, but left resources behind" (collect its `.failures`, still record the agent/host as acted-on), whereas a bare `MngrError` from `get_provider_instance` / `get_host` means we could not act at all (`execute_cleanup` converts it to a `PROVIDER_INACCESSIBLE`/`OTHER` `CleanupFailure`; see [Orchestration](#orchestration)). A `CommandTimeoutError` is **not** raised out of `stop_agents`; it is caught internally and aggregated as a `TIMEOUT` failure.
 
 ## Classification rules
 
@@ -164,18 +170,18 @@ Providers already raise typed exceptions. Each `destroy_host` (and `destroy_agen
 
 1. For each agent, run the collection + kill + kill-session steps best-effort, classifying each command via the shared helper. Do **not** abort on a real failure -- record a `CleanupFailure` (tagged with the agent) and continue to the next step / agent.
 2. A timed-out step yields a `TIMEOUT` failure for that agent and we continue (the remaining steps are still attempted; if the tmux server is wedged they will likely also time out and add their own failures -- that is fine, they aggregate).
-3. Return the collected `list[CleanupFailure]` (empty if everything was clean or only-benign).
+3. Wrap the body in `collecting_cleanup_failures()`: append each `CleanupFailure` to the yielded list; on exit it raises a `CleanupFailedGroup` if any were collected, or returns normally if everything was clean or only-benign.
 
 This replaces the current fail-fast `raise_on_timeout` propagation. `raise_on_timeout` remains the **internal mechanism** the helper uses to *detect* a local timeout (a local timeout otherwise looks like a benign non-zero exit); the helper catches the resulting `CommandTimeoutError` and turns it into a `TIMEOUT` `CleanupFailure` rather than letting it propagate out of `stop_agents`.
 
 ### Destroy path
 
-- `Host.destroy_agent`: runs `on_destroy` hook, `stop_agents`, `rm -rf <state_dir>`, `remove_persisted_agent_data`, each best-effort with classification. The `list[CleanupFailure]` returned by `stop_agents` is merged in. Returns the combined `list[CleanupFailure]`.
-- Each provider `destroy_host`: wrap each step in classification (benign typed-exception -> drop; real -> `CleanupFailure`), continue through all steps, return the collected `list[CleanupFailure]`. This is the largest part of the change (7 providers: local, docker, ssh, modal, vps_docker, lima; vultr/ovh inherit vps_docker).
+- `Host.destroy_agent`: runs `on_destroy` hook, `stop_agents`, `rm -rf <state_dir>`, `remove_persisted_agent_data`, each best-effort with classification, all inside `collecting_cleanup_failures()`. `stop_agents` now raises its own `CleanupFailedGroup`; `destroy_agent` catches it and merges its `.failures` in via `collect_cleanup_failures` so the remaining steps still run. Raises the combined `CleanupFailedGroup` (or returns normally if clean).
+- Each provider `destroy_host`: wrap the body in `collecting_cleanup_failures()`, classify each step (benign typed-exception -> drop; real -> append a `CleanupFailure`), continue through all steps; the context manager raises the collected group on exit. This is the largest part of the change (7 providers: local, docker, ssh, modal, vps_docker, lima; vultr/ovh inherit vps_docker).
 
 ### Orchestration (`execute_cleanup` / `_execute_stop` / `_execute_destroy`)
 
-- The per-agent / per-host calls now `result.failures.extend(host.stop_agents(...))` / `extend(host.destroy_agent(...))` / `extend(provider.destroy_host(...))`. A still-raised `MngrError` (from `get_provider_instance` / `get_host` / a provider op that could not be made to return) is caught and converted to a single `CleanupFailure` (category inferred from type: `HostNotFoundError`/`ProviderUnavailableError`/`LocalHostNotDestroyableError`/`NotImplementedError` -> `PROVIDER_INACCESSIBLE`; else `OTHER`).
+- The per-agent / per-host calls wrap each operation in `try: host.stop_agents(...) except CleanupFailedGroup as g: result.failures.extend(g.failures)` (likewise for `destroy_agent` / `destroy_host`), still recording the agent/host as acted-on. A bare `MngrError` (from `get_provider_instance` / `get_host` / a provider op that could not even be attempted) is a *different* exception type from the group and is caught separately and converted to a single `CleanupFailure` (category inferred from type: `HostNotFoundError`/`ProviderUnavailableError`/`LocalHostNotDestroyableError`/`NotImplementedError` -> `PROVIDER_INACCESSIBLE`; else `OTHER`).
 - `ErrorBehavior.ABORT` still returns early after recording; `CONTINUE` proceeds to the next host/agent. Aggregation within a host/agent is unconditional.
 - Agents are still appended to `stopped_agents` / `destroyed_agents` when the operation was attempted (even if it recorded failures) -- those lists reflect "we acted on this agent". A consumer distinguishes "fully clean" from "acted but incomplete" via `failures` and the exit code. Exception: a `PROVIDER_INACCESSIBLE` failure means we could not act at all, so those agents are **not** added to the stopped/destroyed lists.
 - The offline-host STOP case (previously a warning appended to `errors`) is recorded as a real `PROVIDER_INACCESSIBLE` failure: the host is unreachable, so we cannot stop -- or even verify the state of -- its agents, and must not claim success we did not achieve. The affected agents are not added to `stopped_agents`. (DESTROY of an offline host goes through `destroy_host` and is unaffected.)
@@ -191,15 +197,15 @@ This replaces the current fail-fast `raise_on_timeout` propagation. `raise_on_ti
 - **`mngr stop` / `destroy` / `cleanup` now exit non-zero when a real failure leaves a resource behind.** Previously they always exited 0. Scripts that ignored the exit code are unaffected; scripts that now see a non-zero exit are seeing a previously-hidden failure.
 - **JSON output schema change:** `errors: [string]` becomes `failures: [{category, message, ...}]` and an `exit_code` field is added. This is a breaking change for JSON consumers; called out here and in the changelog. (The minds desktop client's destroy flow consumes `mngr destroy`; verify it does not parse `errors` -- see [detached-destroy-flow](detached-destroy-flow/spec.md).)
 - **No more silent swallowing:** failures previously hidden as warnings now surface in `failures` and the exit code. This may make previously-"passing" cleanups visibly report leaks; that is the intent.
-- `CommandTimeoutError` is no longer raised *out of* `stop_agents`; it is caught internally and returned as a `TIMEOUT` failure.
+- `CommandTimeoutError` is no longer raised *out of* `stop_agents`; it is caught internally and aggregated as a `TIMEOUT` failure (surfaced in the `CleanupFailedGroup`).
 
 ## Test plan
 
 - **Classification unit tests** (host_test.py): for each stop command, a fake host whose handler returns the benign signature (exit/stderr) -> no failure; the real signature -> the expected category. Cover the kill-loop ESRCH-vs-EPERM split and the timeout -> `TIMEOUT` path (real local backend with `sleep`/explicit timeout, as today).
-- **Aggregation tests:** a stop run where step A times out and step B reports a real non-zero -> both failures present in the returned list, all steps attempted.
+- **Aggregation tests:** a stop run where step A times out and step B reports a real non-zero -> both failures present in the raised `CleanupFailedGroup` (use the `get_cleanup_failures` test helper), all steps attempted.
 - **Benign-only test:** every command "fails" benignly (session already gone) -> no failures, normal return, exit 0.
 - **Per-provider destroy tests:** for each provider, a not-found exception -> benign (no failure); a real exception -> the mapped category. Use existing provider test fixtures / fakes.
-- **Orchestration tests** (cleanup_test.py): `execute_cleanup` aggregates the returned failures into `result.failures`; a raised `MngrError` from provider access becomes a `PROVIDER_INACCESSIBLE`/`OTHER` failure; `PROVIDER_INACCESSIBLE` agents are not marked stopped/destroyed; offline-host stop is benign (no failure).
+- **Orchestration tests** (cleanup_test.py): `execute_cleanup` aggregates the raised `CleanupFailedGroup`'s failures into `result.failures`; a raised `MngrError` from provider access becomes a `PROVIDER_INACCESSIBLE`/`OTHER` failure; `PROVIDER_INACCESSIBLE` agents are not marked stopped/destroyed; offline-host stop is benign (no failure).
 - **Exit-code mapping tests:** `exit_code_for_failures` returns the most-severe code for mixed failure lists; empty -> 0.
 - **CLI tests** (cli/cleanup_test.py, stop_test.py, destroy_test.py): update the many `assert result.exit_code == 0` cases -- they remain 0 for clean/benign runs, and assert the specific non-zero code for runs with injected real failures. JSON output asserts the `failures`/`exit_code` schema.
 - The original regression (`test_execute_cleanup_stop_on_online_host` hang) must still pass: a normal stop of a live agent records no failures and exits 0.

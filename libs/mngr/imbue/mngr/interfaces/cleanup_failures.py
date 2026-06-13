@@ -73,6 +73,6 @@ def collect_cleanup_failures(sink: list[CleanupFailure], group: CleanupFailedGro
                 self.stop_agents([agent.id])
             except CleanupFailedGroup as group:
                 collect_cleanup_failures(failures, group)
-            ...  # remaining steps still run
+            # ... remaining steps still run and append to `failures`
     """
     sink.extend(group.failures)

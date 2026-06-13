@@ -20,6 +20,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -387,17 +388,20 @@ class _RecordingProvider:
     def __init__(
         self,
         raise_on_destroy: Exception | None = None,
-        return_failures_on_destroy: list[CleanupFailure] | None = None,
+        leak_failures_on_destroy: list[CleanupFailure] | None = None,
     ) -> None:
         self.destroyed_hosts: list[object] = []
         self._raise_on_destroy = raise_on_destroy
-        self._return_failures_on_destroy = return_failures_on_destroy or []
+        self._leak_failures_on_destroy = leak_failures_on_destroy or []
 
-    def destroy_host(self, host: object) -> list[CleanupFailure]:
+    def destroy_host(self, host: object) -> None:
         if self._raise_on_destroy is not None:
             raise self._raise_on_destroy
         self.destroyed_hosts.append(host)
-        return list(self._return_failures_on_destroy)
+        # A "destroyed but a resource leaked" outcome is surfaced as a raised
+        # CleanupFailedGroup (distinct from a bare exception meaning "couldn't attempt").
+        if self._leak_failures_on_destroy:
+            raise CleanupFailedGroup.from_failures(self._leak_failures_on_destroy)
 
 
 def _pair_for_emptied(
@@ -510,8 +514,8 @@ def test_destroy_emptied_hosts_tolerates_destroy_host_mngr_error(temp_mngr_ctx: 
 
 
 def test_destroy_emptied_hosts_surfaces_returned_leak_failures(temp_mngr_ctx: MngrContext) -> None:
-    """A host that was destroyed but left a real resource behind (a *returned* failure
-    from destroy_host) is surfaced -- only *raised* "couldn't attempt" errors are skipped.
+    """A host that was destroyed but left a real resource behind (a CleanupFailedGroup
+    raised by destroy_host) is surfaced -- only bare "couldn't attempt" MngrErrors are skipped.
     """
     empty_host = _StubOnlineHost(remaining_agents=[])
     leak = CleanupFailure(
@@ -519,7 +523,7 @@ def test_destroy_emptied_hosts_surfaces_returned_leak_failures(temp_mngr_ctx: Mn
         message="container could not be removed",
         host_id=empty_host.id,
     )
-    leaky_provider = _RecordingProvider(return_failures_on_destroy=[leak])
+    leaky_provider = _RecordingProvider(leak_failures_on_destroy=[leak])
 
     failures: list[CleanupFailure] = []
     _destroy_emptied_hosts(

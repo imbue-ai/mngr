@@ -338,9 +338,8 @@ class _RecordingDestroyProvider(LocalProviderInstance):
 
     destroyed_host_ids: list[HostId] = Field(default_factory=list)
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         self.destroyed_host_ids.append(host if isinstance(host, HostId) else host.id)
-        return []
 
 
 def _make_recording_provider(local_provider: LocalProviderInstance) -> _RecordingDestroyProvider:

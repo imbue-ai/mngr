@@ -2271,10 +2271,9 @@ class _DestroyableProvider(MockProviderInstance):
 
     destroyed_hosts: list[HostId] = Field(default_factory=list)
 
-    def destroy_host(self, host: HostInterface | HostId) -> list[CleanupFailure]:
+    def destroy_host(self, host: HostInterface | HostId) -> None:
         host_id = host.id if isinstance(host, HostInterface) else host
         self.destroyed_hosts.append(host_id)
-        return []
 
 
 def _make_remote_host(
