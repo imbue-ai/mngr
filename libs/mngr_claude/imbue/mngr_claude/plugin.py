@@ -101,7 +101,6 @@ from imbue.mngr_claude.claude_config import is_effort_callout_dismissed
 from imbue.mngr_claude.claude_config import is_onboarding_completed
 from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import merge_hooks_config
-from imbue.mngr_claude.claude_config import partition_settings_args
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
@@ -1645,12 +1644,14 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # Build the additional arguments (cli_args from config + agent_args from CLI).
         # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
         # before being spliced into this shell-evaluated command (see ``quote_agent_args``).
-        # A user ``--settings`` is dropped here and merged into the managed file instead
-        # (see ``_configure_agent_hooks``): claude honors only the last ``--settings`` on
-        # the command line, so leaving it would replace mngr's managed file wholesale.
-        _, cli_args = partition_settings_args(self.agent_config.cli_args)
-        _, raw_agent_args = partition_settings_args(agent_args)
-        all_extra_args = cli_args + quote_agent_args(raw_agent_args)
+        # A user ``--settings`` passes through verbatim: in normal mode mngr injects no
+        # ``--settings`` of its own (its hooks live in the config-dir settings.json, which
+        # Claude layers under the user's command-line ``--settings``), so there is nothing
+        # to collide with. In use_env_config_dir mode mngr does inject its own ``--settings``
+        # (see ``mngr_settings_arg`` below); a user ``--settings`` then collides with it
+        # (Claude is last-wins) -- the accepted, documented limitation of that mode.
+        cli_args = self.agent_config.cli_args
+        all_extra_args = cli_args + quote_agent_args(agent_args)
         args_str = " ".join(all_extra_args) if all_extra_args else ""
 
         # Read the latest session ID from the tracking file written by the SessionStart hook.
@@ -1670,8 +1671,12 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         # the end of assemble_command would spawn a fresh `claude --session-id
         # <agent_uuid>` without surfacing any error -- so an adopted session
         # would appear to do nothing.
-        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base} {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID"'
-        create_cmd = f"{base} {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {agent_uuid}"
+        # mngr injects its own --settings only in use_env_config_dir mode (the managed
+        # hooks file). In normal mode the hooks are baked into the config-dir settings.json,
+        # so mngr adds no --settings here.
+        mngr_settings_arg = f" {MANAGED_SETTINGS_LAUNCH_ARG}" if self.agent_config.use_env_config_dir else ""
+        resume_cmd = f'( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && {base}{mngr_settings_arg} --resume "$MAIN_CLAUDE_SESSION_ID"'
+        create_cmd = f"{base}{mngr_settings_arg} --session-id {agent_uuid}"
 
         # Append additional args to both commands if present
         if args_str:

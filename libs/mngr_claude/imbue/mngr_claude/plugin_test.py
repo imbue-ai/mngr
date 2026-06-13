@@ -342,22 +342,23 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
 class _ParsedAssembleCommand:
     """Structural view of an assembled claude command, parsed via shlex.
 
-    The assembled command has the shape::
+    The assembled command has the shape (normal mode, no mngr --settings)::
 
         <bg> <exports> && rm -rf .../session_started
-            && ( ( find ... | grep . ) && <base> --settings <path> --resume "$SID" <args> )
-            || <base> --settings <path> --session-id <uuid> <args>
+            && ( ( find ... | grep . ) && <base> --resume "$SID" <args> )
+            || <base> --session-id <uuid> <args>
+
+    In use_env_config_dir mode, mngr injects its own ``--settings <path>``
+    immediately after ``<base>`` in both branches.
 
     shlex.split tokenizes shell operators (``&&``, ``||``) as their own tokens,
     so we split on the single top-level ``||`` to separate the resume branch from
-    the create branch, then read the base command, the managed-settings path, and
-    the trailing args from each. This lets the assemble-command tests assert on
-    meaningful tokens (which base command, the ``--settings`` path, the
-    resume/session-id flags, the trailing args) without pinning the exact
-    whitespace or ``&&`` chain layout.
+    the create branch, then read the base command, the (optional) managed-settings
+    path, and the trailing args from each. ``mngr_injects_settings`` selects the
+    layout; in normal mode ``resume_settings`` / ``create_settings`` are None.
     """
 
-    def __init__(self, command: str) -> None:
+    def __init__(self, command: str, mngr_injects_settings: bool = False) -> None:
         self.tokens = shlex.split(command)
         # The resume/create split is the LAST top-level `||`. (An earlier `||`
         # appears inside the SID export's `... 2>/dev/null || true` fallback, so
@@ -366,26 +367,34 @@ class _ParsedAssembleCommand:
         resume_tokens = self.tokens[:split_idx]
         create_tokens = self.tokens[split_idx + 1 :]
 
-        # Resume branch: <base> --settings <path> --resume $MAIN_CLAUDE_SESSION_ID <args...>.
-        # The managed-settings launch arg sits immediately before --resume, so the
-        # base command is the token two positions ahead of it. The resume command
-        # is wrapped in a `( ... )` subshell, so a trailing `)` group token follows
-        # the args; drop it before reading the args.
+        # Resume branch: <base> [--settings <path>] --resume $MAIN_CLAUDE_SESSION_ID <args...>.
+        # With mngr --settings, the launch arg sits immediately before --resume, so
+        # the base is two tokens ahead of it; without it, the base is the token right
+        # before --resume. The resume command is wrapped in a `( ... )` subshell, so a
+        # trailing `)` group token follows the args; drop it before reading the args.
         resume_idx = resume_tokens.index("--resume")
-        assert resume_tokens[resume_idx - 2] == "--settings"
-        self.resume_settings = resume_tokens[resume_idx - 1]
-        self.resume_base = resume_tokens[resume_idx - 3]
+        if mngr_injects_settings:
+            assert resume_tokens[resume_idx - 2] == "--settings"
+            self.resume_settings: str | None = resume_tokens[resume_idx - 1]
+            self.resume_base = resume_tokens[resume_idx - 3]
+        else:
+            self.resume_settings = None
+            self.resume_base = resume_tokens[resume_idx - 1]
         assert resume_tokens[resume_idx + 1] == "$MAIN_CLAUDE_SESSION_ID"
         resume_arg_tokens = resume_tokens[resume_idx + 2 :]
         if resume_arg_tokens and resume_arg_tokens[-1] == ")":
             resume_arg_tokens = resume_arg_tokens[:-1]
         self.resume_args = resume_arg_tokens
 
-        # Create branch: <base> --settings <path> --session-id <uuid> <args...>
+        # Create branch: <base> [--settings <path>] --session-id <uuid> <args...>
         session_idx = create_tokens.index("--session-id")
-        assert create_tokens[session_idx - 2] == "--settings"
-        self.create_settings = create_tokens[session_idx - 1]
-        self.create_base = create_tokens[session_idx - 3]
+        if mngr_injects_settings:
+            assert create_tokens[session_idx - 2] == "--settings"
+            self.create_settings: str | None = create_tokens[session_idx - 1]
+            self.create_base = create_tokens[session_idx - 3]
+        else:
+            self.create_settings = None
+            self.create_base = create_tokens[session_idx - 1]
         self.create_session_id = create_tokens[session_idx + 1]
         self.create_args = create_tokens[session_idx + 2 :]
 
@@ -416,10 +425,9 @@ def test_claude_agent_assemble_command_with_no_args(
     assert parsed.create_args == []
     # Local hosts should NOT have IS_SANDBOX set
     assert not parsed.has_is_sandbox
-    # The managed-settings launch arg is injected ahead of --resume/--session-id.
-    expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
-    assert parsed.resume_settings == expected_settings
-    assert parsed.create_settings == expected_settings
+    # In normal mode mngr injects no --settings of its own (its hooks live in the
+    # config-dir settings.json), so no --settings token appears at all.
+    assert "--settings" not in parsed.tokens
 
 
 def test_claude_agent_assemble_command_with_agent_args(
@@ -461,15 +469,14 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     assert parsed.create_args == ["--verbose", "--model", "opus"]
 
 
-def test_claude_agent_assemble_command_strips_user_settings(
+def test_claude_agent_assemble_command_passes_user_settings_through(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """A user ``--settings`` (in cli_args or agent_args) is dropped from the launch args.
+    """In normal mode a user ``--settings`` (cli_args or agent_args) passes through verbatim.
 
-    claude honors only the last ``--settings``, so a user value left in the args
-    would clobber mngr's managed file. assemble_command strips it (it is merged
-    into the managed file instead); only mngr's own ``--settings`` survives, and
-    the non-settings args are preserved in order.
+    mngr injects no ``--settings`` of its own (its hooks live in the config-dir
+    settings.json, which Claude layers under the user's command-line ``--settings``),
+    so the user's flag reaches claude unmodified and there is nothing to collide.
     """
     agent, host = make_claude_agent(
         local_provider,
@@ -485,15 +492,58 @@ def test_claude_agent_assemble_command_strips_user_settings(
     )
 
     parsed = _ParsedAssembleCommand(str(command))
-    # Only mngr's managed-settings arg remains; the user values are gone.
+    # mngr added no --settings of its own.
+    assert parsed.resume_settings is None
+    assert parsed.create_settings is None
+    # Both the cli_args and agent_args user --settings appear verbatim in the args.
+    assert parsed.resume_args == [
+        "--settings",
+        '{"model": "opus"}',
+        "--verbose",
+        "--settings",
+        '{"hooks": {}}',
+        "--model",
+        "opus",
+    ]
+    assert parsed.create_args == parsed.resume_args
+
+
+def test_claude_agent_assemble_command_injects_mngr_settings_in_env_config_dir_mode(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In use_env_config_dir mode, mngr injects its own --settings, alongside the user's.
+
+    There is no per-agent config dir, so mngr loads its hooks via --settings (the
+    managed file). The user's own --settings still passes through, so both appear
+    (the documented collision: claude is last-wins).
+    """
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(shared_dir))
+    agent, host = make_claude_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        agent_config=ClaudeAgentConfig(
+            cli_args=split_cli_args_string('--settings \'{"model": "opus"}\''),
+            check_installation=False,
+            use_env_config_dir=True,
+        ),
+    )
+
+    command = agent.assemble_command(host=host, agent_args=(), command_override=None)
+
+    parsed = _ParsedAssembleCommand(str(command), mngr_injects_settings=True)
+    # mngr's managed-settings launch arg is present...
     expected_settings = shlex.split(MANAGED_SETTINGS_LAUNCH_ARG)[1]
     assert parsed.resume_settings == expected_settings
     assert parsed.create_settings == expected_settings
-    # The non-settings args survive in order; no stray --settings or JSON payloads.
-    assert parsed.resume_args == ["--verbose", "--model", "opus"]
-    assert parsed.create_args == ["--verbose", "--model", "opus"]
-    assert "--settings" not in parsed.resume_args
-    assert "--settings" not in parsed.create_args
+    # ...and the user's own --settings also passes through (the collision).
+    assert parsed.resume_args == ["--settings", '{"model": "opus"}']
+    assert parsed.create_args == ["--settings", '{"model": "opus"}']
 
 
 def test_claude_agent_assemble_command_with_command_override(
@@ -554,7 +604,7 @@ def test_claude_agent_assemble_command_sets_is_sandbox_for_remote_host(
     sid_export = _sid_export_for(uuid)
     # Remote hosts SHOULD have IS_SANDBOX set
     assert command == CommandString(
-        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude {MANAGED_SETTINGS_LAUNCH_ARG} --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude {MANAGED_SETTINGS_LAUNCH_ARG} --session-id {uuid}'
+        f'{background_cmd} export IS_SANDBOX=1 && {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
     )
 
 
