@@ -1,4 +1,5 @@
-from typing import Any
+from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Final
 
 from loguru import logger
@@ -153,8 +154,8 @@ class LimaSliceVpsClient(VpsClientInterface):
         region: str,
         plan: str,
         user_data: str,
-        ssh_key_ids: Any,
-        tags: Any,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
         raise self._unavailable("create_instance")
 
