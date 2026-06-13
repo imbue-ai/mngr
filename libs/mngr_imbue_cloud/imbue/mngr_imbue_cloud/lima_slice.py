@@ -4,11 +4,33 @@ from typing import Final
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 
 # Inside the slice VM, the vps_docker bake publishes the agent container's sshd on
-# this guest port (matches VpsDockerProviderConfig.container_ssh_port); the VM's
-# own root sshd is the standard guest port 22. Each is forwarded to a distinct
-# host port on the bare-metal box so the slice looks like a VPS (box-IP + two ports).
+# this guest port (matches VpsDockerProviderConfig.container_ssh_port). Each is
+# forwarded to a distinct host port on the bare-metal box so the slice looks like
+# a VPS (box-IP + two ports).
 _CONTAINER_SSH_GUEST_PORT: Final[int] = 2222
-_VM_SSH_GUEST_PORT: Final[int] = 22
+# Lima reserves guest port 22 for its own (loopback-only) SSH and rejects any
+# portForward targeting it, so we make the VM's sshd ALSO listen on this extra
+# guest port and forward that one to the box's external interface for the "outer"
+# (root) SSH that the vps_docker provider uses.
+_VM_SSH_GUEST_PORT: Final[int] = 2200
+
+
+def _vm_ssh_extra_port_script(extra_port: int) -> str:
+    """Bash that makes the VM's sshd listen on ``extra_port`` in addition to 22.
+
+    Lima's own SSH needs guest 22, so we keep it and add the extra port (sshd
+    drops the implicit 22 default once any ``Port`` line is present, so both must
+    be listed). Idempotent across re-provisions.
+    """
+    return f"""\
+#!/bin/bash
+set -eux -o pipefail
+if ! grep -q '^Port {extra_port}$' /etc/ssh/sshd_config; then
+    printf 'Port 22\\nPort {extra_port}\\n' >> /etc/ssh/sshd_config
+    systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
+fi
+"""
+
 
 # Installs Docker on the VM so the shared vps_docker bake can run its container.
 # Idempotent: get.docker.com no-ops when docker is already present.
@@ -88,7 +110,11 @@ def build_slice_lima_yaml(
         {"guestPort": _CONTAINER_SSH_GUEST_PORT, "hostPort": container_ssh_host_port, "hostIP": "0.0.0.0"},
         *_disable_other_forwards(),
     ]
-    # Append a Docker-install step after the base provisioning (packages, sshd,
-    # root key, btrfs disk mount).
-    config["provision"] = list(config["provision"]) + [{"mode": "system", "script": _DOCKER_INSTALL_SCRIPT}]
+    # After the base provisioning (packages, sshd, root key, btrfs disk mount):
+    # make sshd listen on the extra forwardable port, then install Docker so the
+    # shared vps_docker bake can run its container on this VM.
+    config["provision"] = list(config["provision"]) + [
+        {"mode": "system", "script": _vm_ssh_extra_port_script(_VM_SSH_GUEST_PORT)},
+        {"mode": "system", "script": _DOCKER_INSTALL_SCRIPT},
+    ]
     return config

@@ -43,7 +43,8 @@ def test_slice_yaml_forwards_exactly_vm_and_container_sshd_externally() -> None:
     # The first two rules are the explicit external allows for the VM sshd and the
     # inner container sshd; both bound to 0.0.0.0 so the box exposes them.
     vm_rule, container_rule = forwards[0], forwards[1]
-    assert vm_rule == {"guestPort": 22, "hostPort": 22001, "hostIP": "0.0.0.0"}
+    # Guest 2200 (not 22, which Lima reserves) is the VM's extra sshd port.
+    assert vm_rule == {"guestPort": 2200, "hostPort": 22001, "hostIP": "0.0.0.0"}
     assert container_rule == {"guestPort": 2222, "hostPort": 22002, "hostIP": "0.0.0.0"}
     # Everything after them is a catch-all ignore rule (no other guest port leaks).
     assert all(rule.get("ignore") is True for rule in forwards[2:])
@@ -60,6 +61,8 @@ def test_slice_yaml_authorizes_root_client_key_and_installs_docker() -> None:
     assert "get.docker.com" in joined
     # The pre-injected sshd host key avoids a TOFU race on first connect.
     assert "ssh_host_ed25519_key" in joined
+    # sshd is made to listen on the extra forwardable port (Lima keeps 22 for itself).
+    assert "Port 2200" in joined
 
 
 def test_slice_yaml_provision_runs_base_setup_before_docker() -> None:
