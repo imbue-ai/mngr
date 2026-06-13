@@ -758,7 +758,12 @@ def test_destroy_transfer_none_keeps_shared_worktree(
         assert tmux_session_exists(owner_session), "owner tmux session should still be running"
 
 
+# Real create + destroy + post-destroy GC of a tmux agent. Under heavy CI load the GC
+# thread-pool join can briefly outrun the global 10s pytest-timeout (the work itself --
+# real tmux session create/destroy -- is the point of the test and can't be shrunk), so
+# give it a little more headroom. Matches the precedent on the other tmux destroy tests.
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_destroy_transfer_none_standalone_keeps_user_worktree(
     cli_runner: CliRunner,
     temp_git_repo: Path,
