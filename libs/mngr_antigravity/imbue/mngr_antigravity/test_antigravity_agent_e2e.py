@@ -40,6 +40,7 @@ from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
 from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_token_path
+from imbue.mngr_antigravity.antigravity_config import get_antigravity_settings_path
 
 # Resolved at import time, before the autouse fixture redirects $HOME: the real ~/.gemini
 # auth the plugin reads and shares into each per-agent home. agy signs in from the
@@ -48,7 +49,7 @@ from imbue.mngr_antigravity.antigravity_config import get_antigravity_oauth_toke
 # agent comes up unauthenticated and can't run a turn.
 _REAL_GEMINI = Path.home() / ".gemini"
 _REAL_OAUTH_TOKEN = get_antigravity_oauth_token_path(Path.home())
-_REAL_SETTINGS = _REAL_OAUTH_TOKEN.parent / "settings.json"
+_REAL_SETTINGS = get_antigravity_settings_path(Path.home())
 _TOP_LEVEL_AUTH_FILES = ("oauth_creds.json", "google_accounts.json")
 
 # Resolved at import time too: the user's real macOS login keychain dir. agy's embedded
@@ -106,7 +107,7 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
         shutil.copy2(_REAL_OAUTH_TOKEN, seeded_token)
         settings = json.loads(_REAL_SETTINGS.read_text()) if _REAL_SETTINGS.exists() else {}
         settings["model"] = _MODEL
-        (seeded_token.parent / "settings.json").write_text(json.dumps(settings))
+        get_antigravity_settings_path(Path(env["HOME"])).write_text(json.dumps(settings))
 
         # macOS only: seed Library/Keychains into the redirected HOME so the plugin's
         # _provision_macos_keychain (which symlinks host_home's Library/Keychains into the
