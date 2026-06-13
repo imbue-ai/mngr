@@ -285,6 +285,26 @@ Provider: ovh
   Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
+Provider: smolvm
+  Supported build arguments for the smolvm provider:
+    --image-archive PATH  Create the host from a local image archive (the output
+                          of 'docker save'). The archive is converted to a
+                          .smolmachine pack (cached by content hash) and the
+                          machine is created from it.
+    --from PATH           Create the host from an existing .smolmachine pack.
+    --dockerfile PATH     Build the Dockerfile with docker, export the image,
+                          and create the host from it (cached by image id).
+  When none is given, the host runs the --image OCI reference (pulled from a
+  registry), or a bare Alpine VM when no image is specified at all.
+  Start args are passed through to 'smolvm machine create'. Common options:
+    --cpus N              Number of vCPUs (default: 4)
+    --mem MiB             Memory in MiB (default: 4096)
+    --storage GiB         OCI layer storage disk size (default: 20)
+    --overlay GiB         Persistent rootfs overlay disk size (default: 10)
+    --allow-cidr CIDR     Restrict egress to the given CIDR (repeatable)
+    --allow-host HOST     Restrict egress to the given hostname (repeatable)
+  Run 'smolvm machine create --help' for the full list.
+
 Provider: ssh
   The SSH provider does not support creating hosts dynamically.
   Hosts must be pre-configured in the mngr config file.

@@ -197,6 +197,20 @@ def test_build_mngr_create_command_omits_color_label_when_unset() -> None:
     assert "color=" not in joined
 
 
+def test_build_mngr_create_command_smolvm_uses_smolvm_host_and_templates() -> None:
+    """SMOLVM mode targets a ``.smolvm`` host address and stacks the main +
+    smolvm templates, mirroring the lima wiring."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.SMOLVM,
+        host_name=HostName("hello"),
+    )
+    assert any(arg.endswith("@hello.smolvm") for arg in command)
+    joined = " ".join(command)
+    assert "--new-host" in command
+    assert "--template main" in joined
+    assert "--template smolvm" in joined
+
+
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
@@ -210,6 +224,7 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
+        (LaunchMode.SMOLVM, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
@@ -386,6 +401,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
+        (LaunchMode.SMOLVM, None),
         (LaunchMode.CLOUD, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):

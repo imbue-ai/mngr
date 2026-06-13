@@ -574,7 +574,7 @@ def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
     Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
-    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    ``DOCKER`` / ``LIMA`` / ``SMOLVM`` run locally and have no region.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
@@ -2929,7 +2929,7 @@ def _handle_restart_host_api(
 #
 # A "shutdown-capable mind" is a workspace on a provider whose host minds can
 # stop and start (see ``provider_backend_supports_shutdown`` -- the local docker
-# / lima backends today). Stopping one frees the user's machine while preserving
+# / lima / smolvm backends today). Stopping one frees the user's machine while preserving
 # data and leaving it fully restartable. Stop = ``mngr stop --stop-host`` on the
 # host (same teardown the host-restart tier uses); Start = ``mngr start`` (boots
 # the stopped container). Both set an optimistic host-state override on the

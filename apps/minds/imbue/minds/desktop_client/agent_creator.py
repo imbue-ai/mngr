@@ -550,6 +550,8 @@ def _build_mngr_create_command(
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
+        case LaunchMode.SMOLVM:
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.smolvm"
         case LaunchMode.CLOUD:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
         case LaunchMode.IMBUE_CLOUD:
@@ -642,6 +644,9 @@ def _build_mngr_create_command(
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
+            mngr_command.extend(_remote_host_env_flags())
+        case LaunchMode.SMOLVM:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "smolvm"])
             mngr_command.extend(_remote_host_env_flags())
         case LaunchMode.CLOUD:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])

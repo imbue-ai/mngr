@@ -12,7 +12,7 @@ scopes it to shutdown-capable minds:
 
 - ``provider_backend_supports_shutdown`` -- the *single* gate for "can this
   provider's host be stopped/started from minds today?" Currently only the local
-  (docker / lima) backends qualify; widen this one predicate when other
+  (docker / lima / smolvm) backends qualify; widen this one predicate when other
   providers gain host shutdown support.
 - ``classify_host_state`` -- maps a discovery ``HostState`` to the coarse
   RUNNING / STOPPED / UNKNOWN the UI shows.
@@ -43,7 +43,7 @@ from imbue.mngr.primitives import HostState
 # restriction: when a remote provider gains host shutdown support, widen this set
 # (or replace it with a richer per-provider capability check) and every Start /
 # Stop surface follows. See ``provider_backend_supports_shutdown``.
-_SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima"})
+_SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima", "smolvm"})
 
 # Discovery ``HostState`` values that mean the container exists but is not
 # running. Mirrors the offline set the recovery-diagnostics probe uses.
@@ -64,8 +64,8 @@ def provider_backend_supports_shutdown(backend: str) -> bool:
     """Whether a provider on ``backend`` exposes host stop/start to minds today.
 
     The single gate behind every Start / Stop surface and the quit-time prompt.
-    Currently only the local (docker / lima) backends qualify; widen this when
-    other providers gain host shutdown support.
+    Currently only the local (docker / lima / smolvm) backends qualify; widen
+    this when other providers gain host shutdown support.
     """
     return backend in _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS
 
