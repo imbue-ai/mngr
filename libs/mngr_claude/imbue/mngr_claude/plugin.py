@@ -93,6 +93,7 @@ from imbue.mngr_claude.claude_config import dismiss_effort_callout
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
 from imbue.mngr_claude.claude_config import find_project_config
 from imbue.mngr_claude.claude_config import find_user_claude_config
+from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
 from imbue.mngr_claude.claude_config import get_agent_claude_plugin_dir
 from imbue.mngr_claude.claude_config import get_claude_config_dir
 from imbue.mngr_claude.claude_config import get_managed_settings_path
@@ -1494,7 +1495,7 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         """
         if self.agent_config.use_env_config_dir:
             return resolve_shared_claude_config_dir()
-        return self._get_agent_dir() / _AGENT_CLAUDE_CONFIG_RELPATH
+        return get_agent_claude_config_dir(self._get_agent_dir())
 
     def get_stream_buffer_path(self) -> Path:
         """Return the path to this agent's response-streaming buffer file.
