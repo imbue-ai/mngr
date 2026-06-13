@@ -345,15 +345,26 @@ def clone_git_repo(
 
     ``branch`` accepts a branch name, a tag name, or a commit SHA -- git
     fetch handles all three uniformly. The fetched ref lands in
-    ``FETCH_HEAD``; the caller materialises HEAD by calling
-    :func:`checkout_branch` next.
+    ``FETCH_HEAD``, which we then check out (detached) so the clone has a
+    materialised working tree -- exactly what ``git clone`` produces. The
+    caller still calls :func:`checkout_branch` next to rename the detached
+    HEAD to a real local branch.
+
+    Checking out here (rather than leaving an empty tree for the caller)
+    is load-bearing: callers that overlay a worktree via
+    :func:`rsync_worktree_over_clone` need a *checked-out* clone, else the
+    rsync'd files land untracked and the subsequent ``checkout_branch``
+    aborts with "untracked working tree files would be overwritten by
+    checkout". A bare ``git init`` + ``git fetch`` (no checkout) silently
+    broke every local-worktree create until this checkout was restored.
 
     Implementation is ``git init`` + ``git remote add origin`` + ``git
-    fetch origin <ref>`` rather than ``git clone --single-branch --branch
-    <ref>``. ``--branch`` rejects commit SHAs (``fatal: Remote branch
-    <sha> not found in upstream origin``); ``git fetch`` does not. The
-    fetch downloads only the requested ref's full ancestry -- same shape
-    as ``--single-branch``, still non-shallow.
+    fetch origin <ref>`` + ``git checkout --detach FETCH_HEAD`` rather than
+    ``git clone --single-branch --branch <ref>``. ``--branch`` rejects
+    commit SHAs (``fatal: Remote branch <sha> not found in upstream
+    origin``); ``git fetch`` does not. The fetch downloads only the
+    requested ref's full ancestry -- same shape as ``--single-branch``,
+    still non-shallow.
 
     We deliberately do NOT shallow-clone (no ``--depth``): this clone is
     the source ``mngr create`` mirror-pushes into the agent container's
@@ -374,9 +385,11 @@ def clone_git_repo(
 
     # `init` and `remote add` are local-only and never fail in healthy
     # environments; `fetch` is the step that can legitimately error
-    # (auth, network, ref-not-found). All three are wrapped under the
-    # same child concurrency group so cancellation is uniform; the
-    # failure is raised AFTER the `with cg` block to keep GitCloneError
+    # (auth, network, ref-not-found). The final `checkout --detach`
+    # materialises the working tree from the just-fetched FETCH_HEAD so
+    # the clone matches what `git clone` produces. All steps are wrapped
+    # under the same child concurrency group so cancellation is uniform;
+    # the failure is raised AFTER the `with cg` block to keep GitCloneError
     # from being wrapped in a ConcurrencyExceptionGroup.
     cg = _make_child_cg("git-clone", parent_cg)
     failed: tuple[str, str] | None = None
@@ -385,6 +398,7 @@ def clone_git_repo(
             ["git", "init", "-q"],
             ["git", "remote", "add", "origin", str(git_url)],
             ["git", "fetch", "origin", str(branch) if branch is not None else "HEAD"],
+            ["git", "checkout", "--detach", "FETCH_HEAD"],
         ):
             result = cg.run_process_to_completion(
                 command=command,
@@ -1384,28 +1398,12 @@ class AgentCreator(MutableModel):
                             on_output=emit_log,
                             parent_cg=self.root_concurrency_group,
                         )
-                        # Materialise the fetched ref into the clone's working
-                        # tree BEFORE overlaying the worktree. clone_git_repo
-                        # only does `git init` + `git fetch` (no checkout), so
-                        # the clone's working tree is empty at this point.
-                        # _rsync_worktree_over_clone is documented to overlay
-                        # over a *checked-out* clone; without this checkout the
-                        # rsync'd files land untracked and the trailing
-                        # checkout_branch aborts with "untracked working tree
-                        # files would be overwritten by checkout". Checking out
-                        # first makes those files tracked, so the rsync just
-                        # updates them (uncommitted edits survive) and the
-                        # trailing checkout is a safe no-op for this path.
-                        if branch:
-                            checkout_branch(
-                                clone_target,
-                                GitBranch(branch),
-                                on_output=emit_log,
-                                parent_cg=self.root_concurrency_group,
-                            )
                         # Rsync the worktree's working directory over so that
                         # uncommitted changes (e.g. a locally-rsynced
                         # vendor/mngr/) are included in the Docker build context.
+                        # clone_git_repo leaves a checked-out tree, so the
+                        # rsync'd files are tracked and the trailing
+                        # checkout_branch does not abort on untracked files.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,

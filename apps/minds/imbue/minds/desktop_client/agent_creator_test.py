@@ -47,7 +47,6 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import GitCloneError
-from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.primitives import AIProvider
 from imbue.minds.primitives import BackupProvider
@@ -492,21 +491,42 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
 
 
-@pytest.mark.rsync
-def test_worktree_overlay_checks_out_before_rsync_and_preserves_uncommitted(tmp_path: Path) -> None:
-    """The local-worktree create path must check out the fetched ref BEFORE
-    overlaying the worktree, else the rsync'd files land untracked and the
-    trailing checkout aborts with "untracked working tree files would be
-    overwritten by checkout".
+def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
+    """``clone_git_repo`` materialises a checked-out, tracked working tree --
+    exactly what ``git clone`` produces.
 
-    Regression for the SMOLVM/docker local-worktree create failure: when the
-    create source is a git worktree on a branch (the ``minds-start`` dev
-    flow auto-fills the branch), ``clone_git_repo`` only does ``git init`` +
-    ``git fetch`` (no checkout), so the clone's working tree is empty.
-    ``_rsync_worktree_over_clone`` is documented to overlay over a *checked-out*
-    clone. This mirrors production's ordering (clone -> checkout -> rsync ->
-    trailing checkout) and asserts it both succeeds and keeps the worktree's
-    uncommitted edits.
+    Regression for the SHA-support rewrite that swapped ``git clone`` for
+    ``git init`` + ``git fetch`` and dropped the checkout, leaving an empty
+    working tree. Callers that overlay a worktree via
+    ``rsync_worktree_over_clone`` depend on the clone being checked out: with
+    an empty tree the overlaid files land untracked and the follow-up
+    ``checkout_branch`` aborts with "untracked working tree files would be
+    overwritten by checkout", which silently broke every local-worktree
+    create (docker, lima, smolvm).
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    # Working tree is populated from the fetched HEAD (origin is left on main)...
+    assert (dest / "f").read_text() == "base\n"
+    # ...and the files are TRACKED (clean status), not untracked -- this is the
+    # property the worktree overlay relies on.
+    assert _git(dest, "status", "--porcelain") == ""
+
+
+@pytest.mark.rsync
+def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
+    """The local-worktree create flow (clone -> rsync overlay -> checkout)
+    succeeds and keeps the worktree's uncommitted edits.
+
+    Regression for the create failure where ``clone_git_repo`` stopped
+    checking out, so the overlay rsync'd files landed untracked and
+    ``checkout_branch`` aborted with "untracked working tree files would be
+    overwritten by checkout". Mirrors production's ordering for a git-worktree
+    source on a branch (the ``minds-start`` dev flow).
     """
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
@@ -518,38 +538,12 @@ def test_worktree_overlay_checks_out_before_rsync_and_preserves_uncommitted(tmp_
     (worktree / "f").write_text("uncommitted edit\n")
 
     dest = tmp_path / "clone"
-    # clone_git_repo fetches HEAD only -- no branch, no checkout (production
-    # local-worktree path does exactly this).
     clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
-    # The fix: materialise the branch before overlaying.
-    checkout_branch(dest, GitBranch("testing"))
     _rsync_worktree_over_clone(worktree, dest)
-    # The trailing checkout production runs unconditionally for branch creates;
-    # it must be a safe no-op here (not wipe the rsync'd uncommitted edit).
     checkout_branch(dest, GitBranch("testing"))
 
     assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
     assert (dest / "f").read_text() == "uncommitted edit\n"
-
-
-@pytest.mark.rsync
-def test_worktree_overlay_rsync_before_checkout_aborts(tmp_path: Path) -> None:
-    """Documents WHY the checkout must precede the rsync: doing it in the old
-    order (rsync first) leaves the files untracked, so ``checkout_branch``
-    aborts. This is the exact failure the create path hit before the fix.
-    """
-    origin = tmp_path / "origin"
-    _make_origin_repo_with_branch(origin, "testing")
-    worktree = tmp_path / "wt"
-    _git(origin, "worktree", "add", "-q", str(worktree), "testing")
-
-    dest = tmp_path / "clone"
-    clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
-    # Old (buggy) order: overlay the worktree onto an unchecked-out clone...
-    _rsync_worktree_over_clone(worktree, dest)
-    # ...then try to check out -- git refuses to clobber the untracked files.
-    with pytest.raises(GitOperationError):
-        checkout_branch(dest, GitBranch("testing"))
 
 
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
