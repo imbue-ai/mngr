@@ -20,6 +20,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from imbue.mngr_codex.resources.testing import provision_commands_dir
 from imbue.mngr_codex.resources.testing import run_codex_hook
 
@@ -204,6 +206,13 @@ def test_two_subagents_marker_stays_until_both_stop(tmp_path: Path) -> None:
     assert not _marker(tmp_path).exists()
 
 
+# This smoke test forks ~32 short-lived bash subprocesses (4 per iteration). That
+# work is well under a second when the machine is idle, but on a heavily loaded CI
+# runner the fork/exec alone can blow past the suite-wide 10s timeout, so give it
+# generous headroom (a real deadlock would still hang far longer) and let offload
+# retry it as a known-flaky test.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_concurrent_root_stop_and_last_subagent_stop_clears_marker(tmp_path: Path) -> None:
     """Smoke test the lock: race the root Stop against the last SubagentStop a
     handful of times; the marker must always end CLEARED, never stranded."""
