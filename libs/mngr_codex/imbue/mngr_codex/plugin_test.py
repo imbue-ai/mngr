@@ -7,13 +7,16 @@ import tomllib
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.ratchet_testing.ratchets import assert_posix_compatible
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
+from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
@@ -468,6 +471,34 @@ def test_non_interactive_only_notifies(local_provider: LocalProviderInstance, tm
     """Non-interactive: never prompt and never mutate the global install -- just notify."""
     agent = _make_codex_agent(_OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig())
     _check_update(agent)
+
+
+def test_unattended_remote_host_only_notifies(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """A remote (non-local) host is unattended even from an interactive tty: notify, never prompt.
+
+    Mirrors the claude plugin's ``is_unattended = not host.is_local``: provisioning a
+    remote codex agent from a local interactive terminal must not prompt to upgrade the
+    remote's global install (the prompt override raises if consulted), nor run the update.
+    """
+    agent = _make_codex_agent(
+        _OutdatedPromptRaisesAgent, local_provider, tmp_path, CodexAgentConfig(), is_interactive=True
+    )
+    remote_host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    agent._maybe_check_for_codex_update(remote_host, agent.work_dir, agent.mngr_ctx)
+
+
+def test_unattended_remote_host_still_auto_updates(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
+    """``auto_update`` is an explicit opt-in, so it upgrades even on an unattended remote host."""
+    agent = _make_codex_agent(
+        _OutdatedPromptRaisesAgent,
+        local_provider,
+        tmp_path,
+        CodexAgentConfig(auto_update=True),
+        is_interactive=True,
+    )
+    remote_host = cast(OnlineHostInterface, FakeHost(is_local=False))
+    with pytest.raises(_CodexUpdateRan):
+        agent._maybe_check_for_codex_update(remote_host, agent.work_dir, agent.mngr_ctx)
 
 
 def test_auto_approve_does_not_trigger_global_update(local_provider: LocalProviderInstance, tmp_path: Path) -> None:

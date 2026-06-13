@@ -226,8 +226,9 @@ class CodexAgentConfig(AgentTypeConfig):
         default=True,
         description="When True, check at provision whether the codex CLI is outdated (comparing "
         "`codex --version` to the latest version codex last recorded in ~/.codex/version.json -- "
-        "no network call) and surface it: an interactive prompt to run `codex update`, or a "
-        "non-blocking notice when non-interactive. mngr disables codex's own blocking startup "
+        "no network call) and surface it: an interactive prompt to run `codex update` on an "
+        "attended local run, or a non-blocking notice otherwise (unattended remote/deploy hosts, "
+        "or any non-interactive run). mngr disables codex's own blocking startup "
         "update prompt, so this is the replacement.",
     )
     # auto_update is the opt-in to let mngr run ``codex update`` itself. ``codex update``
@@ -238,7 +239,8 @@ class CodexAgentConfig(AgentTypeConfig):
         default=False,
         description="When True, run `codex update` automatically (no prompt) whenever the check "
         "finds codex is outdated. `codex update` self-detects the install method. Default False: "
-        "mngr instead prompts interactively, or just notifies when non-interactive. Note: updating "
+        "mngr instead prompts on an attended local run, or just notifies otherwise (unattended "
+        "remote/deploy hosts, or any non-interactive run). Note: updating "
         "mutates the user's global codex install. Implies the update check even if "
         "check_for_updates is False.",
     )
@@ -545,8 +547,9 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         "Update available!" prompt would intercept the first pasted message), so this
         is the well-behaved replacement: a network-free check (codex's own
         ``version.json`` vs ``codex --version``) plus, when outdated, either an
-        automatic ``codex update`` (``auto_update``), an interactive prompt, or a
-        non-blocking notice. Updating is optional -- an outdated codex still runs --
+        automatic ``codex update`` (``auto_update``), an interactive prompt (only on
+        an attended local run), or a non-blocking notice (unattended remote/deploy
+        hosts, or any non-interactive run). Updating is optional -- an outdated codex still runs --
         so, unlike workspace trust, a declined or non-interactive case never aborts
         provisioning, and any probe/parse failure is swallowed (debug-logged).
         """
@@ -616,16 +619,25 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     ) -> None:
         """Apply or surface an available codex update.
 
-        ``auto_update`` -> run ``codex update`` with no prompt. Otherwise, when
-        interactive (and not ``--yes``), prompt to update now. In every other case
-        (``--yes`` or non-interactive), just log a non-blocking notice -- we never
-        mutate the user's *global* codex install at provision without an explicit
-        opt-in (the ``auto_update`` flag) or an interactive yes. (``--yes`` clears
-        blocking prerequisites like trust, but an optional global upgrade is heavier,
-        so it is gated on ``auto_update`` alone, not on auto-approve.)
+        ``auto_update`` -> run ``codex update`` with no prompt. Otherwise, only an
+        *attended* run -- a local host driven from an interactive terminal, and not
+        ``--yes`` -- prompts to update now. In every other case (``--yes``,
+        non-interactive, or an *unattended* remote/deploy host) we just log a
+        non-blocking notice: we never mutate the *global* codex install at provision
+        without an explicit opt-in (the ``auto_update`` flag) or an interactive yes.
+
+        Unattended is keyed off ``not host.is_local`` -- mirroring the claude plugin's
+        ``is_unattended`` -- so provisioning a *remote* codex agent from a local tty
+        never prompts (and never silently upgrades the remote's global install), even
+        though the local terminal is interactive. (``--yes`` clears blocking
+        prerequisites like trust, but an optional global upgrade is heavier, so it is
+        gated on ``auto_update`` alone, not on auto-approve.)
         """
+        # Attended = a local host driven from an interactive terminal. A remote/deploy
+        # host is unattended even when the local stdout is a tty, so it never prompts.
+        is_attended = mngr_ctx.is_interactive and host.is_local
         should_update = self.agent_config.auto_update
-        if not should_update and mngr_ctx.is_interactive and not mngr_ctx.is_auto_approve:
+        if not should_update and is_attended and not mngr_ctx.is_auto_approve:
             should_update = self._prompt_user_to_update_codex(installed, latest)
         if should_update:
             self._run_codex_update(host, installed, latest)
