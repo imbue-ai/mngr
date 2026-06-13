@@ -1,5 +1,6 @@
+import os
+import pwd
 import shutil
-import tempfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ register_build_level()
 
 
 @pytest.mark.release
+@pytest.mark.timeout(1800)  # booting a real VM + baking a container far exceeds the package's 10s default
 @pytest.mark.skipif(shutil.which("limactl") is None, reason="requires limactl + a hypervisor")
 def test_slice_provider_bakes_a_reachable_host_on_a_real_lima_vm(
     temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
@@ -33,12 +35,16 @@ def test_slice_provider_bakes_a_reachable_host_on_a_real_lima_vm(
     it over box-forwarded ports, confirm the resulting host's inner container is
     reachable, then destroy the VM + disk.
     """
-    # temp_mngr_ctx overrides $HOME to a deep pytest tmp dir, which would make
-    # lima's $HOME/.lima/<instance>/ssh.sock path exceed the 108-char UNIX socket
-    # limit. Point LIMA_HOME at a short tmp dir (production uses the box's short
-    # home, so this is a test-env-only concern).
-    lima_home = tempfile.mkdtemp(prefix="l", dir="/tmp")
-    monkeypatch.setenv("LIMA_HOME", lima_home)
+    # temp_mngr_ctx overrides $HOME to a deep pytest tmp dir; lima then splits
+    # across $HOME (deep) and LIMA_HOME and its instance/socket paths break (the
+    # 108-char UNIX socket limit, and an uninitialized home). Restore the real,
+    # short, already-initialized home for lima -- which is also what production
+    # uses on the box. mngr_ctx already captured its (deep) profile dir at
+    # construction, so this only affects lima. The real home is read via pwd
+    # because $HOME has been overridden.
+    real_home = pwd.getpwuid(os.getuid()).pw_dir
+    monkeypatch.setenv("HOME", real_home)
+    monkeypatch.setenv("LIMA_HOME", str(Path(real_home) / ".lima"))
 
     backend = ProviderBackendName("imbue_cloud_slice")
     config = SliceVpsDockerProviderConfig(
@@ -51,7 +57,9 @@ def test_slice_provider_bakes_a_reachable_host_on_a_real_lima_vm(
     client = LimaSliceVpsClient()
     provider = SliceVpsDockerProvider(
         name=ProviderInstanceName("test-slice"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
+        # host_dir is the in-container mngr dir (/mngr), NOT a host-side path --
+        # the container is a fresh image, so a deep host path wouldn't exist there.
+        host_dir=config.host_dir,
         mngr_ctx=temp_mngr_ctx,
         config=config,
         vps_client=client,
@@ -71,4 +79,3 @@ def test_slice_provider_bakes_a_reachable_host_on_a_real_lima_vm(
         assert "slice-ok" in result.stdout
     finally:
         client.destroy_instance(instance_id)
-        shutil.rmtree(Path(lima_home), ignore_errors=True)
