@@ -1500,15 +1500,6 @@ async def amain() -> int:
                     **os.environ,
                     "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
                     "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
-                    # The bundled mngr ships a subset of provider plugins (no
-                    # aws). A signed-in account can leave a `[providers.aws]`
-                    # block in settings.toml whose backend this bundle can't
-                    # load, which aborts strict config parse before any agent
-                    # is listed (empty stdout -> W1 looks absent). That is the
-                    # forward-/unknown-config case MNGR_ALLOW_UNKNOWN_CONFIG
-                    # covers: downgrade the unknown-backend error to a warning
-                    # so the cross-check still sees W1 via the lima provider.
-                    "MNGR_ALLOW_UNKNOWN_CONFIG": "1",
                 }
                 # ``--on-error continue`` puts each provider's discovery error
                 # into the JSON payload's ``errors`` array. mngr STILL exits 1

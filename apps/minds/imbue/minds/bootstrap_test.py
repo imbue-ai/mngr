@@ -390,6 +390,33 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     assert parsed["plugins"]["recursive"]["enabled"] is False
 
 
+def test_ensure_mngr_settings_disables_unbundled_plugins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Cataloged plugins this bundle did not install are written as
+    ``[plugins.<name>] enabled = false`` so mngr's strict loader skips a synced
+    provider block referencing an un-bundled backend instead of aborting.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _ensure_mngr_settings("minds-dev-tname", disabled_plugin_names=frozenset({"aws", "vultr"}))
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["plugins"]["aws"]["enabled"] is False
+    assert parsed["plugins"]["vultr"]["enabled"] is False
+    assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_ensure_mngr_settings_adds_disables_to_preexisting_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A settings.toml already shaped by an older bundle (no un-bundled-plugin
+    disables) must gain them on the next call -- the idempotency early-return
+    must not skip a settings file that is missing a requested disable.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    _ensure_mngr_settings("minds-dev-tname")
+    assert "aws" not in tomllib.loads(settings_path.read_text()).get("plugins", {})
+    _ensure_mngr_settings("minds-dev-tname", disabled_plugin_names=frozenset({"aws"}))
+    assert tomllib.loads(settings_path.read_text())["plugins"]["aws"]["enabled"] is False
+
+
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
