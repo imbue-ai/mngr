@@ -10,15 +10,26 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Added: Notion (MCP) support in the latchkey permission catalog, exposing Notion's hosted MCP endpoint with its grantable permissions.
 - Added: File-sharing approvals can now honor a path edited by the user in the approval dialog. The override is re-validated with the same traversal rules used at request creation, and cannot escalate read-only access to read-write.
+- Added: File-sharing permission requests now accept paths that use `~` / `~/...` notation for the current user's home directory; the gateway expands them to an absolute path before storing the grant. `~user` notation for another user's home is rejected with a clear error.
 
 ### Changed
 
 - Changed: VPS-resident latchkey gateway is now launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`. The remote gateway runs on a synced copy of the user's credentials, so disabling refresh there prevents it from racing the desktop-side latchkey to rotate the same OAuth refresh token (which would exhaust the user's token and invalidate the desktop's credentials). The desktop-side latchkey remains the single owner of credential refresh.
 - Changed: Refreshed Slack `slack-read-all` / `slack-write-all` descriptions to match detent's updated wording.
+- Changed: Per-agent latchkey gateway setup is now decoupled — a failure to reverse-tunnel the desktop-side gateway into an agent's container no longer prevents the agent's VPS-resident gateway from being provisioned (and vice versa). VPS-resident gateway provisioning is coalesced per outer host (only one provisioning pass at a time when several agents share one VPS) and is no longer re-run on every discovery cycle (each host is provisioned at most once per supervisor lifetime; the remote-state watcher handles ongoing credential/permission sync).
+- Changed: Desktop-client `ServicesCatalog` / `ServicePermissionInfo` moved into `imbue.mngr_latchkey.services_catalog` (reads the bundled `services.json` directly). The gateway's `permissions` extension no longer serves the bare `GET /permissions/available` collection endpoint; the per-service `GET /permissions/available/<service>` endpoint that agents use is unchanged.
 
 ### Fixed
 
 - Fixed: File-sharing requests are now validated against the Minds WebDAV mount roots (the user's home directory and the system temp directory) at request-creation time and at approve time for a user-edited path override. A grant for any path outside those roots was previously inert (the WebDAV server has no provider for it and answers 404); rejecting it up front gives the agent a clear "must be within a shared root" error instead of an approve-then-404 dead end. Matching mirrors the WebDAV share-prefix matching (case-insensitive, lexical, no symlink resolution or existence check).
+- Fixed: File-sharing permission grants for paths containing spaces or non-ASCII characters now match. The per-file permission pattern is built from the same WHATWG-URL-normalized (percent-encoded) form the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter is no longer silently never granted.
+- Fixed: Services whose catalog lists no specific permissions (e.g. Linear) now surface the catch-all `any` permission. `GET /permissions/available/<service>` injects `any` as the first available permission for every scope, and `POST /permission-requests` accepts a `predefined` request naming `any` under any known scope.
+
+### Security
+
+- Security: VPS-resident latchkey gateway no longer interpolates its encryption key or listen password into the gateway start command (where they could surface in process listings or command logs). They're written to short-lived 0600 files on the VPS with random names that don't advertise which secret each one holds; the start script reads them into the gateway's environment and deletes them immediately.
+- Security: VPS-resident latchkey gateway now starts with the same shared password the local desktop gateway uses (derived via `Latchkey.derive_gateway_password` from the shared encryption key and injected as `LATCHKEY_GATEWAY_LISTEN_PASSWORD`). Previously the remote gateway started without any listen password, so it did not enforce the same authentication.
+- Security: Remote VPS gateways now receive only the latchkey credentials a host's permissions actually grant (a host-scoped subset re-encrypted with the same encryption key via `latchkey auth re-encrypt --services`), instead of the full desktop credential store. When nothing is left to ship (a deny-all host, or every granted service lacks stored credentials) the remote store is cleared instead. This limits the blast radius of a VPS compromise to the credentials the agent was actually permitted to use.
 
 ## [v0.1.1] - 2026-06-08
 

@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `agy` alias for the `antigravity` agent type — `mngr create my-agent agy` is now equivalent to `mngr create my-agent antigravity`.
+
+### Changed
+
+- Changed: `mngr message` to an antigravity (`agy`) agent now returns only after the agent has actually started processing the submission (a confirmed acceptance, not a blind Enter), and the agent correctly reports RUNNING for the whole turn including while subagents run. A single mngr-owned `statusLine` (seeded as agy's `statusLine` command) is now the source of truth for agent lifecycle, replacing the previous `PreInvocation`/`Stop` marker-hook pair. A user's own `statusLine` is composed and rendered verbatim; a `statusLine` that isn't a runnable command block is dropped with a warning.
+
 ## [v0.1.3] - 2026-06-08
 
 ### Fixed

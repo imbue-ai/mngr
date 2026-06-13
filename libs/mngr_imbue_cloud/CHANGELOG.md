@@ -9,6 +9,9 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 ### Changed
 
 - Changed: A stopped (offline) host's files are now readable through the same interface as an online host (used e.g. by Claude session preservation when a host is destroyed while offline). The host's volume is resolved lazily on first read, so this adds no per-host probe to host discovery; when no volume is available, reads behave as "nothing there".
+- Changed: AWS-provider shared-layer refactor — `is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend) and replaced with a default-no-op `bootstrap_for_host_creation` method (Modal-only override). The imbue-cloud backend's now-unused `del`-of-`is_for_host_creation` is removed; no behavior change.
+- Changed: `_build_delegated_vps_provider` now returns the public `MinimalVpsDockerProvider` (moved into `mngr_vps_docker`, since it's a generally useful role for any externally-managed-VPS host-setup path), replacing the previous ad-hoc minimal subclass. The slow (rebuild) path's `--git-depth=N` extraction continues to work; without this, every slow-path container rebuild would raise before any docker work happened (after `VpsDockerProvider._parse_build_args` became `@abstractmethod` in this window).
+- Changed: Replaced direct `ValueError`/`RuntimeError` raises in build-arg parsing and host provisioning with dedicated custom exception types.
 
 ## [v0.1.1] - 2026-06-08
 

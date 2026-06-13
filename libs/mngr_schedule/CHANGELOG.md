@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `--timezone` option on `mngr schedule add` pins the IANA timezone in which the `--schedule` cron expression is interpreted (e.g. `--timezone America/Los_Angeles`). Previously the cron was always interpreted in the deploying machine's local timezone, so the same schedule could fire at different wall-clock times depending on where it was deployed from. The value is validated against the IANA timezone database at deploy time. Only supported for the modal provider; passing it with `--provider local` is an error.
+
+### Changed
+
+- Changed: Replaced direct `ValueError` raises in modal deploy upload-spec parsing with a dedicated `UploadSpecError` exception type.
+
 ## [v0.1.1] - 2026-06-08
 
 ### Fixed

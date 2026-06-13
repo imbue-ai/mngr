@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Added
+
+- Added: `pi` alias for the `pi-coding` agent type — `mngr create my-agent pi` is now equivalent to `mngr create my-agent pi-coding`.
+- Added: Real lifecycle parity for `pi-coding` agents. A single mngr-owned pi extension (loaded via `pi -e`) drives RUNNING vs WAITING reporting on `agent_start`/`agent_end` events (subagent-aware: stays correct when an agent spawns a nested `pi` via its bash tool), `mngr transcript`, and conversation resume across `mngr stop` / `mngr start` with full context. Agent creation waits on a real readiness sentinel the extension writes when pi's session loads (rather than scraping the startup banner). Messages are delivered via `pi.sendUserMessage` (an inbox file the extension's watcher injects) instead of simulating tmux keystrokes — behaves identically on local and remote hosts (the old paste+Enter path intermittently swallowed the first Enter). On remote hosts (when allowed), `pi` is auto-installed from npm; on local hosts it still defers to the user unless `--yes` is passed. Pi 0.79+'s "Trust project folder?" dialog is pre-trusted (seeding pi's `trust.json`), gated like the claude/antigravity agent types — silent under `mngr create --yes` or the new `auto_dismiss_dialogs` config, interactive prompt otherwise. New config: `emit_common_transcript`, `emit_raw_transcript`, `resume_session` (all default on).
+
 ## [v0.1.9] - 2026-06-08
 
 ## [v0.1.8] - 2026-06-05

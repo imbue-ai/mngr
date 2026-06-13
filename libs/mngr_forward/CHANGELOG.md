@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: Reverse SSH tunnels no longer orphan their forwarded port on the remote sshd when a half-dead connection skips cleanup. `SSHTunnelManager.cleanup()` now always attempts to cancel each reverse port forward (was: skipped when the connection looked inactive), and every tunnel SSH connection sends periodic keepalives so an idle reverse tunnel doesn't silently die before the health check can repair it.
+
 ## [v0.1.1] - 2026-06-08
 
 ### Added

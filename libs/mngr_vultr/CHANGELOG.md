@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: **Breaking** — per-host build args renamed from the shared `--vps-*` prefix to the Vultr-native prefix: `--vps-region=` is now `--vultr-region=`, `--vps-plan=` is now `--vultr-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared. The `--vps-os=` build arg is removed; per-host overrides require a separate Vultr provider instance with its own `default_os_id` (which `VultrVpsClient` now carries locally).
+- Changed: AWS-provider shared-layer refactor — adopts the new `_fetch_provider_instances` hook on `VpsDockerProvider` (per-class `_list_instances_cached` override is gone; cache scaffolding lives on the base), picks up the shared `wait_for_instance_active` default method, and the `is_for_host_creation` flag is gone (no behavior change). The stale "OS image is set via default_os_id..." block in `get_build_args_help()` is removed.
+- Changed: Replaced a direct `ValueError` raise in Vultr provider config with a dedicated custom exception type.
+
 ## [v0.1.5] - 2026-06-08
 
 ## [v0.1.4] - 2026-06-05
