@@ -1,0 +1,1 @@
+- Changed: Marked `test_print_extras_status_runs_without_error` (`mngr extras` status) as `@pytest.mark.flaky` so offload retries it; the status code paths shell out and can occasionally exceed the 10s pytest-timeout under sandbox load. Test-only change; no behavior change.

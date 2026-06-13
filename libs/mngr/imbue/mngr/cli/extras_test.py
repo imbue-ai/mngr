@@ -360,6 +360,10 @@ def test_plugins_status_returns_string() -> None:
     assert len(status) > 0
 
 
+# Flaky on offload: the status code paths shell out (plugin/completion/claude
+# status) and can occasionally exceed the 10s pytest-timeout under sandbox load
+# (observed at 10.05s in CI; ~0.4s locally). Retry rather than fail the suite.
+@pytest.mark.flaky
 def test_print_extras_status_runs_without_error() -> None:
     """_print_extras_status completes without error."""
     # Exercises plugin status, completion status, and claude plugin status code paths
