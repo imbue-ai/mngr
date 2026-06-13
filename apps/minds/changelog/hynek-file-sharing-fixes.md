@@ -1,1 +1,0 @@
-The file-sharing permission dialog now accepts `~` / `~/...` notation for the current user's home directory when editing the path to share. The path is expanded to an absolute home-directory path (mirroring the gateway), the client-side within-roots check and Approve gating expand it too, and `~user` notation for another user's home is rejected with a clear error.
