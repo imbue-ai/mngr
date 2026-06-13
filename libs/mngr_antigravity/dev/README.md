@@ -149,7 +149,7 @@ that the production transcript pipeline uses to read agy >= 1.0.4 conversations 
 2026-06-01, made SQLite "the CLI's conversation format"; before that, interactive agy wrote
 a per-conversation JSONL transcript that the old streamer tailed). It does **not** depend on
 the ``protobuf`` library or any shipped descriptors -- it walks the wire format directly,
-keyed to the field map recovered by ``extract_agy_proto_schema.py`` (see ``dev/README.md``).
+keyed to the field map recovered by ``extract_antigravity_proto_schema.py`` (see ``dev/README.md``).
 
 Schema (recovered field map -- re-verify against new agy releases):
 
