@@ -1,1 +1,0 @@
-- `CLAUDE.md`: Clarified that release tests do *not* run in CI (unlike acceptance tests), so anyone developing or modifying release tests must run them locally to verify them.
