@@ -19,10 +19,25 @@ rather than constructing the ``mngr schedule run`` command itself.
 literals in the two shell consumers because they need the values before
 any ``uv run python`` invocation; those literals must be kept in sync
 with the constants here by hand.
+
+This module also exposes ``--stop-all-apps``, which ``changelog_deploy.sh``
+runs before redeploying to stop *every* Modal app in the schedule's
+isolated environment(s). The schedule lives in its own environment (named
+``{MNGR_ROOT_NAME}-<user_id>``), so stopping all apps there is a safe,
+naming-scheme-independent guarantee that no orphaned cron app survives a
+redeploy -- a past app-naming-scheme change had left an orphan firing a
+second nightly run because ``mngr schedule remove`` only stops the app
+matching the *current* name.
 """
 
 import argparse
 import importlib.metadata
+import json
+import subprocess
+import sys
+from collections.abc import Callable
+from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Final
 
 TRIGGER_NAME: Final[str] = "changelog-consolidation"
@@ -56,6 +71,101 @@ def disable_plugin_args() -> list[str]:
     return args
 
 
+# Keys emitted by ``modal environment list --json`` and ``modal app list
+# --json`` (the column headers from the Modal CLI's table output, which are
+# the JSON keys verbatim). Mirrors the constants in scripts/modal_nuke.py.
+_ENV_NAME_KEY: Final[str] = "name"
+_APP_ID_KEY: Final[str] = "App ID"
+_APP_STATE_KEY: Final[str] = "State"
+# App states (lowercased) that mean the app is already not running, so there
+# is nothing to stop.
+_ALREADY_STOPPED_STATES: Final[frozenset[str]] = frozenset({"stopped", "stopping"})
+
+# A callable that runs ``modal <args>`` and returns the completed process.
+# Injected so the sweep can be unit-tested without invoking the real CLI.
+ModalRunner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+
+
+class ModalCommandError(Exception):
+    """A ``modal`` CLI invocation we depend on failed."""
+
+
+class ModalSchemaError(Exception):
+    """``modal ... --json`` output is missing an expected key.
+
+    Stopping apps is destructive, so we fail loudly (rather than act on a
+    placeholder identifier) if the Modal CLI changes its ``--json`` schema.
+    """
+
+
+def _run_modal(args: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(["modal", *args], capture_output=True, text=True, timeout=60)
+
+
+def _require_key(entry: Mapping[str, object], key: str, kind: str) -> str:
+    if key not in entry:
+        raise ModalSchemaError(
+            f"Modal {kind} entry is missing expected key {key!r}; got keys {sorted(entry)!r}. "
+            "Refusing to act on an unknown identifier; the modal --json schema may have changed."
+        )
+    return str(entry[key])
+
+
+def _changelog_environment_names(run_modal: ModalRunner) -> list[str]:
+    """Return the names of the changelog schedule's isolated Modal environment(s).
+
+    The schedule's environment is named ``{MNGR_ROOT_NAME}-<user_id>``, so any
+    environment whose name starts with ``MNGR_ROOT_NAME`` belongs to this
+    schedule (the root name is unique to it).
+    """
+    result = run_modal(["environment", "list", "--json"])
+    if result.returncode != 0:
+        raise ModalCommandError(f"`modal environment list` failed: {result.stderr.strip()}")
+    environments = json.loads(result.stdout)
+    names = [_require_key(env, _ENV_NAME_KEY, "environment") for env in environments]
+    return sorted(name for name in names if name.startswith(MNGR_ROOT_NAME))
+
+
+def stop_all_apps_in_changelog_envs(
+    run_modal: ModalRunner = _run_modal,
+    *,
+    is_dry_run: bool = False,
+) -> list[tuple[str, str]]:
+    """Stop every running Modal app in the changelog schedule's environment(s).
+
+    This is the orphan-proof complement to ``mngr schedule remove`` (which only
+    stops the app whose name matches the *current* naming scheme). Because the
+    schedule has its own dedicated environment, stopping all apps there is safe.
+
+    Returns the ``(environment, app_id)`` pairs that were stopped (in dry-run,
+    the pairs that *would* be stopped). A failure to stop an individual app is
+    logged and skipped rather than aborting the redeploy.
+    """
+    stopped: list[tuple[str, str]] = []
+    for env_name in _changelog_environment_names(run_modal):
+        list_result = run_modal(["app", "list", "--json", "-e", env_name])
+        if list_result.returncode != 0:
+            raise ModalCommandError(f"`modal app list` failed for env {env_name!r}: {list_result.stderr.strip()}")
+        for app in json.loads(list_result.stdout):
+            if _require_key(app, _APP_STATE_KEY, "app").lower() in _ALREADY_STOPPED_STATES:
+                continue
+            app_id = _require_key(app, _APP_ID_KEY, "app")
+            if is_dry_run:
+                print(f"[dry-run] would stop Modal app {app_id} in env {env_name}", file=sys.stderr)
+                stopped.append((env_name, app_id))
+                continue
+            stop_result = run_modal(["app", "stop", app_id, "-e", env_name, "--yes"])
+            if stop_result.returncode == 0:
+                print(f"Stopped Modal app {app_id} in env {env_name}", file=sys.stderr)
+                stopped.append((env_name, app_id))
+            else:
+                print(
+                    f"WARNING: failed to stop Modal app {app_id} in env {env_name}: {stop_result.stderr.strip()}",
+                    file=sys.stderr,
+                )
+    return stopped
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -70,6 +180,17 @@ def main() -> None:
         help="Print the deployed provider name and exit. "
         "Used by changelog_deploy.sh and the changelog-trigger justfile recipe.",
     )
+    parser.add_argument(
+        "--stop-all-apps",
+        action="store_true",
+        help="Stop every Modal app in the changelog schedule's isolated environment(s). "
+        "Used by changelog_deploy.sh before redeploy to clear orphaned cron apps.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --stop-all-apps, only print which apps would be stopped.",
+    )
     args = parser.parse_args()
     if args.print_disable_plugin_args:
         print(" ".join(disable_plugin_args()))
@@ -77,8 +198,13 @@ def main() -> None:
     if args.print_provider:
         print(PROVIDER)
         return
+    if args.stop_all_apps:
+        stopped = stop_all_apps_in_changelog_envs(is_dry_run=args.dry_run)
+        verb = "Would stop" if args.dry_run else "Stopped"
+        print(f"{verb} {len(stopped)} Modal app(s) in the changelog environment(s).", file=sys.stderr)
+        return
     # parser.error() prints usage to stderr and calls sys.exit(2); it does not return.
-    parser.error("no action specified; pass --print-disable-plugin-args or --print-provider")
+    parser.error("no action specified; pass --print-disable-plugin-args, --print-provider, or --stop-all-apps")
 
 
 if __name__ == "__main__":
