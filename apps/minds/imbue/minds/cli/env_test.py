@@ -22,7 +22,25 @@ import pytest
 from click.testing import CliRunner
 
 from imbue.minds.cli._activated_env import MODAL_PROFILE_ENV_VAR
+from imbue.minds.cli.env import _destroy_agents_and_state_container_for_wipe
 from imbue.minds.cli.env import env
+from imbue.minds.envs.primitives import InvalidDevEnvNameError
+
+
+def test_wipe_teardown_is_noop_without_profile_or_agents(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # With no mngr profile + no agents under the env root, there is nothing to
+    # destroy and the state-container cleanup skips on an unresolved user_id --
+    # a pure no-op that does not raise (no Docker daemon is even contacted).
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _destroy_agents_and_state_container_for_wipe("staging")
+
+
+def test_wipe_teardown_raises_on_invalid_env_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Errors are surfaced, not swallowed: a bad env name must raise so the
+    # operator sees the problem rather than silently leaking resources.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(InvalidDevEnvNameError):
+        _destroy_agents_and_state_container_for_wipe("not a valid env name!!")
 
 
 @pytest.fixture
@@ -121,6 +139,73 @@ def test_activate_deploy_mode_refuses_when_modal_toml_has_wrong_profile(_isolate
     result = runner.invoke(env, ["activate", "--create", "--deploy", "dev-foo"])
     assert result.exit_code != 0, result.output
     assert "no profile named 'minds-dev'" in result.output
+
+
+# -- activate: recover-target guard (catch-22 avoidance) --
+
+
+def test_activate_allows_when_only_this_envs_recover_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pending recover-target for the env being activated must NOT block activation.
+
+    Otherwise `minds env recover` (which requires an activated env) could
+    never run to clear it -- the activate/recover catch-22.
+    """
+    monkeypatch.chdir(_isolated_env)
+    # monorepo-root marker for find_monorepo_root
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
+def test_activate_refuses_when_another_envs_recover_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recover-target for a DIFFERENT env still blocks activating an unaffected env.
+
+    This surfaces a forgotten failed deploy rather than letting the operator
+    silently proceed past it.
+    """
+    monkeypatch.chdir(_isolated_env)
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code != 0, result.output
+    assert "dev-other" in result.output
+
+
+def test_activate_succeeds_when_run_outside_the_monorepo(_isolated_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Activation works from outside the monorepo: the recover-target guard is
+    skipped (no monorepo root means no recover-target file can exist there)
+    rather than erroring on NotInMonorepoError.
+    """
+    # Deliberately do NOT create an `apps/` marker, so find_monorepo_root
+    # raises NotInMonorepoError from this cwd and the guard tolerates it.
+    monkeypatch.chdir(_isolated_env)
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
+
+
+def test_activate_allowed_for_affected_env_even_when_another_target_exists(
+    _isolated_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Activating an affected env is allowed even when another env also has a
+    pending recover-target; the other is surfaced as a warning, not a block."""
+    monkeypatch.chdir(_isolated_env)
+    (_isolated_env / "apps").mkdir()
+    (_isolated_env / ".minds-deploy-recover-target-dev-foo.json").write_text("{}")
+    (_isolated_env / ".minds-deploy-recover-target-dev-other.json").write_text("{}")
+    runner = CliRunner()
+    result = runner.invoke(env, ["activate", "--create", "dev-foo"])
+    assert result.exit_code == 0, result.output
+    assert "export MINDS_ROOT_NAME=minds-dev-foo" in result.output
 
 
 # -- env deploy / destroy gate --

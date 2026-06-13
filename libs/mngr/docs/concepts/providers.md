@@ -21,6 +21,15 @@ profile = "development"
 backend = "docker"
 host = "ssh://user@server"
 
+# A pool of pre-existing machines reached over SSH (see the ssh provider page).
+[providers.my-ssh-pool]
+backend = "ssh"
+
+[providers.my-ssh-pool.hosts.myvm]
+address = "192.168.1.100"
+user = "root"
+key_file = "~/.ssh/id_ed25519"
+
 [providers.team-mngr]
 backend = "mngr"
 url = "https://mngr.internal.company.com"
@@ -37,6 +46,10 @@ Runs agents directly on your machine with no isolation. Always available--no con
 Runs agents in Docker containers. Available as long as `docker` is installed.
 
 Provides container isolation while keeping everything local or on a remote Docker daemon. Uses SSH for host operations after initial container setup.
+
+### ssh
+
+Runs agents on pre-existing hosts you reach over SSH (e.g. a VM you already own). Unlike `local` and `docker`, it has no usable default instance: you must configure a pool of hosts (it does not create, destroy, or snapshot hosts). Target a configured host with the `NAME@HOST.PROVIDER` address form. See the [ssh provider page](../core_plugins/providers/ssh.md) for the full configuration and host schema.
 
 ## Responsibilities
 

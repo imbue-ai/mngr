@@ -34,6 +34,7 @@ from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.primitives import ProviderInstanceName
 
 hookimpl = pluggy.HookimplMarker("mngr")
 
@@ -735,6 +736,28 @@ def test_apply_create_template_multiple_templates_extend_stack(mngr_test_prefix:
     assert result["env"] == ("FOO=1", "BAR=2")
 
 
+def test_apply_create_template_post_host_create_command_extend_stacks(mngr_test_prefix: str) -> None:
+    """`post_host_create_command__extend` from a template merges into the CLI tuple param
+    so users can opt into image-specific first-boot setup (e.g. FCT's /usr/local/bin/fct-seed)
+    without inlining shell into mngr."""
+    ctx = _make_click_context(
+        params={
+            "template": ("fct-docker",),
+            "post_host_create_command": (),
+        },
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        create_templates={
+            CreateTemplateName("fct-docker"): CreateTemplate(
+                options={"post_host_create_command__extend": ["/usr/local/bin/fct-seed"]}
+            ),
+        },
+    )
+    result = apply_create_template(ctx, ctx.params.copy(), config)
+    assert result["post_host_create_command"] == ("/usr/local/bin/fct-seed",)
+
+
 def test_apply_create_template_second_template_narrowing_raises(mngr_test_prefix: str) -> None:
     """When the first template extends and the second bare-assigns over the result,
     the second template trips the narrowing guard against the in-flight value."""
@@ -1316,6 +1339,213 @@ def test_setting_flag_sets_command_defaults_in_config(
     assert captured_config[0].commands["create"].defaults["connect"] is False
 
 
+# =============================================================================
+# Tests for create-template `setting`/`setting__extend` reaching the config
+# (regression for: template-provided settings were silently dropped).
+# =============================================================================
+
+
+def _make_create_command_capturing_config() -> tuple[click.Command, list[MngrConfig]]:
+    """Build a create-like click command and a sink that captures the resolved config.
+
+    The command carries a ``--template`` option (so create templates resolve) plus
+    the common options (so ``-S`` is parsed), and runs ``setup_command_context`` for
+    the ``create`` command.
+    """
+    captured_config: list[MngrConfig] = []
+
+    @click.command()
+    @click.option("--template", multiple=True, default=())
+    @add_common_options
+    @click.pass_context
+    def test_create(ctx: click.Context, **kwargs: Any) -> None:
+        mngr_ctx, _output_opts, _opts = setup_command_context(
+            ctx=ctx,
+            command_name="create",
+            command_class=CommonCliOptions,
+        )
+        captured_config.append(mngr_ctx.config)
+
+    return test_create, captured_config
+
+
+def test_create_template_setting_extend_lands_in_config(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create template's ``setting__extend`` should reach the resolved config."""
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[create_templates.tmpl]\nsetting__extend = ["prefix=tmpl-custom-"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert captured_config[0].prefix == "tmpl-custom-"
+
+
+def test_create_template_setting_bare_assign_lands_in_config(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create template's bare ``setting`` (assign) should reach the resolved config."""
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[create_templates.tmpl]\nsetting = ["prefix=tmpl-bare-"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert captured_config[0].prefix == "tmpl-bare-"
+
+
+def test_create_template_provider_subclass_setting_lands_in_config(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A create template setting targeting a provider-subclass field reaches the config.
+
+    This mirrors the original bug report (``providers.docker.docker_runtime`` set
+    via a template ``setting__extend`` was silently ignored), using the local
+    provider's subclass-only ``host_dir`` field so the test does not depend on the
+    docker backend being registered in the unit-test plugin manager. The provider
+    instance is named after its backend (``local``) because a ``setting`` delta
+    that omits ``backend`` resolves the backend from the instance name -- the same
+    convention the original docker repro relies on.
+    """
+    (tmp_path / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[providers.local]\nbackend = "local"\n\n'
+        '[create_templates.tmpl]\nsetting__extend = ["providers.local.host_dir=/tmp/mngr-template-probe"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    # The stored instance is a LocalProviderConfig; dump it (its concrete type
+    # carries host_dir) to read the subclass-only field without a type error.
+    local_config = captured_config[0].providers[ProviderInstanceName("local")]
+    assert local_config.model_dump(mode="json")["host_dir"] == "/tmp/mngr-template-probe"
+
+
+def test_cli_setting_wins_over_create_template_setting(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct CLI ``-S`` for the same key beats the create template's setting."""
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[create_templates.tmpl]\nsetting__extend = ["prefix=from-template-"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(
+        cmd,
+        ["--template", "tmpl", "-S", "prefix=from-cli-"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert captured_config[0].prefix == "from-cli-"
+
+
+def test_create_template_setting_targeting_command_defaults_raises(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template ``setting`` for ``commands.*`` cannot take effect, so it must raise."""
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[create_templates.tmpl]\nsetting__extend = ["commands.create.connect=false"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, _captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=True)
+
+    assert result.exit_code != 0
+    assert "commands.create.connect" in result.output
+    assert "cannot take effect" in result.output
+
+
+def test_create_template_setting_targeting_create_templates_raises(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template ``setting`` for ``create_templates.*`` cannot take effect, so it must raise."""
+    (tmp_path / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[create_templates.tmpl]\nsetting__extend = ["create_templates.other.provider=docker"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, _captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=True)
+
+    assert result.exit_code != 0
+    assert "create_templates.other.provider" in result.output
+
+
+def test_cli_setting_for_command_defaults_still_works_on_create(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct CLI ``-S commands.*`` keeps working on create (the rejection is template-only)."""
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(
+        cmd,
+        ["-S", "commands.create.headless=true"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    assert captured_config[0].commands["create"].defaults["headless"] is True
+
+
+def test_create_template_setting_narrowing_raises(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A template ``setting`` that narrows a non-empty list raises, like ``--setting``."""
+    (tmp_path / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n"
+        'enabled_backends = ["docker"]\n\n'
+        "[create_templates.tmpl]\nsetting__extend = ['enabled_backends=[]']\n"
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    cmd, _captured_config = _make_create_command_capturing_config()
+    result = cli_runner.invoke(cmd, ["--template", "tmpl"], obj=plugin_manager, catch_exceptions=True)
+
+    assert result.exit_code != 0
+    assert "narrowing" in result.output.lower()
+
+
 def test_disable_plugin_in_command_defaults_blocks_override_hook(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -1415,7 +1645,9 @@ def test_setup_command_context_raises_on_unknown_command_param_by_default(
     """Without MNGR_ALLOW_UNKNOWN_CONFIG, a typo in [commands.create] must raise."""
     # MNGR_PROJECT_CONFIG_DIR points directly at the directory containing settings.toml
     # (see resolve_project_config_dir in config/pre_readers.py).
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1440,7 +1672,9 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     log_warnings: list[str],
 ) -> None:
     """With MNGR_ALLOW_UNKNOWN_CONFIG=1, a typo in [commands.create] should warn, not raise."""
-    (tmp_path / "settings.toml").write_text('[commands.create]\nbogus_typo_param = "x"\n')
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nbogus_typo_param = "x"\n'
+    )
 
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
@@ -1453,3 +1687,28 @@ def test_setup_command_context_warns_on_unknown_command_param_when_lax(
     assert any("bogus_typo_param" in msg for msg in log_warnings), (
         f"Expected a warning mentioning the unknown param, got: {log_warnings}"
     )
+
+
+# =============================================================================
+# Tests for the narrowing guard on --setting overrides.
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "flag_setting",
+    [
+        "allow_settings_key_assignment_narrowing=true",
+        "allow_settings_key_assignment_narrowing=false",
+        # Hyphenated spelling normalizes to the same field.
+        "allow-settings-key-assignment-narrowing=true",
+    ],
+)
+def test_apply_settings_to_config_rejects_setting_the_narrowing_flag(flag_setting: str, mngr_test_prefix: str) -> None:
+    """``--setting`` cannot set ``allow_settings_key_assignment_narrowing``: the
+    narrowing guard runs while loading the settings files and env vars, before
+    ``--setting`` is applied, so a ``--setting`` value would be misleading. It
+    raises a clear error pointing to the settings file / env var instead.
+    """
+    config = MngrConfig(prefix=mngr_test_prefix)
+    with pytest.raises(UserInputError, match="allow_settings_key_assignment_narrowing"):
+        apply_settings_to_config(config, (flag_setting,), frozenset())

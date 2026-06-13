@@ -4,6 +4,119 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## AWS provider support: ProviderBackendInterface refactor
+
+`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Modal now overrides a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface, where the per-user environment registration moves. `mngr create` invokes this hook before `build_provider_instance`. No behavior change for Modal.
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
+The new `get_volume_reference_for_host` is wrapped so missing/expired Modal
+credentials surface as the user-friendly `ModalAuthError` (consistent with the
+other provider methods) rather than a raw proxy error, including when reached
+during offline-host construction.
+
+## Remove Modal async-permission-propagation workaround
+
+Modal has fixed the bug on their side where a just-created environment returned
+`modal.exception.PermissionDeniedError` for several seconds (async per-user
+permission propagation) before the creating user could operate on it.
+Read-after-write is now immediate, so the workaround is no longer needed.
+
+Removed from `mngr_modal`:
+
+- The `ModalProxyPermissionDeniedError` retries in
+  `_lookup_persistent_app_with_retry` and `_enter_ephemeral_app_context_with_retry`
+  (`imbue.mngr_modal.backend`); both decorators once again retry only on
+  `ModalProxyNotFoundError`.
+- The `_invoke_modal_sdk_delete_with_retry` test-cleanup helper in `conftest.py`;
+  `_classify_modal_sdk_delete` now invokes the SDK delete callable directly again.
+
+## 2026-06-08
+
+Standardized mngr_modal's project conftest on `register_plugin_test_fixtures(globals())`
+for HOME isolation, the same single mechanism used by every mngr plugin. The
+Modal-specific fixtures (including the credential-loading `setup_test_mngr_env`
+override) are unchanged. Internal test-infrastructure change only; no user-facing
+behavior change.
+
+Creating a Modal host with an invalid argument (e.g. a non-existent
+`--snapshot` image id) now fails with a clean single-line error
+(`Error: Failed to create Modal host: '<id>' is not a valid Image ID.`) instead
+of dumping a raw Python traceback. `create_host` now wraps
+`ModalProxyInvalidError` in a user-facing `MngrError`, mirroring how
+`ModalProxyRemoteError` was already handled.
+
+## 2026-06-04
+
+Added an acceptance test (`test_upload_deploy_files_handles_large_set_on_modal`) that uploads a large (600-file) deploy set to a real Modal host and verifies every file lands. This is the regression guard for github issue 1825, where `mngr create` on Modal failed during provisioning (`Error reading SSH protocol banner`) because deploy files were uploaded one SFTP channel at a time; the fix transfers them with a single rsync.
+
+Updated references to the renamed `modal_proxy` test doubles: `TestingModalInterface`
+is now `FakeModalInterface` (and the rest of the `Testing*` Modal family is now
+`Fake*`). Affects the `make_testing_provider`/`testing_modal` test helpers and
+fixtures, which now reference `FakeModalInterface`. No behavior change.
+
+## 2026-06-04
+
+- Three modal acceptance tests (`test_get_host_by_id`, `test_discover_hosts_includes_created_host`, `test_destroy_host_stops_sandbox_and_delete_host_removes_record`) had their `pytest.mark.timeout` bumped from 180s to 300s and a `pytest.mark.flaky` mark added. They all hit `sandbox.tunnels()` while waiting for SSH on a fresh Modal sandbox, which intermittently brushes the 180s ceiling under load -- the bump matches the longer-running peers in the same file (e.g. `test_persistent_host_creates_shutdown_script` already used 300s) and `flaky` lets offload retry on the rare residual timeout.
+
+## 2026-06-02
+
+Preserved connection-error handling in the Modal provider's optimized listing now that
+`HostConnectionError` is a `MngrError` subclass. `get_host_and_agent_details` now re-raises
+`HostConnectionError` from the inner SSH-collection guard so it still reaches the outer
+handler that clears the per-host connection cache and falls back to the default listing,
+instead of being swallowed by the inner `except MngrError`.
+
+## 2026-06-01
+
+Fixed flakiness in two `mngr_modal` host-volume acceptance tests by polling `get_volume_for_host` with `wait_for` instead of asserting once, to absorb the brief Modal control-plane lag before a freshly-created volume becomes resolvable by name.
+
+# Offline agent field generators
+
+Updated the provider's `get_host_and_agent_details` override to accept and forward the new `offline_field_generators` parameter to the base implementation, so offline plugin fields (see the mngr changelog entry) are populated when a host falls back to offline data.
+
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-21
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.

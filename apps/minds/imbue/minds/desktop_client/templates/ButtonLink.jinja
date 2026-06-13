@@ -1,0 +1,17 @@
+{#def href, variant="secondary", size="md", extra="", block=false #}
+{#
+  Anchor styled as a button. Use for navigation links that should look like
+  buttons. Usage:
+    <ButtonLink href="/create" variant="primary">Create</ButtonLink>
+    <ButtonLink href="/auth/login" variant="secondary" size="lg" block>Log in</ButtonLink>
+
+  Pulls its base class string, sizes map, and variants map from the
+  Catalog globals ``BTN_BASE`` / ``BTN_SIZES`` / ``BTN_VARIANTS`` (defined
+  in templates.py).
+
+  Any HTML attribute on the tag that is not declared above (id=, title=,
+  aria-*, data-*, target=) flows through via JinjaX's ``attrs``
+  passthrough.
+#}
+{%- set _cls = BTN_BASE ~ " " ~ BTN_SIZES[size] ~ " " ~ BTN_VARIANTS[variant] ~ (" w-full" if block else "") ~ " " ~ extra -%}
+<a {{ attrs.render(href=href, classes=_cls) }}>{{ content }}</a>

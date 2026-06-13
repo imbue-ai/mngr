@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -129,3 +130,95 @@ def test_cache_behavior(tmp_path: Path) -> None:
     from_disk = store.read_host_record(host_id)
     assert from_disk is not None
     assert from_disk.ssh_port == 100
+
+
+def test_lima_host_config_default_layout_is_bind_mount() -> None:
+    """A newly-constructed LimaHostConfig defaults is_host_data_volume_exposed
+    to True so that hosts created before this field existed continue to behave
+    exactly as they did before."""
+    config = LimaHostConfig(instance_name="mngr-test")
+    assert config.is_host_data_volume_exposed is True
+    assert config.host_data_disk_name is None
+
+
+def test_lima_host_config_btrfs_mode_round_trips(tmp_path: Path) -> None:
+    """btrfs-mode hosts persist their disk name and the False flag, and the
+    values survive a write/read cycle through the host store."""
+    store = _make_store(tmp_path)
+    host_id = HostId.generate()
+    record = HostRecord(
+        certified_host_data=_make_certified_data(host_id),
+        config=LimaHostConfig(
+            instance_name="mngr-btrfs-test",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc123-data",
+        ),
+    )
+    store.write_host_record(record)
+
+    store.clear_cache()
+    loaded = store.read_host_record(host_id)
+    assert loaded is not None
+    assert loaded.config is not None
+    assert loaded.config.is_host_data_volume_exposed is False
+    assert loaded.config.host_data_disk_name == "mngr-abc123-data"
+
+
+def test_lima_host_config_run_as_root_defaults_to_false() -> None:
+    """A LimaHostConfig defaults to the non-root agent user, so pre-existing
+    records (which lack the field) behave unchanged."""
+    config = LimaHostConfig(instance_name="mngr-test")
+    assert config.is_run_as_root is False
+
+
+def test_lima_host_config_run_as_root_round_trips(tmp_path: Path) -> None:
+    """run-as-root hosts persist the is_run_as_root flag alongside the btrfs
+    layout, and the values survive a write/read cycle."""
+    store = _make_store(tmp_path)
+    host_id = HostId.generate()
+    record = HostRecord(
+        certified_host_data=_make_certified_data(host_id),
+        config=LimaHostConfig(
+            instance_name="mngr-root-test",
+            is_host_data_volume_exposed=False,
+            host_data_disk_name="mngr-abc123-data",
+            is_run_as_root=True,
+        ),
+    )
+    store.write_host_record(record)
+
+    store.clear_cache()
+    loaded = store.read_host_record(host_id)
+    assert loaded is not None
+    assert loaded.config is not None
+    assert loaded.config.is_run_as_root is True
+
+
+def test_lima_host_config_legacy_record_defaults_to_bind_mount(tmp_path: Path) -> None:
+    """Records written before is_host_data_volume_exposed existed must
+    deserialize with the field defaulting to True (today's behavior). We
+    write the JSON shape an older mngr would have produced and assert."""
+    store = _make_store(tmp_path)
+    host_id = HostId.generate()
+    legacy_json = {
+        "certified_host_data": {
+            "host_id": str(host_id),
+            "host_name": "legacy-host",
+            "user_tags": {},
+            "snapshots": [],
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "updated_at": "2024-01-01T00:00:00+00:00",
+        },
+        "config": {
+            "instance_name": "mngr-legacy",
+            "start_args": [],
+            "image_url": None,
+        },
+    }
+    store.volume.write_files({f"host_state/{host_id}.json": json.dumps(legacy_json).encode("utf-8")})
+
+    loaded = store.read_host_record(host_id, use_cache=False)
+    assert loaded is not None
+    assert loaded.config is not None
+    assert loaded.config.is_host_data_volume_exposed is True
+    assert loaded.config.host_data_disk_name is None

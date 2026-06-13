@@ -8,22 +8,27 @@ import click
 from loguru import logger
 from pydantic import BaseModel
 
+from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import CompletionCacheData
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
+from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
+from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.file_utils import atomic_write
+from imbue.mngr.utils.model_schema import walk_model_fields
 from imbue.mngr.utils.pydantic_utils import unwrap_optional
 
 # Per-position positional completion spec for top-level commands.
 # Maps command name -> list of source identifier lists per position.
 # Each inner list contains source names for that position (empty = freeform).
 # For variadic commands (nargs=None), the last entry repeats.
-# Source identifiers: "agent_names", "host_names", "plugin_names", "config_keys"
+# Source identifiers: "agent_names", "host_names", "plugin_names",
+# "catalog_packages", "installed_packages", "config_keys", "help_targets"
 _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "archive": [["agent_names"]],
     "capture": [["agent_names"]],
@@ -32,6 +37,7 @@ _POSITIONAL_COMPLETION_SPEC: Final[dict[str, list[list[str]]]] = {
     "exec": [["agent_names"]],
     "limit": [["agent_names"]],
     "event": [["agent_names", "host_names"], []],
+    "help": [["help_targets"]],
     "label": [["agent_names"]],
     "message": [["agent_names"]],
     "pair": [["agent_names"]],
@@ -49,6 +55,8 @@ _POSITIONAL_COMPLETION_SUBCOMMAND_SPEC: Final[dict[str, list[list[str]]]] = {
     "snapshot.create": [["agent_names"]],
     "snapshot.destroy": [["agent_names"]],
     "snapshot.list": [["agent_names"]],
+    "plugin.add": [["catalog_packages"]],
+    "plugin.remove": [["installed_packages"]],
     "plugin.enable": [["plugin_names"]],
     "plugin.disable": [["plugin_names"]],
     "config.get": [["config_keys"]],
@@ -78,6 +86,18 @@ _PLUGIN_NAME_OPTION_NAMES: Final[frozenset[str]] = frozenset(
         "--plugin",
         "--enable-plugin",
         "--disable-plugin",
+    }
+)
+
+# Option names whose value is a ``KEY=VALUE`` config override (the ``-S``/
+# ``--setting`` common option). The completer completes their KEY against
+# config_keys and their VALUE against config_value_choices. These are global
+# common options (see ``add_common_options``), so they are recorded once by
+# name rather than per command.
+_SETTING_OPTION_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "-S",
+        "--setting",
     }
 )
 
@@ -114,23 +134,39 @@ _FIELD_TYPE_COMPLETION_SOURCES: Final[dict[type, str]] = {
 
 
 def _extract_options_for_command(cmd: click.Command) -> list[str]:
-    """Extract all --long option names from a click command."""
+    """Extract every option name from a click command, both ``--long`` and ``-short`` forms.
+
+    This is the full set of recognised options. It serves two roles in the
+    completer: the ``--long`` entries are the candidates offered when completing
+    ``--`` (short forms are filtered out there by the ``--`` prefix), and the
+    whole set lets the positional-argument counter (``_count_positional_words``)
+    recognise an option so it knows to consume its value. A value-taking option
+    consumes the following word, so a short option like ``-S KEY=VALUE`` must be
+    recognised here to avoid miscounting its value as a positional argument.
+    No-value options (flags and ``count`` options) are additionally recorded in
+    flag_options so the counter consumes only the option word itself.
+    """
     options: list[str] = []
     for param in cmd.params:
         if isinstance(param, click.Option):
-            for opt in param.opts + param.secondary_opts:
-                if opt.startswith("--"):
-                    options.append(opt)
+            options.extend(param.opts + param.secondary_opts)
     return sorted(options)
 
 
 def _extract_flag_options_for_command(cmd: click.Command) -> list[str]:
-    """Extract all option names (both --long and -short) where ``is_flag`` is True."""
+    """Extract no-value option names (both --long and -short forms).
+
+    These are the options that take no value: boolean flags (``is_flag``) and
+    repeatable counters (``count``, e.g. ``-v``/``--verbose``). The
+    positional-argument counter consumes only the option word itself for these,
+    rather than also consuming the following word as it does for value-taking
+    options. Both the long and short forms are recorded so they are treated
+    uniformly.
+    """
     flags: list[str] = []
     for param in cmd.params:
-        if isinstance(param, click.Option) and param.is_flag:
-            for opt in param.opts + param.secondary_opts:
-                flags.append(opt)
+        if isinstance(param, click.Option) and (param.is_flag or param.count):
+            flags.extend(param.opts + param.secondary_opts)
     return sorted(flags)
 
 
@@ -225,6 +261,27 @@ def _extract_config_value_choices(
     return result
 
 
+def _value_choices_for_annotation(
+    annotation: Any,
+    dynamic_values: dict[str, list[str]],
+) -> list[str] | None:
+    """Return the constrained value set for a field annotation, or None if unconstrained.
+
+    ``bool`` -> ``["true", "false"]``; an ``Enum`` subclass -> its member values; a
+    type in ``_FIELD_TYPE_COMPLETION_SOURCES`` -> the corresponding dynamic values
+    (or None when none are available). ``Optional[T]`` / ``T | None`` is unwrapped
+    first. Everything else (str, int, Path, list, dict, ...) is unconstrained.
+    """
+    annotation = unwrap_optional(annotation)
+    if annotation is bool:
+        return ["true", "false"]
+    if isinstance(annotation, type) and issubclass(annotation, Enum):
+        return [str(e.value) for e in annotation]
+    if annotation in _FIELD_TYPE_COMPLETION_SOURCES:
+        return dynamic_values.get(_FIELD_TYPE_COMPLETION_SOURCES[annotation]) or None
+    return None
+
+
 def _walk_model_for_choices(
     obj: BaseModel,
     prefix: str,
@@ -238,15 +295,9 @@ def _walk_model_for_choices(
         value = field_values[field_name]
         annotation = unwrap_optional(field_info.annotation)
 
-        if annotation is bool:
-            result[key] = ["true", "false"]
-        elif isinstance(annotation, type) and issubclass(annotation, Enum):
-            result[key] = [str(e.value) for e in annotation]
-        elif annotation in _FIELD_TYPE_COMPLETION_SOURCES:
-            source_name = _FIELD_TYPE_COMPLETION_SOURCES[annotation]
-            values = dynamic_values.get(source_name, [])
-            if values:
-                result[key] = values
+        choices = _value_choices_for_annotation(annotation, dynamic_values)
+        if choices is not None:
+            result[key] = choices
         elif isinstance(annotation, type) and issubclass(annotation, BaseModel):
             _walk_model_for_choices(value, f"{key}.", result, dynamic_values)
         elif isinstance(value, dict):
@@ -254,8 +305,7 @@ def _walk_model_for_choices(
                 if isinstance(dict_value, BaseModel):
                     _walk_model_for_choices(dict_value, f"{key}.{dict_key}.", result, dynamic_values)
         else:
-            # Other types (str, int, Path, list, etc.) have no constrained
-            # value set -- skip them.
+            # Other types (str, int, Path, list, etc.) have no constrained value set -- skip them.
             continue
 
 
@@ -273,6 +323,43 @@ class _DynamicCompletions(NamedTuple):
 def _is_excluded_config_key(key: str) -> bool:
     """Return True if *key* matches any excluded config key prefix."""
     return any(key == prefix or key.startswith(f"{prefix}.") for prefix in _EXCLUDED_CONFIG_KEY_PREFIXES)
+
+
+def _is_agent_types_key(key: str) -> bool:
+    """Return True for the ``agent_types`` container key and any key under it."""
+    return key == "agent_types" or key.startswith("agent_types.")
+
+
+def _agent_type_schema_completions(
+    agent_type_names: list[str],
+    config: MngrConfig,
+    dynamic_values: dict[str, list[str]],
+) -> tuple[list[str], dict[str, list[str]]]:
+    """Build ``agent_types.<name>.*`` completion keys and value choices from each type's config schema.
+
+    Returns ``(keys, value_choices)``. Unlike dumping the config instance (which
+    only covers agent types defined in the user's config, and drops unset
+    container fields), this walks the *schema* of every known agent type's config
+    class -- builtin/registered types as well as custom ones -- so e.g.
+    ``agent_types.claude.config_overrides`` is offered even when nothing is set.
+
+    For a custom type the resolved instance's class is used (it carries the parent
+    type's subclass fields); for a builtin type the registered config class is
+    used (falling back to the base ``AgentTypeConfig``).
+    """
+    keys: list[str] = []
+    choices: dict[str, list[str]] = {}
+    for name in agent_type_names:
+        existing = config.agent_types.get(AgentTypeName(name))
+        config_class = type(existing) if existing is not None else get_agent_config_class(name)
+        for path, annotation, _description in walk_model_fields(
+            config_class, prefix=("agent_types", name), recurse_optional=True
+        ):
+            keys.append(path)
+            value_choices = _value_choices_for_annotation(annotation, dynamic_values)
+            if value_choices is not None:
+                choices[path] = value_choices
+    return keys, choices
 
 
 def _build_dynamic_completions(
@@ -294,16 +381,26 @@ def _build_dynamic_completions(
     template_names = sorted(str(k) for k in config.create_templates.keys())
     provider_names = sorted(set(["local"] + [str(k) for k in config.providers.keys()]))
     plugin_names = sorted({name for name, _ in mngr_ctx.pm.list_name_plugin() if name and not name.startswith("_")})
-    config_keys = [k for k in flatten_dict_keys(config.model_dump(mode="json")) if not _is_excluded_config_key(k)]
 
     dynamic_values = {
         "agent_type_names": agent_type_names,
         "provider_backend_names": provider_backend_names,
     }
+
+    # The instance dump only covers agent types present in the user's config and
+    # drops unset container fields, so the ``agent_types.*`` keys/choices are
+    # instead derived from each known agent type's config *schema* (covering
+    # builtin types and fields like ``config_overrides`` even when unset).
+    schema_agent_keys, schema_agent_choices = _agent_type_schema_completions(agent_type_names, config, dynamic_values)
+
+    instance_keys = [k for k in flatten_dict_keys(config.model_dump(mode="json")) if not _is_agent_types_key(k)]
+    config_keys = [k for k in (instance_keys + sorted(schema_agent_keys)) if not _is_excluded_config_key(k)]
+
+    instance_choices = {
+        k: v for k, v in _extract_config_value_choices(config, dynamic_values).items() if not _is_agent_types_key(k)
+    }
     config_value_choices = {
-        k: v
-        for k, v in _extract_config_value_choices(config, dynamic_values).items()
-        if not _is_excluded_config_key(k)
+        k: v for k, v in {**instance_choices, **schema_agent_choices}.items() if not _is_excluded_config_key(k)
     }
 
     return _DynamicCompletions(
@@ -321,6 +418,8 @@ def write_cli_completions_cache(
     cli_group: click.Group,
     mngr_ctx: MngrContext | None = None,
     registered_agent_types: list[str] | None = None,
+    topic_names: list[str] | None = None,
+    installed_plugin_packages: list[str] | None = None,
 ) -> None:
     """Write all CLI commands, options, and choices to the completions cache (best-effort).
 
@@ -335,6 +434,17 @@ def write_cli_completions_cache(
     When mngr_ctx is provided, runtime-derived completion values (agent types,
     templates, providers, plugin names, config keys) are extracted and injected
     into the cache.
+
+    topic_names are the registered ``mngr help`` topic keys; combined with the
+    command names they form the completion candidates for the ``mngr help``
+    positional argument. The caller passes these because help topics live in the
+    cli layer, which this (config-layer) writer must not import.
+
+    installed_plugin_packages are the package names currently installed as
+    plugins (uv-tool receipt extras); they are the completion candidates for the
+    ``mngr plugin remove`` positional argument. The caller passes these for the
+    same layering reason as topic_names: the uv-tool receipt helper transitively
+    imports the cli layer, which this writer must not depend on.
 
     Catches OSError from cache writes so filesystem failures do not break
     CLI commands. Other exceptions are allowed to propagate.
@@ -410,6 +520,12 @@ def write_cli_completions_cache(
             if dotted_key.split(".")[0] in canonical_names:
                 positional_completions[dotted_key] = entries
 
+        # Candidates for `mngr help <arg>`: every top-level command plus every
+        # registered help topic key. Only meaningful if the help command exists.
+        help_targets: list[str] = []
+        if "help" in canonical_names:
+            help_targets = sorted(canonical_names | set(topic_names or []))
+
         # Inject dynamic choice values from runtime context (config, registries)
         dynamic = _build_dynamic_completions(mngr_ctx, registered_agent_types or []) if mngr_ctx is not None else None
         if dynamic is not None:
@@ -418,6 +534,11 @@ def write_cli_completions_cache(
                 cmd_name = opt_key.split(".")[0]
                 if cmd_name in canonical_names and data_key in dynamic_as_dict:
                     option_choices[opt_key] = dynamic_as_dict[data_key]
+
+        # Static catalog package names for `mngr plugin add` completion. Sourced
+        # from the plugin catalog (the same store the `mngr extras` install wizard
+        # uses), not from the runtime context, so it is always available.
+        catalog_package_names = sorted({entry.package_name for entry in get_installable_packages()})
 
         cache_data = CompletionCacheData(
             commands=all_command_names,
@@ -430,13 +551,17 @@ def write_cli_completions_cache(
             host_name_options=sorted(host_name_opts),
             plugin_name_options=sorted(set(plugin_name_opts)),
             plugin_names=dynamic.plugin_names if dynamic is not None else [],
+            catalog_package_names=catalog_package_names,
+            installed_plugin_package_names=sorted(set(installed_plugin_packages or [])),
             config_keys=dynamic.config_keys if dynamic is not None else [],
             positional_nargs_by_command=positional_nargs_by_command,
             positional_completions=positional_completions,
             config_value_choices=dynamic.config_value_choices if dynamic is not None else {},
+            help_targets=help_targets,
+            setting_option_names=sorted(_SETTING_OPTION_NAMES),
         )
 
         cache_path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
         atomic_write(cache_path, json.dumps(cache_data._asdict()))
-    except OSError:
-        logger.debug("Failed to write CLI completions cache")
+    except OSError as e:
+        logger.warning("Failed to write CLI completions cache: {}", e)

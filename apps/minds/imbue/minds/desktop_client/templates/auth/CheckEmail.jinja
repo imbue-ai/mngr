@@ -1,0 +1,57 @@
+{#def email #}
+{#
+  Verify-your-email page. Polls /auth/api/email-verified every 3s; when
+  the user has clicked the verification link the page flips into the
+  success state and redirects through /post-login (which sends first-time
+  users with no workspaces to the create screen and returning users to the
+  accounts page). A "Resend verification email" button triggers a backend
+  resend (rate-limited server-side).
+#}
+{% set _scripts %}
+<script>
+  var pollInterval = setInterval(async function () {
+    try {
+      var res = await fetch('/auth/api/email-verified');
+      var data = await res.json();
+      if (data.verified) {
+        clearInterval(pollInterval);
+        document.getElementById('status-msg').classList.add('hidden');
+        document.getElementById('success-msg').classList.remove('hidden');
+        setTimeout(function () { window.location.href = '/post-login'; }, 1500);
+      }
+    } catch (e) {}
+  }, 3000);
+
+  document.getElementById('resend-btn').addEventListener('click', async function () {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    try {
+      await fetch('/auth/api/resend-verification', { method: 'POST' });
+      btn.textContent = 'Sent. Check your inbox';
+      setTimeout(function () {
+        btn.disabled = false;
+        btn.textContent = 'Resend verification email';
+      }, 5000);
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = 'Resend verification email';
+    }
+  });
+</script>
+{% endset %}
+<CardPage title="Check your email" scripts={{ _scripts }}>
+  <div class="text-center">
+    <h1 class="text-2xl font-semibold text-zinc-900 mb-2">Check your email</h1>
+    <p class="text-zinc-500 mb-3">We sent a verification link to <strong>{{ email }}</strong></p>
+    <p class="text-sm text-zinc-500 mb-5">
+      Click the link in the email to verify your account, then come back here.
+    </p>
+    <Notice variant="info" id="status-msg">Waiting for verification...</Notice>
+    <Notice variant="success" id="success-msg" class="hidden">Email verified. Redirecting...</Notice>
+    <Button variant="primary" size="lg" block id="resend-btn" extra="mt-4">Resend verification email</Button>
+    <div class="text-center mt-3 text-sm text-zinc-500">
+      <Link href="/">Go to home</Link>
+    </div>
+  </div>
+</CardPage>

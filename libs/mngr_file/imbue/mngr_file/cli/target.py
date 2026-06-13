@@ -15,9 +15,11 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
-from imbue.mngr.hosts.host import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.offline_host import try_resolve_readable_host
+from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
-from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentOrHostAddress
@@ -55,77 +57,20 @@ def _compute_agent_base_path(
             assert_never(unreachable)
 
 
-@pure
-def _is_volume_accessible_path(relative_to: PathRelativeTo) -> bool:
-    """Whether the given relative_to mode produces paths under host_dir (accessible via volume)."""
-    match relative_to:
-        case PathRelativeTo.WORK:
-            return False
-        case PathRelativeTo.STATE:
-            return True
-        case PathRelativeTo.HOST:
-            return True
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
-@pure
-def compute_volume_path(
-    relative_to: PathRelativeTo,
-    agent_id: AgentId | None,
-    user_path: str | None,
-) -> str:
-    """Compute the path within a volume for a given relative_to mode and user path.
-
-    Volume paths are relative to the host_dir root. Returns a path string
-    suitable for Volume.read_file() and Volume.listdir().
-    """
-    match relative_to:
-        case PathRelativeTo.HOST:
-            if user_path is None:
-                return "."
-            return user_path
-        case PathRelativeTo.STATE:
-            if agent_id is None:
-                raise UserInputError("--relative-to state requires an agent target")
-            base = f"agents/{agent_id}"
-            if user_path is None:
-                return base
-            return f"{base}/{user_path}"
-        case PathRelativeTo.WORK:
-            raise UserInputError(
-                "Cannot access work directory files when the host is offline. "
-                "Use --relative-to state or --relative-to host instead."
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 class ResolveFileTargetResult(FrozenModel):
-    """Result of resolving a file command target to access methods and base path."""
+    """Result of resolving a file command target to a readable host and base path."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    online_host: OnlineHostInterface | None = Field(default=None, description="Online host for direct access")
-    volume: Volume | None = Field(default=None, description="Volume for offline access")
+    host: HostFileReadInterface = Field(description="Readable host (online host or readable stopped host)")
     base_path: Path = Field(description="Base path for resolving relative paths")
     is_agent: bool = Field(description="Whether the target is an agent (vs a host)")
     agent_id: AgentId | None = Field(default=None, description="Agent ID if target is an agent")
     relative_to: PathRelativeTo = Field(description="Path resolution mode")
 
     @property
-    def host(self) -> OnlineHostInterface:
-        """Get the online host, raising if not available."""
-        if self.online_host is None:
-            raise MngrError(
-                "Host is offline and this operation requires direct host access. "
-                "Use --relative-to state or --relative-to host for offline access."
-            )
-        return self.online_host
-
-    @property
     def is_online(self) -> bool:
-        return self.online_host is not None
+        return isinstance(self.host, OnlineHostInterface)
 
 
 def resolve_file_target(
@@ -179,35 +124,36 @@ def resolve_file_target(
     )
 
 
-def _get_host_access(
+def _get_readable_host(
     provider: BaseProviderInstance,
     host_id: HostId,
     target_display_name: str,
-) -> tuple[OnlineHostInterface | None, Volume | None]:
-    """Get online host and/or volume access for a host, raising if neither is available."""
-    # Try online access
-    online_host: OnlineHostInterface | None = None
-    try:
-        host_interface = provider.get_host(host_id)
-    except MngrError as err:
-        logger.trace("Host {} is not available: {}", host_id, err)
-        host_interface = None
+) -> HostFileReadInterface:
+    """Return a readable host for ``host_id``, raising if no access is available.
 
-    if host_interface is not None and isinstance(host_interface, OnlineHostInterface):
-        online_host = host_interface
-
-    # Try volume access
-    host_volume = provider.get_volume_for_host(host_id)
-    volume: Volume | None = None
-    if host_volume is not None:
-        volume = host_volume.volume
-
-    if online_host is None and volume is None:
+    When the host is online, the live host is returned directly. When the host
+    is stopped, a volume-backed readable host is returned (provided the provider
+    surfaces a volume for the host); otherwise a clear error is raised.
+    """
+    host = try_resolve_readable_host(provider, host_id)
+    if host is None:
         raise MngrError(
             f"{target_display_name} is offline and the provider does not support volume access. Cannot access files."
         )
+    return host
 
-    return online_host, volume
+
+def _host_dir_of(host: HostFileReadInterface) -> Path:
+    """Return the ``host_dir`` of a readable host.
+
+    Every readable host resolved for ``mngr file`` is also a
+    :class:`HostInterface` (an online host or a volume-backed offline host), so
+    it exposes a real ``host_dir``. This narrows the file-read interface to
+    obtain it.
+    """
+    if not isinstance(host, HostInterface):
+        raise MngrError(f"Readable host {host} does not expose a host_dir")
+    return host.host_dir
 
 
 def _resolve_agent_target(
@@ -219,51 +165,46 @@ def _resolve_agent_target(
     with log_span("Getting access for agent target"):
         provider = get_provider_instance(discovered_host.provider_name, mngr_ctx)
 
-    online_host, volume = _get_host_access(
+    host = _get_readable_host(
         provider=provider,
         host_id=discovered_host.host_id,
         target_display_name=f"Host for agent '{discovered_agent.agent_name}'",
     )
+    is_online = isinstance(host, OnlineHostInterface)
 
-    # When online, get work_dir from the host's agent list
+    # Work-directory files live outside host_dir, so an offline volume-backed
+    # host cannot read them. Keep an explicit, friendly error.
+    if relative_to == PathRelativeTo.WORK and not is_online:
+        raise UserInputError(
+            "Host is offline. Work directory files are not accessible via volume. "
+            "Use --relative-to state or --relative-to host for offline access."
+        )
+
+    # When online, get work_dir from the host's agent list.
     work_dir: Path | None = None
-    host_dir: Path | None = None
-    if online_host is not None:
-        host_dir = online_host.host_dir
-        for agent_ref in online_host.discover_agents():
+    if isinstance(host, OnlineHostInterface):
+        for agent_ref in host.discover_agents():
             if agent_ref.agent_id == discovered_agent.agent_id:
                 work_dir = agent_ref.work_dir
                 break
 
-    # When offline, use discovered data for work_dir
+    # Otherwise, fall back to the discovered work_dir.
     if work_dir is None:
         work_dir = discovered_agent.work_dir
 
     if work_dir is None and relative_to == PathRelativeTo.WORK:
         raise UserInputError(f"Could not determine work directory for agent: {discovered_agent.agent_name}")
 
-    # For offline + work_dir relative, we can't use volume
-    if online_host is None and not _is_volume_accessible_path(relative_to):
-        raise UserInputError(
-            "Host is offline. Work directory files are not accessible via volume. "
-            "Use --relative-to state or --relative-to host for offline access."
-        )
-
-    # Compute a synthetic host_dir for path computation when offline
-    if host_dir is None:
-        host_dir = Path("/mngr-host-dir")
-
     base_path = _compute_agent_base_path(
         relative_to=relative_to,
         work_dir=work_dir if work_dir is not None else Path("/unknown"),
-        host_dir=host_dir,
+        host_dir=_host_dir_of(host),
         agent_id=discovered_agent.agent_id,
     )
-    logger.debug("Resolved agent target: base_path={}, is_online={}", base_path, online_host is not None)
+    logger.debug("Resolved agent target: base_path={}, is_online={}", base_path, is_online)
 
     return ResolveFileTargetResult(
-        online_host=online_host,
-        volume=volume,
+        host=host,
         base_path=base_path,
         is_agent=True,
         agent_id=discovered_agent.agent_id,
@@ -278,22 +219,17 @@ def _resolve_host_target(
     with log_span("Getting access for host target"):
         provider = get_provider_instance(discovered_host.provider_name, mngr_ctx)
 
-    online_host, volume = _get_host_access(
+    host = _get_readable_host(
         provider=provider,
         host_id=discovered_host.host_id,
         target_display_name=f"Host '{discovered_host.host_name}'",
     )
 
-    if online_host is not None:
-        base_path = online_host.host_dir
-    else:
-        base_path = Path("/mngr-host-dir")
-
-    logger.debug("Resolved host target: base_path={}, is_online={}", base_path, online_host is not None)
+    base_path = _host_dir_of(host)
+    logger.debug("Resolved host target: base_path={}, is_online={}", base_path, isinstance(host, OnlineHostInterface))
 
     return ResolveFileTargetResult(
-        online_host=online_host,
-        volume=volume,
+        host=host,
         base_path=base_path,
         is_agent=False,
         agent_id=None,

@@ -1233,6 +1233,17 @@ def test_get_field_value_returns_empty_for_missing_label() -> None:
     assert result == ""
 
 
+def test_get_field_value_resolves_bare_project_alias() -> None:
+    """The bare `project` field should resolve to the project label via the alias."""
+    agent = make_test_agent_details(labels={"project": "mngr"})
+    assert _get_field_value(agent, "project") == "mngr"
+
+
+def test_get_header_label_for_bare_project_alias() -> None:
+    """The bare `project` field should use the PROJECT header (via the alias)."""
+    assert _get_header_label("project") == "PROJECT"
+
+
 # =============================================================================
 # Fake api_list_agents for CLI-level list command output formatting tests
 # =============================================================================
@@ -1700,3 +1711,38 @@ def test_emit_human_output_empty_list_is_noop(capsys: pytest.CaptureFixture[str]
     _emit_human_output([], fields=["name", "state"])
     captured = capsys.readouterr()
     assert captured.out == ""
+
+
+def test_list_schema_json_lists_referenceable_fields(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`mngr list --schema --format json` dumps the field catalog without touching agents."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--schema", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    rows_by_key = {row["key"]: row for row in output["schema"]}
+    # Live model fields (including a deeply nested one) and a computed field.
+    assert {"name", "host.resource.cpu.count"} <= set(rows_by_key)
+    assert rows_by_key["age"]["contexts"] == "cel"
+    assert rows_by_key["name"]["contexts"] == "cel, template"
+
+
+def test_list_schema_rejects_agent_selection_options(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """`--schema` is a static field dump; combining it with a filter is a UsageError."""
+    result = cli_runner.invoke(
+        list_command,
+        ["--schema", "--running"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code != 0
+    assert "--schema lists fields and cannot be combined with" in result.output

@@ -158,8 +158,7 @@ mngr file put [OPTIONS] TARGET PATH
 ## See Also
 
 - [mngr exec](../primary/exec.md) - Execute a shell command on an agent's host
-- [mngr push](../primary/push.md) - Push files or git commits to an agent
-- [mngr pull](../primary/pull.md) - Pull files or git commits from an agent
+- [mngr rsync](../primary/rsync.md) - Rsync files between local and a remote host or agent
 - [mngr event](./event.md) - View agent and host event files
 
 ## Examples

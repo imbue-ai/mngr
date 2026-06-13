@@ -24,6 +24,7 @@ import shutil
 import socket
 import threading
 import time
+from collections.abc import Collection
 from collections.abc import Mapping
 from enum import auto
 from importlib import resources
@@ -79,15 +80,17 @@ _GATEWAY_BIND_POLL_INTERVAL_SECONDS: Final[float] = 0.05
 _SERVICES_INFO_TIMEOUT_SECONDS: Final[float] = 15.0
 _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 
+# Empirically, reencryption takes around 0.1s.
+_REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
+
 # ``latchkey --version`` is a print-and-exit; 5s is generous slack for
 # Node-runtime startup on cold filesystems.
 _VERSION_CHECK_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # Minimum version of the upstream ``latchkey`` CLI this package will
-# operate against. 2.9.0 is the first release that ships the gateway
-# extension loader this package depends on (see ``extensions/`` for the
-# .mjs files it materializes into ``LATCHKEY_DIRECTORY/extensions/``).
-LATCHKEY_MIN_VERSION: Final[str] = "2.9.0"
+# operate against. 2.14.0 is the first release that supports GitHub git
+# operations over the gateway (including permissions) which is used for backups.
+LATCHKEY_MIN_VERSION: Final[str] = "2.16.0"
 
 # Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
 # when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
@@ -758,9 +761,66 @@ class Latchkey(MutableModel):
             )
         return jwt
 
+    # -- Credential export ---------------------------------------------------
+
+    def export_credentials_subset(self, destination: Path, service_names: Collection[str]) -> None:
+        """Write a re-encrypted copy of the credential store, filtered to ``service_names``.
+
+        Shells out to ``latchkey auth re-encrypt <destination> --services <service> ...``.
+        ``destination`` is an output *directory* (which must already exist): the
+        source store (this :class:`Latchkey`'s ``LATCHKEY_DIRECTORY``) is
+        decrypted with the current per-directory encryption key and a
+        re-encrypted copy containing *only* the listed services' credentials is
+        written into it as ``credentials.json.enc``. The new key is read
+        from the child's stdin; we pass an empty stdin (``DEVNULL``) so
+        ``re-encrypt`` reuses the same encryption key, keeping the copy
+        readable by the same gateway -- and the same derived password /
+        permissions-override JWTs -- as the canonical store.
+
+        ``service_names`` must be non-empty: ``--services`` requires at
+        least one service, and an empty bundle is meaningless. The caller
+        resolves the host's granted services (and drops the ones with no
+        stored credentials) first, and handles the "nothing to ship" case
+        itself rather than calling this with an empty set. The only
+        credentials that ever reach a host are the ones its permissions
+        allow and that are actually stored.
+
+        Raises:
+            LatchkeyError: if ``service_names`` is empty, the binary
+                cannot be launched, or the ``re-encrypt`` command exits
+                non-zero.
+        """
+        if not service_names:
+            raise LatchkeyError("export_credentials_subset requires at least one service; got an empty set")
+        env = _build_local_latchkey_env(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        # Sorted for a deterministic command line (stable logs / tests);
+        # the set of services is order-independent.
+        command = [self.latchkey_binary, "auth", "re-encrypt", str(destination), "--services", *sorted(service_names)]
+        cg = ConcurrencyGroup(name="latchkey-reencrypt")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=command,
+                    timeout=_REENCRYPT_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=env,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyError(f"Failed to launch 'latchkey auth re-encrypt': {group}") from group
+        if result.returncode != 0:
+            raise LatchkeyError(
+                "'latchkey auth re-encrypt' exited {} writing {}: {}".format(
+                    result.returncode,
+                    destination,
+                    result.stderr.strip() or result.stdout.strip(),
+                )
+            )
+
     # -- Service introspection -----------------------------------------------
 
-    def services_info(self, service_name: str) -> LatchkeyServiceInfo:
+    def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo:
         """Run ``latchkey services info <service>`` and return the parsed output.
 
         Latchkey emits pretty-printed JSON to stdout; we parse it and pull
@@ -769,13 +829,22 @@ class Latchkey(MutableModel):
         string) yields a service info with ``CredentialStatus.UNKNOWN`` and
         empty ``auth_options``, so the caller can fall back to its legacy
         behaviour rather than wrongly assuming credentials are valid.
+
+        When ``is_offline`` is set, ``--offline`` is passed so latchkey
+        reports the *stored* credential state without any network
+        validation -- enough to tell ``MISSING`` (nothing stored) from a
+        present credential, which is all the credential-export filter
+        needs and avoids a per-service network round-trip.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        command = [self.latchkey_binary, "services", "info", service_name]
+        if is_offline:
+            command.append("--offline")
         cg = ConcurrencyGroup(name="latchkey-services-info")
         try:
             with cg:
                 result = cg.run_process_to_completion(
-                    command=[self.latchkey_binary, "services", "info", service_name],
+                    command=command,
                     timeout=_SERVICES_INFO_TIMEOUT_SECONDS,
                     is_checked_after=False,
                     env=env,
@@ -827,24 +896,71 @@ class Latchkey(MutableModel):
         from a cancelled browser flow, network failure, or something else --
         returns ``(False, message)`` where ``message`` carries the latchkey
         stderr (or stdout, or a generic fallback).
+
+        Some latchkey services require a one-off ``latchkey auth
+        browser-prepare <service>`` step before the regular browser sign-in
+        flow can run;. In such a case, we transparently run ``auth
+        browser-prepare`` and retry ``auth browser`` once.
+        """
+        is_success, detail = self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+        if is_success:
+            return True, ""
+        if "latchkey auth browser-prepare" not in detail.lower():
+            return False, detail
+        logger.info(
+            "latchkey auth browser {} reports preparation required; running 'auth browser-prepare' and retrying",
+            service_name,
+        )
+        is_prepared, prepare_detail = self._run_latchkey_auth_command(
+            log_label="auth browser-prepare",
+            argv=["auth", "browser-prepare", service_name],
+            service_name=service_name,
+        )
+        if not is_prepared:
+            return False, prepare_detail
+        return self._run_latchkey_auth_command(
+            log_label="auth browser",
+            argv=["auth", "browser", service_name],
+            service_name=service_name,
+        )
+
+    def _run_latchkey_auth_command(
+        self,
+        log_label: str,
+        argv: list[str],
+        service_name: str,
+    ) -> tuple[bool, str]:
+        """Run a single ``latchkey auth ...`` subcommand and translate its exit into ``(is_success, detail)``.
+
+        ``log_label`` is the human-readable name of the subcommand
+        (e.g. ``"auth browser"``, ``"auth browser-prepare"``) used in
+        log lines and the generic failure-message fallback.
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        cg = ConcurrencyGroup(name="latchkey-auth-browser")
+        cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:
-            # No timeout: this command waits on a real human completing
-            # the browser sign-in flow, which can take arbitrarily long.
+            # No timeout: ``auth browser`` waits on a real human
+            # completing the browser sign-in flow, which can take
+            # arbitrarily long. ``auth browser-prepare`` is typically
+            # non-interactive but may still hit the network, so we keep
+            # the same untimed treatment.
             result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, "auth", "browser", service_name],
+                command=[self.latchkey_binary, *argv],
                 timeout=None,
                 is_checked_after=False,
                 env=env,
             )
         if result.returncode == 0:
-            logger.info("latchkey auth browser {} succeeded", service_name)
+            logger.info("latchkey {} {} succeeded", log_label, service_name)
             return True, ""
-        message = result.stderr.strip() or result.stdout.strip() or "latchkey auth browser failed"
+        message = result.stderr.strip() or result.stdout.strip() or f"latchkey {log_label} failed"
         logger.warning(
-            "latchkey auth browser {} exited {}: {}",
+            "latchkey {} {} exited {}: {}",
+            log_label,
             service_name,
             result.returncode,
             message,

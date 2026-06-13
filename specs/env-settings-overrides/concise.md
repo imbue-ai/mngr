@@ -29,7 +29,7 @@
 
 ### Other `MNGR_*` env var dispositions
 
-- Unchanged (config-loading meta / mngr-set runtime metadata): `MNGR_PROJECT_CONFIG_DIR`, `MNGR_ALLOW_UNKNOWN_CONFIG`, `MNGR_ALLOW_PYTEST`, `MNGR_LOAD_ALL_PLUGINS`, `MNGR_USER_ID`, `MNGR_TEST_VERBOSE`, and the agent-runtime vars (`MNGR_AGENT_ID`, `MNGR_AGENT_NAME`, `MNGR_AGENT_STATE_DIR`, `MNGR_AGENT_WORK_DIR`, `MNGR_HOST_DIR` set inside agents, `MNGR_GIT_BASE_BRANCH`).
+- Unchanged (config-loading meta / mngr-set runtime metadata): `MNGR_PROJECT_CONFIG_DIR`, `MNGR_ALLOW_UNKNOWN_CONFIG`, `MNGR_LOAD_ALL_PLUGINS`, `MNGR_USER_ID`, `MNGR_TEST_VERBOSE`, and the agent-runtime vars (`MNGR_AGENT_ID`, `MNGR_AGENT_NAME`, `MNGR_AGENT_STATE_DIR`, `MNGR_AGENT_WORK_DIR`, `MNGR_HOST_DIR` set inside agents, `MNGR_GIT_BASE_BRANCH`).
 - Promoted to first-class config fields and read via `MNGR__*` only:
   - `MNGR_AGENT_READY_TIMEOUT` → new top-level field `MngrConfig.agent_ready_timeout: float`.
   - `MNGR_COMPLETION_CACHE_DIR` → new top-level field `MngrConfig.completion_cache_dir: Path | None`.

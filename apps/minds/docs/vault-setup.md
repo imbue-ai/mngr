@@ -36,7 +36,6 @@ secrets/minds/<tier>/cloudflare
 secrets/minds/<tier>/litellm
 secrets/minds/<tier>/litellm-connector
 secrets/minds/<tier>/neon
-secrets/minds/<tier>/paid-accounts
 secrets/minds/<tier>/pool-ssh
 secrets/minds/<tier>/supertokens
 ```
@@ -49,7 +48,6 @@ create-project / VPS-management permissions):
 secrets/minds/<tier>/neon-admin   # NEON_API_TOKEN (every tier);
                                   #   NEON_ORG_ID (dev only);
                                   #   NEON_PROJECT_ID (staging / production only)
-secrets/minds/<tier>/vultr        # VULTR_API_KEY (legacy; OVH-backed pools today)
 secrets/minds/<tier>/ovh          # OVH_APPLICATION_KEY, OVH_APPLICATION_SECRET,
                                   #   OVH_CONSUMER_KEY (shared per-tier OVH AK/AS/CK)
 ```
@@ -132,8 +130,8 @@ uv run minds env deploy
 
 `minds env deploy` reads `apps/minds/imbue/minds/config/envs/<tier>/deploy.toml`
 for the Modal workspace name + the list of services to push from
-Vault, then runs `modal deploy` for both `litellm-proxy-<tier>` and
-`remote-service-connector-<tier>`. Tier deploys write nothing to disk
+Vault, then runs `modal deploy` for both `llm-<tier>` and
+`rsc-<tier>`. Tier deploys write nothing to disk
 (the committed in-repo `client.toml` stays the source of truth); dev
 env deploys write the resulting URLs to `~/.minds-<name>/client.toml`
 and per-env secrets (Neon DSN, SuperTokens connection URI + API key)
@@ -148,7 +146,7 @@ this CLI.
 
 `minds env deploy` (when run with a dev env activated) reads a small
 set of dev-tier secrets from Vault (the dev-tier Neon API token, the
-dev-tier SuperTokens admin key, the dev-tier Vultr API key) to
+dev-tier SuperTokens admin key, the dev-tier OVH AK/AS/CK) to
 provision per-dev-env resources. The resulting per-dev-env state
 (Neon DSN, SuperTokens app id, etc.) is written **only** to
 `~/.minds-<name>/secrets.toml` on the developer's machine -- never

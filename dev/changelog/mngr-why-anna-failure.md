@@ -1,0 +1,1 @@
+Added a design plan under `blueprint/host-backup-snapshot-rotation/` for fixing empty gVisor host backups: unique time-named btrfs snapshots, keep-newest-N retention, and exit-code-only backup failure signaling.

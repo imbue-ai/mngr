@@ -4,6 +4,73 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+## Fix snapshot launch path after provider bootstrap refactor
+
+The AWS-provider shared-layer refactor removed the `is_for_host_creation` parameter from `get_provider_instance`, but `mngr_tmr`'s `--use-snapshot` launch path still passed it, which broke the type check. The snapshot path now calls the new `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` helper before `get_provider_instance`, matching how `mngr create` triggers one-time backend bootstrap (e.g. Modal's per-user environment).
+
+## 2026-06-10
+
+Fixed a stale See-Also reference in the `tmr` command's help metadata. The `pull` reference pointed at a top-level command that was removed when push/pull were restructured into `rsync` and `git push`/`git pull`; it is now replaced with an `rsync` reference. Previously this produced a broken `[mngr help pull](mngr help pull)` markdown link in the generated docs.
+
+Raised the stale coverage floor from 50% to 75% to match the coverage CI already measures (~78%).
+
+## 2026-06-08
+
+- Stays unpublished-on-purpose (already in `UNPUBLISHED_PACKAGES`; the canonical mapreduce recipe, internal tooling). Its stale `imbue-mngr==0.1.6` pin is realigned to the current `0.2.10` so `uv lock` stays solvable. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+Marked the `TestRunInfo`, `TestResult`, and `TestMapReduceResult` result models
+with `__test__ = False` so pytest no longer attempts to collect them as test
+classes (their names start with "Test"). This silences the "cannot collect
+test class ... because it has a __init__ constructor" warnings in CI. No
+behavior change.
+
+## 2026-05-28
+
+`mngr_tmr` is now a thin recipe on top of the new `mngr_mapreduce` framework. The `mngr tmr` CLI surface is unchanged for users; under the hood, all agent launching / polling / extraction code moved out, and TMR is now expressed as a `TestMapReduceRecipe` (in `imbue.mngr_tmr.recipe`) implementing discovery (pytest collect), prompt building, and the `on_mapper_finalized` / `on_reducer_finalized` hooks (which apply each agent's `branch.bundle` to the local repo). Server-side labels were renamed to `mapreduce_role` / `mapreduce_run_name` and the outputs-archive path was simplified to `plugin/mapreduce/outputs.tar.gz` — agents from older TMR runs are not discoverable by this version (run them down with the prior `mngr` build first).
+
+Integrator now runs on the same `--provider` as the testing agents and reuses any snapshot the testing agents built, so on `--provider modal` (or any remote provider) it spins up just as quickly as the test agents do instead of running locally.
+
+To make that work, the integrator now publishes its results the same way testing agents do — packaging `test_output/` + `branch.bundle` into `outputs.tar.gz` under `$MNGR_AGENT_STATE_DIR/plugin/test-map-reduce/` — so the orchestrator can pull and apply the integrated branch via the same volume-based path it already uses for testing-agent outputs.
+
+The integrator path is now identical across providers (including local): the orchestrator rsyncs the local output directory (every testing agent's extracted outputs) into `<work_dir>/.tmr_inputs/` on the integrator host and then sends the integrator prompt; the prompt's inline bash walks each subdirectory, applies the "should pull" predicate to filter qualifying agents, fetches the qualifying bundles into local branches, and cherry-picks. Achieving this required switching local testing agents from `GIT_WORKTREE` to `GIT_MIRROR` transfer mode — branches now live only in each agent's own clone (rather than auto-appearing in the orchestrator's source repo) and surface in the source repo only via the published bundle. Slightly slower than the worktree mode on local, but the unified code path makes the local provider a meaningful proxy for testing the remote one.
+
+Removed CLI flags (the integrator now follows the testing-agent settings): `--integrator-provider`, `--integrator-type`, `--integrator-template`. Pass `--provider` once for both. `--integrator-timeout` is unchanged.
+
+Also dropped `--use-snapshot`: snapshot building is now automatic whenever the provider supports it (modal today, with no warning when the provider doesn't). `--snapshot <ID>` still works for reusing an existing snapshot.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-26
 
 ## mngr_tmr

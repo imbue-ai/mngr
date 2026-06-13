@@ -1,1 +1,0 @@
-- Fixed a stale `LaunchMode.LOCAL` reference in `agent_creator_test.py` that was missed during the `LaunchMode.LOCAL` -> `LaunchMode.DOCKER` rename, which was causing `test_no_type_errors` to fail. No user-visible behavior change.

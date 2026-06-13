@@ -203,6 +203,25 @@ def test_ensure_running_spawns_when_no_record_exists(tmp_path: Path) -> None:
         assert _wait_for_process_exit(info.pid)
 
 
+def test_bounce_starts_supervisor_when_none_running(tmp_path: Path) -> None:
+    """``bounce()`` with no live supervisor brings one up (start-if-down)."""
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+
+    # No record exists yet, so bounce must spawn rather than no-op.
+    supervisor.bounce()
+    try:
+        persisted = _wait_for_forward_record(supervisor.plugin_data_dir)
+        assert persisted.pid > 0
+        assert _wait_for_process_alive(persisted.pid)
+    finally:
+        supervisor.stop()
+
+
 # A no-double-spawn / adoption-against-live-subprocess test used to live
 # here but proved flaky under xdist (the fork->exec window between
 # ``subprocess.Popen`` returning and the child running its own argv

@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import sys
-import textwrap
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -17,41 +16,33 @@ import docker.errors
 import pluggy
 import psutil
 import pytest
-from click.testing import CliRunner
 from loguru import logger
 from urwid.widget.listbox import SimpleFocusListWalker
 
 import imbue.mngr.main
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.agent_registry import load_agents_from_plugins
 from imbue.mngr.agents.agent_registry import reset_agent_registry
 from imbue.mngr.api.providers import reset_provider_instances
-from imbue.mngr.config.consts import PROFILES_DIRNAME
-from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import BaseMngrError
-from imbue.mngr.hosts.host import Host
+from imbue.mngr.errors import MngrError
 from imbue.mngr.plugin_catalog import get_independent_entry_point_names
 from imbue.mngr.plugins import hookspecs
-from imbue.mngr.primitives import HostName
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.testing import remove_docker_container_and_volume
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
-from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
-from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_LABEL
+from imbue.mngr.providers.docker.volume import STATE_CONTAINER_TYPE_VALUE
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.deps import CORE_DEPS
+from imbue.mngr.utils.env_utils import looks_like_mngr_test_container_name
+from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
-from imbue.mngr.utils.testing import isolate_git
-from imbue.mngr.utils.testing import isolate_tmux_server
-from imbue.mngr.utils.testing import make_mngr_ctx
-from imbue.mngr.utils.testing import setup_mngr_test_environment
+from imbue.mngr.utils.testing import worker_docker_state_prefixes
 from imbue.mngr.utils.testing import worker_test_ids
 
 # Resource guards (tmux, rsync, unison, modal, docker_cli, docker_sdk) are
@@ -100,47 +91,32 @@ _remove_deprecated_urwid_module_aliases()
 
 
 # =============================================================================
-# Non-autouse fixtures
+# Shared plugin fixtures (single-sourced from plugin_testing.py)
 # =============================================================================
+#
+# Most of mngr's test fixtures (HOME isolation, temp host/profile/config dirs,
+# git-repo helpers, the autouse setup_test_mngr_env, the shell-stub fixtures,
+# etc.) are defined once in imbue.mngr.utils.plugin_testing and registered here
+# via register_plugin_test_fixtures -- the exact same entry point every mngr
+# plugin uses. Single-sourcing them this way keeps mngr-core and its plugins
+# from drifting apart.
+#
+# Two fixtures below override the plugin_testing versions. Only one is a genuine
+# design difference:
+#   - plugin_manager: deliberately diverges -- mngr-core blocks every external
+#                     entry-point plugin except those in enabled_plugins, whereas
+#                     the plugin-facing version loads all entry points so a
+#                     plugin's own hooks are present.
+#   - mngr_test_id:   identical to the shared version except it also appends to
+#                     worker_test_ids. That list is read only by mngr-core's
+#                     session_cleanup leak scan, which isn't shared with plugins,
+#                     so the bookkeeping would simply be inert there. This override
+#                     is incidental, not principled -- it could go away if that
+#                     scan were ever shared with plugins.
+# register_plugin_test_fixtures runs first; because these defs come after it,
+# they win for the mngr-core test session.
 
-
-@pytest.fixture
-def cg() -> Generator[ConcurrencyGroup, None, None]:
-    """Provide a ConcurrencyGroup for tests that need to run processes."""
-    with ConcurrencyGroup(name="test") as group:
-        yield group
-
-
-@pytest.fixture
-def stub_mngr_log_sh() -> str:
-    """A no-op mngr_log.sh stub for testing shell scripts that source it.
-
-    Background scripts in mngr_claude/resources and mngr_antigravity/resources
-    source $MNGR_AGENT_STATE_DIR/commands/mngr_log.sh for logging helpers.
-    In production the file is provisioned by Host.provision_agent(); tests
-    write this stub to the same path so the script under test can source it
-    without doing real I/O.
-    """
-    return textwrap.dedent("""\
-        #!/bin/bash
-        mngr_timestamp() { date -u +"%Y-%m-%dT%H:%M:%S.000000000Z"; }
-        log_info() { :; }
-        log_debug() { :; }
-        log_warn() { :; }
-        log_error() { :; }
-    """)
-
-
-@pytest.fixture
-def mngr_transcript_lib_sh() -> str:
-    """Real mngr_transcript_lib.sh contents for shell tests that source it.
-
-    Returns the actual library body (not a stub) because the streamer
-    scripts exercise the shared primitives end-to-end. Tests write this to
-    ``$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh`` to mirror the
-    production layout established by ``Host._ensure_shared_shell_libs``.
-    """
-    return importlib.resources.files(mngr_resources).joinpath("mngr_transcript_lib.sh").read_text()
+register_plugin_test_fixtures(globals())
 
 
 @pytest.fixture
@@ -153,69 +129,6 @@ def mngr_test_id() -> str:
     test_id = uuid4().hex
     worker_test_ids.append(test_id)
     return test_id
-
-
-@pytest.fixture
-def mngr_test_prefix(mngr_test_id: str) -> str:
-    """Get the test prefix for tmux session names.
-
-    Format: mngr_{test_id}- (underscore separator for easy cleanup).
-    """
-    return f"mngr_{mngr_test_id}-"
-
-
-@pytest.fixture
-def mngr_test_root_name(mngr_test_id: str) -> str:
-    """Get the test root name for config isolation.
-
-    Format: mngr-test-{test_id}
-
-    This ensures tests don't load the project's .mngr/settings.toml config,
-    which might have settings like extra_window that would interfere with tests.
-    """
-    return f"mngr-test-{mngr_test_id}"
-
-
-@pytest.fixture
-def temp_host_dir(tmp_path: Path) -> Path:
-    """Create a temporary directory for host/mngr data.
-
-    This fixture creates .mngr inside tmp_path (which becomes the fake HOME),
-    ensuring tests don't write to the real ~/.mngr.
-    """
-    host_dir = tmp_path / ".mngr"
-    host_dir.mkdir()
-    return host_dir
-
-
-@pytest.fixture
-def tmp_home_dir(tmp_path: Path) -> Generator[Path, None, None]:
-    yield tmp_path
-
-
-@pytest.fixture
-def setup_git_config(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Isolate git and provide user config for tests that run git commands.
-
-    Sets GIT_CONFIG_NOSYSTEM and GIT_TERMINAL_PROMPT, and writes a
-    .gitconfig to the fake HOME via the shared isolate_git() helper.
-    Tests that need git should request this fixture (or temp_git_repo,
-    which depends on it).
-    """
-    with isolate_git(monkeypatch):
-        yield
-
-
-@pytest.fixture
-def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
-    """Create a temporary git repository with an initial commit.
-
-    Uses a subdirectory of tmp_path so that .gitconfig (written by
-    setup_git_config) does not appear as untracked in git status.
-    """
-    repo_dir = tmp_path / "git_repo"
-    init_git_repo(repo_dir)
-    return repo_dir
 
 
 @pytest.fixture
@@ -233,30 +146,11 @@ def disable_remote_providers_for_subprocesses(
     the test environment, or would create Docker state containers that leak.
     """
     settings_path = project_config_dir / "settings.local.toml"
-    settings_path.write_text("[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n")
+    settings_path.write_text(
+        "is_allowed_in_pytest = true\n\n[providers.modal]\nis_enabled = false\n\n[providers.docker]\nis_enabled = false\n"
+    )
     monkeypatch.chdir(temp_git_repo)
     return settings_path
-
-
-@pytest.fixture
-def temp_work_dir(tmp_path: Path) -> Path:
-    """Create a temporary work_dir directory for agents."""
-    work_dir = tmp_path / "work_dir"
-    work_dir.mkdir()
-    return work_dir
-
-
-@pytest.fixture
-def project_config_dir(temp_git_repo: Path, mngr_test_root_name: str) -> Path:
-    """Return the project config directory inside the test git repo, creating it.
-
-    The directory is named `.{mngr_test_root_name}` (e.g., `.mngr-test-abc123`).
-    Tests can write `settings.toml` or `settings.local.toml` into this directory
-    to configure project-level settings for a test.
-    """
-    config_dir = temp_git_repo / f".{mngr_test_root_name}"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir
 
 
 @pytest.fixture
@@ -272,148 +166,26 @@ def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> P
 
 
 @pytest.fixture
-def temp_profile_dir(temp_host_dir: Path) -> Path:
-    """Create a temporary profile directory.
-
-    Use this fixture when tests need to create their own MngrContext with custom config.
-    """
-    profile_dir = temp_host_dir / PROFILES_DIRNAME / uuid4().hex
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    return profile_dir
-
-
-@pytest.fixture
-def temp_config(temp_host_dir: Path, mngr_test_prefix: str) -> MngrConfig:
-    """Create a MngrConfig with a temporary host directory.
-
-    Use this fixture when calling API functions that need a config.
-    """
-    return MngrConfig(default_host_dir=temp_host_dir, prefix=mngr_test_prefix, is_error_reporting_enabled=False)
-
-
-@pytest.fixture
-def temp_mngr_ctx(
-    temp_config: MngrConfig, temp_profile_dir: Path, plugin_manager: pluggy.PluginManager
-) -> Generator[MngrContext, None, None]:
-    """Create a MngrContext with a temporary host directory.
-
-    Use this fixture when calling API functions that need a context.
-    """
-    cg = ConcurrencyGroup(name="test")
-    with cg:
-        yield make_mngr_ctx(temp_config, plugin_manager, temp_profile_dir, concurrency_group=cg)
-    # Clear the provider instance cache so cached instances don't outlive
-    # the ConcurrencyGroup that was just torn down.
-    reset_provider_instances()
-
-
-@pytest.fixture
 def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
     """Provide an active ConcurrencyGroup for tests that construct MngrContext directly."""
     with ConcurrencyGroup(name="test") as cg:
         yield cg
 
 
-@pytest.fixture
-def local_provider(temp_host_dir: Path, temp_mngr_ctx: MngrContext) -> LocalProviderInstance:
-    """Create a LocalProviderInstance with a temporary host directory."""
-    return LocalProviderInstance(
-        name=ProviderInstanceName("local"),
-        host_dir=temp_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-@pytest.fixture
-def per_host_dir(temp_host_dir: Path) -> Path:
-    """Get the host directory for the local provider.
-
-    This is the directory where host-scoped data lives: agents/, data.json,
-    activity/, etc. This is the same as temp_host_dir (e.g. ~/.mngr/).
-    """
-    return temp_host_dir
-
-
-@pytest.fixture
-def cli_runner() -> CliRunner:
-    """Create a Click CLI runner for testing CLI commands."""
-    return CliRunner()
-
-
 @pytest.fixture()
 def log_warnings() -> Generator[list[str], None, None]:
     """Capture loguru warning messages for assertion in tests.
 
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with plugin_testing.py's identically-named fixture).
     """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
+    with capture_log_warnings() as messages:
         yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 # =============================================================================
 # Autouse fixtures
 # =============================================================================
-
-
-@pytest.fixture
-def _isolate_tmux_server(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
-    """Give each test its own isolated tmux server.
-
-    Delegates to the shared isolate_tmux_server() context manager in testing.py.
-    See its docstring for details on the isolation strategy and why /tmp is used.
-    """
-    with isolate_tmux_server(monkeypatch):
-        yield
-
-
-@pytest.fixture(autouse=True)
-def setup_test_mngr_env(
-    tmp_home_dir: Path,
-    temp_host_dir: Path,
-    mngr_test_prefix: str,
-    mngr_test_root_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-    _isolate_tmux_server: None,
-) -> Generator[None, None, None]:
-    """Set up environment variables for all tests.
-
-    This autouse fixture ensures:
-    - HOME points to tmp_path (not the real ~/)
-    - MNGR_HOST_DIR points to tmp_path/.mngr (not ~/.mngr)
-    - MNGR_PREFIX uses a unique test ID for isolation
-    - MNGR_ROOT_NAME prevents loading project config (.mngr/settings.toml)
-    - TMUX_TMPDIR gives each test its own tmux server (via _isolate_tmux_server)
-
-    By setting HOME to tmp_path, tests cannot accidentally read or modify
-    files in the real home directory. This protects files like ~/.claude.json.
-    """
-    setup_mngr_test_environment(tmp_home_dir, temp_host_dir, mngr_test_prefix, mngr_test_root_name, monkeypatch)
-
-    yield
-
-
-@pytest.fixture
-def local_host(local_provider: LocalProviderInstance) -> Host:
-    """Create a local Host via the local provider.
-
-    This fixture eliminates the repeated pattern of:
-        host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-
-    Use this when tests need a Host instance for creating agents,
-    executing commands, etc. The local provider always returns a Host
-    (the concrete OnlineHostInterface implementation).
-    """
-    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
-    return host
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -540,16 +312,16 @@ def minimal_install_env(
     The subprocess environment is intentionally minimal (not inherited from
     the parent process). PATH contains only the venv bin and the directories
     of mngr's declared system dependencies: CORE_DEPS from
-    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq, ssh) plus two
+    libs/mngr/imbue/mngr/utils/deps.py (git, tmux, jq) plus three
     fixture-specific extras (curl, used by scripts/install.sh to bootstrap
-    uv, and rsync, an optional dep included so file-sync code paths are
-    exercised). This catches code that depends on tools from the developer's
-    environment (e.g. the modal CLI being on PATH).
+    uv, and rsync + ssh, optional deps included so file-sync and remote
+    code paths are exercised). This catches code that depends on tools from
+    the developer's environment (e.g. the modal CLI being on PATH).
     """
     # Pull the core binary names from CORE_DEPS so this list cannot drift
-    # away from what mngr actually requires. The two extras below are
+    # away from what mngr actually requires. The extras below are
     # fixture-specific (see docstring above).
-    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync"]
+    system_deps = [dep.binary for dep in CORE_DEPS] + ["curl", "rsync", "ssh"]
     dep_dirs: set[str] = set()
     for dep in system_deps:
         dep_path = shutil.which(dep)
@@ -706,7 +478,11 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     """
     try:
         client = create_docker_client()
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        # Called unconditionally at session end, including in sessions with no
+        # Docker daemon (e.g. offload sandboxes), so a connection failure here
+        # is expected -- log at debug only.
+        logger.debug("Skipped stale docker container sweep (Docker unavailable): {}", e)
         return []
 
     try:
@@ -717,7 +493,8 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
                 "label": [LABEL_PROVIDER],
             },
         )
-    except docker.errors.DockerException:
+    except docker.errors.DockerException as e:
+        logger.warning("Failed to list Docker containers during stale-container sweep: {}", e)
         client.close()
         return []
 
@@ -738,7 +515,7 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
         is_test_container = (
             provider_name.startswith("docker-test-")
             or container_name.startswith("mngr_test-")
-            or _looks_like_test_prefix(container_name)
+            or looks_like_mngr_test_container_name(container_name)
         )
         if not is_test_container:
             continue
@@ -762,22 +539,43 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     return stale
 
 
-def _looks_like_test_prefix(container_name: str) -> bool:
-    """Check if a container name starts with a test prefix pattern.
+def _get_leaked_state_containers_for_prefixes(prefixes: list[str]) -> list[tuple[str, str]]:
+    """Find surviving state containers whose name starts with one of *prefixes*.
 
-    Test prefixes follow the format 'mngr_{hex32}-' where {hex32} is a
-    32-character hex string (uuid4().hex). For example:
-    'mngr_22921e597952421296c8973d922f2eb3-docker-state-...'
+    Returns (container_id, container_name) tuples for state containers (those
+    carrying the state-container type label) created under any of this worker's
+    registered prefixes. These are leaks we can attribute to our own fixtures,
+    so the caller fails the suite for them (after cleaning them up).
     """
-    if not container_name.startswith("mngr_"):
-        return False
-    # Extract the part after 'mngr_' up to the first '-'
-    rest = container_name[4:]
-    dash_idx = rest.find("-")
-    if dash_idx != 32:
-        return False
-    hex_part = rest[:32]
-    return all(c in "0123456789abcdef" for c in hex_part)
+    if not prefixes:
+        return []
+    try:
+        client = create_docker_client()
+    except docker.errors.DockerException as e:
+        # We only reach here when this worker's docker fixtures ran (non-empty
+        # prefixes), so the daemon was reachable during the tests. Failing to
+        # connect now means we cannot verify our own cleanup -- this is
+        # unexpected, so surface it loudly rather than silently skipping.
+        logger.opt(exception=e).error("Failed to connect to Docker to check for leaked state containers")
+        return []
+
+    try:
+        containers = client.containers.list(
+            all=True,
+            filters={"label": [f"{STATE_CONTAINER_TYPE_LABEL}={STATE_CONTAINER_TYPE_VALUE}"]},
+        )
+    except docker.errors.DockerException as e:
+        logger.opt(exception=e).error("Failed to list Docker containers while checking for leaked state containers")
+        return []
+    finally:
+        client.close()
+
+    leaked: list[tuple[str, str]] = []
+    for container in containers:
+        name = container.name or ""
+        if any(name.startswith(prefix) for prefix in prefixes):
+            leaked.append((container.id, name))
+    return leaked
 
 
 def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
@@ -806,7 +604,7 @@ def _remove_docker_containers(containers: list[tuple[str, str]]) -> None:
         client.close()
 
 
-class _DockerdStartupError(BaseMngrError):
+class _DockerdStartupError(MngrError):
     """Raised when the release-test session fixture cannot bring dockerd up."""
 
 
@@ -887,14 +685,16 @@ def session_cleanup() -> Generator[None, None, None]:
     and checks for:
     1. Leftover child processes (excluding xdist workers on the leader)
     2. Leftover tmux sessions created by this worker's tests
-    3. Stale Docker containers from tests (older than 1 hour), including
-       both state containers and host containers
+    3. Docker state containers leaked under one of this worker's registered
+       prefixes (an own-fixture leak)
+    4. Stale Docker test containers from other/older sessions (older than 1
+       hour) that cannot be attributed to this worker
 
     If any leaked resources are found:
-    - An error is raised to fail the test suite (except for stale Docker
-      containers, which are silently cleaned up since they may be from
-      other sessions)
-    - The resources are killed as a last-ditch cleanup measure
+    - An error is raised to fail the test suite for leaks we can attribute to
+      this worker (processes, tmux sessions, prefix-matched state containers);
+      stale containers from other sessions are warn-and-cleaned without failing
+    - The resources are killed/removed as a last-ditch cleanup measure
 
     Tests should always clean up after themselves! This is just a safety net.
     """
@@ -946,13 +746,30 @@ def session_cleanup() -> Generator[None, None, None]:
             + "\n".join(f"  {s}" for s in leftover_sessions)
         )
 
-    # 3. Check for stale Docker containers from tests (older than 1 hour).
-    # This catches both state containers and host containers that were leaked
-    # by crashed or interrupted test runs.  We don't fail the test suite for
-    # these (they may be from other sessions), but we do clean them up.
-    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
+    # 3. Check for Docker state containers leaked by THIS worker's fixtures.
+    # These carry one of the prefixes our docker fixtures registered, so they
+    # are unambiguously our own leaks (a fixture failed to clean up). We fail
+    # the suite for these. We cannot fail on arbitrary containers from other
+    # concurrent workers/sessions (we have no way to attribute them), so those
+    # are handled by the age-based sweep below (warn + clean, no failure).
+    leaked_state_containers = _get_leaked_state_containers_for_prefixes(worker_docker_state_prefixes)
+    if leaked_state_containers:
+        container_lines = [f"  {name} ({cid[:12]})" for cid, name in leaked_state_containers]
+        errors.append(
+            "Leaked Docker state containers found!\n"
+            "A docker fixture failed to remove its state container before completing.\n" + "\n".join(container_lines)
+        )
 
-    # 4. Clean up leaked resources (last-ditch safety measure)
+    # 4. Check for stale Docker test containers from other/older sessions (older
+    # than 1 hour). These cannot be attributed to this worker, so we warn and
+    # clean them but do not fail the suite.
+    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
+    if stale_docker_containers:
+        logger.warning(
+            "Cleaning {} stale docker test container(s) from other/older sessions", len(stale_docker_containers)
+        )
+
+    # 5. Clean up leaked resources (last-ditch safety measure)
     for process in leftover_processes:
         try:
             process.kill()
@@ -960,9 +777,10 @@ def session_cleanup() -> Generator[None, None, None]:
             pass
 
     _kill_tmux_sessions(leftover_sessions)
+    _remove_docker_containers(leaked_state_containers)
     _remove_docker_containers(stale_docker_containers)
 
-    # 5. Fail the test suite if any issues were found
+    # 6. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"

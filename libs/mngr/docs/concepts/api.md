@@ -9,9 +9,11 @@ Plugins implement these to register new capabilities with mngr. They are called 
 | Hook                         | Description                                                                                                    |
 |------------------------------|----------------------------------------------------------------------------------------------------------------|
 | `register_agent_type`        | Register a new agent type (e.g., `claude`, `codex`, `opencode`)                                                |
+| `register_agent_aliases`     | Register short alternate names for agent types the plugin registers (e.g., `agy` for `antigravity`)            |
 | `register_provider_backend`  | Register a new provider backend (e.g., cloud platforms)                                                        |
 | `register_cli_commands`      | Define an entirely new CLI command                                                                             |
 | `register_cli_options`       | Add custom CLI options to any existing command's schema so that they appear in `--help`                        |
+| `register_help_topics`       | Add standalone help topic pages that appear in `mngr help` and `mngr help <topic>` when the plugin is installed |
 
 ## Lifecycle hooks
 

@@ -11,8 +11,10 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NestedTmuxError
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
+from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.duration import parse_duration_to_seconds
 from imbue.mngr.utils.interactive_subprocess import run_interactive_subprocess
 from imbue.mngr.utils.polling import poll_until
@@ -23,16 +25,27 @@ from imbue.mngr.utils.polling import poll_until
 SIGNAL_EXIT_CODE_DESTROY: Final[int] = 10
 SIGNAL_EXIT_CODE_STOP: Final[int] = 11
 
+# Set in the environment of a custom connect command so that any nested mngr
+# invocation it makes (e.g. a script that calls `mngr connect` to do the real
+# attach) falls back to the builtin connect instead of re-running the custom
+# command, which would recurse indefinitely.
+CONNECT_COMMAND_ACTIVE_ENV_VAR: Final[str] = "MNGR_CONNECT_COMMAND_ACTIVE"
+
 
 @pure
-def build_post_attach_resize_script(session_name: str) -> str:
-    """Build a shell command that resizes tmux windows and sends SIGWINCH.
+def build_post_attach_sigwinch_script(session_name: str) -> str:
+    """Build a shell command that sends SIGWINCH to every pane's child processes.
 
-    After a tmux client attaches, resize each window to match the client
-    (resize-window -A), then explicitly send SIGWINCH to each pane's child
-    processes. The explicit SIGWINCH is needed because resize-window -A can
-    be a no-op (and thus not trigger SIGWINCH) when the window already
-    matches the client size (e.g., due to window-size=latest).
+    After a tmux client attaches, the agent process needs a SIGWINCH to re-query
+    its terminal size (TIOCGWINSZ) and redraw at the client's dimensions. We send
+    the signal directly rather than via ``tmux resize-window`` because
+    resize-window has a documented side effect of switching the window's
+    ``window-size`` option to ``manual`` -- which pins the window at its current
+    size and stops it tracking later client resizes, so the user sees a field of
+    padding dots once their terminal grows past the pinned size. With
+    ``window-size`` left at tmux's default (``latest``), the window already
+    resizes to match the client on attach and on every subsequent terminal
+    resize; this script's only job is to nudge the in-pane process to redraw.
 
     Uses pgrep -P to find child processes of each pane. This avoids any
     dependency on matching the agent's process name, which is unreliable
@@ -47,7 +60,6 @@ def build_post_attach_resize_script(session_name: str) -> str:
     return (
         f"tmux list-windows -t {session_target} -F '#I' | "
         f"while read W; do "
-        f"tmux resize-window -t {session_target}:$W -A; "
         f"tmux list-panes -t {session_target}:$W -F '#{{pane_pid}}' "
         f"| xargs -I{{}} sh -c 'kill -WINCH {{}} $(pgrep -P {{}})' 2>/dev/null; "
         f"done"
@@ -75,6 +87,20 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
     activity_dir = host_dir / "activity"
     activity_file = activity_dir / "ssh"
     signal_file = host_dir / "signals" / session_name
+    # After attaching, nudge the agent to redraw by sending SIGWINCH to its pane
+    # processes. Skip it when the agent's window is pinned ("manual" window-size):
+    # such a window never changes size on attach, so there is nothing to redraw,
+    # and we leave the deliberately-fixed dimensions untouched. The check runs on
+    # the remote host at attach time (window-size is a window option, read via -wv).
+    # We deliberately do NOT use `tmux resize-window` here: it would flip
+    # window-size to manual as a side effect, pinning the window and breaking the
+    # live resize tracking that the default window-size=latest otherwise provides.
+    agent_window_target = TmuxWindowTarget(session_name=session_name, window=0).as_shell_arg()
+    sigwinch_step = (
+        f"(sleep 3; "
+        f'if [ "$(tmux show-options -t {agent_window_target} -wv window-size 2>/dev/null)" != manual ]; then '
+        f"{build_post_attach_sigwinch_script(session_name)}; fi) 2>/dev/null & "
+    )
     # Use single quotes around most things to avoid shell expansion issues,
     # but the paths need to be interpolated
     return (
@@ -84,8 +110,7 @@ def _build_ssh_activity_wrapper_script(session_name: str, host_dir: Path) -> str
         f'printf \'{{\\n  "time": %d,\\n  "ssh_pid": %d\\n}}\\n\' "$TIME_MS" "$$" > \'{activity_file}\'; '
         f"sleep 5; done) & "
         "MNGR_ACTIVITY_PID=$!; "
-        # Force a terminal resize after attaching to trigger SIGWINCH delivery.
-        f"(sleep 3; {build_post_attach_resize_script(session_name)}) 2>/dev/null & "
+        f"{sigwinch_step}"
         # actually attach. Route the -t target through TmuxSessionTarget so the
         # = exact-match prefix and shell-escaping rule are uniform with the rest
         # of the codebase (see TmuxSessionTarget docstring for the prefix-matching
@@ -114,7 +139,11 @@ def build_ssh_base_args(
 
     Raises MngrError if no known_hosts file is configured and
     is_unknown_host_allowed is False.
+    Raises BinaryNotInstalledError if the ssh binary is not installed (ssh is an
+    optional dependency, only needed to attach to remote agents).
     """
+    SSH.require()
+
     pyinfra_host = host.connector.host
     ssh_host = pyinfra_host.name
     ssh_user = pyinfra_host.data.get("ssh_user")
@@ -180,7 +209,14 @@ def resolve_connect_command(
     cli_connect_command: str | None,
     mngr_ctx: MngrContext,
 ) -> str | None:
-    """Resolve the connect command from a CLI option or global config."""
+    """Resolve the connect command from a CLI option or global config.
+
+    Returns None (i.e. use the builtin connect) when already running inside a
+    custom connect command, so a connect command that itself invokes mngr does
+    not recurse indefinitely.
+    """
+    if os.environ.get(CONNECT_COMMAND_ACTIVE_ENV_VAR):
+        return None
     if cli_connect_command is not None:
         return cli_connect_command
     return mngr_ctx.config.connect_command
@@ -201,6 +237,8 @@ def run_connect_command(
     env["MNGR_AGENT_NAME"] = agent_name
     env["MNGR_SESSION_NAME"] = session_name
     env["MNGR_HOST_IS_LOCAL"] = "true" if is_local else "false"
+    # Guard against infinite recursion if the connect command invokes mngr again.
+    env[CONNECT_COMMAND_ACTIVE_ENV_VAR] = "1"
     logger.debug("Running custom connect command: {}", connect_command)
     os.execvpe("sh", ["sh", "-c", connect_command], env)
 

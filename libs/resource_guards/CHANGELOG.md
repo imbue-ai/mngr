@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.8] - 2026-06-05
+
+## [v0.1.7] - 2026-05-28
+
 ### Added
 
 - Added: `@fixture_uses_resources` decorator for declaring resource use at the fixture level. Module/session-scoped fixtures that opt in run their setup and teardown under their own guard scope so resource calls inside the fixture are authorized against the fixture's declaration.

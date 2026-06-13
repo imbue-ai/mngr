@@ -1,0 +1,33 @@
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 2rem; }
+h1 { color: rgb(51, 51, 51); }
+h2 { margin-top: 1.5rem; font-size: 1.1rem; }
+.summary { margin-bottom: 0.5rem; color: rgb(102, 102, 102); }
+.run-commands { background: rgb(245, 245, 245); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; font-size: 0.85rem; }
+.run-cmd { margin: 0.3rem 0; }
+.run-cmd-label { color: rgb(80, 80, 80); }
+.blocked-hint { background: rgb(255, 243, 224); border-left: 3px solid rgb(244, 67, 54); padding: 0.5rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; border-radius: 0 4px 4px 0; }
+.blocked-hint p { margin: 0 0 0.3rem 0; font-weight: 600; }
+.blocked-hint ol { margin: 0; padding-left: 1.5rem; }
+.toc-sidebar { position: sticky; top: 2rem; width: 200px; float: left; padding-right: 1rem; }
+.toc-link { display: block; font-weight: 600; font-size: 0.9rem; text-decoration: none; margin-bottom: 0.5rem; }
+.toc-link:hover { text-decoration: underline; }
+.main-content { margin-left: 220px; }
+table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+th, td { border: 1px solid rgb(221, 221, 221); padding: 8px 12px; text-align: left; }
+th { background: rgb(245, 245, 245); font-weight: 600; }
+tr:hover { background: rgb(250, 250, 250); }
+.summary-row td { border-top: none; }
+.summary-cell { padding-left: 2em; color: rgb(80, 80, 80); font-size: 0.9em; }
+td.md p { margin: 0.25em 0; }
+td.md p:first-child { margin-top: 0; }
+td.md p:last-child { margin-bottom: 0; }
+code { background: rgb(240, 240, 240); padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }
+.artifacts-btn { cursor: pointer; padding: 2px 8px; font-size: 0.85em; border: 1px solid rgb(180, 180, 180); border-radius: 3px; background: rgb(250, 250, 250); }
+.artifacts-btn:hover { background: rgb(235, 235, 235); }
+.artifacts-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3); z-index: 999; }
+.artifacts-panel { display: none; position: fixed; top: 0; right: 0; bottom: 0; width: 80%; max-width: 1200px; background: rgb(250,250,250); z-index: 1000; overflow-y: auto; padding: 2rem; box-shadow: -4px 0 20px rgba(0,0,0,0.15); }
+.artifacts-panel.open, .artifacts-overlay.open { display: block; }
+.artifacts-close { position: sticky; top: 0; float: right; font-size: 1.5rem; cursor: pointer; background: none; border: none; padding: 0.5rem; z-index: 1001; }
+.run-tabs { display: flex; gap: 4px; margin-bottom: 1rem; }
+.run-tab { cursor: pointer; padding: 4px 12px; border: 1px solid rgb(200,200,200); border-radius: 4px; background: rgb(245,245,245); font-size: 0.85rem; }
+.run-tab.active { background: rgb(33,150,243); color: white; border-color: rgb(33,150,243); }

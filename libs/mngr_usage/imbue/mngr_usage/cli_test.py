@@ -16,10 +16,11 @@ from loguru import logger
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
@@ -851,6 +852,74 @@ def test_usage_command_human_format(
     # Writer emitted label="5h", so the line uses "5h:" rather than the literal key.
     assert "5h:" in result.output
     assert "73% used" in result.output
+
+
+def _plant_preserved_usage_agent(local_host: Host, agent_id: AgentId, name: str, event: dict[str, Any]) -> None:
+    """Plant a preserved (destroyed-agent) usage dir under <host_dir>/preserved/.
+
+    Mirrors what the destroy-time preservation writes: a usage events file, the
+    agent's data.json, and the host-metadata sidecar the reader keys on.
+    """
+    preserved_dir = local_host.host_dir / "preserved" / f"{name}--{agent_id}"
+    preserved_dir.mkdir(parents=True, exist_ok=True)
+    _write_event(preserved_dir / "events" / "claude" / "usage" / "events.jsonl", event)
+    (preserved_dir / "data.json").write_text(
+        json.dumps({"id": str(agent_id), "name": name, "type": "claude", "work_dir": "/tmp/w"})
+    )
+    (preserved_dir / "mngr_usage_meta.json").write_text(
+        json.dumps({"provider_name": "local", "host_id": "host-" + "0" * 32, "host_name": "h"})
+    )
+
+
+def _parse_json_payload(output: str) -> dict[str, Any]:
+    """Parse the single JSON object line from CLI output, skipping any leading log lines."""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            return json.loads(stripped)
+    raise AssertionError(f"No JSON object line in output: {output!r}")
+
+
+def test_usage_command_includes_preserved_by_default_and_excludes_with_flag(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_host: Host,
+    cli_profile_dir: Path,
+) -> None:
+    """A destroyed agent's preserved usage shows by default; --no-preserved hides it.
+
+    No live agent is registered, so the only data is the preserved dir -- the
+    default run must surface it, and --no-preserved must drop it entirely.
+    """
+    _plant_preserved_usage_agent(
+        local_host,
+        AgentId.generate(),
+        "gone-agent",
+        {
+            "source": "claude/usage",
+            "type": "cost_snapshot",
+            "event_id": "evt-preserved",
+            "timestamp": "2056-05-08T10:00:00.000000000Z",
+            "session_id": "preserved-session",
+            "rate_limits": {"five_hour": {"used_percentage": 42.0, "resets_at": 9_999_999_999_999}},
+        },
+    )
+
+    default_result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert default_result.exit_code == 0, default_result.output
+    default_payload = _parse_json_payload(default_result.output)
+    assert [s["source"] for s in default_payload["sources"]] == ["claude"]
+    assert default_payload["sources"][0]["five_hour"]["used_percentage"] == 42.0
+
+    excluded_result = cli_runner.invoke(
+        usage, ["--format", "json", "--max-age", "300", "--no-preserved"], obj=plugin_manager, catch_exceptions=False
+    )
+    assert excluded_result.exit_code == 0, excluded_result.output
+    # No live agents and preserved excluded -> the no-data hint is logged ahead
+    # of the JSON line; parse just the JSON object.
+    assert _parse_json_payload(excluded_result.output)["sources"] == []
 
 
 @pytest.mark.tmux

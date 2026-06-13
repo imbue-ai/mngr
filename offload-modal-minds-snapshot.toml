@@ -1,0 +1,82 @@
+# offload configuration for the minds-snapshot-resume test suite.
+#
+# Unlike the other offload-modal*.toml configs, this one is not driven by
+# offload's image-setup pipeline (Dockerfile build, post_patch_cmd, etc).
+# Instead, the operator runs:
+#
+#     offload -c offload-modal-minds-snapshot.toml run \
+#         --override-image-id <snapshot-image-id> ...
+#
+# where ``<snapshot-image-id>`` is the Modal image id printed by
+# ``scripts/snapshot_minds_e2e_state.py``. That image already has the
+# entire mngr checkout + FCT workspace + a stopped Docker container
+# baked in, so we skip the full image-setup phase and just boot
+# sandboxes from the snapshot.
+#
+# ``--override-image-id`` was added in offload v0.9.6; the bump from
+# 0.9.5 -> 0.9.6 in this PR is what enables this config to exist.
+
+[offload]
+# Tiny test suite to start (one sanity check). max_parallel scales up
+# as more @pytest.mark.minds_snapshot_resume tests get added.
+max_parallel = 10
+test_timeout_secs = 600
+retry_count = 0
+stream_output = true
+sandbox_project_root = "/code/mngr"
+
+# No post_patch_cmd: the snapshot already has the synced venv + the
+# committed-at-snapshot-time source tree. Each sandbox boots straight
+# from the snapshot image and into the test command -- which is the
+# whole point.
+
+[provider]
+type = "modal"
+# vm_runtime must match what scripts/snapshot_minds_e2e_state.py used
+# when *producing* the image -- the resumed sandbox's Docker-in-sandbox
+# layer (/var/lib/docker) was written under a VM-runtime sandbox and
+# needs the same runtime to be loaded back consistently. The image
+# itself is supplied via --override-image-id on the offload CLI, so
+# there's no dockerfile= here.
+[provider.experimental_options]
+vm_runtime = true
+
+[framework]
+type = "pytest"
+# Bash-wrapped command with a conditional cd so the same string works in
+# both offload contexts:
+# - Local discovery: offload's pytest framework `shell_words::split`s the
+#   command, takes the first token as the program (`bash`), and spawns
+#   it directly with the remaining tokens as argv. bash runs the -c
+#   script: /code/mngr does not exist locally, so the cd is skipped,
+#   and `uv run pytest --collect-only "$@"` runs from the worktree cwd.
+# - In-sandbox execution: offload calls
+#   `modal_sandbox.py exec <id> "<cmd.to_shell_string()>"`, which wraps
+#   the whole thing in another `bash -c` inside the sandbox. The
+#   sandbox's cwd is `/` (offload's create_from_image hardcodes
+#   workdir=/app on Sandbox.create but Modal does NOT propagate that
+#   workdir to subsequent .exec() calls). The inner bash -c sees
+#   /code/mngr exists, cd's into it, then `uv run pytest "$@"` runs
+#   from the project root and finds .venv/bin/pytest.
+#
+# The `--` after the inline script terminates bash's option parsing so
+# the subsequent test args become "$@" rather than additional flags
+# being parsed by bash.
+command = "bash -c '[ -d /code/mngr ] && cd /code/mngr; exec uv run pytest \"$@\"' --"
+run_args = "--no-cov -p no:xdist"
+
+[groups.all]
+# Only tests carrying the snapshot-resume mark. Everything else is
+# scoped out of this run (and `minds_snapshot_resume` is itself scoped
+# out of the other offload configs, so a test with this mark is only
+# ever collected here).
+filters = "-m 'minds_snapshot_resume'"
+
+[history]
+path = "offload-history-modal-minds-snapshot.jsonl"
+
+[report]
+output_dir = "test-results"
+junit = true
+junit_file = "junit.xml"
+download_globs = [".test_output/**"]

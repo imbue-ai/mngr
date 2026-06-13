@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.9] - 2026-06-08
+
+## [v0.1.8] - 2026-06-05
+
+## [v0.1.7] - 2026-06-01
+
+## [v0.1.6] - 2026-05-28
+
 ### Changed
 
 - Changed: The watcher's "agent is waiting for input" notification now fires for the indirect `RUNNING → UNKNOWN → WAITING` transition (when the agent's provider was briefly unreachable) in addition to the direct `RUNNING → WAITING` transition; an internal per-agent bit bridges the indirect path.

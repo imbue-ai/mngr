@@ -4,6 +4,310 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Fixed file-sharing permission grants for paths containing spaces or non-ASCII characters (e.g. an agent-requested or user-selected directory like `My Documents`). The per-file permission pattern is now built from the same WHATWG-URL-normalized (percent-encoded) form that the gateway matches incoming requests against, so a path with a space (`%20`) or accented letter now matches instead of silently never granting access.
+
+File-sharing permission requests now accept paths that use `~` / `~/...` notation for the current user's home directory; the gateway expands them to an absolute path (the same root the WebDAV home mount is served from) before storing the grant. `~user` notation for another user's home is rejected with a clear error.
+
+Fixed the gateway permissions extension so that services whose catalog lists no specific permissions (e.g. Linear) now surface the catch-all `any` permission. `GET /permissions/available/<service>` injects `any` as the first available permission for every scope, and `POST /permission-requests` accepts a `predefined` request naming `any` under any known scope. Previously such services appeared to have no permissions an agent could request.
+
+## 2026-06-11
+
+Hardened how the VPS-resident latchkey gateway receives its secrets. The encryption key and gateway listen password are no longer interpolated into the gateway start command (where they could surface in process listings or command logs). Instead they are written to short-lived 0600 files on the VPS that the start script reads into the gateway's environment and deletes immediately. This keeps the secrets out of process argv and logs, and -- importantly -- avoids leaving the encryption key on the VPS disk next to the encrypted credential store it decrypts. These temp files now also use random, non-descriptive names so they do not advertise which secret each one holds to anyone able to list the directory.
+
+Decoupled per-agent latchkey gateway setup so a failure to reverse-tunnel the desktop-side gateway into an agent's container no longer prevents that agent's VPS-resident gateway from being provisioned (and vice versa). The two reachability paths are independent, so each is now attempted with its own error handling.
+
+Coalesced VPS-resident gateway provisioning per outer host: when several agents share one outer host (VPS/container), only one provisioning pass runs at a time instead of multiple agents racing concurrent, redundant passes against the same host's gateway, tunnel, and credential/permission files.
+
+Stopped re-provisioning an already-provisioned outer host on every discovery cycle. The discovery stream re-emits the full agent set continuously; previously each emission re-ran the full (expensive, idempotent) VPS gateway provisioning, flooding the log and the network with redundant SSH work. Each host is now provisioned at most once per supervisor lifetime (a failed pass still retries, and a supervisor restart re-provisions); ongoing credential/permission sync continues to be handled by the remote-state watcher.
+
+The VPS-resident latchkey gateway now starts with the same shared password the
+local desktop gateway uses. The desktop-derived gateway password (a pure
+function of the shared Latchkey encryption key, as produced by
+`Latchkey.derive_gateway_password`) is injected into the remote gateway as
+`LATCHKEY_GATEWAY_LISTEN_PASSWORD`, matching the `LATCHKEY_GATEWAY_PASSWORD`
+agents already present. Previously the remote gateway started without any
+listen password, so it did not enforce the same authentication as the local
+gateway.
+
+Remote VPS gateways now receive only the latchkey credentials a host's permissions actually grant, instead of the full desktop credential store.
+
+When syncing credentials to a remote VPS, mngr resolves the canonical services a host has been granted (mapping its permissions-rule scopes back to service names via the bundled `services.json` catalog, accessed through the new `services_catalog` module), drops any whose credentials are not actually stored (checked with `latchkey services info --offline`), and re-encrypts a host-scoped subset with the same encryption key via `latchkey auth re-encrypt --services`. The encryption key is unchanged, so the gateway's derived password and the agents' permissions-override JWTs keep validating. When nothing is left to ship (a deny-all host, or every granted service lacks stored credentials) the remote store is cleared instead. This limits the blast radius of a VPS compromise to the credentials the agent was actually permitted to use.
+
+The `services_catalog` module also now owns the dialog-facing catalog (`ServicesCatalog` / `ServicePermissionInfo`), previously in the desktop client. It reads the bundled `services.json` directly rather than over HTTP, so the gateway's `permissions` extension no longer serves the bare `GET /permissions/available` collection endpoint (the per-service `GET /permissions/available/<service>` endpoint that agents use is unchanged).
+
+Replaced a direct RuntimeError raise in the discovery stream consumer with a dedicated DiscoveryStreamError.
+
+## 2026-06-09
+
+Regenerated the latchkey `services.json` permission catalog from detent 1.5.0.
+This adds the new `notion-mcp` service (Notion's hosted MCP endpoint at
+`mcp.notion.com`, scope `notion-mcp-api`, displayed as "Notion (MCP)") with its
+20 grantable permissions, and refreshes the Slack `slack-read-all` /
+`slack-write-all` descriptions to match detent's updated wording. The catalog
+generator (`scripts/generate_services_json.py`) gained curated display-name and
+service-order entries for `notion-mcp`.
+
+The VPS-resident latchkey gateway is now launched with
+`LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`. The remote gateway runs on a synced
+copy of the user's credentials, so disabling refresh there prevents it from
+racing the desktop-side latchkey to rotate the same OAuth refresh token (which
+would exhaust the user's token and invalidate the desktop's credentials). The
+desktop-side latchkey remains the single owner of credential refresh.
+
+The `permission-requests` gateway extension's approve endpoint
+(`POST /permission-requests/approve/<id>`) now accepts an optional JSON body
+carrying a single `path` field. When present, and only for `file-sharing`
+requests, the file-sharing effect is recomputed for that path instead of using
+the one precomputed at request-creation time -- this lets the Minds desktop
+client honor a user who edited the shared path in the approval dialog. The
+overridden path is re-validated with the same traversal-rejection rules used at
+request creation, the access mode fixed at creation time is preserved (a path
+override cannot escalate read-only to read-write), and only the `path` field is
+accepted in the body. An empty or `null` body preserves the previous behavior
+(apply the precomputed effect verbatim).
+
+File-sharing requests are now validated to be within one of the Minds WebDAV
+mount roots -- the user's home directory or the system temp directory -- at
+request-creation time (and at approve time for a user-edited path override).
+A grant for any path outside those roots is inert (the WebDAV server has no
+provider for it and answers 404), so rejecting it up front gives the agent a
+clear "must be within a shared root" error instead of an approve-then-404 dead
+end. The roots are derived from the gateway process's `homedir()` / `tmpdir()`,
+which match the `Path.home()` / `tempfile.gettempdir()` roots the Minds WebDAV
+server serves on the desktop host. The comparison is case-insensitive (mirroring
+the WebDAV share-prefix matching) and purely lexical (no symlink resolution or
+existence check).
+
+## 2026-06-08
+
+- Now auto-discovered as a publishable package by the release tooling (it is a standalone `mngr latchkey` plugin). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` and `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
+
+## 2026-06-06
+
+Added `libs/mngr_latchkey/imbue/mngr_latchkey/remote_gateway.py`, the first piece of "run the latchkey gateway on the VPS" support. It declares a pinned `LATCHKEY_VERSION` (2.15.1) and a small public surface for standing up a latchkey gateway on a remote VPS (the agent's outer host):
+
+- `sync_credentials(host, latchkey_directory)` copies the local encrypted credential store (`<latchkey_directory>/credentials.json.enc`) to `~/.latchkey/` on the VPS so the remote latchkey CLI can decrypt the same credentials.
+- `sync_permissions(host, latchkey_directory, host_id)` copies the per-host permissions file (`<latchkey_directory>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json`) to `~/.latchkey/permissions.json` on the VPS, falling back to the restrictive deny-all default when the host has no local permissions file.
+
+Both syncs write atomically (to a sibling `.tmp` file, then `mv` into place), so the remote gateway never reads a half-written credentials or permissions file mid-sync.
+- `provision_remote_gateway(host, host_id, container_ssh_user, container_ssh_port)` is the orchestrator (its internal steps are private helpers). It: installs the upstream `latchkey` CLI and its prerequisites (curl, Node.js via NodeSource, `latchkey@<version>` via `npm install -g`); starts `latchkey gateway` detached, bound to the VPS loopback on `OUTER_PORT` (`LATCHKEY_DISABLE_COUNTING=1`, and `LATCHKEY_ENCRYPTION_KEY` interpolated from the local `<latchkey_directory>/encryption_key` so the VPS gateway can decrypt the synced `credentials.json.enc`), unless one is already running; locates the agent's container on the VPS by its `com.imbue.mngr.host-id` label; mints an ad-hoc ed25519 keypair and authorizes it in the container via `docker exec` (the VPS owns the docker daemon, so no pre-existing SSH access is needed); and opens a reverse SSH tunnel from the VPS into the container (`-R 127.0.0.1:INNER_PORT:127.0.0.1:OUTER_PORT`) so the agent reaches the VPS gateway via its unchanged `LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`. It is a no-op when the outer host is the local machine (e.g. the outer of a local docker daemon), so latchkey is never installed or run on the user's own computer -- only genuinely-remote outers are provisioned. The install runs as a single POSIX-sh command (no bash-only `pipefail`). The detached gateway and tunnel are each launched under `nohup` and made idempotent via a PID file (`$HOME/.latchkey/{gateway,tunnel}.pid`) checked with `kill -0` plus a `/proc/<pid>/cmdline` marker -- not `pgrep -f`, which would self-match the shell running the launch script (its argv contains the launch command) and so could either never start the gateway or spuriously restart the tunnel.
+- `LatchkeyDiscoveryHandler` now takes an `MngrContext`. On agent discovery, every SSH-reachable agent gets the desktop-side gateway reverse-tunneled onto its `127.0.0.1:AGENT_SIDE_LATCHKEY_PORT` (run inline; this is the only path for local agents). Agents whose host *also* has an accessible outer host (the VPS -- decided by a cheap, connection-free `outer_host_id_for` check) additionally get the heavy VPS-resident gateway provisioning thrown onto its own fire-and-forget concurrency-group thread, reverse-tunneled onto a distinct `127.0.0.1:INNER_PORT`, so a VPS agent can reach both the desktop gateway and the VPS gateway at once. The provisioning thread is unchecked so one agent's failure can't tear down the shared supervisor, but the group's `ObservableThread` logs any uncaught failure at error level so it is never silently missed, and a later discovery fire retries idempotently. The discovery callback now carries the host id.
+- `INNER_PORT` is now `AGENT_SIDE_LATCHKEY_PORT + 1` (not 1989), so the VPS gateway's in-container reverse-tunnel port does not collide with the desktop gateway's in-container port.
+- `LatchkeyDiscoveryHandler.start_remote_state_sync(concurrency_group)` keeps every known remote (VPS) host in sync with the desktop's latchkey state. It first syncs each currently-known remote host's permissions and then credentials (permissions first), and a newly-provisioned host gets the same initial sync inline (reusing the provisioning SSH connection). It then uses a `watchdog` observer to react to changes: a change to the local credentials file pushes credentials to every known remote host, and a change to a host's permissions file pushes that host's permissions. The observer is stopped when the supervisor shuts down; a host that no longer exists is dropped from the set. The observer's health is supervised on a *checked* concurrency-group strand: if it dies for any reason other than shutdown, that surfaces as a loud failure (the strand raises, the group surfaces it, and the supervisor is signalled to tear down) rather than silently leaving remote agents with stale credentials/permissions. Wired into `mngr latchkey forward`. Adds a `watchdog>=4.0` dependency.
+- `prepare_agent_latchkey(..., is_tunneled=True)` now also injects `LATCHKEY_GATEWAY_SECONDARY` into the agent's host env: the agent's URL for the per-VPS gateway as seen from inside the workspace container (`http://127.0.0.1:<INNER_PORT>`, where the discovery handler reverse-tunnels the VPS-resident gateway). It is set for all tunneled agents (the endpoint is only live on genuinely-remote VPS-backed hosts; the URL is the agent's view either way) and omitted for on-host/DEV agents. This flows automatically to both `mngr latchkey create-agent-env` (CLI) and the minds desktop client (which lifts every `latchkey_env` entry into a `--host-env` flag).
+- Adds `INNER_PORT`/`OUTER_PORT` constants: `INNER_PORT` is the in-container port on which the VPS gateway is reached (distinct from the desktop gateway's `AGENT_SIDE_LATCHKEY_PORT`) and `OUTER_PORT` is the gateway's VPS-loopback bind port (the tunnel's forward target).
+
+## 2026-06-05
+
+- Added to the release tooling's publish graph (`scripts/utils.py`). It will be offered for first publication to PyPI on the next release. Its stale `imbue-common==0.1.17` / `concurrency-group==0.1.17` pins are realigned to the current `0.1.18`. No runtime change.
+
+## 2026-06-04
+
+`mngr latchkey forward`'s discovery observer now writes to the standard discovery event log instead of a private per-env `discovery-observe` directory. It is the single discovery observer for the host dir (minds' `mngr forward --observe-via-file` tails the same log), so the previous isolation onto a separate event log -- needed only when two observers ran at once -- is no longer required. Old `discovery-observe/` directories left by prior versions are inert and can be deleted manually.
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-06-04
+
+`mngr latchkey forward` now refreshes its provider set on SIGHUP instead of shutting down. SIGHUP bounces only the `mngr observe` child (the shared gateway and all reverse tunnels stay up); SIGINT/SIGTERM remain the shutdown signals. Its discovery consumer also retains agents whose provider errored on a poll rather than tearing down their reverse tunnels, dropping them only on an explicit destroy or a later successful poll. `LatchkeyForwardSupervisor` gained a `bounce()` method that SIGHUPs a live supervisor (or starts one if none is running) so embedders can refresh latchkey's provider set mid-session.
+
+## 2026-06-03
+
+The latchkey forward's discovery observer (`mngr observe --discovery-only`) now writes its event log to a private, per-environment directory under the latchkey plugin data dir instead of the shared mngr discovery log. This fixes workspaces flickering out of (and never reliably appearing in) the desktop UI: when latchkey's observer and another forward's observer shared one discovery log, a snapshot from one observer that didn't have the imbue_cloud provider registered (e.g. it started before the account was written to the profile) was tailed by the other observer and treated as authoritative "no hosts," repeatedly dropping live workspaces. The private log is cleared on forward (re)start so a prior run's stale snapshots aren't replayed.
+
+## 2026-06-02
+
+Internal refactor with no user-visible behavior change. Updated the JSON output call sites to use the renamed `write_json_line` helper from `imbue.mngr.cli.output_helpers` (formerly `emit_final_json`, now removed).
+
+Added `libs/mngr_latchkey/scripts/generate_services_json.py`, a developer tool that regenerates the bundled `services.json` permission catalog from a detent checkout's built-in request schemas. It classifies each schema as a scope or a permission (mirroring detent's own doc generator, including the AWS special case), groups permissions under their owning scope, and carries over detent's per-schema `$comment` summaries.
+
+Regenerated `services.json` against the current detent. Each scope entry now carries a `description` (detent's `$comment` for the scope), and `permissions` changed from a list of strings to a list of `{"name", "description"}` objects so each permission's summary is colocated with its name. The refresh also picks up detent's newer definitions: Slack gains `slack-auth-read`/`slack-auth-write`, and GitLab now exposes a separate `gitlab-git` scope (alongside `gitlab-api`), matching how GitHub is split.
+
+The `permissions` gateway extension now documents and validates the new scope-level `description` and the `{name, description}` permission objects. The `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints surface the scope and per-permission descriptions (their documented contract was updated to match), covered by new end-to-end tests that drive the extension over HTTP.
+
+The `permission_requests` gateway extension now validates the `scope` and `permissions` of incoming `predefined` POST `/permission-requests` bodies against the bundled `services.json` catalog. A request whose `scope` is not a known Detent scope, or whose `permissions` list contains entries that the catalog does not list under that scope, is rejected with HTTP 400 at creation time rather than persisted as a pending request that approval would happily splice into `permissions.json`. File-sharing requests are unaffected.
+
+The two Node-driven extension tests (`minds_api_proxy_test.py`, `permission_requests_test.py`) no longer silently skip in CI. They spawn a Node child process to drive the `.mjs` gateway extensions and carried `skipif(shutil.which("node") is None)`, which skipped silently on the Node-less offload image -- so they exercised nothing. With Node now installed in the shared mngr image, the `skipif` is removed: they run on offload and assert Node is present (a missing Node fails loudly rather than skipping).
+
+- pyproject.toml: align `imbue-mngr*==` pin stragglers with the satellites bumped in main's `e22e7010e` release commit. Several `imbue-mngr-*` libs still pinned to older versions even though `libs/mngr` had moved to 0.2.10; building the apps/minds ToDesktop bundle from main today would fail at `uv lock` in `apps/minds/scripts/build.js` because the workspace constraint graph is unsatisfiable. Day-to-day dev hides this because `[tool.uv.sources]` redirects every `imbue-mngr-*` to its workspace path, bypassing the `==` pin.
+
+## 2026-06-01
+
+Bump Latchkey to version 2.14.0 to support GitHub git operations via Latchkey gateway.
+
+Changed the `services.json` catalog (and the `permissions` gateway extension that reads it) so each raw service name now maps to a *list* of scope entries instead of a single entry. This lets one service expose more than one detent scope. The `GET /permissions/available` and `GET /permissions/available/<service_name>` endpoints now return arrays of `{scope, display_name, permissions}` objects per service.
+
+## 2026-05-28
+
+- `Latchkey.auth_browser` now transparently recovers from latchkey's "Service `<name>` requires preparation first" error: when it sees that message it runs `latchkey auth browser-prepare <service>` and then retries `latchkey auth browser <service>` once, so callers (e.g. minds' predefined-permission grant flow) succeed on the first user-visible attempt instead of failing with a confusing error. Failures of either the prepare step or the retry are surfaced as the usual `(False, message)` result.
+
+## 2026-05-28
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-26
+
+# Minds-api-proxy: authorization injection + schema editing + baseline notification grant
+
+The `minds-api-proxy` gateway extension now authenticates the
+forwarded request *to* the upstream Minds API on the agent's behalf:
+
+- It reads `LATCHKEY_EXTENSION_MINDS_API_KEY` on every request and,
+  when set, overwrites the inbound `Authorization` header with
+  `Bearer <LATCHKEY_EXTENSION_MINDS_API_KEY>` before forwarding.
+  Agents therefore never see the key and cannot spoof one. With the
+  env var unset, the inbound `Authorization` header is forwarded
+  unchanged (used by tests).
+
+The `permissions` extension grew matching CRUD for inline detent
+schemas alongside its existing rule editor:
+
+- `POST /permissions/schemas?path=<file>&schema_name=<name>` adds or
+  replaces an inline schema. The body is a JSON object (the schema
+  definition). Schema names must match the conservative pattern
+  `^[A-Za-z0-9][A-Za-z0-9._-]*$` so they round-trip safely through
+  URL path segments and detent's name lookup.
+- `DELETE /permissions/schemas?path=<file>&schema_name=<name>` removes
+  the named schema.
+
+These let minds install per-agent path-pattern schemas (`"only
+`/minds-api-proxy/api/v1/agents/<agent_id>/...`"`) at agent-creation
+time without having to direct-write the per-host permissions file
+itself.
+
+The agent baseline (`_AGENT_BASELINE_PERMISSIONS` in
+`mngr_latchkey/agent_setup.py`) now ships an extra permission schema
+out of the box: every minds-created agent can
+`POST /minds-api-proxy/api/v1/agents/<...>/notifications`. New
+helpers expose the per-agent scope / permission names + inline
+schemas that the desktop client adds for each agent on top of the
+baseline:
+
+- `agent_minds_api_proxy_scope_name(agent_id)`
+- `agent_minds_api_proxy_permission_name(agent_id)`
+- `build_agent_minds_api_proxy_schemas(agent_id)`
+
+`mngr_imbue_cloud/host.py`'s `build_combined_inject_command` /
+`normalize_inject_args` (and the helpers only they called) are
+gone entirely: there is exactly one `MINDS_API_KEY` per minds
+installation now, the latchkey gateway injects it transparently, and
+agents never see the value -- so there was nothing left to push
+down onto a leased pool host, and the functions had no caller in
+the monorepo outside their own tests.
+
+## Narrower interface for per-agent Minds API proxy permissions
+
+The per-agent `minds-api-proxy` permissioning model has been simplified.
+Instead of installing a per-agent scope schema + per-agent permission
+schema + per-agent rule at agent creation time (via the low-level
+`POST /permissions/schemas` extension endpoint), the baseline
+permissions file carries two cooperating rules + a plain JSON list of
+allowed agent ids. To allow a new agent, the desktop client (or an
+operator running the CLI) just appends an entry to that list.
+
+Concretely:
+
+- The baseline now has **two** rules, in this exact order:
+  1. `{minds-api-proxy-unauthorized: []}` -- scope matches any
+     `/minds-api-proxy/api/v1/agents/<id>/...` request whose `<id>`
+     is NOT in the allowed list (encoded as `not + anyOf` on the
+     path schema). The empty permission list rejects the request
+     immediately; detent stops at the first matching scope, so the
+     rule below never gets a chance to allow it.
+  2. `{latchkey-self: [...gateway-self baseline..., minds-api-proxy]}`
+     -- the existing gateway-self rule, extended with a *generic*
+     `minds-api-proxy` permission that matches any path under the
+     proxy's `/agents/<id>/` subtree without enumerating ids.
+     Authorized agents (those past Rule 1's `not + anyOf`) hit this
+     rule and are let through by the generic permission.
+- The source-of-truth list of allowed agent ids is a plain JSON
+  `anyOf` array inside Rule 1's scope schema -- one entry per allowed
+  agent of the form `{"pattern": "^/minds-api-proxy/api/v1/agents/<id>(/.*)?$"}`.
+  No regex alternation parsing/building; reading the list is iteration,
+  appending is `list.append`.
+- New library helper: `imbue.mngr_latchkey.agent_setup.register_agent_for_host(plugin_data_dir, host_id, agent_id)`.
+  Reads the host's permissions file (or starts from the baseline if it
+  doesn't yet exist), extracts the existing allowed-agent list out of
+  the `anyOf` block, appends a new entry if not already there, and
+  writes back atomically. Idempotent.
+- New CLI: `mngr latchkey register-agent --host-id ID --agent-id ID`
+  wraps the helper for operators. Documented in the README's "Wiring a
+  new agent using the CLI interface" section.
+- `imbue.mngr_latchkey.store.load_permissions` is the new public
+  reader that `register_agent_for_host` uses; symmetric with `save_permissions`.
+- The shared `minds-api-proxy-notifications` baseline grant from the
+  earliest design in this branch is gone entirely; notifications are
+  reached via the same allowed-agent list as every other
+  `/api/v1/agents/<id>/` endpoint.
+- The per-agent helpers `agent_minds_api_proxy_scope_name`,
+  `agent_minds_api_proxy_permission_name`, and
+  `build_agent_minds_api_proxy_schemas` are gone -- nobody needs to
+  mint a per-agent schema name anymore.
+- The `POST /permissions/schemas` and `DELETE /permissions/schemas`
+  endpoints I added to `permissions.mjs` in an earlier round of this
+  branch are gone. The user-facing interface for granting Minds API
+  access is now "add the agent id to the host's allowed-agent list"
+  (via the helper or the CLI), not "install arbitrary inline schemas".
+
+A permissions file whose `anyOf` block has been hand-edited into a
+shape the parser doesn't recognize is left alone (the helper raises
+`LatchkeyStoreError` rather than rebuild from scratch), so operators
+who customize the file by hand won't lose their edits silently.
+
+## Consolidation: shared `SSHTunnelManager`
+
+The `SSHTunnelManager` (and `RemoteSSHInfo`, `ReverseTunnelInfo`,
+`SSHTunnelError`) used to exist in two places: this package's own
+`mngr_latchkey/ssh_tunnel.py` (driving the latchkey gateway's
+reverse-into-each-agent tunnels) and the `mngr_forward` plugin's
+`mngr_forward/ssh_tunnel.py` (driving forward + `--reverse` tunnels).
+The two implementations were ~70% verbatim duplicates that diverged on
+three things: latchkey added a per-tunnel exponential backoff for the
+repair loop (capped at 5 minutes), an `agent_id` tag on each
+`ReverseTunnelInfo`, and a `remove_reverse_tunnels_for_agent` cleanup
+hook used by the destruction path.
+
+All three latchkey improvements moved into the `mngr_forward` manager
+(they're strictly better behavior for both callers), and
+`mngr_latchkey/ssh_tunnel.py` is gone:
+
+- `mngr_latchkey/discovery.py`, `cli.py`, `discovery_stream.py`,
+  `discovery_stream_test.py`, and `core_test.py` now import
+  `RemoteSSHInfo`, `SSHTunnelError`, `SSHTunnelManager` from
+  `imbue.mngr_forward.ssh_tunnel` instead.
+- The 635-line `mngr_latchkey/ssh_tunnel_test.py` has been
+  consolidated into `mngr_forward/ssh_tunnel_test.py` (which now
+  carries the previously-thin manager unit tests plus the new
+  exponential-backoff + `remove_reverse_tunnels_for_agent` coverage).
+- The reverse-tunnel repair loop in `mngr_forward` no longer uses a
+  flat 30s retry; it uses per-tunnel exponential backoff with a 5min
+  cap. Same recovery latency for healthy targets; much less wasted
+  paramiko handshake against permanently-gone ones.
+- `remove_reverse_tunnels_for_agent` is careful not to close an SSH
+  client out from under any live *forward* tunnel using the same
+  host, so the two flavors of tunnel can coexist on one connection.
+
+- Internal: simplified `mngr_latchkey.store.LatchkeyPermissionsConfig` save/load to rely on Pydantic's built-in JSON serialization and validation instead of hand-rolled JSON parsing. The on-disk file format is unchanged; the model now uses `extra="ignore"` so unknown top-level keys (e.g. detent's `include`) continue to be silently dropped on load and not re-emitted on the next save.
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-25
 
 ### permission-requests extension: preserve symlinks at the approval target

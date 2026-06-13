@@ -17,6 +17,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
@@ -291,8 +292,13 @@ def test_provider_instance_config_merge_replaces_dicts() -> None:
     assert merged.options == {"key2": "override_val", "key3": "val3"}
 
 
-def test_provider_instance_config_merge_handles_none_list_override() -> None:
-    """ProviderInstanceConfig.merge_with should keep base list when override is None."""
+def test_provider_instance_config_merge_keeps_unset_list() -> None:
+    """ProviderInstanceConfig.merge_with keeps the base list when the override never set it.
+
+    "Never set" is expressed by omitting the field from the override (so it is
+    absent from ``model_fields_set``), matching how a real config layer that
+    doesn't mention the key is parsed.
+    """
     base = _TestProviderConfigWithListAndDict(
         backend=ProviderBackendName("local"),
         tags=["tag1"],
@@ -300,7 +306,6 @@ def test_provider_instance_config_merge_handles_none_list_override() -> None:
     )
     override = _TestProviderConfigWithListAndDict.model_construct(
         backend=ProviderBackendName("local"),
-        tags=None,
         options={},
     )
     merged = base.merge_with(override)
@@ -308,8 +313,8 @@ def test_provider_instance_config_merge_handles_none_list_override() -> None:
     assert merged.tags == ["tag1"]
 
 
-def test_provider_instance_config_merge_handles_none_dict_override() -> None:
-    """ProviderInstanceConfig.merge_with should keep base dict when override is None."""
+def test_provider_instance_config_merge_keeps_unset_dict() -> None:
+    """ProviderInstanceConfig.merge_with keeps the base dict when the override never set it."""
     base = _TestProviderConfigWithListAndDict(
         backend=ProviderBackendName("local"),
         tags=[],
@@ -318,11 +323,41 @@ def test_provider_instance_config_merge_handles_none_dict_override() -> None:
     override = _TestProviderConfigWithListAndDict.model_construct(
         backend=ProviderBackendName("local"),
         tags=[],
-        options=None,
     )
     merged = base.merge_with(override)
     assert isinstance(merged, _TestProviderConfigWithListAndDict)
     assert merged.options == {"key1": "val1"}
+
+
+class _TestProviderConfigWithBoolAndTuple(ProviderInstanceConfig):
+    """Test config with non-None-default fields (a bool and a tuple)."""
+
+    is_special: bool = Field(default=False)
+    extra_args: tuple[str, ...] = Field(default=())
+
+
+def test_provider_instance_config_merge_keeps_unset_non_none_default_fields() -> None:
+    """An override that sets only one field must not reset other fields to their defaults.
+
+    Regression test: a create template applies ``providers.<name>.is_enabled=true``
+    as a single-key override. The parsed override carries every other field at its
+    model default (``is_special=False``, ``extra_args=()``), but only ``is_enabled``
+    is in ``model_fields_set``. The merge must preserve the base's non-default values
+    rather than clobbering them with the override's defaults.
+    """
+    base = _TestProviderConfigWithBoolAndTuple(
+        backend=ProviderBackendName("local"),
+        is_enabled=False,
+        is_special=True,
+        extra_args=("--workdir=/",),
+    )
+    # Mirror how parse_config builds a single-key --setting override.
+    override = _TestProviderConfigWithBoolAndTuple.model_construct(is_enabled=True)
+    merged = base.merge_with(override)
+    assert isinstance(merged, _TestProviderConfigWithBoolAndTuple)
+    assert merged.is_enabled is True
+    assert merged.is_special is True
+    assert merged.extra_args == ("--workdir=/",)
 
 
 # =============================================================================
@@ -906,14 +941,15 @@ def test_provider_instance_config_merge_overrides_destroyed_host_persisted_secon
     assert merged.destroyed_host_persisted_seconds == 7200.0
 
 
-def test_provider_instance_config_merge_keeps_base_when_override_is_none() -> None:
+def test_provider_instance_config_merge_keeps_base_when_override_unset() -> None:
+    # An override that does not set the field (absent from model_fields_set, as a
+    # real config layer that omits the key is parsed) leaves the base value intact.
     base = ProviderInstanceConfig(
         backend=ProviderBackendName("local"),
         destroyed_host_persisted_seconds=3600.0,
     )
     override = ProviderInstanceConfig.model_construct(
         backend=ProviderBackendName("local"),
-        destroyed_host_persisted_seconds=None,
     )
     merged = base.merge_with(override)
     assert merged.destroyed_host_persisted_seconds == 3600.0
@@ -960,9 +996,11 @@ def test_provider_instance_config_merge_overrides_min_online_host_age_seconds() 
     assert merged.min_online_host_age_seconds == 600.0
 
 
-def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_none() -> None:
+def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_unset() -> None:
+    # The override omits the field, so it stays out of model_fields_set and the
+    # base value is preserved (the real parse path never sets a field to None).
     base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=None)
+    override = ProviderInstanceConfig.model_construct(backend=ProviderBackendName("test"))
     merged = base.merge_with(override)
     assert merged.min_online_host_age_seconds == 300.0
 
@@ -1216,6 +1254,50 @@ def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
     assert would_assignment_narrow(base, ("--verbose",)) is True
 
 
+def test_string_derived_tuple_is_a_scalar_tuple() -> None:
+    """``StringDerivedTuple`` specializes ``ScalarTuple`` so the single
+    ``isinstance(_, ScalarTuple)`` check in both narrowing guards covers it and
+    every other replace-by-default field (e.g. ``allowed_ssh_cidrs``) at once.
+    """
+    assert isinstance(StringDerivedTuple(("--verbose",)), ScalarTuple)
+
+
+def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
+    """A bare ``ScalarTuple`` override (not string-derived) is exempt from
+    narrowing too: it marks a field whose value is a coherent scalar that a
+    higher-precedence layer replaces wholesale (the ``allowed_ssh_cidrs`` case),
+    rather than a list to be merged additively. A plain tuple with the same
+    tokens still narrows, proving the marker is the discriminator.
+    """
+    base: tuple[str, ...] = ("0.0.0.0/0",)
+    assert would_assignment_narrow(base, ScalarTuple(("203.0.113.4/32",))) is False
+    assert would_assignment_narrow(base, ("203.0.113.4/32",)) is True
+
+
+def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefix: str) -> None:
+    """The leaf-level ``ScalarTuple`` exemption holds through the full
+    ``detect_settings_narrowing`` walk: a ``ScalarTuple`` override over a
+    non-empty tuple base reports no narrowing, while a plain-tuple override of
+    the same shape still does.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    exempt_override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={
+            AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=ScalarTuple(("--verbose",)))
+        },
+    )
+    assert detect_settings_narrowing(base, exempt_override) == []
+    plain_override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
+    )
+    assert detect_settings_narrowing(base, plain_override) == ["agent_types.my_claude.cli_args"]
+
+
 def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:
     """A provider sub-config's list field follows the same narrowing rule via
     sub-model recursion. Uses ``_TestProviderConfigWithListAndDict`` because
@@ -1359,7 +1441,7 @@ def _build_fully_populated_mngr_config(mngr_test_prefix: str) -> MngrConfig:
         is_nested_tmux_allowed=True,
         headless=True,
         is_error_reporting_enabled=False,
-        is_allowed_in_pytest=False,
+        is_allowed_in_pytest=True,
         default_destroyed_host_persisted_seconds=98765.0,
         default_min_online_host_age_seconds=4321.0,
         agent_ready_timeout=42.0,

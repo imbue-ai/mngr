@@ -21,7 +21,7 @@
     h.appendChild(document.createTextNode(isEnabled ? '' : 'Share '));
 
     var codeEl = document.createElement('code');
-    codeEl.className = 'bg-zinc-100 rounded px-1.5 py-0.5 font-mono text-[0.95em]';
+    codeEl.className = 'code-pill';
     codeEl.textContent = serviceName;
     h.appendChild(codeEl);
 
@@ -75,7 +75,7 @@
     row.appendChild(left);
 
     var btn = document.createElement('button');
-    btn.className = 'bg-transparent border-none cursor-pointer text-zinc-400 text-lg leading-none px-1 hover:text-zinc-600';
+    btn.className = 'bg-transparent border-none cursor-pointer text-zinc-400 text-lg leading-none px-1 hover:text-zinc-700';
     btn.setAttribute('aria-label', 'Remove');
     btn.setAttribute('data-action',
       variant === 'added' ? 'unmark-added'
@@ -235,6 +235,47 @@
     setTimeout(function () { btn.textContent = 'Copy'; }, 2000);
   };
 
+  // Cloudflare can take a few seconds after sharing is enabled to publish the
+  // Access app at the edge. Until then the hostname does not return the Access
+  // login redirect, so revealing the URL immediately makes forwarding look
+  // broken. Poll the minds-side readiness probe (which checks for the Access
+  // 302) and only reveal the link once the edge is live, or after a short
+  // timeout with a "may take a moment" note so the user is never stuck.
+  var READINESS_POLL_INTERVAL_MS = 2000;
+  var READINESS_MAX_ATTEMPTS = 12;
+
+  function revealShareUrl(showFallbackNote) {
+    document.getElementById('url-provisioning').classList.add('hidden');
+    document.getElementById('url-ready').classList.remove('hidden');
+    if (showFallbackNote) {
+      document.getElementById('url-fallback-note').classList.remove('hidden');
+    }
+  }
+
+  function startReadinessPolling(url) {
+    document.getElementById('url-section').classList.remove('hidden');
+    document.getElementById('url-provisioning').classList.remove('hidden');
+    document.getElementById('url-ready').classList.add('hidden');
+    var attempts = 0;
+    function poll() {
+      attempts++;
+      var probeUrl = '/api/sharing-readiness/' + agentId + '/' + serviceName + '?url=' + encodeURIComponent(url);
+      fetch(probeUrl)
+        .then(function (r) { return r.ok ? r.json() : { ready: false }; })
+        .catch(function () { return { ready: false }; })
+        .then(function (data) {
+          if (data && data.ready) {
+            revealShareUrl(false);
+          } else if (attempts >= READINESS_MAX_ATTEMPTS) {
+            revealShareUrl(true);
+          } else {
+            setTimeout(poll, READINESS_POLL_INTERVAL_MS);
+          }
+        });
+    }
+    poll();
+  }
+
   // The status endpoint emits the AuthPolicy shape from the imbue_cloud
   // plugin: ``{"emails": [...], "email_domains": [...], "require_idp": ...}``.
   function emailsFromPolicy(policy) {
@@ -268,8 +309,8 @@
         document.getElementById('action-btn').textContent = 'Update';
         setHeading(true);
         if (data.url) {
-          document.getElementById('url-section').classList.remove('hidden');
           document.getElementById('share-url').value = data.url;
+          startReadinessPolling(data.url);
         }
         var disableBtn = document.getElementById('disable-btn');
         if (disableBtn) disableBtn.classList.remove('hidden');

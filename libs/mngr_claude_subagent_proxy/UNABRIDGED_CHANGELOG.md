@@ -4,6 +4,90 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Internal: routed `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now in `imbue.mngr.hosts.common`). No behavior change.
+
+The plugin's provisioning artifacts now live under a `mngr-proxy/` subdirectory and are guarded against dirtying a tracked worktree:
+
+- The PROXY-mode agent definition moved from `.claude/agents/mngr-proxy.md` to `.claude/agents/mngr-proxy/proxy.md`, and the DENY-mode skill moved from `.claude/skills/mngr-subagents/SKILL.md` to `.claude/skills/mngr-proxy/SKILL.md` (the DENY skill is correspondingly renamed from `mngr-subagents` to `mngr-proxy`). A single `.claude/agents/mngr-proxy/` or `.claude/skills/mngr-proxy/` line in `.gitignore` now covers each artifact. Discovery is unaffected: Claude Code identifies the subagent by its frontmatter `name:` field.
+
+- At provisioning the plugin now refuses to write either artifact into a git-tracked worktree where the path is not gitignored, raising a clear error instead of silently leaving an untracked file. The error tells you to either gitignore the path or disable the plugin for the repository (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).
+
+## 2026-06-11
+
+The `claude_subagent_proxy` plugin is now **disabled by default** and must be explicitly opted into. It only loads when a config layer sets:
+
+```toml
+[plugins.claude_subagent_proxy]
+enabled = true
+```
+
+This inverts the usual plugin default (load-unless-disabled) because the plugin is very experimental and interferes with a lot of other tooling -- it intercepts Claude Code's built-in `Task` tool. The README documents the new opt-in requirement and behavior.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 66% to 70% to match the coverage CI already measures (~71%).
+
+## 2026-06-09
+
+Updated the destroyed-agent fallback to read the preserved common transcript from its new
+location. Preserved Claude sessions now mirror the agent state directory under
+`<local_host_dir>/preserved/<agent-name>--<agent-id>/`, so the common transcript is read from
+`preserved/<name>--<id>/events/claude/common_transcript/events.jsonl` (via the shared
+`get_preserved_agent_dir` helper) instead of the former
+`plugin/mngr_claude/preserved_sessions/<name>--<id>/common_transcript/events.jsonl`.
+
+## 2026-06-08
+
+Standardized this plugin's test setup on `register_plugin_test_fixtures(globals())`
+instead of `pytest_plugins = ["imbue.mngr.conftest"]`, so HOME isolation is wired
+the same single way across all mngr plugins. Internal test-infrastructure change
+only; no user-facing behavior change.
+
+- Marked unpublished-on-purpose in `UNPUBLISHED_PACKAGES` (it is an experimental plugin coupled to Claude Code internals), so the release tooling will not offer it for publication. Its stale `imbue-mngr==0.2.5` / `imbue-mngr-claude==0.2.5` pins and the dev-group `imbue-mngr-modal==0.1.0` pin are realigned to current workspace versions so `uv lock` stays solvable. No runtime change.
+
+## 2026-06-04
+
+Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.
+
+## 2026-05-28
+
+# Release test opts into the pytest config guard
+
+`mngr`'s `is_allowed_in_pytest` config field now defaults to `False`, so a
+config loaded during a pytest run must opt in. The release-only
+`test_real_claude_subagent` helper hand-rolls its own mngr profile and loads it,
+so it now writes `is_allowed_in_pytest = true` into that profile's settings.toml.
+Test-only change; no user-facing behavior change.
+
+# Dropped redundant per-project ty/ruff ratchet tests
+
+Removed this project's `test_no_type_errors` and `test_no_ruff_errors` from its
+`test_ratchets.py`. ty resolves the uv workspace root and ruff (run from the repo
+root) both scan across projects, so the per-project copies just re-ran the same
+checks. The single repo-wide equivalents now live in `test_meta_ratchets.py`
+(`test_no_type_errors` and `test_no_ruff_errors`).
+
+No user-facing behavior change.
+
+## 2026-05-27
+
+# Ratchet count tightening
+
+- Tightened the violation counts recorded in `test_ratchets.py` to their current exact values (via `uv run pytest --inline-snapshot=trim`), locking in previously-unrecorded reductions. No source-code or behavior change.
+
+## 2026-05-26
+
+- Pruned non-notable entries (test-only changes, internal refactors, and doc-only tweaks with no user-facing effect) from this project's CHANGELOG.md, per the new notable-only changelog policy.
+
+Adopted the `PREVENT_BARE_TMUX_TARGETS` ratchet rule (added in `imbue_common`) via
+`rc.check_bare_tmux_targets(_DIR, snapshot(0))` in this project's `test_ratchets.py`.
+This ratchet prevents new occurrences of `tmux <subcmd> -t '<bare-name>'` -- targets
+without a leading `=` exact-match prefix, which can silently route commands to a
+sibling session whose name shares a prefix with the intended one. No production code
+changes in this project; the adopting test starts at a baseline of zero violations.
+
 ## 2026-05-21
 
 Fix the intro in `UNABRIDGED_CHANGELOG.md` so it references the correct entries directory. The path was `changelog/<project>/` (which never existed); the actual layout is `<project_dir>/changelog/`.

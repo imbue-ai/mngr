@@ -16,6 +16,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 
 # === Enums ===
 
@@ -89,6 +90,33 @@ class IdleMode(UpperCaseStrEnum):
     RUN = auto()
     CUSTOM = auto()
     DISABLED = auto()
+
+
+class TmuxWindowSize(UpperCaseStrEnum):
+    """Resize policy for an agent's tmux window (tmux ``window-size`` option).
+
+    The lowercase of each value is exactly the token tmux accepts. ``MANUAL``
+    pins the window to its configured size and never auto-resizes to attached
+    clients; ``LATEST`` (tmux's own default) sizes to the most recent client;
+    ``LARGEST`` / ``SMALLEST`` size to the largest / smallest attached client.
+    """
+
+    MANUAL = auto()
+    LATEST = auto()
+    LARGEST = auto()
+    SMALLEST = auto()
+
+
+class TmuxWidth(PositiveInt):
+    """Width, in columns, of an agent's tmux window. Must be > 0."""
+
+    ...
+
+
+class TmuxHeight(PositiveInt):
+    """Height, in rows, of an agent's tmux window. Must be > 0."""
+
+    ...
 
 
 class ActivitySource(UpperCaseStrEnum):
@@ -166,17 +194,6 @@ class UncommittedChangesMode(UpperCaseStrEnum):
     CLOBBER = auto()
     MERGE = auto()
     FAIL = auto()
-
-
-class SyncMode(UpperCaseStrEnum):
-    """Direction of sync operation.
-
-    PUSH: local -> agent
-    PULL: agent -> local
-    """
-
-    PUSH = auto()
-    PULL = auto()
 
 
 class SyncDirection(UpperCaseStrEnum):
@@ -448,9 +465,9 @@ class HostLocationAddress(FrozenModel):
     """A location that lives on some host: ``[NAME[@HOST[.PROVIDER]]][:PATH]`` or a bare path.
 
     Used wherever a CLI command needs to designate "a place on any host" -- the
-    source for ``mngr create --from``/``mngr pair``, or the target for
-    ``mngr push``/``mngr pull``. The host may be local or remote; "hosted"
-    captures both.
+    source for ``mngr create --from``/``mngr pair``, the source/destination for
+    ``mngr rsync``, and the target for ``mngr git push``/``mngr git pull``. The
+    host may be local or remote; "hosted" captures both.
 
     Every component is optional. The four meaningful shapes (in addition to a
     bare path string) are:
@@ -467,6 +484,13 @@ class HostLocationAddress(FrozenModel):
     agent: AgentNameOrId | None = Field(default=None, description="Optional agent name or ID")
     host: HostAddress | None = Field(default=None, description="Optional host")
     path: Path | None = Field(default=None, description="Optional path")
+    has_trailing_path_slash: bool = Field(
+        default=False,
+        description=(
+            "True if the user-typed PATH ended with ``/``. ``Path`` strips trailing slashes, "
+            "so this flag is the only way to preserve rsync's contents-vs-child semantics."
+        ),
+    )
 
 
 class AgentTypeName(SafeName):

@@ -34,7 +34,7 @@ If none of the above are set, `~/.ovh.conf` is consulted via python-ovh's normal
 
 ```bash
 mngr create my-agent --provider ovh
-mngr create my-agent --provider ovh -b --vps-plan=vps-2025-model1 -b --vps-datacenter=US-EAST-VA
+mngr create my-agent --provider ovh -b --ovh-plan=vps-2025-model1 -b --ovh-datacenter=US-EAST-VA
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -68,7 +68,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Only override if you change `default_image_name` to a non-Debian image (e.g. `ubuntu` for Ubuntu images, `almalinux` for AlmaLinux). |
 | `pricing_mode` | `default` | OVH pricing mode (`default`, `upfront6`, `upfront12`) |
 | `duration` | `P1M` | ISO-8601 commitment duration (monthly only) |
-| `vps_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
+| `instance_boot_timeout` | `600.0` | Seconds to wait for the OVH order to deliver a VPS |
 | `enable_recycle_cancelled` | `True` | Whether `mngr create` may reuse a cancelled-but-still-alive VPS instead of ordering fresh |
 | `recycle_safety_margin_hours` | `2` | Min hours of remaining `expiration` for a cancelled VPS to be recyclable |
 | `recycle_max_candidates_considered` | `10` | Cap on the number of cancelled VPSes evaluated before falling through to a fresh order |
@@ -80,6 +80,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 - Discovery: `GET /v2/iam/resource?resourceType=vps` filtered client-side for matching tags
 - Provisioning: full `/order/cart` flow (`POST /order/cart` → `POST /cart/{id}/vps` → configure datacenter/OS → assign → checkout → poll `/vps` until the new `serviceName` appears)
 - Bootstrap (no cloud-init available): after delivery, `POST /vps/{s}/rebuild` with `publicSshKey` + `doNotSendPassword=true` pre-installs our client key. OVH installs that key for the image's default non-root user (e.g. `debian` on `Debian 12 - Docker`), not for root, so the provider then SSHes in as that user, pins the host key on first connect (`StrictHostKeyChecking=accept-new` semantics), sudo-copies `authorized_keys` into `/root/.ssh/`, and verifies SSH-as-root works before handing off to the rest of the provider. After pinning, strict host-key checking is enforced on every subsequent connection.
+- Backups disabled: as the final bootstrap step, the provider purges all `qemu*` packages (`apt-get purge --auto-remove 'qemu*'`). OVH automated backups drive the image's `qemu-guest-agent` to freeze the guest filesystem, which causes serious runtime problems on the agent; removing qemu removes the mechanism the backups hook into. The purge runs on both the fresh-order and recycle paths (rebuilding the OS reinstalls the agent), and a failure aborts provisioning so no host is left running with backups enabled. mngr also never orders an OVH backup option in the cart in the first place.
 
 ## Security caveat (first connect)
 
@@ -114,7 +115,7 @@ Intended usage is to keep a VPS pool warm (e.g., via `mngr_imbue_cloud`) so that
 
 ## Adopting slowly-delivered orphan VPSes
 
-OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `vps_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing would leak.
+OVH's order pipeline is asynchronous: a `POST /order/cart/{id}/checkout` returns immediately with an `orderId`, but the actual VPS `serviceName` is only assigned during a later delivery phase. `mngr create` waits up to `instance_boot_timeout` (default 10 min) for that delivery. If OVH is slow (busy region, new-account fraud-review hold, etc.) and the VPS shows up *after* the timeout, the order silently produces a VPS that mngr never tags — invisible to discovery and to the recycle path. A full month of billing would leak.
 
 The recovery mechanism is a **pending-order marker** pattern:
 

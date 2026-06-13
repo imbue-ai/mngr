@@ -12,11 +12,11 @@ this file drives it from the outside:
    the proxy returned and the request shape the upstream Minds API
    observed.
 
-These tests are unit-test-shaped (no marker) because the only external
-dependency is Node, which is already a hard runtime requirement for the
-``latchkey gateway`` subprocess we ship alongside the extension. If
-Node is somehow not on ``PATH`` the test is skipped (rather than
-failing) so the rest of the suite still runs on minimal CI images.
+Node is a hard runtime requirement for the ``latchkey gateway``
+subprocess we ship alongside the extension, and is installed in the
+shared mngr image, so these tests run on offload like any other test.
+Each Node spawn asserts the binary is present, so a missing Node fails
+loudly rather than skipping silently.
 """
 
 import json
@@ -39,8 +39,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 
-# Resolved once at import time so individual tests can skip cleanly on
-# images that don't have Node.
+# Resolved once at import time; the spawning fixtures assert it is not None
+# (Node ships in the shared mngr image, so absence is a hard failure).
 _NODE_BINARY: Final[str | None] = shutil.which("node")
 
 _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "minds_api_proxy.mjs"
@@ -49,9 +49,6 @@ _EXTENSION_PATH: Final[Path] = Path(__file__).resolve().parent / "minds_api_prox
 # the actual handshake completes in milliseconds.
 _NODE_READY_TIMEOUT_SECONDS: Final[float] = 15.0
 _POLL_INTERVAL_SECONDS: Final[float] = 0.02
-
-
-pytestmark = pytest.mark.skipif(_NODE_BINARY is None, reason="node binary not available on PATH")
 
 
 class _RecordedRequest(FrozenModel):

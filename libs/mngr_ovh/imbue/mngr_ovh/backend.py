@@ -1,5 +1,6 @@
 import os
 import uuid
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -22,7 +23,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_ovh import hookimpl
 from imbue.mngr_ovh.bootstrap import bootstrap_root_authorized_keys_via_user
-from imbue.mngr_ovh.bootstrap import install_required_outer_packages
 from imbue.mngr_ovh.bootstrap import pin_host_key_via_tofu
 from imbue.mngr_ovh.bootstrap import verify_root_ssh
 from imbue.mngr_ovh.bootstrap import wait_for_ssh_after_rebuild
@@ -50,9 +50,10 @@ from imbue.mngr_ovh.pending_orders import write_pending_order_marker
 from imbue.mngr_ovh.recycle import abort_recycle
 from imbue.mngr_ovh.recycle import finalize_recycle
 from imbue.mngr_ovh.recycle import try_recycle_cancelled_vps
-from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import parse_vps_build_args
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 OVH_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("ovh")
@@ -81,40 +82,25 @@ class OvhProvider(VpsDockerProvider):
         self._vps_iam_cache = None
 
     # =========================================================================
-    # Build-args parsing -- OVH uses string image names and --vps-datacenter
+    # Build-args parsing -- OVH uses --ovh-datacenter (alias for --ovh-region)
     # =========================================================================
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        region = self.config.default_region
-        plan = self.config.default_plan
-        os_id: int | str = self.ovh_config.default_image_name
-        git_depth: int | None = None
-        docker_build_args: list[str] = []
-        if build_args:
-            for arg in build_args:
-                if arg.startswith("--vps-datacenter="):
-                    region = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-region="):
-                    region = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-plan="):
-                    plan = arg.split("=", 1)[1]
-                elif arg.startswith("--vps-os="):
-                    os_id = arg.split("=", 1)[1]
-                elif arg.startswith("--git-depth="):
-                    git_depth = int(arg.split("=", 1)[1])
-                elif arg.startswith("--vps-"):
-                    raise MngrError(
-                        f"Unknown OVH build arg: {arg}. "
-                        "Valid args: --vps-datacenter=, --vps-plan=, --vps-os=, --git-depth="
-                    )
-                else:
-                    docker_build_args.append(arg)
-        return ParsedVpsBuildOptions(
-            region=region,
-            plan=plan,
-            os_id=os_id,
-            git_depth=git_depth,
-            docker_build_args=tuple(docker_build_args),
+        """Parse OVH-prefixed build args. ``--ovh-datacenter=`` is an alias for ``--ovh-region=``."""
+        # Rewrite the OVH datacenter alias to the canonical region form so the
+        # shared parser handles the lookup uniformly.
+        normalized: list[str] | None = None
+        if build_args is not None:
+            normalized = [
+                arg.replace("--ovh-datacenter=", "--ovh-region=", 1) if arg.startswith("--ovh-datacenter=") else arg
+                for arg in build_args
+            ]
+        return parse_vps_build_args(
+            normalized,
+            provider_prefix="ovh",
+            default_region=self.ovh_config.default_region,
+            default_plan=self.ovh_config.default_plan,
+            plan_arg_name="plan",
         )
 
     # =========================================================================
@@ -139,12 +125,15 @@ class OvhProvider(VpsDockerProvider):
             # real credentials still surfaces through the except branch below.
             self._vps_iam_cache = []
             return []
-        try:
-            resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
-        except (VpsApiError, MngrError) as e:
-            logger.warning("OVH IAM tag listing failed; treating as empty: {}", e)
-            self._vps_iam_cache = []
-            return []
+        # Deliberately do NOT catch IAM-listing errors here. Swallowing to an
+        # empty list would make a transient OVH outage / expired credentials
+        # look like "this provider has zero hosts" -- which the discovery layer
+        # cannot distinguish from a real empty result, and which defeats mngr's
+        # "mark hosts UNKNOWN when a provider's discovery fails" safeguard. We
+        # let it propagate so `mngr list --on-error continue` records the
+        # failure instead of silently dropping live hosts. (The genuinely-
+        # unconfigured case is the is_unconfigured early-return above.)
+        resources = list_vps_resources_for_provider(self.ovh_client, provider_name=str(self.name))
         hostnames = [r.name for r in resources if r.name]
         self._vps_iam_cache = hostnames
         return list(hostnames)
@@ -199,7 +188,7 @@ class OvhProvider(VpsDockerProvider):
                     order_id=record.order_id,
                     plan_code=record.plan_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: poll for order {} failed ({}); keeping marker for next bake",
                     record.order_id,
@@ -219,7 +208,7 @@ class OvhProvider(VpsDockerProvider):
                     provider_name=provider_name,
                     region_code=region_code,
                 )
-            except (VpsApiError, MngrError) as exc:
+            except MngrError as exc:
                 logger.warning(
                     "OVH pending-orders reconcile: adoption of {} (order {}) failed ({}); keeping marker",
                     service_name,
@@ -285,6 +274,7 @@ class OvhProvider(VpsDockerProvider):
         new_host_id: HostId,
         requested_plan: str,
         requested_region: str,
+        extra_tags: Mapping[str, str],
     ) -> RecycleHandle | None:
         """Try to lock + re-tag a cancelled VPS; return the recycle handle or None.
 
@@ -306,6 +296,7 @@ class OvhProvider(VpsDockerProvider):
             requested_region=requested_region,
             safety_margin_hours=self.ovh_config.recycle_safety_margin_hours,
             max_candidates=self.ovh_config.recycle_max_candidates_considered,
+            extra_tags=extra_tags,
         )
 
     def _on_host_finalized(self, *, host_id: HostId, vps_ip: str) -> None:
@@ -333,7 +324,7 @@ class OvhProvider(VpsDockerProvider):
             return
         try:
             finalize_recycle(self.ovh_client, handle)
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH recycle: finalize_recycle raised for {} after host record was written; "
                 "the VPS may auto-decommission at end of month -- manual un-cancel may be needed. {}",
@@ -345,9 +336,7 @@ class OvhProvider(VpsDockerProvider):
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
-        os_id: int | str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -369,12 +358,19 @@ class OvhProvider(VpsDockerProvider):
         time. The locally-generated host key files are left on disk; they
         do no harm and keep the base ``create_host`` flow uniform.
 
+        The OS image is taken from ``OvhProviderConfig.default_image_name``;
+        per-host image overrides are not supported via build args, matching
+        the Vultr convention. (AWS now allows a per-host override via
+        ``--aws-ami=<ami-id>``.)
+
         Returns the OVH ``serviceName`` for both the instance id *and* the
         SSH-reachable hostname -- OVH's serviceName is itself a DNS name
         like ``vps-eec8860b.vps.ovh.us`` that resolves to the VPS's IP.
         """
         del vps_host_key_path, vps_host_public_key
-        image_name = str(os_id)
+        region = parsed.region
+        plan = parsed.plan
+        image_name = self.ovh_config.default_image_name
 
         public_key = self.ovh_client.get_cached_public_key(vps_ssh_key_id)
 
@@ -384,15 +380,14 @@ class OvhProvider(VpsDockerProvider):
         # IAM-key regex + the reserved-key list locally, so a 400 from
         # the IAM tag attach loop -- which would otherwise leak a freshly-
         # ordered month of billing -- cannot happen. (DEPLOY_SAFETY_AUDIT-
-        # style F1; spec required pre-order parsing.) The recycle path
-        # does not apply extra tags (the recycled VPS already carries
-        # whatever tags it had pre-cancellation, plus its mngr-host-id
-        # gets swapped by ``try_recycle_cancelled_vps``), so the parsed
-        # dict is only consumed in the fresh-order branch below. Parsing
-        # at the top still matters for the recycle path: if recycling
-        # falls through, the same provisioning call ends up ordering a
-        # fresh VPS, and we want to have already validated extra tags
-        # by that point.
+        # style F1; spec required pre-order parsing.) Both provisioning
+        # paths consume the parsed dict: the fresh-order branch attaches
+        # it alongside provider/host-id below, and the recycle path passes
+        # it to ``try_recycle_cancelled_vps`` (which (over)writes the tags
+        # so a VPS recycled across envs reflects the new owner's
+        # ``minds_env`` rather than the previous owner's). Parsing up front
+        # still matters either way: if recycling falls through to a fresh
+        # order, the extra tags have already been validated by that point.
         extra_tags = parse_extra_tags_env(os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
 
         with log_span("OVH provisioning for host {} ({})", name, host_id):
@@ -402,7 +397,7 @@ class OvhProvider(VpsDockerProvider):
             # this bake (no extra round-trip latency in the failure case).
             self._reconcile_pending_orders()
             recycle_handle = self._maybe_claim_recycled_vps(
-                new_host_id=host_id, requested_plan=plan, requested_region=region
+                new_host_id=host_id, requested_plan=plan, requested_region=region, extra_tags=extra_tags
             )
             # If `_provision_vps` raises before returning, the outer
             # cleanup in `_create_host_internal` never sees a vps_instance_id
@@ -431,11 +426,11 @@ class OvhProvider(VpsDockerProvider):
                             image_name=image_name,
                             pricing_mode=self.ovh_config.pricing_mode.to_wire_value(),
                             duration=self.ovh_config.duration,
-                            deliver_timeout_seconds=self.ovh_config.vps_boot_timeout,
+                            deliver_timeout_seconds=self.ovh_config.instance_boot_timeout,
                         )
                     except OvhOrderDeliveryTimeoutError as exc:
                         # OVH accepted the order but the VPS didn't deliver
-                        # within ``vps_boot_timeout``. Without intervention,
+                        # within ``instance_boot_timeout``. Without intervention,
                         # any later delivery becomes an unmanaged orphan
                         # (no ``mngr-provider`` tag => invisible to
                         # ``list_vps_resources_for_provider`` => the next
@@ -467,9 +462,9 @@ class OvhProvider(VpsDockerProvider):
                 # orphan in `mngr list` and the create-cleanup path can
                 # clean it up by service name. The recycle path arrives
                 # already tagged -- `try_recycle_cancelled_vps` swapped
-                # `mngr-host-id` to the new host id under a cooperative
-                # lock -- so we skip the re-tag there to avoid two
-                # redundant POST /tag calls per recycled host.
+                # `mngr-host-id` to the new host id and (over)wrote the
+                # extra tags under a cooperative lock -- so we skip the
+                # re-tag here to avoid redundant POST /tag calls.
                 urn = vps_urn_for(service_name, region_code=iam_region_code_for_endpoint(self.ovh_config.endpoint))
                 if recycle_handle is None:
                     # F1: ``extra_tags`` was parsed at the very top of
@@ -542,18 +537,24 @@ class OvhProvider(VpsDockerProvider):
                     known_hosts_path=self._vps_known_hosts_path(),
                     timeout_seconds=self.config.ssh_connect_timeout,
                 )
-                # OVH has no cloud-init, so the Debian 12 - Docker image's
-                # missing ``rsync`` (which the vps_docker build-context
-                # upload needs) has to be installed explicitly. Runs as the
-                # final outer-bootstrap step before the base
-                # VpsDockerProvider takes over.
-                install_required_outer_packages(
-                    hostname=service_name,
-                    port=22,
-                    private_key_path=vps_private_key_path,
-                    known_hosts_path=self._vps_known_hosts_path(),
-                    timeout_seconds=self.config.ssh_connect_timeout,
-                )
+                # OVH has no cloud-init, so the host-level setup that cloud-init
+                # backends (Vultr) get at first boot is applied here over SSH via
+                # the single shared source of truth (``apply_host_setup_on_outer``):
+                # pinned Docker, optional gVisor runsc (gated by
+                # ``install_gvisor_runtime``), sshd tuning, the base packages
+                # mngr_vps_docker needs (rsync/inotify-tools/jq), plus the
+                # OVH-specific qemu purge that disables the hypervisor's
+                # filesystem-freezing automated backups. Runs as the final
+                # outer-bootstrap step (on both the fresh-order and recycle
+                # paths -- the recycle rebuild reinstalls the qemu agent) before
+                # the base VpsDockerProvider takes over. Any failure raises and
+                # aborts provisioning, so no half-set-up host is handed back.
+                with self._make_outer_for_vps_ip(service_name) as outer:
+                    apply_host_setup_on_outer(
+                        outer,
+                        install_gvisor_runtime=self.config.install_gvisor_runtime,
+                        is_qemu_purge_enabled=True,
+                    )
                 # All post-claim steps succeeded. Ownership of both the
                 # recycle lock (recycle path) and the freshly-ordered
                 # VPS (fresh-order path) transfers to the caller -- on
@@ -587,7 +588,7 @@ class OvhProvider(VpsDockerProvider):
                 "OVH _provision_vps failed after fresh order delivered {}; requested termination to avoid a leaked month of billing",
                 service_name,
             )
-        except (VpsApiError, MngrError) as e:
+        except MngrError as e:
             logger.error(
                 "OVH _provision_vps cleanup: failed to terminate freshly-ordered VPS {} ({}); manual cleanup may be needed to avoid a leaked month of billing",
                 service_name,
@@ -613,14 +614,14 @@ class OvhProviderBackend(ProviderBackendInterface):
     @staticmethod
     def get_build_args_help() -> str:
         return (
-            "VPS-specific args (consumed by provider, not passed to docker):\n"
-            "  --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)\n"
-            "  --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)\n"
-            "  --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')\n"
+            "OVH-specific args (consumed by provider, not passed to docker):\n"
+            "  --ovh-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)\n"
+            "                        (alias: --ovh-region=)\n"
+            "  --ovh-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)\n"
             "  --git-depth=N         Shallow-clone build context to depth N before upload\n"
             "\n"
             "All other build args are passed to 'docker build' on the VPS.\n"
-            "Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .\n"
+            "Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .\n"
         )
 
     @staticmethod
@@ -632,15 +633,7 @@ class OvhProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        """Build an OVH provider instance.
-
-        ``is_for_host_creation`` is ignored: the OVH backend has no one-time
-        bootstrap resources to gate on (compare the Modal backend, which uses
-        this flag to authorize creating a missing per-user env).
-        """
-        del is_for_host_creation
         if not isinstance(config, OvhProviderConfig):
             raise MngrError(f"Expected OvhProviderConfig, got {type(config).__name__}")
         ovh_client = build_ovh_client(config)

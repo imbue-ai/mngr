@@ -9,18 +9,17 @@ from typing import assert_never
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr.api.sync import SyncFilesResult
-from imbue.mngr.api.sync import SyncGitResult
+from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.primitives import SyncMode
 
 
-def _write_json_line(data: Mapping[str, Any]) -> None:
+def write_json_line(data: Mapping[str, Any]) -> None:
     """Write a JSON object as a line to stdout.
 
-    This is used for JSON and JSONL output formats where we need raw JSON
-    without any logger formatting.
+    Used for both JSON output (a single terminating object) and JSONL output
+    (one object per line, streamed) where we need raw JSON without any logger
+    formatting. Sibling to ``write_human_line``.
     """
     sys.stdout.write(json.dumps(data) + "\n")
     sys.stdout.flush()
@@ -116,7 +115,7 @@ def emit_info(message: str, output_format: OutputFormat) -> None:
             write_human_line(message)
         case OutputFormat.JSONL:
             event = {"event": "info", "message": message}
-            _write_json_line(event)
+            write_json_line(event)
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -138,7 +137,7 @@ def emit_event(
                 write_human_line(str(data["message"]))
         case OutputFormat.JSONL:
             event = {"event": event_type, **data}
-            _write_json_line(event)
+            write_json_line(event)
         case OutputFormat.JSON:
             # JSON mode: silent until final output
             pass
@@ -160,8 +159,10 @@ def on_error(
         case OutputFormat.HUMAN:
             logger.error(error_msg)
         case OutputFormat.JSONL:
-            event = {"event": "error", "message": error_msg}
-            _write_json_line(event)
+            error_event: dict[str, Any] = {"event": "error", "message": error_msg}
+            if exc is not None:
+                error_event["error_class"] = type(exc).__name__
+            write_json_line(error_event)
         case OutputFormat.JSON:
             # JSON mode: errors collected and shown in final output
             pass
@@ -173,9 +174,18 @@ def on_error(
         raise AbortError(error_msg, original_exception=exc)
 
 
-def emit_final_json(data: Mapping[str, Any]) -> None:
-    """Emit final JSON output (for JSON format only)."""
-    _write_json_line(data)
+def emit_error_event(error: BaseException, output_format: OutputFormat | None) -> None:
+    """Emit a machine-readable JSONL error record so subprocess callers can detect the error type.
+
+    No-op unless ``output_format`` is JSONL. Called from the top-level CLI
+    exception handler so every command surfaces a structured
+    ``{"event": "error", "error_class": ..., "message": ...}`` line in
+    ``--format jsonl`` mode -- letting callers (e.g. minds) branch on the
+    exception *type* without parsing human-formatted error text.
+    """
+    if output_format is not OutputFormat.JSONL:
+        return
+    write_json_line({"event": "error", "error_class": type(error).__name__, "message": str(error)})
 
 
 @pure
@@ -220,91 +230,58 @@ def emit_format_template_lines(
     sys.stdout.flush()
 
 
-def output_sync_files_result(
-    result: SyncFilesResult,
+def output_rsync_result(
+    result: RsyncResult,
     output_format: OutputFormat,
 ) -> None:
-    """Output a file sync result in the appropriate format.
-
-    Works for both push and pull operations, using result.mode to determine
-    the event name and human-readable message.
-    """
+    """Output an rsync result in the appropriate format."""
     result_data = {
         "files_transferred": result.files_transferred,
         "bytes_transferred": result.bytes_transferred,
-        "source_path": str(result.source_path),
-        "destination_path": str(result.destination_path),
-        "is_dry_run": result.is_dry_run,
+        "source_path": result.source_path,
+        "destination_path": result.destination_path,
     }
-    mode_label = "Push" if result.mode == SyncMode.PUSH else "Pull"
-    event_name = f"{mode_label.lower()}_complete"
 
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line(result_data)
         case OutputFormat.JSONL:
-            emit_event(event_name, result_data, OutputFormat.JSONL)
+            emit_event("rsync_complete", result_data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            if result.is_dry_run:
-                write_human_line("Dry run complete: {} files would be transferred", result.files_transferred)
-            else:
-                write_human_line(
-                    "{} complete: {} files, {} bytes transferred",
-                    mode_label,
-                    result.files_transferred,
-                    result.bytes_transferred,
-                )
+            write_human_line(
+                "Rsync complete: {} files, {} bytes transferred",
+                result.files_transferred,
+                result.bytes_transferred,
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def output_sync_git_result(
-    result: SyncGitResult,
+def _output_git_sync_success(
     output_format: OutputFormat,
+    event_name: str,
+    human_message: str,
 ) -> None:
-    """Output a git sync result in the appropriate format.
+    """Shared success output for ``mngr git push`` / ``mngr git pull``.
 
-    Works for both push and pull operations, using result.mode to determine
-    the event name and human-readable message.
+    There's no structured result -- git's own stdout/stderr have already gone to the
+    user during the run. This just emits a terminating event/line so callers can
+    detect the operation finished.
     """
-    result_data = {
-        "source_branch": result.source_branch,
-        "target_branch": result.target_branch,
-        "source_path": str(result.source_path),
-        "destination_path": str(result.destination_path),
-        "is_dry_run": result.is_dry_run,
-        "commits_transferred": result.commits_transferred,
-    }
-    is_push = result.mode == SyncMode.PUSH
-    event_name = "push_git_complete" if is_push else "pull_git_complete"
-    verb = "push" if is_push else "merge"
-    verb_past = "pushed" if is_push else "merged"
-    preposition = "to" if is_push else "into"
-
     match output_format:
         case OutputFormat.JSON:
-            emit_final_json(result_data)
+            write_json_line({"success": True})
         case OutputFormat.JSONL:
-            emit_event(event_name, result_data, OutputFormat.JSONL)
+            emit_event(event_name, {"success": True}, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            if result.is_dry_run:
-                write_human_line(
-                    "Dry run complete: would {} {} commits from {} {} {}",
-                    verb,
-                    result.commits_transferred,
-                    result.source_branch,
-                    preposition,
-                    result.target_branch,
-                )
-            else:
-                write_human_line(
-                    "Git {} complete: {} {} commits from {} {} {}",
-                    verb,
-                    verb_past,
-                    result.commits_transferred,
-                    result.source_branch,
-                    preposition,
-                    result.target_branch,
-                )
+            write_human_line(human_message)
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def output_git_push_success(output_format: OutputFormat) -> None:
+    _output_git_sync_success(output_format, "git_push_complete", "Git push complete")
+
+
+def output_git_pull_success(output_format: OutputFormat) -> None:
+    _output_git_sync_success(output_format, "git_pull_complete", "Git pull complete")

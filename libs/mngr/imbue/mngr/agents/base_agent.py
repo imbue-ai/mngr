@@ -27,6 +27,7 @@ from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import check_agent_type_known
 from imbue.mngr.hosts.common import determine_lifecycle_state
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.tmux import LONG_MESSAGE_THRESHOLD
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -41,6 +42,23 @@ from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
+
+
+def quote_agent_args(agent_args: tuple[str, ...]) -> tuple[str, ...]:
+    """Shell-quote raw ``agent_args`` for splicing into a shell-evaluated command.
+
+    ``agent_args`` are raw argv strings (passed after ``--`` and threaded through
+    Click as ``click.UNPROCESSED``): the OS shell stripped their quote characters
+    when it built argv at invocation time, so each element must be re-quoted before
+    it is joined into the (shell-evaluated) launch command. Without this, a value
+    containing spaces or shell metacharacters -- e.g. ``--model "Gemini 3.5 Flash
+    (Medium)"`` -- word-splits and the ``(`` is parsed as a subshell.
+
+    ``cli_args`` must NOT be passed through here: string-form ``cli_args`` configs
+    are split with a quote-preserving (non-POSIX) shlex (see ``split_cli_args_string``)
+    and so already arrive shell-safe.
+    """
+    return tuple(shlex.quote(arg) for arg in agent_args)
 
 
 class BaseAgent(AgentInterface[AgentConfigT]):
@@ -63,8 +81,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         The base comes from ``command_override`` if provided, otherwise
         ``agent_config.command`` if set, otherwise nothing. After the base,
         ``cli_args`` and then ``agent_args`` are appended (joined with spaces).
-        Raises ``UserInputError`` if the final command would be empty -- i.e.
-        no base, no ``cli_args``, and no ``agent_args``.
+        ``agent_args`` are shell-quoted (they are raw argv); ``cli_args`` and the
+        base are left as-is (they arrive already shell-safe). Raises
+        ``UserInputError`` if the final command would be empty -- i.e. no base,
+        no ``cli_args``, and no ``agent_args``.
 
         ``initial_message`` is accepted for interface compatibility but is
         not used here. Subclasses that bake the prompt into the command line
@@ -84,7 +104,10 @@ class BaseAgent(AgentInterface[AgentConfigT]):
             parts.append(base)
         if self.agent_config.cli_args:
             parts.extend(self.agent_config.cli_args)
-        parts.extend(agent_args)
+        # cli_args arrive already shell-safe; agent_args are raw argv and must be quoted
+        # (see ``quote_agent_args``). ``mngr_claude`` overrides this method but applies the
+        # identical rule via the same helper.
+        parts.extend(quote_agent_args(agent_args))
 
         if not parts:
             raise UserInputError(
@@ -100,7 +123,7 @@ class BaseAgent(AgentInterface[AgentConfigT]):
 
     def _get_agent_dir(self) -> Path:
         """Get the agent's state directory path."""
-        return self.host.host_dir / "agents" / str(self.id)
+        return get_agent_state_dir_path(self.host.host_dir, self.id)
 
     def _get_data_path(self) -> Path:
         """Get the path to the agent's data.json file."""
@@ -140,6 +163,11 @@ class BaseAgent(AgentInterface[AgentConfigT]):
         data = self._read_data()
         cmd = data.get("command")
         return CommandString(cmd) if cmd else CommandString("bash")
+
+    def set_command(self, command: CommandString) -> None:
+        data = self._read_data()
+        data["command"] = str(command)
+        self._write_data(data)
 
     def get_labels(self) -> dict[str, str]:
         data = self._read_data()

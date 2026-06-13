@@ -197,15 +197,15 @@ def parse_host_location_address(s: str) -> HostLocationAddress:
     """Parse a ``[NAME[@HOST[.PROVIDER]]][:PATH]`` string into a :class:`HostLocationAddress`.
 
     Used for any CLI argument that designates "a location on some host" --
-    sources (``mngr create --from``, ``mngr pair``) and targets
-    (``mngr push``, ``mngr pull``).
+    sources (``mngr create --from``, ``mngr pair``), the source/destination of
+    ``mngr rsync``, and the target of ``mngr git push``/``mngr git pull``.
 
     Bare paths (starting with ``/``, ``./``, ``~/``, or ``../``) are recognized
     as a convenience. A bare name like ``foo`` always refers to an agent named
     ``foo``, not a directory; use ``:foo`` to mean a relative directory.
     """
     if s.startswith(("/", "./", "~/", "../")):
-        return HostLocationAddress(path=Path(s))
+        return HostLocationAddress(path=Path(s), has_trailing_path_slash=s.endswith("/") and s != "/")
 
     address_part, path = _split_path_suffix(s)
     if not address_part and path is None:
@@ -214,7 +214,12 @@ def parse_host_location_address(s: str) -> HostLocationAddress:
     agent_str, host_part = _split_at_part(address_part)
     agent = parse_agent_name_or_id(agent_str) if agent_str else None
     host = parse_host_address(host_part) if host_part else None
-    return HostLocationAddress(agent=agent, host=host, path=path)
+    return HostLocationAddress(
+        agent=agent,
+        host=host,
+        path=path,
+        has_trailing_path_slash=path is not None and s.endswith("/"),
+    )
 
 
 # === Internal split helpers ===

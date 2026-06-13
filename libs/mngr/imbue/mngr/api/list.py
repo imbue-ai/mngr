@@ -30,13 +30,13 @@ from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
-from imbue.mngr.errors import BaseMngrError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
 from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
@@ -63,6 +63,11 @@ def _walk_dict_paths(model: type[BaseModel], prefix: tuple[str, ...] = ()) -> li
 
     Used to compute `_AGENT_SCHEMALESS_PATHS` from the AgentDetails type tree
     at module load time -- see the rationale on that constant.
+
+    This is intentionally separate from `utils.model_schema.walk_model_fields`
+    (which enumerates *all* fields for the `--schema` view): this walk yields
+    only dict-typed leaf paths as tuples and has no use for non-dict leaves, so
+    expressing it on the general walker would be more indirect, not less.
     """
     paths: list[tuple[str, ...]] = []
     for name, field in model.model_fields.items():
@@ -178,6 +183,9 @@ class _ListAgentsParams(FrozenModel):
     field_generators: dict[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] = Field(
         default_factory=dict,
     )
+    offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = Field(
+        default_factory=dict,
+    )
 
 
 @log_call
@@ -222,6 +230,12 @@ def list_agents(
                 plugin_name, generators = hook_result
                 field_generators[plugin_name] = generators
 
+        offline_field_generators: dict[str, dict[str, Callable[[DiscoveredAgent, HostDetails], Any]]] = {}
+        for offline_hook_result in mngr_ctx.pm.hook.offline_agent_field_generators():
+            if offline_hook_result is not None:
+                offline_plugin_name, offline_generators = offline_hook_result
+                offline_field_generators[offline_plugin_name] = offline_generators
+
         params = _ListAgentsParams(
             compiled_include_filters=compiled_include_filters,
             compiled_exclude_filters=compiled_exclude_filters,
@@ -229,6 +243,7 @@ def list_agents(
             on_agent=on_agent,
             on_error=on_error,
             field_generators=field_generators,
+            offline_field_generators=offline_field_generators,
         )
 
         if is_streaming:
@@ -674,8 +689,9 @@ def _collect_and_emit_details_for_host(
     _host_details, agent_details_list = provider.get_host_and_agent_details(
         host_ref,
         agent_refs,
-        params.field_generators,
-        lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
+        field_generators=params.field_generators,
+        offline_field_generators=params.offline_field_generators,
+        on_error=lambda source, exc: _handle_listing_error(source, exc, params, result, results_lock),
     )
     for agent_details in agent_details_list:
         # Apply CEL filters if provided
@@ -713,7 +729,7 @@ def _process_host_with_error_handling(
 
     except Exception as e:
         if params.error_behavior == ErrorBehavior.ABORT:
-            if isinstance(e, (MngrError, BaseMngrError)):
+            if isinstance(e, MngrError):
                 raise
             raise MngrError(str(e)) from e
         logger.opt(exception=e).error("Error processing host {}", host_ref.host_id)
@@ -776,6 +792,12 @@ def agent_details_to_cel_context(agent: AgentDetails) -> dict[str, Any]:
     # (host.provider is the documented short form; host.provider_name matches the data type)
     if host_dict is not None and "provider_name" in host_dict:
         host_dict["provider"] = host_dict["provider_name"]
+
+    # Expose labels.project as the bare `project` alias too, mirroring the --project
+    # filter flag and the host.provider alias, so CEL filters/sorts can use either name.
+    # Always set (None when unset), matching how optional scalar fields appear in the dump.
+    labels = result.get("labels")
+    result["project"] = labels.get("project") if isinstance(labels, dict) else None
 
     return result
 

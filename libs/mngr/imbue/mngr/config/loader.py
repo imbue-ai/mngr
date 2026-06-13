@@ -11,15 +11,21 @@ from uuid import uuid4
 import pluggy
 from loguru import logger
 from pydantic import BaseModel
+from pydantic import ValidationError
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.agent_alias_registry import is_agent_alias
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
+from imbue.mngr.config.agent_alias_registry import unregister_agent_alias
 from imbue.mngr.config.agent_config_registry import get_agent_config_class
 from imbue.mngr.config.agent_config_registry import is_agent_config_registered
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import CreateCliOptions
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
@@ -39,10 +45,9 @@ from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
-from imbue.mngr.config.pre_readers import get_user_config_path
-from imbue.mngr.config.pre_readers import load_local_config
-from imbue.mngr.config.pre_readers import load_project_config
+from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
+from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
@@ -84,10 +89,48 @@ _PRESERVED_ALIASES: Final[dict[str, tuple[str, Callable[[str], Any]]]] = {
 }
 
 
+class _FileSettingsSource(FrozenModel):
+    """A TOML settings-file layer for narrowing diagnostics.
+
+    ``scope`` is the :class:`ConfigScope` the file belongs to (which is exactly
+    what ``mngr config set --scope`` accepts) and ``path`` is the resolved file
+    path. The human-readable label is derived from ``scope`` in
+    ``_describe_source`` rather than stored, so the two can't drift.
+    """
+
+    scope: ConfigScope
+    path: Path
+
+
+class _EnvSettingsSource(FrozenModel):
+    """The ``MNGR__*`` environment-variable layer: not a file, so it carries no
+    path and has no ``config set`` scope.
+    """
+
+
+# A settings layer the narrowing guard can attribute a value to. The loader only
+# ever deals with these two; ``--setting`` narrowing is a separate path
+# (``apply_settings_to_config``) that does not use this type.
+_SettingsSource = _FileSettingsSource | _EnvSettingsSource
+
+
+class _NarrowingViolation(FrozenModel):
+    """A single narrowing assignment, with both sides attributed.
+
+    ``assigned_by`` is the higher-precedence layer doing the (narrowing)
+    assignment; ``dropped_from`` is the lower-precedence layer whose value would
+    be silently dropped (``None`` only if no contributing layer could be
+    identified, which should not happen for a real violation).
+    """
+
+    key_path: str
+    assigned_by: _SettingsSource
+    dropped_from: _SettingsSource | None = None
+
+
 def load_config(
     pm: pluggy.PluginManager,
     concurrency_group: ConcurrencyGroup,
-    context_dir: Path | None = None,
     enabled_plugins: Sequence[str] | None = None,
     disabled_plugins: Sequence[str] | None = None,
     is_interactive: bool = False,
@@ -99,14 +142,23 @@ def load_config(
     Precedence (lowest to highest):
     1. Built-in MngrConfig defaults
     2. User config (~/.{root_name}/profiles/<profile_id>/settings.toml)
-    3. Project config (.{root_name}/settings.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
-    4. Local config (.{root_name}/settings.local.toml at context_dir, git root, or MNGR_PROJECT_CONFIG_DIR)
+    3. Project config (.{root_name}/settings.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
+    4. Local config (.{root_name}/settings.local.toml at the git root or MNGR_PROJECT_CONFIG_DIR)
     5. MNGR__* env vars (each ``__``-separated segment after ``MNGR__`` maps to a dotted config
        key; values are JSON-parsed with raw-string fallback) plus the preserved aliases
        ``MNGR_PREFIX``, ``MNGR_HOST_DIR``, and ``MNGR_HEADLESS`` (synthesised into the same form
        via _collect_env_overrides). See docs/concepts/environment_variables.md for the full surface.
     6. ``--setting KEY=VALUE`` CLI overrides (applied later in setup_command_context)
     7. CLI arguments (handled by caller)
+
+    Note: the narrowing guard below runs over layers 2-5 (the config files and
+    env vars) only. It does NOT see the layer-6 ``--setting`` overrides, which
+    are merged afterwards in ``setup_command_context``. ``--setting`` cannot
+    fully resolve until this function has produced the config it extends against
+    (``__extend`` keys resolve against the loaded config), so it deliberately
+    runs after. Consequently ``allow_settings_key_assignment_narrowing`` can only
+    be opted into via a settings file or the ``MNGR__*`` env var, not via
+    ``--setting`` (see the error message and changelog).
 
     MNGR_ROOT_NAME is read before config-file resolution to derive:
     1. Config file paths (where to look for settings files)
@@ -149,28 +201,37 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
-    # Load and merge config files in precedence order (user, project, local).
-    # Narrowing violations -- a higher-precedence layer assigning over a non-
-    # empty aggregate value from a lower-precedence layer -- are collected as
-    # we go, then turned into a single error after all layers are merged (when
-    # the final ``allow_settings_key_assignment_narrowing`` resolves to False).
-    narrowing_violations: list[tuple[str, str]] = []
-    for raw, source_label in (
-        (try_load_toml(get_user_config_path(profile_dir)), "user settings"),
-        (load_project_config(context_dir, root_name, concurrency_group), "project settings"),
-        (load_local_config(context_dir, root_name, concurrency_group), "project local settings"),
-    ):
-        if raw is not None:
-            parsed_layer = _parse_config_with_extends(
-                raw,
-                base_config=config,
-                disabled_plugins=config_disabled_plugins,
-                strict=strict,
-                silent=silent_unknown_fields,
-            )
-            for violation in detect_settings_narrowing(config, parsed_layer):
-                narrowing_violations.append((source_label, violation))
-            config = config.merge_with(parsed_layer)
+    # Read the user/project/local config layers (in precedence order) through
+    # read_config_layers -- the single chokepoint that applies the pytest config
+    # guard -- so a real (non-test) config can never be loaded here during a test
+    # run. The project root is resolved from the cwd's git worktree root (or
+    # MNGR_PROJECT_CONFIG_DIR). Each layer carries its resolved path and its
+    # ``config set --scope`` value so narrowing diagnostics can name the actual
+    # file rather than an opaque layer label.
+    project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
+    loaded_layers = read_config_layers(profile_dir, project_config_dir)
+
+    # Merge config files in precedence order (user, project, local). Narrowing
+    # violations -- a higher-precedence layer assigning over a non-empty aggregate
+    # value from a lower-precedence layer -- are collected as we go, then turned
+    # into a single error after all layers are merged (when the final
+    # ``allow_settings_key_assignment_narrowing`` resolves to False).
+    # ``processed_sources`` lets each violation be attributed to the specific
+    # lower-precedence layer whose value is being dropped.
+    narrowing_violations: list[_NarrowingViolation] = []
+    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    for scope, config_path, raw in loaded_layers:
+        file_source = _FileSettingsSource(scope=scope, path=config_path)
+        parsed_layer = _parse_config_with_extends(
+            raw,
+            base_config=config,
+            disabled_plugins=config_disabled_plugins,
+            strict=strict,
+            silent=silent_unknown_fields,
+        )
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, file_source, processed_sources))
+        config = config.merge_with(parsed_layer)
+        processed_sources.append((file_source, parsed_layer))
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -179,6 +240,7 @@ def load_config(
     # form raise ConfigParseError.
     env_override_raw = _collect_env_overrides(os.environ)
     if env_override_raw:
+        env_source = _EnvSettingsSource()
         parsed_env_layer = _parse_config_with_extends(
             env_override_raw,
             base_config=config,
@@ -186,9 +248,9 @@ def load_config(
             strict=strict,
             silent=silent_unknown_fields,
         )
-        for violation in detect_settings_narrowing(config, parsed_env_layer):
-            narrowing_violations.append(("MNGR__* env vars", violation))
+        narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
         config = config.merge_with(parsed_env_layer)
+        processed_sources.append((env_source, parsed_env_layer))
 
     # Raise on collected narrowing assignments unless the user has opted in.
     # Done before further config_dict mutation so the error surfaces with the
@@ -251,35 +313,10 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # Check whether we're in pytest. The expected way to hit this branch is a
-    # poorly-scoped test whose subprocess mngr picked up the repo's
-    # .mngr/settings.toml because MNGR_ROOT_NAME / MNGR_HOST_DIR aren't pointed
-    # at a tmp directory. The shared plugin test fixtures handle that
-    # scoping; if they aren't available for a given test, use MNGR_ALLOW_PYTEST
-    # as the explicit opt-in instead of stripping PYTEST_CURRENT_TEST or
-    # setting is_allowed_in_pytest=True in the repo config (both dodge the
-    # guard without actually fixing the isolation).
-    if not final_config.is_allowed_in_pytest and "PYTEST_CURRENT_TEST" in os.environ:
-        if os.environ.get("MNGR_ALLOW_PYTEST") != "1":
-            raise ConfigParseError(
-                "Running mngr within pytest is not allowed by the current configuration. "
-                "For an intentional end-to-end test, set MNGR_ALLOW_PYTEST=1. For extra "
-                "safety, also point MNGR_HOST_DIR at a tmp directory so the subprocess "
-                "cannot mutate real mngr state."
-            )
-        # MNGR_ALLOW_PYTEST=1 is the explicit opt-in. We considered requiring
-        # MNGR_HOST_DIR to also be under tempfile.gettempdir() here, but
-        # test_schedule_add.py's local-dev path intentionally runs against the
-        # developer's real ~/.mngr so the subprocess can pick up their Modal
-        # SSH key config, which would trip such a check. MNGR_PREFIX isolation
-        # is enforced by the Modal backend guard (libs/mngr_modal/...:backend.py)
-        # which rejects env names that don't match TEST_ENV_PATTERN during
-        # pytest -- that's the actual leak-prevention gate.
-
     # Resolve project root for use as cwd in pre-command scripts.
     # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
     # directory (containing settings.toml), not the project root.
-    project_root = context_dir or find_git_worktree_root(start=None, cg=concurrency_group)
+    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
 
     # Return MngrContext containing both config and plugin manager
     return MngrContext(
@@ -327,23 +364,97 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _build_narrowing_error(violations: Sequence[tuple[str, str]]) -> ConfigParseError:
+def _collect_layer_narrowing(
+    base: MngrConfig,
+    parsed_layer: MngrConfig,
+    source: _SettingsSource,
+    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
+) -> list["_NarrowingViolation"]:
+    """Detect narrowing of ``base`` by ``parsed_layer`` and attribute each side.
+
+    ``source`` is the layer doing the assignment. The lower-precedence layer
+    whose value is dropped is attributed by re-running ``detect_settings_narrowing``
+    of ``parsed_layer`` against each already-merged layer: because the merge is
+    assign-by-default, the merged base value at any path equals the value written
+    by the highest-precedence layer that set it, so the highest-precedence prior
+    layer that ``parsed_layer`` narrows at a given path is the one whose value is
+    being dropped. Reusing ``detect_settings_narrowing`` here (rather than walking
+    field values directly) keeps the field traversal in one place -- the place the
+    ``PREVENT_GETATTR`` ratchet already accounts for. ``dropped_from`` is ``None``
+    only if no contributing layer is found (should not happen for a real
+    violation, but keeps the diagnostic robust).
+    """
+    violation_paths = detect_settings_narrowing(base, parsed_layer)
+    if not violation_paths:
+        return []
+    # For each already-merged layer (highest precedence first), the set of paths
+    # where ``parsed_layer`` narrows that specific layer.
+    narrowed_paths_by_prior_source = [
+        (prior_source, set(detect_settings_narrowing(prior_layer, parsed_layer)))
+        for prior_source, prior_layer in reversed(processed_sources)
+    ]
+    violations: list[_NarrowingViolation] = []
+    for key_path in violation_paths:
+        dropped_from = next(
+            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
+            None,
+        )
+        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
+    return violations
+
+
+def _display_path(path: Path) -> str:
+    """Render ``path`` with the user's home directory contracted to ``~`` (e.g.
+    ``~/.mngr/profiles/<id>/settings.toml``), falling back to the absolute path
+    when it is not under home. Keeps the narrowing error readable and avoids
+    spelling out the full home path.
+    """
+    home = Path.home()
+    if path.is_relative_to(home):
+        return f"~/{path.relative_to(home)}"
+    return str(path)
+
+
+def _describe_source(source: _SettingsSource) -> str:
+    """Render a settings layer for the narrowing error.
+
+    A TOML file layer is described as ``<scope> settings (<path>) [edit with:
+    mngr config set --scope <scope> ...]``; the ``MNGR__*`` env-var layer is
+    named as such.
+    """
+    match source:
+        case _FileSettingsSource(scope=scope, path=path):
+            scope_flag = scope.value.lower()
+            return (
+                f"{scope_flag} settings ({_display_path(path)}) [edit with: mngr config set --scope {scope_flag} ...]"
+            )
+        case _EnvSettingsSource():
+            return "MNGR__* environment variables"
+
+
+def _build_narrowing_error(violations: Sequence["_NarrowingViolation"]) -> ConfigParseError:
     """Construct the user-facing error raised when a higher-precedence layer
     silently narrows a non-empty aggregate value.
 
-    Lists every offending source-and-key pair, explains how to opt in to the
-    new assign-by-default semantics, points at the ``__extend`` operator for
-    additive opt-out, and warns that the safety net itself is temporary.
+    For each offending key it names both sides -- the file/scope doing the
+    assignment and the file/scope whose value would be dropped -- then explains
+    how to opt in to the new assign-by-default semantics, points at the
+    ``__extend`` operator for additive opt-out, and warns that the safety net
+    itself is temporary.
     """
-    detail_lines = [f"  {source}: {key}" for source, key in violations]
+    detail_lines: list[str] = []
+    for violation in violations:
+        detail_lines.append(f"  {violation.key_path}")
+        detail_lines.append(f"      assigned by {_describe_source(violation.assigned_by)}")
+        if violation.dropped_from is not None:
+            detail_lines.append(f"      would drop a value from {_describe_source(violation.dropped_from)}")
     return ConfigParseError(
         "Settings narrowing detected: a higher-precedence settings layer would assign over "
         "a non-empty list/tuple/dict/set value from a lower-precedence layer, silently "
         "dropping the earlier entries.\n" + "\n".join(detail_lines) + "\n"
         "To opt into this assign-by-default behavior (and silence this error), set "
-        "`allow_settings_key_assignment_narrowing = true` in your settings.toml (or "
-        "MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true, or --setting "
-        "allow_settings_key_assignment_narrowing=true).\n"
+        "`allow_settings_key_assignment_narrowing = true` in one of the settings files above "
+        "(or MNGR__ALLOW_SETTINGS_KEY_ASSIGNMENT_NARROWING=true).\n"
         "To keep the additive behavior for a specific key, use the `__extend` suffix on the "
         'key in the higher-precedence layer (e.g. `env__extend = ["X=5"]`).\n'
         "NOTE: the default for `allow_settings_key_assignment_narrowing` will change to True "
@@ -382,8 +493,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
       raise so the caller picks one canonical spelling.
 
     Always returns a fresh dict, so callers can freely mutate the result
-    (e.g. via ``del`` in ``_check_unknown_fields`` or ``pop`` in
-    ``parse_config``) without affecting the caller's input.
+    (e.g. via ``pop`` in ``parse_config``) without affecting the caller's input.
     """
     result: dict[str, Any] = {}
     seen_normalized: dict[str, str] = {}
@@ -417,7 +527,7 @@ def _normalize_field_keys(raw: dict[str, Any], context: str) -> dict[str, Any]:
     return result
 
 
-def _check_unknown_fields(
+def _drop_unknown_fields(
     raw_config: dict[str, Any],
     model_class: type[BaseModel],
     context: str,
@@ -425,31 +535,34 @@ def _check_unknown_fields(
     strict: bool = True,
     silent: bool = False,
     extra_hint: str | None = None,
-) -> None:
-    """Check for unknown fields in raw_config and either raise or warn.
+) -> dict[str, Any]:
+    """Return ``raw_config`` keeping only fields declared on ``model_class``.
 
-    When strict=True, raises ConfigParseError (used by config set to catch typos).
-    When strict=False, logs a warning and removes the unknown fields so that config files
-    written for newer versions of mngr don't break older versions.
-    When silent=True (and strict=False), suppress the warning entirely. Used by
-    ``mngr plugin add``, where the config is expected to reference plugins that
-    are not yet installed; the warnings are noise that resolve themselves once
-    the install completes.
+    When strict=True (used by ``config set`` to catch typos), raises
+    ConfigParseError on any unknown field. When strict=False, logs a warning and
+    returns a copy with the unknown fields removed, so config files written for
+    newer versions of mngr don't break older versions. When silent=True (and
+    strict=False), suppresses the warning entirely -- used by ``mngr plugin add``,
+    where the config is expected to reference plugins that are not yet installed;
+    the warnings are noise that resolve themselves once the install completes.
+
+    The input dict is left untouched; the returned dict is the one to use (it is
+    the same object when there are no unknown fields).
 
     `extra_hint` is appended to the error/warning message after the field listing
     when there are unknown fields. Used to suggest causes (e.g. a missing plugin).
     """
     known_fields = set(model_class.model_fields.keys())
     unknown = set(raw_config.keys()) - known_fields
-    if unknown:
-        base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
-        full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
-        if strict:
-            raise ConfigParseError(full_msg)
-        if not silent:
-            logger.warning(full_msg)
-        for key in unknown:
-            del raw_config[key]
+    if not unknown:
+        return raw_config
+    base_msg = f"Unknown fields in {context}: {sorted(unknown)}. Valid fields: {sorted(known_fields)}"
+    full_msg = f"{base_msg}\n{extra_hint}" if extra_hint else base_msg
+    if strict:
+        raise ConfigParseError(full_msg)
+    if not silent:
+        logger.warning(full_msg)
+    return {k: v for k, v in raw_config.items() if k not in unknown}
 
 
 def _parse_providers(
@@ -461,7 +574,11 @@ def _parse_providers(
 ) -> dict[ProviderInstanceName, ProviderInstanceConfig]:
     """Parse provider configs using the registry.
 
-    Uses model_construct to bypass validation and explicitly set None for unset fields.
+    Validates each block with ``model_validate`` so raw TOML scalars are coerced
+    to their declared field types (e.g. ``builder = "DEPOT"`` to
+    ``DockerBuilder.DEPOT``, ``allowed_ssh_cidrs = [...]`` to a tuple). Only the
+    keys actually present in the block are recorded in ``model_fields_set``, so
+    per-field config-layer merging works.
     Provider blocks whose plugin is disabled are silently skipped.
     Provider blocks with is_enabled=false whose backend plugin is not installed
     are also skipped, since there is no config class to resolve for a disabled
@@ -506,8 +623,25 @@ def _parse_providers(
             if not silent:
                 logger.warning(msg)
             continue
-        _check_unknown_fields(raw_config, config_class, f"providers.{name}", strict=strict, silent=silent)
-        providers[ProviderInstanceName(name)] = config_class.model_construct(**raw_config)
+        # Drop unknown fields (raising in strict mode), leaving only known fields
+        # for model_validate to coerce. Coercion matters because an uncoerced enum
+        # like ``builder = "DEPOT"`` fails its ``is``-identity check against
+        # ``DockerBuilder.DEPOT``, and an uncoerced nested table like
+        # ``SSHProviderConfig.hosts`` stays a raw dict and crashes with
+        # ``AttributeError: 'dict' object has no attribute ...`` the moment the
+        # backend touches it.
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"providers.{name}", strict=strict, silent=silent
+        )
+        try:
+            providers[ProviderInstanceName(name)] = config_class.model_validate(cleaned_config)
+        except ValidationError as e:
+            # A malformed known field (bad scalar, failed validator, malformed
+            # nested host table, ...) is always fatal: surface it as a clear
+            # parse-time ConfigParseError keyed on the provider block rather than
+            # a raw pydantic ValidationError or a late AttributeError from the
+            # backend.
+            raise ConfigParseError(f"Invalid config for 'providers.{name}': {e}") from e
 
     return providers
 
@@ -605,12 +739,34 @@ def _parse_agent_types(
     # read normalized `plugin` / `parent_type` fields as it walks the chain.
     raw_types = {name: _normalize_field_keys(raw, f"agent_types.{name}") for name, raw in raw_types.items()}
 
+    # A user-defined custom type shadows a plugin-registered alias of the same
+    # name: the user's concrete type wins (mirroring how a registered type
+    # beats an alias at plugin-load time), so drop the colliding alias before
+    # resolving anything. Done as a pre-pass so a shadowed alias is never
+    # consulted when normalizing a parent_type in the loop below.
+    for name in raw_types:
+        if is_agent_alias(name):
+            shadowed_canonical = normalize_agent_type_name(name)
+            unregister_agent_alias(name)
+            if not silent:
+                logger.warning(
+                    "Custom agent type '{}' shadows the built-in alias for '{}'; '{}' now "
+                    "refers to your custom type and no longer resolves to '{}'.",
+                    name,
+                    shadowed_canonical,
+                    name,
+                    shadowed_canonical,
+                )
+
     for name, raw_config in raw_types.items():
         # Custom types with a parent_type should use the parent's config class,
         # since the parent type defines the valid fields (e.g., ClaudeAgentConfig
         # has auto_dismiss_dialogs). Without this, unregistered custom type names
         # fall back to the base AgentTypeConfig which rejects parent-specific fields.
-        parent_type = raw_config.get("parent_type")
+        # A parent_type may itself be an alias (e.g. parent_type = "agy"), so
+        # resolve it to the canonical type before looking up the config class.
+        raw_parent_type = raw_config.get("parent_type")
+        parent_type = normalize_agent_type_name(raw_parent_type) if raw_parent_type is not None else None
         # Walk the parent chain through raw_types to check if this type or
         # any ancestor depends on a disabled plugin.
         if _has_disabled_ancestor(name, raw_types, disabled_plugins):
@@ -640,7 +796,7 @@ def _parse_agent_types(
                 "installed. Otherwise the agent type name or one of the field names may be "
                 "misspelled."
             )
-        _check_unknown_fields(
+        cleaned_config = _drop_unknown_fields(
             raw_config,
             config_class,
             f"agent_types.{name}",
@@ -648,7 +804,11 @@ def _parse_agent_types(
             silent=silent,
             extra_hint=extra_hint,
         )
-        normalized_config = _normalize_tuple_fields_for_construct(raw_config)
+        normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
+        # Persist the alias-resolved parent_type so downstream resolution sees
+        # the canonical type rather than the alias the user wrote.
+        if parent_type is not None:
+            normalized_config["parent_type"] = parent_type
         agent_types[AgentTypeName(name)] = config_class.model_construct(**normalized_config)
 
     return agent_types
@@ -669,8 +829,10 @@ def _parse_plugins(
     for name, raw_config in raw_plugins.items():
         raw_config = _normalize_field_keys(raw_config, f"plugins.{name}")
         config_class = get_plugin_config_class(name)
-        _check_unknown_fields(raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent)
-        plugins[PluginName(name)] = config_class.model_construct(**raw_config)
+        cleaned_config = _drop_unknown_fields(
+            raw_config, config_class, f"plugins.{name}", strict=strict, silent=silent
+        )
+        plugins[PluginName(name)] = config_class.model_construct(**cleaned_config)
 
     return plugins
 
@@ -747,8 +909,8 @@ def _parse_retry_config(raw_retry: dict[str, Any], *, strict: bool = True, silen
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_retry = _normalize_field_keys(raw_retry, "retry")
-    _check_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
-    return RetryConfig.model_construct(**raw_retry)
+    cleaned_retry = _drop_unknown_fields(raw_retry, RetryConfig, "retry", strict=strict, silent=silent)
+    return RetryConfig.model_construct(**cleaned_retry)
 
 
 def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, silent: bool = False) -> LoggingConfig:
@@ -757,8 +919,8 @@ def _parse_logging_config(raw_logging: dict[str, Any], *, strict: bool = True, s
     Uses model_construct to bypass validation and explicitly set None for unset fields.
     """
     raw_logging = _normalize_field_keys(raw_logging, "logging")
-    _check_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
-    return LoggingConfig.model_construct(**raw_logging)
+    cleaned_logging = _drop_unknown_fields(raw_logging, LoggingConfig, "logging", strict=strict, silent=silent)
+    return LoggingConfig.model_construct(**cleaned_logging)
 
 
 def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, CommandDefaults]:

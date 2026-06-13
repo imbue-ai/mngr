@@ -1,0 +1,1194 @@
+name: minds launch-to-first-message
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: 'Commit SHA (or branch / tag) to verify. Empty -> mngr main HEAD at trigger time (matches the scheduled-cron behavior). The build job looks for an existing ToDesktop build for this SHA and reuses it; otherwise it packages a fresh one. Verify always runs against a bundle built from THIS SHA -- no implicit fallback to released or arbitrary URLs.'
+        required: false
+        default: ''
+      skip_slack_flow:
+        description: 'Skip the slack-permission-flow Playwright step.'
+        type: boolean
+        required: false
+        default: false
+      template_ref:
+        description: "forever-claude-template ref (branch / tag / SHA) the agent is created from. Empty -> `main`. Pass the FALLBACK_BRANCH tag (e.g. `v0.3.0`) for the production path, `main` for the user-default path, or a specific SHA for replay. Agent runtime behavior is a function of (minds binary, FCT template); pin both for reproducible replays."
+        required: false
+        default: ''
+      template_url:
+        description: 'Override the FCT git URL (forks). Empty -> https://github.com/imbue-ai/forever-claude-template.'
+        required: false
+        default: ''
+      force:
+        description: 'Bypass the skip-if-unchanged check. Schedule-triggered runs skip when the (mngr main HEAD, FCT main HEAD) pair matches the last green run; dispatch-triggered runs ignore the check entirely.'
+        type: boolean
+        required: false
+        default: false
+  # Twice-daily health check against the heads of both repos: 09:00 PDT
+  # (16:00 UTC) so a morning failure surfaces at the start of the workday,
+  # and 21:00 PDT (04:00 UTC) so an evening failure is caught before the
+  # next workday opens. The cron only fires from the default branch --
+  # this file has to be merged to mngr `main` first for the schedule to
+  # activate (GitHub Actions ignores schedule triggers defined only on
+  # feature branches). The `check_should_run` job below skips the rest
+  # of the pipeline when neither mngr nor FCT main HEAD has moved since
+  # the last green run, so the worst-case "nothing changed" cost is one
+  # free Linux job emitting `should_run=false`.
+  schedule:
+    - cron: '0 16 * * *'  # 09:00 PDT / 08:00 PST
+    - cron: '0 4 * * *'   # 21:00 PDT / 20:00 PST
+
+concurrency:
+  group: mac-runner
+  cancel-in-progress: false
+
+# `contents: read` is the default; `actions: read` is needed by
+# `notify_slack` to fetch the run's `run_started_at` for the duration
+# field in the slack message. actions/cache uses its own injected
+# cache token, not GITHUB_TOKEN, so no write scope is needed.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # Free Linux job that decides whether the rest of the pipeline runs.
+  # Fingerprints the (mngr main HEAD, FCT main HEAD) pair and looks for
+  # an actions/cache entry keyed by that fingerprint. A cache hit means
+  # the last green run already verified this exact pair, so we skip the
+  # expensive jobs. The cache action only checks existence
+  # (`lookup-only: true`), so no download happens here.
+  check_should_run:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      pair_key:   ${{ steps.compute.outputs.pair_key }}
+      mngr_sha:   ${{ steps.compute.outputs.mngr_sha }}
+      fct_sha:    ${{ steps.compute.outputs.fct_sha }}
+    steps:
+      - name: compute (mngr, FCT) pair key
+        id: compute
+        run: |
+          set -euo pipefail
+          # Resolve the mngr ref we're going to verify. workflow_dispatch
+          # passes inputs.commit_sha (possibly empty); fall back to
+          # github.sha which, for schedule, is the default branch HEAD.
+          MNGR_REF='${{ inputs.commit_sha }}'
+          if [[ -z "$MNGR_REF" ]]; then
+            MNGR_REF='${{ github.sha }}'
+          fi
+          # If the input is a branch or tag name (not a 40-char SHA),
+          # resolve it against the mngr repo so the pair key fingerprint
+          # is stable across reruns at the same HEAD.
+          if [[ ! "$MNGR_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            MNGR_SHA=$(git ls-remote 'https://github.com/${{ github.repository }}.git' \
+              "refs/heads/$MNGR_REF" "refs/tags/$MNGR_REF" | head -1 | awk '{print $1}')
+          else
+            MNGR_SHA="$MNGR_REF"
+          fi
+          # Same dance for FCT: dispatch lets you override the ref; cron
+          # falls through to `main`.
+          FCT_REF='${{ inputs.template_ref }}'
+          if [[ -z "$FCT_REF" ]]; then
+            FCT_REF='main'
+          fi
+          FCT_REPO_URL='${{ inputs.template_url }}'
+          if [[ -z "$FCT_REPO_URL" ]]; then
+            FCT_REPO_URL='https://github.com/imbue-ai/forever-claude-template'
+          fi
+          if [[ ! "$FCT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            FCT_SHA=$(git ls-remote "$FCT_REPO_URL" \
+              "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" | head -1 | awk '{print $1}')
+          else
+            FCT_SHA="$FCT_REF"
+          fi
+          if [[ -z "$MNGR_SHA" || -z "$FCT_SHA" ]]; then
+            echo "::error::failed to resolve refs -- MNGR_SHA='$MNGR_SHA' FCT_SHA='$FCT_SHA'"
+            exit 1
+          fi
+          PAIR_KEY=$(printf '%s:%s' "$MNGR_SHA" "$FCT_SHA" | shasum -a 256 | awk '{print $1}')
+          {
+            echo "mngr_sha=$MNGR_SHA"
+            echo "fct_sha=$FCT_SHA"
+            echo "pair_key=$PAIR_KEY"
+          } >> "$GITHUB_OUTPUT"
+      - name: look up marker cache
+        id: marker
+        uses: actions/cache/restore@v4
+        with:
+          # Path is required by the action even with lookup-only; the
+          # file never has to exist locally because we're not restoring.
+          path: /tmp/launch-to-msg-marker.txt
+          # Embed both SHAs directly in the key so `gh cache list`
+          # reveals the green pair without having to download the cache.
+          key: launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}
+          lookup-only: true
+      - name: decide
+        id: decide
+        run: |
+          set -euo pipefail
+          {
+            echo "## Pair-key fingerprint"
+            echo "- mngr: \`${{ steps.compute.outputs.mngr_sha }}\`"
+            echo "- FCT:  \`${{ steps.compute.outputs.fct_sha }}\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ steps.compute.outputs.mngr_sha }}-fct-${{ steps.compute.outputs.fct_sha }}\`"
+            echo "- marker cache-hit: \`${{ steps.marker.outputs.cache-hit }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Skip when the marker cache hit (pair already verified green)
+          # AND the caller didn't pass force=true. Applies to both schedule
+          # and dispatch -- dispatch on an already-green pair is wasted CI;
+          # force=true makes the bypass intent explicit.
+          if [[ '${{ steps.marker.outputs.cache-hit }}' == 'true' \
+             && '${{ inputs.force }}' != 'true' ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "- decision: **skip** (pair already green; set force=true to bypass)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "- decision: **run**" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    needs: [check_should_run]
+    if: needs.check_should_run.outputs.should_run == 'true'
+    # The job's `check for existing ToDesktop build` step short-circuits
+    # `pnpm dist` (the 15-min ToDesktop sign + notarize) when a clean
+    # ready build for this SHA already exists; otherwise it packages
+    # fresh. Verify always consumes the artifact this job produced. The
+    # historic "skip build entirely and verify the released bundle" path
+    # is gone -- it shipped three "green" runs against a stale 0.2.34
+    # bundle that didn't have any of this branch's commits in it.
+    # MUST be macOS: scripts/download-binaries.js uses `xcrun --find git`
+    # for the darwin git bundle, and bundling uv/lima needs the target's
+    # native binary. Linux runners produce ELF binaries that the shipped
+    # .app can't exec on Mac.
+    runs-on: [self-hosted, macOS, minds-runner]
+    # 60 min covers cold-cache install + full pnpm dist that waits on
+    # ToDesktop's per-target cloud build (sign + notarize x64 + arm64).
+    # 25 min was too tight (cache-miss installs grazed the deadline).
+    # 40 min was also too tight (run 26935971928 stalled at "Notarizing
+    # Minds for arm64 (this may take up to 30 minutes) 35%" -- Apple's
+    # notarization service is the long pole and the worst case really is
+    # ~30 min per arch). 60 min absorbs that worst-case for both archs
+    # without leaving the post-failure cancel step needlessly tearing
+    # down builds that just needed a few more minutes.
+    timeout-minutes: 60
+    env:
+      TODESKTOP_ACCESS_TOKEN: ${{ secrets.TODESKTOP_ACCESS_TOKEN }}
+      TODESKTOP_EMAIL:        ${{ secrets.TODESKTOP_EMAIL }}
+      # Resolved relative to pnpm's CWD (apps/minds), not the repo root.
+      MINDS_CLIENT_CONFIG_BUNDLE: imbue/minds/config/envs/production/client.toml
+      MINDS_ROOT_NAME_BUNDLE: minds
+    outputs:
+      app_zip_url: ${{ steps.existing.outputs.url || steps.parse.outputs.url }}
+      build_id:    ${{ steps.existing.outputs.build_id || steps.parse.outputs.build_id }}
+      reused:      ${{ steps.existing.outputs.url != '' }}
+    steps:
+      - name: check ToDesktop secrets
+        run: |
+          missing=0
+          if [[ -z "${TODESKTOP_ACCESS_TOKEN:-}" ]]; then
+            echo "::error::TODESKTOP_ACCESS_TOKEN secret is not set."
+            missing=1
+          fi
+          if [[ -z "${TODESKTOP_EMAIL:-}" ]]; then
+            echo "::error::TODESKTOP_EMAIL secret is not set."
+            missing=1
+          fi
+          if (( missing )); then
+            echo "Add both at Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          echo "TODESKTOP_ACCESS_TOKEN length=${#TODESKTOP_ACCESS_TOKEN}, TODESKTOP_EMAIL length=${#TODESKTOP_EMAIL}"
+      - name: checkout @ ${{ inputs.commit_sha || github.sha }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.15.0'
+      - name: setup pnpm
+        run: |
+          npm install -g pnpm@10.33.4
+          pnpm --version
+      - name: setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: latest
+      - name: pnpm install
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+      - name: read ToDesktop APP_ID from todesktop.js
+        working-directory: apps/minds
+        run: |
+          APP_ID=$(node -e "console.log(require('./todesktop.js').id)")
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+      - name: resolve full commit_sha (input may be a branch/tag)
+        id: sha
+        working-directory: apps/minds
+        run: |
+          FULL_SHA=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "full_sha=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved input ${{ inputs.commit_sha || github.sha }} -> $FULL_SHA"
+      - name: check for existing ToDesktop build matching this commit
+        id: existing
+        working-directory: apps/minds
+        env:
+          TARGET_SHA: ${{ steps.sha.outputs.full_sha }}
+        run: |
+          set -o pipefail
+          # ToDesktop returns versionControlInfo.commitId on each build via
+          # `todesktop builds --format json`. If a clean succeeded build
+          # exists for this SHA we skip the 15+ min pnpm dist by reusing
+          # its arm64 .zip URL.
+          mkdir -p resources  # todesktop config validation requires extraResources dir
+          # The CLI emits ANSI cursor-control escapes (`\x1b[2K\x1b[1A...`)
+          # to stdout *before* the JSON payload, so a naive redirect
+          # corrupts the file and the Python matcher used to silently
+          # fall through to "no match" -- causing every retry to redo
+          # the 15+ min build. Strip ANSI before writing. Stderr (CLI
+          # version-out-of-date banner) is routed to a separate file.
+          pnpm exec todesktop builds --format json --count 30 --exit 2>/tmp/td-builds.err \
+            | perl -pe 's/\x1b\[[0-9;]*[a-zA-Z]//g' > /tmp/td-builds.json
+          # Python emits the diagnostics + the chosen <url>\t<build_id> pair
+          # to stdout in a single deterministic format the shell parses below.
+          MATCH=$(python3 -c '
+          import json, os, sys
+          builds = json.load(open("/tmp/td-builds.json"))
+          if not isinstance(builds, list):
+              print(f"FATAL: unexpected response shape: {type(builds).__name__}", file=sys.stderr)
+              sys.exit(1)
+          target = os.environ["TARGET_SHA"]
+          sha_hits = [b for b in builds if (b.get("versionControlInfo") or {}).get("commitId") == target]
+          print(f"scanned {len(builds)} builds; {len(sha_hits)} match {target[:10]}", file=sys.stderr)
+          for b in sha_hits:
+              vci = b.get("versionControlInfo") or {}
+              status = b.get("status")
+              dirty = vci.get("hasUncommittedChanges")
+              # The arm64 .zip URL lives under mac.artifactDownloads.zip.arm64.url
+              # in current ToDesktop responses. (Earlier CLI versions exposed
+              # mac.zip.arm64.url directly; check both layouts.)
+              mac = b.get("mac") or {}
+              zip_node = (mac.get("artifactDownloads") or {}).get("zip") or mac.get("zip") or {}
+              arm = zip_node.get("arm64") if isinstance(zip_node, dict) else None
+              url = arm.get("url") if isinstance(arm, dict) else None
+              # Prefer the build id from standardUniversalDownloadUrl
+              # ("https://.../builds/<id>") -- it is the human-readable id
+              # the dashboard shows; the bare "id" field is a UUID.
+              bid = (b.get("standardUniversalDownloadUrl") or "").rstrip("/").split("/")[-1] or b.get("id", "")
+              print(f"  candidate {bid}: status={status} dirty={dirty} arm64.url={bool(url)}", file=sys.stderr)
+              if status not in ("succeeded", "ready"): continue
+              if dirty:                                 continue
+              if not url:                               continue
+              print(f"{url}\t{bid}")
+              sys.exit(0)
+          ')
+          if [[ -n "$MATCH" ]]; then
+            URL="${MATCH%%$'\t'*}"
+            BID="${MATCH##*$'\t'}"
+            echo "url=$URL"      >> "$GITHUB_OUTPUT"
+            echo "build_id=$BID" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing build $BID for commit $TARGET_SHA"
+            echo "  -> $URL"
+          else
+            echo "No reusable build matches $TARGET_SHA; will build fresh."
+          fi
+      - name: pnpm dist (build + upload to ToDesktop)
+        id: dist
+        if: steps.existing.outputs.url == ''
+        # 45 min covers a healthy cold build (~15-25 min observed) plus
+        # tail latency on Apple's notarization service. When ToDesktop's
+        # signing wedges (silent stall mid-notarize, e.g. run
+        # 27310529771), failing here at 45 surfaces the wedge instead of
+        # consuming the job-level 60-min budget and starving the cancel
+        # step of time to tear the build down.
+        timeout-minutes: 45
+        working-directory: apps/minds
+        # build.js::bundleLatchkey smoke-tests the bundled CLI via
+        # `latchkey --version`. Latchkey tries to read/init an encryption
+        # key from the macOS keychain at startup; on the headless CI
+        # runner the keychain is locked and the call exits 1. Provide a
+        # throwaway random key just for the smoke test -- the shipped
+        # .app uses the end-user's own keychain at runtime, so the
+        # value chosen here never leaves CI.
+        env:
+          LATCHKEY_ENCRYPTION_KEY: ci-throwaway-build-smoketest-key-not-used-at-runtime
+        run: |
+          set -o pipefail
+          # ToDesktop's cloud builder fetches uv/restic/etc from
+          # github.com/<owner>/releases at sign time; transient HTTP 504s
+          # from GitHub's release CDN have killed several runs (e.g.
+          # 27123653171, 27124328081, 27124543177). Retry up to 3 times
+          # so a single 504 doesn't waste a 20-min build slot.
+          attempt=1
+          max_attempts=3
+          while true; do
+            if pnpm dist 2>&1 | tee /tmp/minds-dist.log; then
+              break
+            fi
+            if [[ $attempt -ge $max_attempts ]]; then
+              echo "::error::pnpm dist failed after $max_attempts attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "::warning::pnpm dist failed (attempt $((attempt - 1)) of $max_attempts); retrying in 30s"
+            sleep 30
+          done
+      - name: parse build URL
+        id: parse
+        if: steps.existing.outputs.url == ''
+        run: |
+          # ToDesktop prints "Retrieved build ID: <id>" early in the upload
+          # step. Construct the arm64 .zip URL from it — pnpm dist's final
+          # "Build complete!" line is the dashboard URL, not a direct artifact.
+          BUILD_ID=$(grep -oE 'Retrieved build ID: [a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "::error::could not extract build ID from /tmp/minds-dist.log. Check the uploaded build-log artifact."
+            exit 1
+          fi
+          URL="https://dl.todesktop.com/${APP_ID}/builds/${BUILD_ID}/mac/zip/arm64"
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+          echo "url=$URL"           >> "$GITHUB_OUTPUT"
+      - name: emit build summary
+        if: always()
+        run: |
+          if [[ -n "${{ steps.existing.outputs.url }}" ]]; then
+            URL='${{ steps.existing.outputs.url }}'
+            BID='${{ steps.existing.outputs.build_id }}'
+            SRC='reused (no rebuild needed)'
+          else
+            URL='${{ steps.parse.outputs.url }}'
+            BID='${{ steps.parse.outputs.build_id }}'
+            SRC='freshly built'
+          fi
+          {
+            echo "## Build result ($SRC)"
+            echo ""
+            echo "- commit: \`${{ inputs.commit_sha || github.sha }}\` (resolved \`${{ steps.sha.outputs.full_sha }}\`)"
+            echo "- build_id: \`${BID:-<none>}\`"
+            echo "- url: ${URL:-<none>}"
+            echo "- dashboard: https://app.todesktop.com/apps/${APP_ID}/builds/${BID}"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: cancel ToDesktop build if workflow cancelled or build job failed
+        # Fires on user-cancelled workflow or on pnpm-dist failure once an
+        # upload has happened. The buildId is only known after the upload
+        # step prints "Retrieved build ID: ...", which lives in
+        # /tmp/minds-dist.log; if the pre-upload phase failed there will
+        # be no id to cancel and this is a clean no-op.
+        if: ${{ always() && (cancelled() || failure()) && steps.existing.outputs.url == '' }}
+        run: |
+          BUILD_ID=$(grep -oE 'Retrieved build ID: [a-z0-9]+' /tmp/minds-dist.log 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "no build ID in /tmp/minds-dist.log -- ToDesktop upload didn't happen, nothing to cancel"
+            exit 0
+          fi
+          echo "cancelling orphaned ToDesktop build $BUILD_ID"
+          bash apps/minds/scripts/cancel-todesktop-build.sh "$APP_ID" "$BUILD_ID" || {
+            echo "::warning::cancel-todesktop-build.sh failed (build may have already completed/failed); see logs"
+            exit 0
+          }
+      - name: upload build log
+        if: always() && steps.existing.outputs.url == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: minds-dist-log-${{ github.run_id }}
+          path: /tmp/minds-dist.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+  launch_to_msg:
+    needs: [check_should_run, build]
+    # Skip when `check_should_run` told us to short-circuit (pair
+    # unchanged) AND only run when build actually succeeded -- on build
+    # failure this job is skipped; the build job's own `upload build log`
+    # step uses always() so the dist log artifact is preserved either way.
+    if: needs.check_should_run.outputs.should_run == 'true' && needs.build.result == 'success'
+    runs-on: [self-hosted, macOS, minds-runner]
+    timeout-minutes: 40
+    outputs:
+      # Three per-run metrics surfaced to the slack notification. The
+      # e2e prints `[ci-metric] <key>=<float>` lines on stdout as each
+      # value becomes known; the `extract ci-metrics` step greps the
+      # tee'd log and emits whichever values were captured before the
+      # run finished (so a partial failure still surfaces the prefix
+      # it got to).
+      launch_to_ready: ${{ steps.timings.outputs.launch_to_ready }}
+      w1_create:       ${{ steps.timings.outputs.w1_create }}
+      w2_create:       ${{ steps.timings.outputs.w2_create }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: verify ANTHROPIC_API_KEY injected
+        run: |
+          if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "ANTHROPIC_API_KEY is empty — secret not reaching the runner"; exit 1
+          fi
+          echo "ANTHROPIC_API_KEY present, length=${#ANTHROPIC_API_KEY}"
+      - name: setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: latest
+      - name: setup Python via uv
+        run: uv python install 3.12
+      - name: install minds workspace + playwright python
+        run: |
+          uv sync --package minds --frozen
+          uv run --package minds python -c "from playwright.async_api import async_playwright; print('playwright imports OK')"
+      - name: resolve build URL
+        id: url
+        run: |
+          # Build always runs (commit_sha is required), so its output is
+          # the only source. The historic "no inputs -> latest released"
+          # fallback is gone: it silently tested infra, not code, and
+          # shipped three "green" runs against a stale released bundle.
+          URL='${{ needs.build.outputs.app_zip_url }}'
+          REUSED='${{ needs.build.outputs.reused }}'
+          if [[ -z "$URL" ]]; then
+            echo "::error::build job did not produce a bundle URL. Inspect minds-dist-log-${{ github.run_id }}."
+            exit 1
+          fi
+          if [[ "$REUSED" == "true" ]]; then
+            SRC='reused build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
+          else
+            SRC='fresh build (commit ${{ inputs.commit_sha || github.sha }}, build_id ${{ needs.build.outputs.build_id }})'
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Verifying: $URL"
+          echo "Source: $SRC"
+          {
+            echo "## Verifying"
+            echo ""
+            echo "- URL: $URL"
+            echo "- Source: $SRC"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: precheck runner disk space (need >=200GB free for Lima diffdisks)
+        # Lima allocates up to 100GB per VM as a sparse diffdisk. We provision
+        # at least two VMs per run (W1 + W2); without ~200GB free the second
+        # boot fails with "no space left on device" 15 min into the test --
+        # surface that here so the operator gets a fast, actionable error.
+        # See runs 27060995662, 27061606544, 27062222443 for the symptom.
+        run: |
+          AVAIL_KB=$(df -k "$HOME" | awk 'NR==2 {print $4}')
+          AVAIL_GB=$((AVAIL_KB / 1024 / 1024))
+          echo "Available on $HOME: ${AVAIL_GB}GB"
+          df -h "$HOME" /
+          if [[ "$AVAIL_GB" -lt 200 ]]; then
+            echo "::error::runner disk has only ${AVAIL_GB}GB free; Lima diffdisks need ~100GB each. Free space (ToDesktop builds in ~/actions-runner/_work, npm/uv caches, etc.) before retrying."
+            exit 1
+          fi
+
+      - name: reset to clean state and install fresh app
+        run: bash apps/minds/scripts/mac-runner-reset.sh "${{ steps.url.outputs.url }}"
+
+      - name: seed lima image-cache sha256.digest marker
+        # Without this marker file, lima 2.0.3 falls back to HEAD-validating
+        # the source URL on every boot. When cloud.debian.org is unreachable
+        # from the runner (as observed in runs 27226429762, 27229065721),
+        # lima logs "Using cache" but silently skips materializing
+        # ~/.lima/<vm>/basedisk, then fatals. With the marker in place lima
+        # trusts the cached data and proceeds straight to basedisk creation
+        # (verified in run 27231554631: lima READY at 12:54 with the seeded
+        # marker, vs fatal at 12:36 without).
+        run: |
+          set +e
+          CACHE_ROOT="$HOME/Library/Caches/lima/download/by-url-sha256"
+          for CACHE_DIR in "$CACHE_ROOT"/*/; do
+            [ -d "$CACHE_DIR" ] || continue
+            DATA="$CACHE_DIR/data"
+            DIGEST_FILE="$CACHE_DIR/sha256.digest"
+            [ -f "$DATA" ] || continue
+            [ -f "$DIGEST_FILE" ] && continue  # already present
+            HASH=$(shasum -a 256 "$DATA" | awk '{print $1}')
+            [ -n "$HASH" ] || continue
+            echo "sha256:$HASH" > "$DIGEST_FILE"
+            echo "seeded $DIGEST_FILE -> sha256:$HASH"
+          done
+          true
+
+      - name: probe debian-image reachability + lima cache state
+        # Two consecutive runs (27226429762, 27229065721) failed with
+        # TLS-handshake-timeout to cloud.debian.org from this runner,
+        # followed by lima logging "Using cache" and then fataling on
+        # "basedisk: no such file or directory". Cache file itself is
+        # intact (verified run 27229383007). Now probe multiple endpoints
+        # with longer timeouts + real GETs to see whether ANY Debian
+        # cloud-image source is reachable from the runner, so we know
+        # if the right fix is (a) a different mirror URL, (b) /etc/hosts
+        # override, or (c) lima cache-fallback workaround.
+        run: |
+          set +e
+          IMG="debian-12-genericcloud-arm64-20260601-2496.qcow2"
+          echo "=== DNS resolution:"
+          for HOST in cloud.debian.org cdimage.debian.org saimei.ftp.acc.umu.se mirrors.kernel.org cdn-fastly.deb.debian.org; do
+            printf "  %-40s -> " "$HOST"
+            dig +short +tries=1 +time=3 "$HOST" 2>&1 | head -1 || echo "(dig fail)"
+          done
+          echo
+          echo "=== HEAD + first-byte GET attempts (30s timeout each):"
+          for URL in \
+            "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://cdimage.debian.org/cdimage/cloud/bookworm/20260601-2496/$IMG" \
+            "https://saimei.ftp.acc.umu.se/cloud-images/cloud/bookworm/20260601-2496/$IMG" \
+            "https://mirrors.kernel.org/debian-cloud-images/bookworm/20260601-2496/$IMG" \
+            "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"; do
+            echo "--- $URL"
+            HEAD_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sSI "$URL" 2>&1)
+            HEAD_RC=$?
+            echo "    HEAD rc=$HEAD_RC: $(echo "$HEAD_OUT" | head -1)"
+            if [[ "$HEAD_RC" -eq 0 ]]; then
+              # Try to fetch the first 100KB to verify the data path actually works.
+              GET_OUT=$(/opt/homebrew/opt/curl/bin/curl --max-time 30 -sS -o /tmp/probe-body -w "%{http_code} %{size_download}b in %{time_total}s\n" -H "Range: bytes=0-102399" "$URL" 2>&1)
+              echo "    GET rc=$? : $GET_OUT"
+              rm -f /tmp/probe-body
+            fi
+          done
+          echo
+          echo "=== plain TCP connectivity (nc -z, 5s timeout):"
+          for HP in cloud.debian.org:443 cdimage.debian.org:443 mirrors.kernel.org:443 github.com:443; do
+            HOST="${HP%%:*}"; PORT="${HP##*:}"
+            printf "  %-40s : " "$HP"
+            nc -z -G 5 -w 5 "$HOST" "$PORT" 2>&1 && echo "open" || echo "closed/timeout"
+          done
+          echo
+          echo "=== lima cache state for the Debian URL:"
+          CACHE_DIR="$HOME/Library/Caches/lima/download/by-url-sha256/8774030760d00b6458319cdbb37dce5d0a878cde994448674bd9f3e6eca6e761"
+          if [[ -d "$CACHE_DIR" ]]; then
+            ls -la "$CACHE_DIR"
+            if [[ -f "$CACHE_DIR/data" ]]; then
+              file "$CACHE_DIR/data" | head -1
+              stat -f 'size=%z' "$CACHE_DIR/data"
+            fi
+          else
+            echo "(cache dir absent)"
+          fi
+          echo
+          echo "=== installed lima version (bundled):"
+          /Applications/Minds.app/Contents/Resources/lima/bin/limactl --version 2>&1 || true
+          true  # never fail the step itself
+
+      - name: ensure socat (slack mock TLS terminator)
+        run: |
+          for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            [[ -x "$BREW" ]] && export PATH="$(dirname "$BREW"):$PATH" && break
+          done
+          if ! command -v socat >/dev/null; then
+            brew install socat
+          fi
+          (socat -V 2>&1 || true) | head -1 || true
+          for D in /opt/homebrew/bin /usr/local/bin; do
+            if [[ -d "$D" ]]; then echo "$D" >> "$GITHUB_PATH"; fi
+          done
+
+      - name: install Google Chrome + prime latchkey browser config
+        # The bundled latchkey's "ensure-browser" iterates four sources
+        # in order: existing-config, system-browser, existing-playwright-
+        # browser, download-playwright-browser. The first two are pure
+        # JS and need no playwright internals; the last two call into
+        # playwright-core deep imports (lib/server/registry, lib/zip
+        # Bundle) that the .app's bundled playwright-core does NOT ship
+        # -- those imports fail with "Browser-based features are not
+        # available in the standalone latchkey binary" (see task #97).
+        # Installing Google Chrome.app lets the "system-browser" source
+        # succeed first and skips the broken sources entirely. After
+        # this the agent's chat panel can complete the Slack OAuth
+        # round-trip when the user clicks Approve in the requests
+        # panel.
+        run: |
+          set -euo pipefail
+          for BREW in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            [[ -x "$BREW" ]] && export PATH="$(dirname "$BREW"):$PATH" && break
+          done
+          if [[ ! -d /Applications/Google\ Chrome.app ]]; then
+            brew install --cask google-chrome
+          fi
+          # Sanity check + write browser.json so future runs hit
+          # existing-config and skip the system-browser probe.
+          MINDS_ELECTRON_EXEC_PATH=/Applications/Minds.app/Contents/MacOS/Minds \
+            /Applications/Minds.app/Contents/Resources/latchkey/bin/latchkey ensure-browser
+
+      - name: resolve FCT template ref to a full SHA
+        # template_ref is required at the dispatch level (branch / tag /
+        # SHA accepted). Resolve to a full SHA so the run record names
+        # the exact FCT commit the agent was created from; otherwise a
+        # branch ref like `pilot` would silently drift between runs
+        # the same way the empty commit_sha trap did.
+        id: fct_sha
+        env:
+          FCT_REPO_URL: ${{ inputs.template_url || 'https://github.com/imbue-ai/forever-claude-template' }}
+          FCT_REF:      ${{ inputs.template_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          # `git ls-remote` returns "<sha>\t<full-ref>"; first line for
+          # branch / tag refs, the literal SHA itself when FCT_REF is
+          # already a 40-char SHA.
+          if [[ "$FCT_REF" =~ ^[a-f0-9]{40}$ ]]; then
+            FCT_SHA="$FCT_REF"
+          else
+            FCT_SHA=$(git ls-remote --refs "$FCT_REPO_URL" "$FCT_REF" "refs/heads/$FCT_REF" "refs/tags/$FCT_REF" 2>/dev/null | awk '{print $1; exit}')
+            if [[ -z "$FCT_SHA" ]]; then
+              echo "::error::could not resolve FCT ref '$FCT_REF' against $FCT_REPO_URL"
+              exit 1
+            fi
+          fi
+          echo "sha=$FCT_SHA" >> "$GITHUB_OUTPUT"
+          {
+            echo "## FCT template"
+            echo ""
+            echo "- repo: \`$FCT_REPO_URL\`"
+            echo "- ref input: \`$FCT_REF\`"
+            echo "- resolved SHA: \`$FCT_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "FCT $FCT_REPO_URL @ $FCT_REF -> $FCT_SHA"
+
+      - name: launch-to-msg + slack flow (Python)
+        env:
+          SKIP_SLACK_FLOW:    ${{ inputs.skip_slack_flow && '1' || '0' }}
+          # Drive a second workspace + cross-workspace follow-up pings as
+          # part of the same end-to-end run. Reuses the single mac-runner
+          # session for depth rather than spinning a separate workflow per
+          # scenario.
+          WORKSPACE_COUNT:    "2"
+          # Pin the FCT ref the binary creates against to the `template_ref`
+          # dispatch input. Without this, minds falls back to
+          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
+          # workflow_dispatch input says, so a `template_ref=main` run silently
+          # exercises v0.2.35 instead.
+          # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
+          # in templates._operator_workspace_default (an end-user `minds run` ignores
+          # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
+          # We pass the branch / tag name (not the resolved SHA) because the
+          # binary's `git clone --branch <ref>` only accepts branch names and
+          # tags. The resolved SHA is still recorded in the GHA step summary
+          # for audit. Moving refs (e.g. `main`) thus float between runs --
+          # the trade-off is "must clone-able" vs "must be byte-identical".
+          MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
+          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref || 'main' }}
+        run: |
+          # pipefail is REQUIRED: without it, the pipeline below exits
+          # with tee's status (always 0), so an e2e failure (exit 1) is
+          # silently masked and GHA reports the step as success. That
+          # caused run 26850735596 to be marked completed/success despite
+          # a real Lima provisioning failure -- the only signal was 5
+          # screenshots instead of the usual 26-28.
+          set -o pipefail
+          # Tee stdout+stderr to a file so the e2e script's structured
+          # output (loguru lines: phase=, kick attempts, navigation
+          # debug) is preserved in the artifact alongside the daemon
+          # logs. GHA's own console log expires; the artifact zip is
+          # what survives for post-mortem.
+          mkdir -p /tmp/launch-to-msg-logs
+          uv run --package minds python apps/minds/scripts/launch_to_msg_e2e.py 2>&1 \
+            | tee /tmp/launch-to-msg-logs/e2e-stdout.log
+
+      - name: extract ci-metrics
+        id: timings
+        if: always()
+        # The e2e prints `[ci-metric] <key>=<float>` lines as each value
+        # becomes known: launch_to_ready_s right after backend ready,
+        # w1_create_s after W1's create flow lands DONE, w2_create_s after
+        # W2's. Grepping is robust to partial runs -- a failure mid-W2
+        # still emits launch_to_ready and w1_create.
+        run: |
+          log=/tmp/launch-to-msg-logs/e2e-stdout.log
+          for k in launch_to_ready_s w1_create_s w2_create_s; do
+            v=$(grep -oE "${k}=[0-9.]+" "$log" 2>/dev/null | tail -1 | cut -d= -f2 || true)
+            echo "${k%_s}=${v:-}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: probe agent VM + container state on failure
+        if: failure()
+        # When the e2e fails after agent creation reached DONE (e.g. chat-URL
+        # recovery loop didn't resolve), we need to know why mngr_forward
+        # can't reach the agent's system_interface. Probe the lima VM and the
+        # docker container inside it for service / network state.
+        run: |
+          set +e
+          LIMA=/Applications/Minds.app/Contents/Resources/lima/bin/limactl
+          mkdir -p /tmp/launch-to-msg-logs
+          {
+            echo "=== limactl list ==="
+            "$LIMA" list 2>&1
+            VM=$("$LIMA" list -q 2>/dev/null | head -1)
+            if [ -z "$VM" ]; then
+              echo "(no lima VM)"
+              exit 0
+            fi
+            echo
+            echo "=== VM: $VM ==="
+            echo "=== docker ps inside VM ==="
+            "$LIMA" shell "$VM" -- sudo docker ps -a 2>&1 | head -20
+            CID=$("$LIMA" shell "$VM" -- sudo docker ps -q 2>/dev/null | head -1)
+            if [ -z "$CID" ]; then
+              echo "(no docker container -- pilot in-VM provisioning path)"
+              echo
+              echo "=== tmux sessions inside VM (root socket) ==="
+              "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-sessions 2>&1 | head -10
+              echo
+              for win in $("$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+                echo "--- tmux capture-pane minds-system-services:$win ---"
+                "$LIMA" shell "$VM" -- sudo tmux -S /tmp/tmux-0/default capture-pane -t "minds-system-services:$win" -p -S -300 2>&1 | tail -40
+                echo
+              done
+              echo "=== TEST: directly invoke installed CLIs as root (replicates SIGILL trigger) ==="
+              "$LIMA" shell "$VM" -- sudo bash -c '
+                echo "--- which mngr / system-interface ---"
+                which mngr system-interface 2>&1
+                echo "--- mngr --version (catches SIGILL on mngr CLI startup) ---"
+                mngr --version 2>&1 || echo "rc=$?"
+                echo "--- system-interface --help (catches SIGILL on system_interface startup) ---"
+                system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- /mngr/code/.venv/bin/system-interface --help (sync-installed copy) ---"
+                /mnt/lima-mngr-*/code/.venv/bin/system-interface --help 2>&1 | head -10 || echo "rc=$?"
+                echo "--- python -c import paramiko (in mngr tool venv) ---"
+                MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+                if [ -n "$MNGR_PY" ]; then
+                  echo "mngr python: $MNGR_PY"
+                  "$MNGR_PY" -c "import paramiko; print(\"paramiko OK\")" 2>&1 || echo "rc=$?"
+                fi
+              ' 2>&1 | tail -25
+              echo
+              echo "=== curl system_interface (port 1234) from VM ==="
+              "$LIMA" shell "$VM" -- curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:1234/health 2>&1 | head -5
+              echo
+              echo "=== ps aux in VM ==="
+              "$LIMA" shell "$VM" -- sudo ps auxf 2>&1 | grep -iE "bootstrap|system|web-server|uv run|tmux" | head -30
+              echo
+              echo "=== bootstrap.log (if present) ==="
+              "$LIMA" shell "$VM" -- sudo find /var/log /tmp /mngr -name 'bootstrap*' -type f 2>/dev/null | head -5
+              "$LIMA" shell "$VM" -- sudo bash -c 'tail -40 /var/log/bootstrap*.log /tmp/bootstrap*.log /mngr/bootstrap*.log 2>/dev/null' | head -50
+              echo
+              echo "=== mngr forward host-side reach via SSH (port 8421) ==="
+              curl -s -m 3 -o /dev/null -w 'http_code=%{http_code} time=%{time_total}\n' http://localhost:8421/ 2>&1
+              exit 0
+            fi
+            echo
+            echo "=== container: $CID ==="
+            echo "=== docker exec ss -tlnp ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ss -tlnp 2>&1 | head -30
+            echo
+            echo "=== tmux list-sessions inside container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-sessions 2>&1 | head -20
+            echo
+            echo "=== tmux capture-pane svc-system_interface ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t svc-system_interface -p 2>&1 | tail -40
+            echo
+            echo "=== tmux list-windows on minds-system-services ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services 2>&1 | head -40
+            echo
+            echo "=== tmux capture-pane on each service window ==="
+            for win in $("$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux list-windows -t minds-system-services -F '#{window_name}' 2>/dev/null); do
+              echo "--- $win ---"
+              "$LIMA" shell "$VM" -- sudo docker exec "$CID" tmux capture-pane -t "minds-system-services:$win" -p 2>&1 | tail -25
+              echo
+            done
+            echo "=== services.toml ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" cat /mngr/code/services.toml 2>&1 | head -60
+            echo
+            echo "=== bootstrap log ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" find /var/log /tmp /mngr -name "bootstrap*" -type f 2>/dev/null | head -5
+            echo
+            echo "=== container arch + cpu features ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              echo "uname -m: $(uname -m)"
+              echo "dpkg arch: $(dpkg --print-architecture)"
+              python3 -c "import platform; print(\"python platform:\", platform.machine(), platform.processor())"
+              echo "--- cpuinfo (features) ---"
+              grep -E "^(processor|Features|CPU implementer|CPU part|CPU variant|model name)" /proc/cpuinfo | head -10
+            ' 2>&1 | tail -15
+            echo
+            echo "=== VM lima cpuinfo (host the docker container runs on) ==="
+            "$LIMA" shell "$VM" -- bash -c 'uname -m; grep -E "^(processor|Features|CPU implementer|CPU part|model name)" /proc/cpuinfo | head -10' 2>&1 | tail -12
+            echo
+            echo "=== TEST: bisect paramiko import inside agent container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" bash -c '
+              MNGR_PY=$(head -1 $(which mngr 2>/dev/null) 2>/dev/null | sed "s|^#!||")
+              if [ -z "$MNGR_PY" ]; then echo "(mngr not installed)"; exit 0; fi
+              echo "mngr python: $MNGR_PY"
+              for stmt in \
+                "import sys; print(sys.version)" \
+                "import cryptography; print(cryptography.__version__)" \
+                "from cryptography.hazmat.bindings._rust import openssl" \
+                "from cryptography.hazmat.backends.openssl.backend import backend" \
+                "import bcrypt" \
+                "import nacl.bindings" \
+                "import cffi" \
+                "import paramiko" \
+                "import pyinfra"; do
+                echo "--- $stmt ---"
+                "$MNGR_PY" -c "$stmt; print(\"OK\")" 2>&1 || echo "rc=$?"
+              done
+            ' 2>&1 | tail -40
+            echo
+            echo "=== /var/log/cloud-init-output.log tail (VM) ==="
+            "$LIMA" shell "$VM" -- tail -40 /var/log/cloud-init-output.log 2>&1 || true
+            echo
+            echo "=== curl localhost:1234 from container (system_interface default port) ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" curl -s -m 3 http://localhost:1234/health 2>&1 | head -5
+            echo
+            echo "=== ps inside container ==="
+            "$LIMA" shell "$VM" -- sudo docker exec "$CID" ps auxf 2>&1 | head -40
+          } > /tmp/launch-to-msg-logs/agent-probe.log 2>&1
+          cat /tmp/launch-to-msg-logs/agent-probe.log
+
+      - name: collect screenshots + diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts
+          # Screenshots from BOTH the bash phase (launch-and-verify.sh +
+          # first-message-verify.sh via `screencapture -x`) and the
+          # Playwright phase (drive-slack-ci.js via `page.screenshot`).
+          # Numbered 00..12 so they sort in flow order in the GH UI.
+          if [ -d /tmp/launch-to-msg-screenshots ]; then
+            cp -R /tmp/launch-to-msg-screenshots artifacts/screenshots 2>/dev/null || true
+          fi
+          # Diagnostic logs (also useful on success for tuning).
+          [ -d /tmp/launch-to-msg-logs ] && cp -R /tmp/launch-to-msg-logs artifacts/ || true
+          [ -d "$HOME/.minds/logs" ] && cp -R "$HOME/.minds/logs" artifacts/ || true
+          [ -d "$HOME/.minds/events" ] && cp -R "$HOME/.minds/events" artifacts/ || true
+          [ -d "$HOME/.minds/mngr" ] && cp -R "$HOME/.minds/mngr"/*/events artifacts/agent-events 2>/dev/null || true
+          log show --process Minds --last 5m 2>/dev/null > artifacts/macos-console.log || true
+          ls -la "$HOME/.minds" > artifacts/minds-dir-listing.txt 2>&1 || true
+          [ -f /tmp/minds-electron.log ] && cp /tmp/minds-electron.log artifacts/ || true
+          [ -d /tmp/slack-mock ] && cp -R /tmp/slack-mock artifacts/ 2>/dev/null || true
+          # Latchkey gateway state (encryption_key excluded by directory selection).
+          if [ -d "$HOME/.minds/latchkey" ]; then
+            mkdir -p artifacts/latchkey
+            cp -R "$HOME/.minds/latchkey/mngr_latchkey" artifacts/latchkey/ 2>/dev/null || true
+            cp "$HOME/.minds/latchkey/latchkey_gateway.log" artifacts/latchkey/ 2>/dev/null || true
+            cp "$HOME/.minds/latchkey/latchkey_ensure_browser.log" artifacts/latchkey/ 2>/dev/null || true
+          fi
+      - uses: actions/upload-artifact@v7
+        # Always upload: this branch's verify step relies on downloading
+        # the artifact every run to inspect screenshots + timings, even
+        # on green runs. failure-only would break that loop.
+        if: always()
+        with:
+          name: launch-to-first-message-${{ github.run_id }}
+          path: artifacts/
+          retention-days: 7
+
+      - name: write timing + screenshot summary
+        if: always()
+        run: |
+          shots_dir=artifacts/screenshots
+          if [ ! -d "$shots_dir" ]; then
+            echo "(no screenshots to summarize)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # ---- Timing metrics block --------------------------------------
+          # Read launch-to-msg-timings.json (written by the e2e script) and
+          # surface the per-phase wall-clocks at the very top of the
+          # summary so creation time is visible at a glance.
+          timings_json="$shots_dir/launch-to-msg-timings.json"
+          if [ -f "$timings_json" ]; then
+            # The 2-workspace e2e nests timings under per-workspace keys
+            # (`.w1`, `.w2`, ...); each entry has its own
+            # `total_create_s` + `phase_durations_s`. Emit one row per
+            # workspace so the run summary shows both creation times at
+            # a glance.
+            {
+              echo "## Agent creation timings"
+              echo ""
+              echo "| Workspace | Host name | Total | Phases |"
+              echo "|---|---|---|---|"
+              jq -r 'to_entries[] | "| \(.key) | \(.value.host_name // "?") | \(.value.total_create_s // 0)s | \(.value.phase_durations_s // {} | to_entries | map("\(.key)=\(.value)s") | join(" | ")) |"' "$timings_json"
+              echo ""
+              echo '```json'
+              # The e2e-written JSON may lack a trailing newline; ensure
+              # one so the closing fence below doesn't merge onto the
+              # `}` line and open a new (unterminated) code fence that
+              # swallows the rest of the summary as preformatted text.
+              cat "$timings_json"
+              echo
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ---- Flow screenshot manifest ----------------------------------
+          # Screenshots are not committed to git (an orphan branch of
+          # binary PNGs bloated every clone). They ride in the
+          # `launch-to-first-message-<run_id>` artifact attached to this
+          # run; download + open locally to view. The per-window `.win.png`
+          # shots show the page Playwright asked Electron to render; the
+          # `.desktop.png` shots are full-desktop dupes (often show
+          # whichever BrowserWindow WindowServer had on top -- usually
+          # /welcome -- since CDP page activation does not move OS
+          # z-order).
+          artifact_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
+          {
+            echo "## Flow screenshots"
+            echo ""
+            echo "Screenshots ride in the [\`launch-to-first-message-${{ github.run_id }}\` artifact]($artifact_url) (download + open locally)."
+            echo ""
+            echo "| Milestone | Per-window (.win.png) | Full-desktop (.desktop.png) |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for prefix in 00 01 02 03 04 04b 05 06 06b 07 07a 07b 07c 07d 07e 07f 07g 07h 07i 07j 08 09 10 10b 11 12 13 14 15 16 17 17b 17c 17d 18 18a 18b 18b2 18b3 18c 19 20 21 22 23 24 25 26 27 99; do
+            for win in "$shots_dir"/${prefix}-*.win.png; do
+              [ -f "$win" ] || continue
+              base=$(basename "$win" .win.png)
+              desk="$shots_dir/${base}.png"
+              win_cell="\`${base}.win.png\`"
+              desk_cell="—"
+              [ -f "$desk" ] && desk_cell="\`${base}.png\`"
+              echo "| $base | $win_cell | $desk_cell |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+      - name: post-test cleanup (best effort)
+        if: always()
+        run: |
+          # Wipe state after the run so the runner sits idle clean.
+          # Pre-test reset on the NEXT run also cleans, this is belt+braces.
+          # All steps are best-effort; we never want cleanup to fail the job.
+          bash apps/minds/scripts/mac-runner-reset.sh 2>&1 || true
+
+  # Vanilla `macos-latest` cold-launch smoke: the same binary the `build`
+  # job produced (or cache-hit) gets installed on a fresh GHA-hosted Mac
+  # and asserted via the macos-launch Playwright spec. Runs in parallel
+  # with `launch_to_msg` (both consume the build artifact, neither blocks
+  # the other); the workflow is red if either fails.
+  macos_launch:
+    needs: [check_should_run, build]
+    if: needs.check_should_run.outputs.should_run == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+      - name: install minds.app from the build job's artifact
+        run: |
+          TMP=$(mktemp -d)
+          curl -fSL --silent --show-error -o "$TMP/minds.zip" "${{ needs.build.outputs.app_zip_url }}"
+          unzip -q -d "$TMP" "$TMP/minds.zip"
+          sudo cp -R "$TMP/Minds.app" /Applications/Minds.app
+          sudo xattr -dr com.apple.quarantine /Applications/Minds.app || true
+          defaults read /Applications/Minds.app/Contents/Info.plist CFBundleVersion
+      - name: setup node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+      - name: setup pnpm
+        run: npm install -g pnpm@10.33.4 && pnpm --version
+      - name: pnpm install (apps/minds dev deps incl. playwright)
+        working-directory: apps/minds
+        run: pnpm install --frozen-lockfile
+      - name: run macos-launch spec
+        working-directory: apps/minds
+        run: |
+          # Headless on CI; the spec asserts DOM state and the chrome
+          # iframe sources -- no display dependency. `html` reporter writes
+          # a browsable report with embedded screenshots and traces;
+          # Playwright skips opening it when stdout isn't a TTY (CI is fine).
+          pnpm exec playwright test \
+            --config=test/e2e/playwright.config.js \
+            macos-launch.spec.js \
+            --reporter=list,html
+      - name: upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-launch-playwright-report-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            apps/minds/test-results/
+            apps/minds/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Record the (mngr main HEAD, FCT main HEAD) pair we just verified
+  # green so the next run can skip if nothing has moved. Only runs when
+  # BOTH downstream jobs succeeded -- a partial green doesn't move the
+  # marker, so the next slot retries automatically.
+  update_marker:
+    needs: [check_should_run, launch_to_msg, macos_launch]
+    if: needs.launch_to_msg.result == 'success' && needs.macos_launch.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: write marker file
+        env:
+          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "pair_key: $PAIR_KEY"
+            echo "mngr: $MNGR_SHA"
+            echo "fct:  $FCT_SHA"
+            echo "saved_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } | tee /tmp/launch-to-msg-marker.txt
+      - name: save marker cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/launch-to-msg-marker.txt
+          key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
+      - name: emit summary
+        run: |
+          {
+            echo "## Marker updated"
+            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
+            echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo ""
+            echo "**To inspect the latest green pair manually:**"
+            echo ""
+            echo "GitHub's Caches UI has no working key-prefix filter (the in-page"
+            echo "search box says 'will be ignored since log searching is not yet"
+            echo "available'). Use the CLI:"
+            echo ""
+            echo "\`\`\`"
+            echo "gh cache list --repo ${{ github.repository }} --key launch-to-msg-green-mngr-"
+            echo "\`\`\`"
+            echo ""
+            echo "Branch-scoped UI (eyeball-scroll only): ${{ github.server_url }}/${{ github.repository }}/actions/caches?ref=${{ github.ref }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Post a status summary to Slack for every run (cron + dispatch). No-ops
+  # when SLACK_LAUNCH_TO_MSG_WEBHOOK isn't configured. Uses the curl-the-
+  # webhook approach directly so we don't pull in a third-party action.
+  notify_slack:
+    needs: [check_should_run, build, launch_to_msg, macos_launch, update_marker]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: post status to slack
+        env:
+          WEBHOOK: ${{ secrets.SLACK_LAUNCH_TO_MSG_WEBHOOK }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
+          BUILD_RESULT:         ${{ needs.build.result }}
+          LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
+          MACOS_LAUNCH_RESULT:  ${{ needs.macos_launch.result }}
+          UPDATE_MARKER_RESULT: ${{ needs.update_marker.result }}
+          CHECK_SHOULD_RUN_RESULT: ${{ needs.check_should_run.result }}
+          # Per-run metrics extracted from the e2e by launch_to_msg's
+          # `extract ci-metrics` step. Empty strings when launch_to_msg
+          # didn't run (skip path) or didn't reach the relevant point.
+          LAUNCH_TO_READY_S: ${{ needs.launch_to_msg.outputs.launch_to_ready }}
+          W1_CREATE_S: ${{ needs.launch_to_msg.outputs.w1_create }}
+          W2_CREATE_S: ${{ needs.launch_to_msg.outputs.w2_create }}
+          # ToDesktop .zip download URL emitted by the build job. Empty
+          # when build was skipped (cache-hit short-circuits don't apply
+          # here; build always runs when should_run=true).
+          APP_ZIP_URL: ${{ needs.build.outputs.app_zip_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$WEBHOOK" ]]; then
+            echo "::warning::SLACK_LAUNCH_TO_MSG_WEBHOOK not set -- skipping slack notification"
+            exit 0
+          fi
+          # Total wallclock from when the run was queued to now. GNU date
+          # parses ISO-8601 directly on Ubuntu runners.
+          start_iso=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq '.run_started_at')
+          start_s=$(date -d "$start_iso" +%s)
+          now_s=$(date +%s)
+          total_s=$((now_s - start_s))
+          fmt_duration() {
+            local s=$1
+            if (( s < 60 )); then
+              printf '%ds' "$s"
+            else
+              printf '%dm%02ds' $((s / 60)) $((s % 60))
+            fi
+          }
+          duration=$(fmt_duration "$total_s")
+          # Classify the outcome.
+          failed_jobs=""
+          cancelled_jobs=""
+          if [[ "$CHECK_SHOULD_RUN_RESULT" == "failure" ]]; then
+            failed_jobs="check_should_run"
+          else
+            for pair in "build:$BUILD_RESULT" \
+                        "launch_to_msg:$LAUNCH_TO_MSG_RESULT" \
+                        "macos_launch:$MACOS_LAUNCH_RESULT" \
+                        "update_marker:$UPDATE_MARKER_RESULT"; do
+              name="${pair%%:*}"
+              result="${pair##*:}"
+              case "$result" in
+                failure)   failed_jobs="$failed_jobs $name" ;;
+                cancelled) cancelled_jobs="$cancelled_jobs $name" ;;
+              esac
+            done
+          fi
+          if [[ -n "$failed_jobs" ]]; then
+            emoji=":x:"
+            verdict_word="failed"
+            detail=" (failed:$failed_jobs)"
+          elif [[ -n "$cancelled_jobs" ]]; then
+            emoji=":warning:"
+            verdict_word="cancelled"
+            detail=" (cancelled:$cancelled_jobs)"
+          elif [[ "$SHOULD_RUN" != "true" ]]; then
+            emoji=":fast_forward:"
+            verdict_word="skipped"
+            detail=""
+          else
+            emoji=":white_check_mark:"
+            verdict_word="succeeded"
+            detail=""
+          fi
+          MNGR_SHORT="${MNGR_SHA:0:12}"
+          FCT_SHORT="${FCT_SHA:0:12}"
+          # Format the e2e per-run metrics line. Each metric is the raw
+          # float in seconds; only include the ones we actually got, so a
+          # mid-W2 failure still shows launch->ready and w1.
+          fmt_float_s() {
+            local f=$1
+            [[ -z "$f" ]] && return
+            local s=${f%%.*}
+            fmt_duration "$s"
+          }
+          # Build metrics line: `[_label:_ *value* | _label:_ *value* | ...]`
+          metrics_inner=""
+          sep=""
+          for kv in "_launch to ready:_|$LAUNCH_TO_READY_S" \
+                    "_w1 create:_|$W1_CREATE_S" \
+                    "_w2 create:_|$W2_CREATE_S"; do
+            label="${kv%%|*}"
+            v="${kv##*|}"
+            [[ -z "$v" ]] && continue
+            metrics_inner+="${sep}${label} *$(fmt_float_s "$v")*"
+            sep=" | "
+          done
+          metrics_line=""
+          [[ -n "$metrics_inner" ]] && metrics_line="[${metrics_inner}]"
+          # Build links line: `[<binary> | <run logs> | <mngr commit> | <fct commit>]`.
+          # Derive the ToDesktop dashboard URL from the build's app_zip_url:
+          # https://dl.todesktop.com/<APP_ID>/builds/<BID>/mac/zip/arm64
+          dashboard_url=""
+          if [[ -n "$APP_ZIP_URL" && "$APP_ZIP_URL" =~ dl\.todesktop\.com/([^/]+)/builds/([^/]+)/ ]]; then
+            dashboard_url="https://app.todesktop.com/apps/${BASH_REMATCH[1]}/builds/${BASH_REMATCH[2]}"
+          fi
+          links_inner=""
+          sep=""
+          if [[ -n "$dashboard_url" ]]; then
+            links_inner+="<${dashboard_url}|binary>"
+            sep=" | "
+          fi
+          links_inner+="${sep}<${RUN_URL}|run logs>"
+          links_inner+=" | <https://github.com/imbue-ai/mngr/commit/${MNGR_SHA}|mngr commit>"
+          links_inner+=" | <https://github.com/imbue-ai/forever-claude-template/commit/${FCT_SHA}|fct commit>"
+          links_line="[${links_inner}]"
+          # Assemble the final message. Line 1 is always present. Line 2
+          # (SHAs) is always present. Line 3 (metrics) is omitted when we
+          # have no values. Line 4 (links) is always present, though
+          # `binary` falls out when build didn't produce one.
+          line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
+            "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
+          line2="[_mngr_ \`${MNGR_SHORT}\` | _FCT_ \`${FCT_SHORT}\`]"
+          if [[ -n "$metrics_line" ]]; then
+            text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
+          else
+            text=$(printf '%s\n%s\n%s' "$line1" "$line2" "$links_line")
+          fi
+          payload=$(printf '%s' "$text" | jq -Rs '{text: .}')
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "$payload" "$WEBHOOK"

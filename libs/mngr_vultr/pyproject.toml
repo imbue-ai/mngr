@@ -1,12 +1,12 @@
 [project]
 name = "imbue-mngr-vultr"
-version = "0.1.1"
+version = "0.1.5"
 description = "Vultr provider backend plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.8",
-    "imbue-mngr-vps-docker==0.1.1",
+    "imbue-mngr==0.2.12",
+    "imbue-mngr-vps-docker==0.1.5",
     "requests>=2.31.0",
 ]
 
@@ -51,9 +51,8 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Initial threshold; recalibrate once we have a reliable CI measurement
-# of this package's coverage.
-fail_under = 60
+# Floor pinned just below CI-measured coverage; raise incrementally as tests are added.
+fail_under = 70
 omit = [
   "*_test.py",
   "test_*.py",

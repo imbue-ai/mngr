@@ -8,7 +8,6 @@ import pytest
 import tomlkit
 from click.testing import CliRunner
 
-from imbue.mngr.cli.config import ConfigScope
 from imbue.mngr.cli.config import _emit_all_paths
 from imbue.mngr.cli.config import _emit_config_list
 from imbue.mngr.cli.config import _emit_config_set_result
@@ -21,6 +20,7 @@ from imbue.mngr.cli.config import _format_value_for_display
 from imbue.mngr.cli.config import _get_nested_value
 from imbue.mngr.cli.config import _unset_nested_value
 from imbue.mngr.cli.config import config
+from imbue.mngr.config.data_types import ConfigScope
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import ConfigKeyNotFoundError
 from imbue.mngr.primitives import OutputFormat
@@ -385,6 +385,58 @@ def test_config_get_existing_key(
     )
     assert result.exit_code == 0
     assert len(result.output.strip()) > 0
+
+
+def test_config_get_returns_provider_subclass_field(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`config get` should surface provider-subclass fields (e.g. local host_dir).
+
+    Regression: model_dump serialized providers by the declared base type and
+    dropped subclass-only keys, so this reported "Key not found". Uses the local
+    provider's ``host_dir`` (a subclass-only field) so the test does not depend
+    on the docker backend being registered in the unit-test plugin manager.
+    """
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[providers.mylocal]\nbackend = "local"\nhost_dir = "/tmp/mngr-subclass-probe"\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    result = cli_runner.invoke(
+        config,
+        ["get", "providers.mylocal.host_dir", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    data = json.loads(result.output.strip())
+    assert data["value"] == "/tmp/mngr-subclass-probe"
+
+
+def test_config_list_all_includes_provider_subclass_field(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    plugin_manager: pluggy.PluginManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`config list --all` should include provider-subclass fields in the full view."""
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[providers.mylocal]\nbackend = "local"\nhost_dir = "/tmp/mngr-subclass-probe"\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    result = cli_runner.invoke(
+        config,
+        ["list", "--all", "--format", "json"],
+        obj=plugin_manager,
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"output={result.output!r} exception={result.exception!r}"
+    data = json.loads(result.output.strip())
+    assert data["config"]["providers"]["mylocal"]["host_dir"] == "/tmp/mngr-subclass-probe"
 
 
 # =============================================================================

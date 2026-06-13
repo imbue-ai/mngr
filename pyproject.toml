@@ -10,6 +10,15 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[tool.uv]
+# Supply-chain cooldown: uv ignores any package uploaded after this timestamp
+# when resolving, so we only adopt releases public long enough for malware to
+# surface. scripts/release.py advances it to 2 weeks before each release, but
+# only ever forward -- pushing it back would re-exclude a deliberately-pinned
+# fresh dep and break resolution. This only buys a detection delay;
+# it can't catch a compromise that stays undetected past the window.
+exclude-newer = "2026-05-26T00:00:00Z"
+
 [tool.uv.sources]
 imbue-common = { workspace = true }
 
@@ -64,6 +73,7 @@ addopts = [
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
   "--cov=imbue.mngr_antigravity",
+  "--cov=imbue.mngr_codex",
   "--cov=imbue.mngr_pi_coding",
   "--cov=imbue.mngr_pair",
   "--cov=imbue.mngr_schedule",
@@ -80,6 +90,7 @@ addopts = [
   "--cov=imbue.mngr_imbue_cloud",
   "--cov=imbue.mngr_lima",
   "--cov=imbue.mngr_tmr",
+  "--cov=imbue.mngr_mapreduce",
   "--cov=imbue.skitwright",
   "--cov=imbue.minds",
   "--cov=imbue.slack_exporter",
@@ -87,9 +98,10 @@ addopts = [
   "--cov=imbue.concurrency_group",
   "--cov=imbue.modal_proxy",
   "--cov=imbue.mngr_wait",
-  "--cov=imbue.mngr_uncapped_claude",
+  "--cov=imbue.mngr_robinhood",
   "--cov=imbue.mngr_vps_docker",
   "--cov=imbue.mngr_vultr",
+  "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",
   "--cov-report=term-missing",
   "--cov-report=xml",
@@ -179,6 +191,10 @@ omit = [
     "apps/minds/imbue/minds/telegram/bot_creator.py",
     "apps/minds/imbue/minds/telegram/injector.py",
     "apps/minds/imbue/minds/desktop_client/supertokens_routes.py",
+    "apps/minds/imbue/minds/desktop_client/tunnel_token_injection.py",
+    # Minds Docker state-container teardown shells out to the `docker` CLI and
+    # needs a real daemon -- exercised via a docker-marked test, not offload.
+    "apps/minds/imbue/minds/envs/docker_cleanup.py",
     # Minds deployment_tests importable helpers are exercised only by the
     # minds_deployment / minds_services pytest suites against real cloud,
     # which are excluded from `just test-offload`. No path through the

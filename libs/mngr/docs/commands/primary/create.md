@@ -9,7 +9,7 @@
 mngr [create|c] [<ADDRESS>] [<AGENT_TYPE>] [-t <TEMPLATE>] [--new-host] [-w WINDOW_NAME=COMMAND]
     [--label KEY=VALUE] [--host-label KEY=VALUE] [--project <PROJECT>] [--from <SOURCE>] [--transfer <MODE>]
     [--[no-]rsync] [--rsync-args <ARGS>] [--branch [BASE][:NEW]] [--[no-]ensure-clean]
-    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>]
+    [--snapshot <ID>] [-b <BUILD_ARG>] [-s <START_ARG>] [--post-host-create-command <COMMAND>]
     [--env <KEY=VALUE>] [--env-file <FILE>] [--pass-env <KEY>] [--extra-provision-command <COMMAND>] [--upload-file <LOCAL:REMOTE>]
     [--idle-timeout <SECONDS>] [--idle-mode <MODE>] [--start-on-boot|--no-start-on-boot] [--reuse|--no-reuse]
     [--message <TEXT>] [--message-file <FILE>] [--edit-message]
@@ -75,6 +75,9 @@ mngr create [OPTIONS] [POSITIONAL_NAME] [POSITIONAL_AGENT_TYPE] [AGENT_ARGS]...
 | `-w`, `--extra-window` | text | Run extra command in additional window. Use name="command" to set window name. Note: ALL_UPPERCASE names (e.g., FOO="bar") are treated as env var assignments, not window names | None |
 | `--label` | text | Agent label KEY=VALUE [repeatable] [experimental] | None |
 | `--project` | text | Project name for the agent (sets the 'project' label; '.' inherits from source agent's project label when --from references an agent, else uses the source's git remote origin, else the source's folder name) [default: .] | `.` |
+| `--tmux-width` | integer | Width (columns) of the agent's tmux window [default: 200] | None |
+| `--tmux-height` | integer | Height (rows) of the agent's tmux window [default: 50] | None |
+| `--tmux-window-size` | choice (`manual` &#x7C; `latest` &#x7C; `largest` &#x7C; `smallest`) | tmux window resize policy; 'manual' pins the window to its width/height and never resizes on attach [default: latest] | None |
 
 ## Host Options
 
@@ -96,7 +99,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--connect`, `--no-connect` | boolean | Connect to the agent after creation [default: connect] | `True` |
 | `--foreground` | boolean | Run a headless agent in the foreground, streaming output and auto-destroying when done. Required for headless agent types | `False` |
 | `--auto-start`, `--no-auto-start` | boolean | Automatically start offline hosts (source and target) before proceeding | `True` |
-| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file [repeatable]. | None |
+| `--adopt-session` | text | Adopt an existing Claude Code session into this agent. Accepts a session ID or a path to a .jsonl file. A session ID is searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents. Repeatable: every named session is made available in the new agent, but only the last one is resumed on startup (Claude can only resume one session at a time). | None |
 
 ## Source Data (what to include in the new agent)
 
@@ -153,6 +156,7 @@ By default, `mngr create` uses the local host. Use the agent address to specify 
 | `--snapshot` | text | Use existing snapshot instead of building | None |
 | `-b`, `--build-arg` | text | Build argument as key=value or --key=value (e.g., -b gpu=h100 -b cpu=2) [repeatable] | None |
 | `-s`, `--start-arg` | text | Argument for start [repeatable] | None |
+| `--post-host-create-command` | text | Shell command to run inside the new host after it is created, before any agent work_dir setup. Runs synchronously; non-zero exit aborts the create. [repeatable] | None |
 
 ## Host Lifecycle
 
@@ -199,6 +203,26 @@ See [connect options](./connect.md) for full details (only applies if `--connect
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
 
 ## Provider Build/Start Arguments
+
+Provider: aws
+  EC2-specific args (consumed by provider, not passed to docker):
+    --aws-region=REGION         Must match the provider config's default_region;
+                                the client is bound to one region at construction
+                                and refuses cross-region creates. To target multiple
+                                regions, define one [providers.aws-<region>] block
+                                per region (see mngr_aws README 'Multiple regions').
+    --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
+    --aws-ami=AMI-ID            Override the per-host AMI for this create only
+                                (default: provider config's default_ami_id /
+                                default_ami_by_region for the chosen region)
+    --aws-spot                  Run on EC2 spot capacity (presence-only flag).
+                                AWS may reclaim with ~2 min notice; the host is
+                                terminated, not stopped, on reclaim. Opt-in only.
+    --git-depth=N               Shallow-clone build context to depth N before upload
+
+  All other build args are passed to 'docker build' on the EC2 instance.
+  Example: -b --aws-instance-type=t3.medium -b --file=Dockerfile -b .
+  Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: docker
   Build args are passed directly to 'docker build'. Run 'docker build --help' for details.
@@ -251,14 +275,14 @@ Provider: modal
   No start arguments are supported for the modal provider.
 
 Provider: ovh
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
-    --vps-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
-    --vps-os=NAME         OVH image name (default: 'Debian 12 - Docker')
+  OVH-specific args (consumed by provider, not passed to docker):
+    --ovh-datacenter=DC   OVH datacenter (e.g. US-EAST-VA, US-WEST-OR)
+                          (alias: --ovh-region=)
+    --ovh-plan=PLAN       OVH plan code (default: vps-2025-model1 = VPS-1)
     --git-depth=N         Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vps-2025-model1 -b --file=Dockerfile -b .
+  Example: -b --ovh-plan=vps-2025-model1 -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 Provider: ssh
@@ -277,14 +301,13 @@ Provider: ssh
   No start arguments are supported for the SSH provider.
 
 Provider: vultr
-  VPS-specific args (consumed by provider, not passed to docker):
-    --vps-region=REGION  Vultr region (default: ewr)
-    --vps-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
-    --vps-os=OS_ID       Vultr OS ID (default: 2136 = Debian 12 x64)
-    --git-depth=N        Shallow-clone build context to depth N before upload
+  Vultr-specific args (consumed by provider, not passed to docker):
+    --vultr-region=REGION  Vultr region (default: ewr)
+    --vultr-plan=PLAN      Vultr plan (default: vc2-2c-4gb)
+    --git-depth=N          Shallow-clone build context to depth N before upload
 
   All other build args are passed to 'docker build' on the VPS.
-  Example: -b --vps-plan=vc2-2c-4gb -b --file=Dockerfile -b .
+  Example: -b --vultr-plan=vc2-2c-4gb -b --file=Dockerfile -b .
   Start args are passed directly to 'docker run'. Run 'docker run --help' for details.
 
 

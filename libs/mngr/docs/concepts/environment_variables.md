@@ -115,7 +115,6 @@ Additionally, the following non-config env vars are recognized:
 
 - `MNGR_PROJECT_CONFIG_DIR` — directory containing project-level config files. When set, overrides the default `.{root_name}/` directory at the git root. Affects only where project settings are loaded from.
 - `MNGR_ALLOW_UNKNOWN_CONFIG` — when truthy, unknown TOML / env-var / `--setting` keys produce warnings instead of errors.
-- `MNGR_ALLOW_PYTEST` — explicit opt-in for end-to-end tests that intentionally run mngr inside a pytest subprocess against a config with `is_allowed_in_pytest = false`.
 - `MNGR_LOAD_ALL_PLUGINS` — when truthy, bypasses normal plugin filtering (used by tooling such as doc generation).
 - `MNGR_USER_ID` — explicit user id (overrides the persisted value in `~/.mngr/profiles/<profile_id>/user_id`).
 - `MNGR_TEST_VERBOSE` — increases test-only logging output.

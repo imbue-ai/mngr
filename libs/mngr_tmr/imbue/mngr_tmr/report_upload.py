@@ -1,7 +1,7 @@
 """Optional S3 upload of the TMR HTML report.
 
 When ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY`` are present in
-the environment, the reporter mirrors each freshly-written
+the environment, the recipe mirrors each freshly-written
 ``index.html`` to ``s3://int8-shared-internal/tmr-reports/<run>.html``
 in ``us-west-2`` and exposes it via the internal short link
 ``http://go/shared/tmr-reports/<run>.html``. Without those credentials,
@@ -27,7 +27,7 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
 
     Returns ``None`` (and logs nothing user-facing) when AWS credentials
     are not configured. Logs a warning and returns ``None`` on upload
-    failure -- a failed upload should not break the TMR pipeline.
+    failure -- a failed upload should not break the pipeline.
     """
     if not (os.environ.get("AWS_ACCESS_KEY_ID") and os.environ.get("AWS_SECRET_ACCESS_KEY")):
         return None
@@ -42,11 +42,7 @@ def maybe_upload_report(html_path: Path, run_name: str) -> str | None:
             ExtraArgs={"ContentType": "text/html; charset=utf-8"},
         )
     except (BotoCoreError, ClientError, OSError) as exc:
-        logger.warning("Failed to upload TMR report to s3://{}/{}: {}", _BUCKET, key, exc)
+        logger.warning("Failed to upload report to s3://{}/{}: {}", _BUCKET, key, exc)
         return None
 
-    url = f"{_URL_BASE}/{run_name}.html"
-    # Logged on every successful upload (every report regeneration), symmetric
-    # with the "HTML report written to ..." log line in generate_html_report.
-    logger.info("HTML report mirrored to {}", url)
-    return url
+    return f"{_URL_BASE}/{run_name}.html"

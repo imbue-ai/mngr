@@ -147,6 +147,34 @@ def get_terminal_width() -> int:
     return terminal_size.columns
 
 
+def render_markdown(
+    markdown: str, *, use_ansi: bool, width: int, link_base: str | None = None, indent: int = 0
+) -> str:
+    """Render a markdown block for terminal display.
+
+    When ``use_ansi`` is True, render via rich (tables, bold, code, links,
+    wrapped to ``width``). When False, return the markdown unchanged -- this
+    preserves plain output for pipes, non-interactive runs, tests, and the doc
+    generator, so only interactive terminals get the rich rendering.
+
+    When ``link_base`` is provided (and ``use_ansi`` is True), relative and
+    anchor links are rewritten to absolute URLs resolved against it, so they are
+    clickable terminal hyperlinks rather than dead relative targets. Plain
+    (non-ANSI) output keeps the original relative links untouched.
+
+    When ``indent`` is greater than zero (and ``use_ansi`` is True), every
+    rendered line is left-padded by that many spaces, matching the man-page-style
+    indentation used for the prose sections of command help.
+    """
+    if not use_ansi:
+        return markdown
+    # Lazy import: keep rich (and its import cost) out of the CLI startup path;
+    # it is only needed here, when rendering help for an interactive terminal.
+    from imbue.mngr.cli.markdown_render import markdown_to_ansi
+
+    return markdown_to_ansi(markdown, width, link_base=link_base, indent=indent)
+
+
 @pure
 def get_pager_command(config: MngrConfig | None) -> str:
     """Determine the pager command to use.
@@ -235,6 +263,8 @@ def format_git_style_help(
     ctx: click.Context,
     command: click.Command,
     metadata: CommandHelpMetadata | None,
+    *,
+    use_ansi: bool = False,
 ) -> str:
     """Format help output in git's man-page style.
 
@@ -244,13 +274,18 @@ def format_git_style_help(
     - DESCRIPTION: detailed description
     - OPTIONS: all options organized by groups
     - EXAMPLES: usage examples (if provided)
+
+    When ``use_ansi`` is True the markdown prose sections (description and
+    additional sections) are rendered via rich for an interactive terminal;
+    otherwise they are emitted as plain indented text (used for pipes, the doc
+    generator, and tests).
     """
     output = StringIO()
     width = get_terminal_width()
 
     # If we have metadata, use git-style formatting
     if metadata is not None:
-        _write_git_style_help(output, ctx, command, metadata, width)
+        _write_git_style_help(output, ctx, command, metadata, width, use_ansi=use_ansi)
     else:
         # Fall back to standard click formatting
         output.write(command.get_help(ctx))
@@ -264,6 +299,8 @@ def _write_git_style_help(
     command: click.Command,
     metadata: CommandHelpMetadata,
     width: int,
+    *,
+    use_ansi: bool = False,
 ) -> None:
     """Write git-style help to the output buffer."""
     # NAME section
@@ -279,9 +316,13 @@ def _write_git_style_help(
 
     # DESCRIPTION section
     output.write(f"{_format_section_title('Description')}\n")
-    for paragraph in metadata.full_description.strip().split("\n\n"):
-        wrapped = _wrap_text(paragraph.strip(), width - 7, "       ", None)
-        output.write(f"{wrapped}\n\n")
+    if use_ansi:
+        output.write(render_markdown(metadata.full_description.strip(), use_ansi=True, width=width, indent=7))
+        output.write("\n")
+    else:
+        for paragraph in metadata.full_description.strip().split("\n\n"):
+            wrapped = _wrap_text(paragraph.strip(), width - 7, "       ", None)
+            output.write(f"{wrapped}\n\n")
 
     # OPTIONS section
     output.write(f"{_format_section_title('Options')}\n")
@@ -291,9 +332,13 @@ def _write_git_style_help(
     if metadata.additional_sections:
         for title, content in metadata.additional_sections:
             output.write(f"{_format_section_title(title)}\n")
-            for line in content.strip().split("\n"):
-                output.write(f"       {line}\n")
-            output.write("\n")
+            if use_ansi:
+                output.write(render_markdown(content.strip(), use_ansi=True, width=width, indent=7))
+                output.write("\n")
+            else:
+                for line in content.strip().split("\n"):
+                    output.write(f"       {line}\n")
+                output.write("\n")
 
     # SEE ALSO section (if provided)
     if metadata.see_also:
@@ -426,7 +471,7 @@ class GitStyleHelpMixin:
         metadata = _resolve_help_metadata(ctx)
         # Cast self to click.Command since this mixin is only used with Command subclasses
         command = cast(click.Command, self)
-        help_text = format_git_style_help(ctx, command, metadata)
+        help_text = format_git_style_help(ctx, command, metadata, use_ansi=is_interactive_terminal())
 
         # Write to formatter's buffer
         formatter.write(help_text)
@@ -443,7 +488,7 @@ def show_help_with_pager(
     """
     metadata = _resolve_help_metadata(ctx)
 
-    help_text = format_git_style_help(ctx, command, metadata)
+    help_text = format_git_style_help(ctx, command, metadata, use_ansi=is_interactive_terminal())
     run_pager(help_text, config)
 
 

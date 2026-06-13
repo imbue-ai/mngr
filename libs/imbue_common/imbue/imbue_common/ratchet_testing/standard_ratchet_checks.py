@@ -39,6 +39,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_NAMEDTUPL
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_NUM_PREFIX
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_OS_FORK
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PANDAS_IMPORT
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PER_FILE_HOST_UPLOAD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PYTEST_MARK_INTEGRATION
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RELATIVE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RETURNS_IN_DOCSTRINGS
@@ -66,6 +67,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_code_in_init_files
 from imbue.imbue_common.ratchet_testing.ratchets import find_if_elif_without_else
 from imbue.imbue_common.ratchet_testing.ratchets import find_init_methods_in_non_exception_classes
 from imbue.imbue_common.ratchet_testing.ratchets import find_inline_functions
+from imbue.imbue_common.ratchet_testing.ratchets import find_per_file_host_uploads_in_loops
 from imbue.imbue_common.ratchet_testing.ratchets import find_silent_decode_error_catches
 from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 
@@ -130,7 +132,10 @@ def check_base_exception_catch(source_dir: Path, max_count: int) -> None:
 
 
 def check_builtin_exception_raises(source_dir: Path, max_count: int) -> None:
-    assert_ratchet(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, max_count)
+    # Test files are excluded: tests legitimately raise built-in exceptions to simulate error
+    # conditions, and the custom-exception requirement only applies to production code.
+    chunks = check_ratchet_rule(PREVENT_BUILTIN_EXCEPTION_RAISES, source_dir, _SELF_EXCLUSION + TEST_FILE_PATTERNS)
+    assert len(chunks) <= max_count, PREVENT_BUILTIN_EXCEPTION_RAISES.format_failure(chunks)
 
 
 def check_silent_decode_error_catches(source_dir: Path, max_count: int) -> None:
@@ -328,9 +333,11 @@ def check_bare_tmux_targets(source_dir: Path, max_count: int) -> None:
     # non-Python files routinely construct tmux commands too, and they need
     # the same exact-match enforcement.
     #
-    # Exclude `changelog/`: entries there quote the previous buggy form as
-    # historical context, which the regex would otherwise flag.
-    excluded = _SELF_EXCLUSION + ("changelog/*",) + BINARY_FILE_EXCLUSION
+    # Exclude changelog artifacts: per-PR entries under `changelog/` and the
+    # consolidated `CHANGELOG.md` / `UNABRIDGED_CHANGELOG.md` they get fanned
+    # into all quote the previous buggy form as historical context, which the
+    # regex would otherwise flag.
+    excluded = _SELF_EXCLUSION + ("changelog/*", "CHANGELOG.md", "UNABRIDGED_CHANGELOG.md") + BINARY_FILE_EXCLUSION
     chunks = check_ratchet_rule_all_files(PREVENT_BARE_TMUX_TARGETS, source_dir, excluded)
     assert len(chunks) <= max_count, PREVENT_BARE_TMUX_TARGETS.format_failure(chunks)
 
@@ -370,6 +377,11 @@ def check_init_methods_in_non_exception_classes(source_dir: Path, max_count: int
 def check_cast_usage(source_dir: Path, max_count: int) -> None:
     chunks = find_cast_usages(source_dir)
     assert len(chunks) <= max_count, PREVENT_CAST_USAGE.format_failure(chunks)
+
+
+def check_per_file_host_upload(source_dir: Path, max_count: int) -> None:
+    chunks = find_per_file_host_uploads_in_loops(source_dir)
+    assert len(chunks) <= max_count, PREVENT_PER_FILE_HOST_UPLOAD.format_failure(chunks)
 
 
 def check_assert_isinstance(source_dir: Path, max_count: int) -> None:

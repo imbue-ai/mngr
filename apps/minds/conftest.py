@@ -18,6 +18,9 @@ backend guard AND the CI cleanup script (cleanup_old_modal_test_environments.py)
 both recognize.
 """
 
+import os
+from pathlib import Path
+
 import pytest
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
@@ -25,6 +28,21 @@ from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.testing import generate_test_environment_name
+
+# Point ``MINDS_RESTIC_BINARY`` at the bundled ``resources/restic/restic``
+# binary so restic_cli tests don't require a system-wide restic install.
+# Mirrors what Electron's backend.js does at runtime: a Minds end user --
+# or a dev running tests -- should never have to ``brew install restic``.
+# Run unconditionally before any test module is imported; restic_cli.py
+# reads the env var lazily, so a late-setting fixture would also work,
+# but doing it here is one line and matches how the runtime flows.
+#
+# If ``resources/restic/restic`` doesn't exist (``pnpm build`` hasn't run),
+# leave the env var unset -- ensure_restic_available() then raises a
+# message that points at the right fix.
+_BUNDLED_RESTIC = Path(__file__).parent / "resources" / "restic" / "restic"
+if _BUNDLED_RESTIC.exists() and "MINDS_RESTIC_BINARY" not in os.environ:
+    os.environ["MINDS_RESTIC_BINARY"] = str(_BUNDLED_RESTIC)
 
 suppress_warnings()
 register_marker(
@@ -42,6 +60,13 @@ register_marker(
     "over CDP. Need Node, pnpm, Electron's native deps, and a display server (`xvfb-run` on "
     "Linux). Split out into its own CI job (`test-docker-electron`) so the heavyweight "
     "Electron + docker spin-up does not serialize behind every other docker-marked test."
+)
+register_marker(
+    "minds_snapshot_resume: tests that assume the sandbox was booted from a Modal snapshot "
+    "produced by `scripts/snapshot_minds_e2e_state.py` (a stopped FCT workspace Docker "
+    "container already on disk). Run only via `just test-offload-minds-snapshot <image-id>` -- "
+    "explicitly excluded from every other offload run because they would fail anywhere without "
+    "the snapshot's pre-baked state."
 )
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())

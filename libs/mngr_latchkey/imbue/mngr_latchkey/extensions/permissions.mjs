@@ -13,19 +13,21 @@
  *       Return the full permissions.json that the gateway applied to
  *       the caller for this request (from the extension context's
  *       ``permissionsConfigPath``). Takes no query parameters.
- *   GET    /permissions/available
- *       Return the full permission catalog as a JSON object keyed by
- *       raw service name. Each value has three fields: ``scope`` (the
- *       Detent scope schema name as a string), ``display_name`` (a
- *       human-readable label), and ``permissions`` (an array of Detent
- *       permission-schema names that may be granted under the scope).
  *   GET    /permissions/available/<service_name>
- *       Return the permission catalog entry for ``<service_name>`` (e.g.
- *       ``slack``, ``google-gmail``) using the same value shape as the
- *       collection endpoint. Returns 404 when the service is unknown.
- *       Both endpoints are backed by the ``services.json`` file that
- *       ships alongside this extension, which is keyed by raw service
- *       name.
+ *       Return the permission catalog entries for ``<service_name>``
+ *       (e.g. ``slack``, ``google-gmail``) as an array. Each entry has
+ *       four fields: ``scope`` (the Detent scope schema name as a
+ *       string), ``display_name`` (a human-readable label),
+ *       ``description`` (the scope's plain-English summary, from
+ *       Detent's ``$comment``), and ``permissions`` (an array of
+ *       ``{name, description}`` objects -- the Detent permission-schema
+ *       name plus its own plain-English summary -- that may be granted
+ *       under the scope). The catch-all ``any`` permission is always
+ *       injected at index 0 of every scope's ``permissions`` array, so
+ *       a caller can *       always request unrestricted access under
+ *       a known scope. Returns 404 when the service is unknown. Backed
+ *       by the ``services.json`` file that ships alongside this extension,
+ *       which is keyed by raw service name.
  *   GET    /permissions/rules?path=<path>&rule_key=<key>
  *       Return the rule whose scope key is <key>.
  *   POST   /permissions/rules?path=<path>&rule_key=<key>
@@ -68,7 +70,6 @@ import { fileURLToPath } from 'node:url';
 
 const COLLECTION_PATH = '/permissions';
 const SELF_PATH = '/permissions/self';
-const AVAILABLE_COLLECTION_PATH = '/permissions/available';
 const AVAILABLE_ITEM_PATH_PREFIX = '/permissions/available/';
 const RULES_COLLECTION_PATH = '/permissions/rules';
 const PERMISSIONS_ROOT_ENV_VAR = 'LATCHKEY_EXTENSION_PERMISSIONS_ROOT';
@@ -81,6 +82,15 @@ const AVAILABLE_SERVICES_PATH = resolve(
 // to lowercase letters, digits, and ``-`` so a caller cannot smuggle
 // path-traversal segments or other surprises into the lookup key.
 const VALID_SERVICE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+
+// Detent's catch-all *permission* schema. It matches every request, so a
+// rule like ``{"linear-api": ["any"]}`` grants all access under that
+// scope. The ``services.json`` catalog never lists it explicitly (every
+// scope implicitly admits it).
+const ALWAYS_AVAILABLE_PERMISSION = 'any';
+const ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION =
+  'Unrestricted access: every request permitted under this scope. Use only ' +
+  'when no narrower permission covers what you need.';
 
 class PermissionsExtensionError extends Error {
   constructor(statusCode, message) {
@@ -334,13 +344,11 @@ function parseRoute(requestUrl) {
   if (pathOnly === SELF_PATH || pathOnly === `${SELF_PATH}/`) {
     return { kind: 'self' };
   }
-  // The collection check must run before the item-prefix check so a
-  // trailing-slash request to ``/permissions/available/`` is routed to
-  // the collection handler instead of being rejected as an empty
-  // service-name segment.
-  if (pathOnly === AVAILABLE_COLLECTION_PATH || pathOnly === `${AVAILABLE_COLLECTION_PATH}/`) {
-    return { kind: 'available-collection' };
-  }
+  // Only the per-service item endpoint (``/permissions/available/<service>``)
+  // is served; the bare collection (``/permissions/available[/]``) is
+  // deliberately unhandled (an empty or slash-containing remainder), so
+  // a request for the whole catalog falls through rather than enumerating
+  // every service.
   if (pathOnly.startsWith(AVAILABLE_ITEM_PATH_PREFIX)) {
     const remainder = pathOnly.slice(AVAILABLE_ITEM_PATH_PREFIX.length);
     if (remainder.length === 0 || remainder.includes('/')) {
@@ -419,10 +427,15 @@ function handleGetCollection(response, filePath) {
  * we surface it as HTTP 500.
  *
  * The file is a JSON object keyed by raw service name (``slack``,
- * ``google-gmail``, ...). Each value is a ``{scope: <schema_name>,
- * display_name: <label>, permissions: [...]}`` object where ``scope``
- * is the Detent scope schema name as a plain string and
- * ``display_name`` is a human-readable label.
+ * ``google-gmail``, ...). Each value is an array of ``{scope:
+ * <schema_name>, display_name: <label>, description: <summary>,
+ * permissions: [{name: <schema_name>, description: <summary>}, ...]}``
+ * objects (a single service may expose more than one scope) where
+ * ``scope`` is the Detent scope schema name as a plain string,
+ * ``display_name`` is a human-readable label, the optional scope-level
+ * ``description`` is the scope's plain-English summary (Detent's
+ * ``$comment``), and each permission carries its own name plus an
+ * optional ``description``.
  */
 function readAvailableServices() {
   let raw;
@@ -444,34 +457,60 @@ function readAvailableServices() {
       'top-level value is not a JSON object keyed by service name',
     );
   }
-  for (const [serviceName, entry] of Object.entries(parsed)) {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+  for (const [serviceName, entries] of Object.entries(parsed)) {
+    if (!Array.isArray(entries)) {
       throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}' must be a JSON object`,
+        `value for '${serviceName}' must be a JSON array of scope entries`,
       );
     }
-    if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'scope' must be a non-empty string`,
+    entries.forEach((entry, index) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}' must be a JSON object`,
+        );
+      }
+      if (typeof entry.scope !== 'string' || entry.scope.length === 0) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'scope' must be a non-empty string`,
+        );
+      }
+      if (typeof entry.display_name !== 'string' || entry.display_name.length === 0) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'display_name' must be a non-empty string`,
+        );
+      }
+      // The scope-level ``description`` is optional but must be a string.
+      if (entry.description !== undefined && typeof entry.description !== 'string') {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'description' must be a string`,
+        );
+      }
+      // Each permission is a ``{name, description?}`` object: ``name`` is a
+      // non-empty string and ``description``, when present, is a string.
+      const permissions = entry.permissions;
+      if (!Array.isArray(permissions)) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': 'permissions' must be an array`,
+        );
+      }
+      const isEveryPermissionWellFormed = permissions.every(
+        (item) =>
+          typeof item === 'object' &&
+          item !== null &&
+          !Array.isArray(item) &&
+          typeof item.name === 'string' &&
+          item.name.length > 0 &&
+          (item.description === undefined || typeof item.description === 'string'),
       );
-    }
-    if (typeof entry.display_name !== 'string' || entry.display_name.length === 0) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'display_name' must be a non-empty string`,
-      );
-    }
-    const permissions = entry.permissions;
-    if (!Array.isArray(permissions) || !permissions.every((item) => typeof item === 'string')) {
-      throw new AvailableServicesUnavailableError(
-        `entry for '${serviceName}': 'permissions' must be an array of strings`,
-      );
-    }
+      if (!isEveryPermissionWellFormed) {
+        throw new AvailableServicesUnavailableError(
+          `entry ${index} for '${serviceName}': each 'permissions' item must be ` +
+            `an object with a non-empty string 'name' and optional string 'description'`,
+        );
+      }
+    });
   }
   return parsed;
-}
-
-function handleGetAvailableCollection(response) {
-  sendJson(response, 200, readAvailableServices());
 }
 
 function handleGetAvailableForService(response, rawServiceName) {
@@ -488,7 +527,31 @@ function handleGetAvailableForService(response, rawServiceName) {
   if (!Object.prototype.hasOwnProperty.call(catalog, rawServiceName)) {
     throw new ServiceNotFoundError(rawServiceName);
   }
-  sendJson(response, 200, catalog[rawServiceName]);
+  sendJson(response, 200, catalog[rawServiceName].map(withAlwaysAvailablePermission));
+}
+
+/**
+ * Prepend the always-available ``any`` permission to a scope entry's
+ * ``permissions`` array (deduplicating in case the catalog lists it
+ * explicitly). This ensures every scope -- even one with no enumerated
+ * permissions, like Linear -- surfaces at least the ``any`` option so a
+ * caller can request unrestricted access under it.
+ */
+function withAlwaysAvailablePermission(entry) {
+  const existing = Array.isArray(entry.permissions) ? entry.permissions : [];
+  const withoutAny = existing.filter(
+    (permission) => permission.name !== ALWAYS_AVAILABLE_PERMISSION,
+  );
+  return {
+    ...entry,
+    permissions: [
+      {
+        name: ALWAYS_AVAILABLE_PERMISSION,
+        description: ALWAYS_AVAILABLE_PERMISSION_DESCRIPTION,
+      },
+      ...withoutAny,
+    ],
+  };
 }
 
 function handleGetSelf(response, context) {
@@ -560,10 +623,6 @@ export default async function permissionsExtension(request, response, context) {
     }
     if (route.kind === 'self' && method === 'GET') {
       handleGetSelf(response, context);
-      return true;
-    }
-    if (route.kind === 'available-collection' && method === 'GET') {
-      handleGetAvailableCollection(response);
       return true;
     }
     if (route.kind === 'available-item' && method === 'GET') {

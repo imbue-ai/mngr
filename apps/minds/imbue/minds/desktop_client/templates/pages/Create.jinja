@@ -1,0 +1,399 @@
+{#def git_url, host_name, branch, launch_modes, selected_launch_mode, ai_providers, selected_ai_provider, backup_providers, selected_backup_provider, backup_encryption_methods, selected_backup_encryption_method, backup_api_key_env, has_saved_backup_password, accounts, default_account_id, anthropic_api_key, error_message, region_options_by_launch_mode, region_selected_by_launch_mode, color="#0b292b", palette={} #}
+{#
+  Workspace creation form. The compute provider, AI provider, and backup
+  provider defaults depend on whether an account is selected; the page-level
+  JS keeps the defaults in sync as the user changes the account dropdown.
+#}
+{% set _default_restic_env = "# see docs linked above for available options\n# for example:\nRESTIC_REPOSITORY=s3:s3.amazonaws.com/<bucket_name>\nAWS_ACCESS_KEY_ID=\nAWS_SECRET_ACCESS_KEY=\n" %}
+{% set _scripts %}
+<script src="/_static/workspace_accent.js" defer></script>
+<script>
+  (function() {
+    var configureToggle = document.getElementById('configure-toggle');
+    var configurePanel = document.getElementById('configure-panel');
+    var isConfigureVisible = false;
+    configureToggle.addEventListener('click', function() {
+      isConfigureVisible = !isConfigureVisible;
+      configurePanel.classList.toggle('hidden', !isConfigureVisible);
+      configureToggle.innerHTML = isConfigureVisible ? 'Hide' : 'Configure&hellip;';
+    });
+
+    var toggleBtn = document.getElementById('toggle-advanced');
+    var advancedSection = document.getElementById('advanced-options');
+    var isVisible = false;
+    toggleBtn.addEventListener('click', function() {
+      isVisible = !isVisible;
+      advancedSection.classList.toggle('hidden', !isVisible);
+      toggleBtn.textContent = isVisible ? 'Hide advanced settings' : 'Show advanced settings';
+    });
+
+    var createForm = document.getElementById('create-form');
+    createForm.addEventListener('submit', function() {
+      var buttons = document.querySelectorAll('button[form="create-form"]');
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].disabled = true;
+        buttons[i].textContent = 'Creating...';
+      }
+    });
+
+    // Color picker: palette-only (no custom hex on create). Clicking a
+    // swatch updates the hidden ``color`` input the form POSTs, and
+    // flips aria-checked so the visual selection ring (driven by an
+    // aria-checked CSS attribute selector in tokens.css) tracks.
+    var colorInput = document.getElementById('create-color-input');
+    var colorSwatches = document.querySelectorAll('#create-color-picker .color-swatch');
+    function previewCreateAccent(hex) {
+      // No workspace yet, so route through the freeform preview path:
+      // content-relay-preload validates + forwards to main + main
+      // forwards to this bundle's chrome view as
+      // ``freeform_accent_preview``, which sets the CSS variables
+      // directly. Naturally cleared by the next navigation event
+      // (submit -> ``current-workspace-changed`` repaints from the new
+      // workspace; cancel -> last-workspace fallback repaints).
+      if (typeof hex !== 'string') return;
+      var fg = window.mindsAccent && window.mindsAccent.pickForegroundForHex
+        ? window.mindsAccent.pickForegroundForHex(hex)
+        : null;
+      if (!fg) return;
+      window.postMessage({
+        type: 'minds:preview-freeform-accent',
+        accent: hex,
+        accentFg: fg,
+      }, '*');
+    }
+    function selectColorSwatch(hex) {
+      colorInput.value = hex;
+      for (var i = 0; i < colorSwatches.length; i++) {
+        colorSwatches[i].setAttribute(
+          'aria-checked',
+          colorSwatches[i].getAttribute('data-color') === hex ? 'true' : 'false'
+        );
+      }
+      previewCreateAccent(hex);
+    }
+    for (var i = 0; i < colorSwatches.length; i++) {
+      (function (sw) {
+        sw.addEventListener('click', function () {
+          selectColorSwatch(sw.getAttribute('data-color'));
+        });
+      })(colorSwatches[i]);
+    }
+    // Paint the initial default-color preview so the bar shows the
+    // form's pre-selected color even before the user clicks (matches
+    // the "what you see on submit" expectation). Deferred to
+    // DOMContentLoaded: this inline IIFE runs during parsing, before
+    // the deferred workspace_accent.js has executed, so window.mindsAccent
+    // (which previewCreateAccent needs for pickForegroundForHex) isn't
+    // ready yet. DOMContentLoaded fires after deferred scripts run.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', function () {
+        previewCreateAccent(colorInput.value);
+      });
+    } else {
+      previewCreateAccent(colorInput.value);
+    }
+
+    var accountSelect = document.getElementById('account_id');
+    var launchSelect = document.getElementById('launch_mode');
+    var aiProviderSelect = document.getElementById('ai_provider');
+    var apiKeyRow = document.getElementById('api-key-row');
+    var apiKeyInput = document.getElementById('anthropic_api_key');
+    var launchModeError = document.getElementById('launch-mode-account-error');
+    var aiProviderError = document.getElementById('ai-provider-account-error');
+    var backupSelect = document.getElementById('backup_provider');
+    var backupApiKeyRow = document.getElementById('backup-api-key-row');
+    var backupEncryptionRow = document.getElementById('backup-encryption-row');
+    var backupEncryptionSelect = document.getElementById('backup_encryption_method');
+    var backupMasterPasswordRow = document.getElementById('backup-master-password-row');
+    var backupMasterPasswordInput = document.getElementById('backup_master_password');
+    var backupProviderError = document.getElementById('backup-provider-account-error');
+    var submitBtn = document.getElementById('create-submit');
+    var summaryEl = document.getElementById('config-summary');
+    var regionRow = document.getElementById('region-row');
+    var regionSelect = document.getElementById('region');
+    var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
+    var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
+
+    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', CLOUD: 'a cloud VM'};
+    var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
+    var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
+
+    function joinNames(names) {
+      if (names.length === 1) return names[0];
+      if (names.length === 2) return names[0] + ' and ' + names[1];
+      return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    }
+
+    function capitalize(text) {
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
+    function updateSummary() {
+      var facets = [
+        {name: 'compute', label: COMPUTE_LABELS[launchSelect.value] || launchSelect.value},
+        {name: 'tokens', label: AI_LABELS[aiProviderSelect.value] || aiProviderSelect.value}
+      ];
+      var isBackupDeferred = backupSelect.value === 'CONFIGURE_LATER';
+      if (!isBackupDeferred) {
+        facets.push({name: 'backups', label: BACKUP_LABELS[backupSelect.value] || backupSelect.value});
+      }
+
+      var labelOrder = [];
+      var namesByLabel = {};
+      for (var i = 0; i < facets.length; i++) {
+        var facet = facets[i];
+        if (!namesByLabel[facet.label]) {
+          namesByLabel[facet.label] = [];
+          labelOrder.push(facet.label);
+        }
+        namesByLabel[facet.label].push(facet.name);
+      }
+
+      var sentences = labelOrder.map(function (label) {
+        return capitalize(joinNames(namesByLabel[label]) + ' via ' + label);
+      });
+      summaryEl.textContent = sentences.join('. ') + '.';
+    }
+
+    function onAccountChange() {
+      var hasAccount = accountSelect.value !== '';
+      var imbueOptionSelects = [launchSelect, aiProviderSelect, backupSelect];
+      for (var i = 0; i < imbueOptionSelects.length; i++) {
+        var opt = imbueOptionSelects[i].querySelector('option[data-requires-account]');
+        if (opt) opt.disabled = !hasAccount;
+      }
+      if (hasAccount) {
+        launchSelect.value = 'IMBUE_CLOUD';
+        aiProviderSelect.value = 'IMBUE_CLOUD';
+        backupSelect.value = 'IMBUE_CLOUD';
+      } else {
+        launchSelect.value = 'LIMA';
+        aiProviderSelect.value = 'SUBSCRIPTION';
+        backupSelect.value = 'CONFIGURE_LATER';
+      }
+      update();
+    }
+
+    function updateRegion() {
+      // The region dropdown is only shown for providers that place a machine in
+      // a chosen region (imbue_cloud, vultr). For others it is hidden and
+      // disabled so no region value is submitted.
+      var mode = launchSelect.value;
+      var options = REGION_OPTIONS[mode];
+      if (!options || options.length === 0) {
+        regionRow.classList.add('hidden');
+        regionSelect.disabled = true;
+        return;
+      }
+      // Rebuild options only when the provider changed, so a user's explicit
+      // pick survives unrelated form changes.
+      if (regionSelect.getAttribute('data-mode') !== mode) {
+        var preselected = REGION_SELECTED[mode] || options[0];
+        regionSelect.innerHTML = '';
+        for (var i = 0; i < options.length; i++) {
+          var opt = document.createElement('option');
+          opt.value = options[i];
+          opt.textContent = options[i];
+          if (options[i] === preselected) opt.selected = true;
+          regionSelect.appendChild(opt);
+        }
+        regionSelect.setAttribute('data-mode', mode);
+      }
+      regionSelect.disabled = false;
+      regionRow.classList.remove('hidden');
+    }
+
+    function update() {
+      var hasAccount = accountSelect.value !== '';
+
+      var launchImbueOption = launchSelect.querySelector('option[data-requires-account]');
+      if (launchImbueOption) launchImbueOption.disabled = !hasAccount;
+      var aiImbueOption = aiProviderSelect.querySelector('option[data-requires-account]');
+      if (aiImbueOption) aiImbueOption.disabled = !hasAccount;
+      var backupImbueOption = backupSelect.querySelector('option[data-requires-account]');
+      if (backupImbueOption) backupImbueOption.disabled = !hasAccount;
+
+      var isApiKey = aiProviderSelect.value === 'API_KEY';
+      apiKeyRow.classList.toggle('hidden', !isApiKey);
+      apiKeyInput.required = isApiKey;
+
+      var backupValue = backupSelect.value;
+      var isBackupConfigured = backupValue === 'IMBUE_CLOUD' || backupValue === 'API_KEY';
+      var isBackupApiKey = backupValue === 'API_KEY';
+      backupApiKeyRow.classList.toggle('hidden', !isBackupApiKey);
+      backupEncryptionRow.classList.toggle('hidden', !isBackupConfigured);
+
+      var isMasterPassword = isBackupConfigured && backupEncryptionSelect.value === 'MASTER_PASSWORD';
+      if (backupMasterPasswordRow) backupMasterPasswordRow.classList.toggle('hidden', !isMasterPassword);
+      if (backupMasterPasswordInput) backupMasterPasswordInput.required = isMasterPassword;
+
+      var launchInvalid = !hasAccount && launchSelect.value === 'IMBUE_CLOUD';
+      var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
+      var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
+      launchModeError.classList.toggle('hidden', !launchInvalid);
+      aiProviderError.classList.toggle('hidden', !aiInvalid);
+      backupProviderError.classList.toggle('hidden', !backupInvalid);
+      submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
+
+      updateRegion();
+      updateSummary();
+    }
+
+    accountSelect.addEventListener('change', onAccountChange);
+    launchSelect.addEventListener('change', update);
+    aiProviderSelect.addEventListener('change', update);
+    backupSelect.addEventListener('change', update);
+    backupEncryptionSelect.addEventListener('change', update);
+    update();
+  })();
+</script>
+{% endset %}
+<CardPage title="Create workspace" padding="form" max_width="max-w-[520px]" scripts={{ _scripts }}>
+  <form id="create-form" action="/create" method="post">
+
+      <div class="flex items-center justify-between gap-4 mb-5">
+        <h1 class="text-sm font-medium text-zinc-500">Create workspace</h1>
+        <select id="account_id" name="account_id"
+                class="max-w-[220px] text-xs text-right text-zinc-400 bg-transparent border-0 rounded-md px-1 py-1 outline-none cursor-pointer transition-colors hover:text-zinc-700 focus:outline-none focus:ring-0">
+          {% for acct in accounts %}
+            <option value="{{ acct.user_id }}"{% if acct.user_id == default_account_id %} selected{% endif %}>{{ acct.email }}</option>
+          {% endfor %}
+          <option value=""{% if not default_account_id %} selected{% endif %}>No account (private project)</option>
+        </select>
+      </div>
+
+      {% if error_message %}
+        <Notice variant="error">{{ error_message }}</Notice>
+      {% endif %}
+
+      <div class="flex gap-2 items-stretch">
+        <TextInput name="host_name" :value="host_name" placeholder="assistant" id="host_name" required extra="flex-1" />
+        <ButtonSubmit form="create-form" id="create-submit">Create</ButtonSubmit>
+      </div>
+
+      <div id="create-color-picker" class="mt-3" role="radiogroup" aria-label="Workspace color">
+        <input type="hidden" name="color" id="create-color-input" value="{{ color }}">
+        <div class="flex flex-wrap gap-2">
+          {% for name, hex_value in palette.items() %}
+            <ColorSwatch :hex="hex_value" :name="name" size="sm" :selected="hex_value == color" />
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="flex items-center justify-between gap-3 mt-2.5 px-1 text-xs">
+        <span id="config-summary" class="text-zinc-400 leading-snug"></span>
+        <Button variant="ghost" id="configure-toggle"
+                extra="!p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700 whitespace-nowrap">
+          Configure&hellip;
+        </Button>
+      </div>
+
+      <div id="configure-panel" class="hidden mt-5 flex flex-col gap-4">
+
+        <div>
+          <div class="flex items-center justify-between gap-3">
+            <FormLabel target="launch_mode" inline>Compute provider</FormLabel>
+            <Select id="launch_mode" name="launch_mode" width="w-48">
+              {% for mode in launch_modes %}
+                <option value="{{ mode.value }}"{% if mode.value == selected_launch_mode %} selected{% endif %}
+                        {% if mode.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ mode.value | lower }}</option>
+              {% endfor %}
+            </Select>
+          </div>
+          <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between gap-3">
+            <FormLabel target="ai_provider" inline>AI provider</FormLabel>
+            <Select id="ai_provider" name="ai_provider" width="w-48">
+              {% for provider in ai_providers %}
+                <option value="{{ provider.value }}"{% if provider.value == selected_ai_provider %} selected{% endif %}
+                        {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{{ provider.value | lower }}</option>
+              {% endfor %}
+            </Select>
+          </div>
+          <p id="ai-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <div id="api-key-row" class="mt-2 hidden">
+            <FormLabel target="anthropic_api_key">Anthropic API key</FormLabel>
+            <TextInput name="anthropic_api_key" :value="anthropic_api_key" placeholder="sk-ant-..." id="anthropic_api_key" type="password" />
+          </div>
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between gap-3">
+            <FormLabel target="backup_provider" inline>Backup provider</FormLabel>
+            <Select id="backup_provider" name="backup_provider" width="w-48">
+              {% for provider in backup_providers %}
+                <option value="{{ provider.value }}"{% if provider.value == selected_backup_provider %} selected{% endif %}
+                        {% if provider.value == 'IMBUE_CLOUD' %}data-requires-account="true"{% endif %}>{% if provider.value == 'API_KEY' %}manual{% else %}{{ provider.value | lower }}{% endif %}</option>
+              {% endfor %}
+            </Select>
+          </div>
+          <p id="backup-provider-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+
+          <div id="backup-api-key-row" class="mt-2 hidden">
+            <FormLabel target="backup_api_key_env">restic environment</FormLabel>
+            <p class="mb-1 text-xs text-zinc-400">
+              Written verbatim to <code>restic.env</code>. Don't set <code>RESTIC_PASSWORD</code> -- minds assigns each
+              workspace its own. See the
+              <Link href="https://restic.readthedocs.io/en/stable/040_backup.html#environment-variables"
+                    target="_blank" rel="noopener">restic docs</Link>.
+            </p>
+            <Textarea id="backup_api_key_env" name="backup_api_key_env" rows="6" extra="font-mono"
+                      :value="backup_api_key_env if backup_api_key_env else _default_restic_env" />
+          </div>
+
+          <div id="backup-encryption-row" class="mt-2 hidden">
+            <div class="flex items-center justify-between gap-3">
+              <FormLabel target="backup_encryption_method" inline>Backup encryption method</FormLabel>
+              <Select id="backup_encryption_method" name="backup_encryption_method" width="w-48">
+                {% for method in backup_encryption_methods %}
+                  <option value="{{ method.value }}"{% if method.value == selected_backup_encryption_method %} selected{% endif %}>{{ method.value | lower }}</option>
+                {% endfor %}
+              </Select>
+            </div>
+          </div>
+
+          <div id="backup-master-password-row" class="mt-2 hidden">
+            <FormLabel target="backup_master_password">Backup master password</FormLabel>
+            {% if has_saved_backup_password %}
+              <p class="text-xs text-zinc-500">A saved backup password will be used for this workspace.</p>
+            {% else %}
+              <TextInput type="password" name="backup_master_password" id="backup_master_password"
+                         placeholder="remember this -- backups are unrecoverable without it" />
+              <label class="mt-2 flex items-center gap-2 text-xs text-zinc-500">
+                <input type="checkbox" id="backup_save_password" name="backup_save_password" value="1" />
+                Save this password for all my workspaces
+              </label>
+            {% endif %}
+          </div>
+        </div>
+
+        <Button variant="ghost" id="toggle-advanced"
+                extra="self-start !p-0 !bg-transparent !text-xs !font-normal !text-blue-600 hover:!bg-transparent hover:underline hover:!text-blue-700">
+          Show advanced settings
+        </Button>
+
+        <div id="advanced-options" class="hidden flex flex-col gap-4">
+          <div id="region-row" class="hidden">
+            <div class="flex items-center justify-between gap-3">
+              <FormLabel target="region" inline>Region</FormLabel>
+              <Select id="region" name="region" width="w-48"></Select>
+            </div>
+            <p class="mt-1 text-xs text-zinc-400 text-right">Where the machine is created. If a region is out of capacity, try another.</p>
+          </div>
+          <div>
+            <FormLabel target="git_url">Repository</FormLabel>
+            <p class="mb-1 text-xs text-zinc-400">Git URL or local path</p>
+            <TextInput name="git_url" :value="git_url" placeholder="https://github.com/user/repo.git" id="git_url" required />
+          </div>
+          <div>
+            <FormLabel target="branch">Branch</FormLabel>
+            <p class="mb-1 text-xs text-zinc-400">Leave empty for latest version</p>
+            <TextInput name="branch" :value="branch" placeholder="latest tag" id="branch" />
+          </div>
+        </div>
+      </div>
+  </form>
+</CardPage>

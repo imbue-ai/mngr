@@ -120,13 +120,47 @@ test-offload-release args="":
         cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
     fi
 
+# Run the minds-snapshot-resume test suite against a pre-built Modal
+# image produced by ``scripts/snapshot_minds_e2e_state.py``.
+# Usage:
+#     just test-offload-minds-snapshot im-01...    # required: snapshot image id
+#     just test-offload-minds-snapshot im-01... '--filter test_foo'
+# The snapshot image already has the entire mngr checkout, the FCT
+# workspace's Docker container (in a stopped state), and dockerd's
+# /var/lib/docker tree baked in -- so offload skips its normal image-
+# setup phase entirely and boots straight from the snapshot via
+# ``--override-image-id`` (offload v0.9.6+).
+test-offload-minds-snapshot snapshot_image_id args="":
+    #!/bin/bash
+    set -ueo pipefail
+    : "${MODAL_TOKEN_ID:?must be set}"
+    : "${MODAL_TOKEN_SECRET:?must be set}"
+    if [ -z "{{snapshot_image_id}}" ]; then
+        echo "Usage: just test-offload-minds-snapshot <snapshot-image-id> [args...]" >&2
+        echo "Generate the image id by running: uv run python scripts/snapshot_minds_e2e_state.py" >&2
+        exit 2
+    fi
+    just _generate-dockerignore
+    trap "rm -f .dockerignore" EXIT
+    offload -c offload-modal-minds-snapshot.toml run --trace \
+        --override-image-id "{{snapshot_image_id}}" \
+        --env "GITHUB_HEAD_REF=${GITHUB_HEAD_REF:-}" \
+        --env "GITHUB_REF_NAME=${GITHUB_REF_NAME:-}" {{args}} || [[ $? -eq 2 ]]
+
+    # Copy results to the main worktree so new worktrees inherit baselines via COPY mode.
+    MAIN_WORKTREE=$(git worktree list --porcelain | head -1 | sed 's/^worktree //')
+    if [ -f test-results/junit.xml ] && [ -n "$MAIN_WORKTREE" ] && [ "$MAIN_WORKTREE" != "$(pwd)" ]; then
+        mkdir -p "$MAIN_WORKTREE/test-results"
+        cp test-results/junit.xml "$MAIN_WORKTREE/test-results/junit.xml"
+    fi
+
 # Xdist parallelism args for local dev recipes. Kept out of pyproject addopts
 # so they don't leak into offload sandboxes (which run `-p no:xdist`).
 _parallel := "-n 4 --dist=worksteal --max-worker-restart=0"
 # Default mark filter for local unit + integration recipes. Kept out of
 # pyproject addopts because it would collide with offload-modal-acceptance
 # (which runs the opposite filter). A later -m on CLI overrides this.
-_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services'"
+_skip_acceptance_and_release := "-m 'not acceptance and not release and not minds_deployment and not minds_services and not minds_snapshot_resume'"
 
 test-unit:
   uv run pytest {{_parallel}} {{_skip_acceptance_and_release}} --cov-report=html --ignore-glob="**/test_*.py" --cov-fail-under=36
@@ -150,7 +184,7 @@ test-quick args="":
 
 test-acceptance:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
-  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "no release"
+  PYTEST_MAX_DURATION_SECONDS=600 uv run pytest {{_parallel}} --no-cov -m "not release"
 
 test-release:
   # when running these locally, we set the max duration super high just so that we don't fail (which makes it harder to see the errors)
@@ -164,6 +198,12 @@ test-timings:
 # useful for running against a single test, regardless of how it is marked
 test target:
   PYTEST_MAX_DURATION_SECONDS=600 uv run pytest -sv --no-cov -n 0 -m "acceptance or not acceptance" "{{target}}"
+
+# Run the opt-in live Claude Agent SDK tests (libs/mngr_robinhood). These make real,
+# paid API calls and are excluded from every CI run. ANTHROPIC_API_KEY must already be
+# exported (e.g. `set -a; source .env; set +a`). Pass extra pytest args via `args`.
+test-sdk-live args="":
+  RUN_SDK_LIVE_TESTS=1 PYTEST_MAX_DURATION_SECONDS=2400 uv run pytest -sv --no-cov -n 0 -o timeout=900 -m sdk_live libs/mngr_robinhood {{args}}
 
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds/scripts/test_deployments.py. See specs/minds-deployment-tests.md
@@ -277,6 +317,11 @@ deploy *args:
 #       running minds-start).
 #   MINDS_WORKSPACE_BRANCH  = the FCT worktree's current branch.
 #   MINDS_WORKSPACE_NAME    = "mindtest".
+# Also sets MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1, the explicit opt-in that
+# tells the desktop client to honor those MINDS_WORKSPACE_* vars. Without it
+# (i.e. a normal `minds run`) the form ignores any stray MINDS_WORKSPACE_* in
+# the shell. The opt-in is what makes dev iteration work on ANY tier --
+# including staging / production -- instead of only on per-developer dev envs.
 #
 # Always re-syncs the live mngr working tree into the FCT worktree's
 # vendor/mngr/ first, so the very first Create after starting the app
@@ -313,7 +358,7 @@ minds-start agent_name="mindtest" branch="":
     if [ ! -e "$fct_wt/.git" ]; then
         echo "error: no FCT worktree at $fct_wt" >&2
         echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
+        echo "       (e.g. base = origin/main) before re-running minds-start." >&2
         exit 2
     fi
     vendor_mngr="$fct_wt/vendor/mngr"
@@ -346,13 +391,6 @@ minds-start agent_name="mindtest" branch="":
         fi
         rm -f "$pid_file"
     fi
-    fct_wt="$(pwd)/.external_worktrees/forever-claude-template"
-    if [ ! -e "$fct_wt/.git" ]; then
-        echo "error: no FCT worktree at $fct_wt" >&2
-        echo "       run \`git -C ~/project/forever-claude-template worktree add -b <branch> $fct_wt <base>\`" >&2
-        echo "       (e.g. base = josh/start-minds) before re-running minds-start." >&2
-        exit 2
-    fi
     if [ -f .env ]; then
         set -a
         . .env
@@ -368,6 +406,9 @@ minds-start agent_name="mindtest" branch="":
     # proportionate fix. `unset` of an already-unset var is a no-op.
     unset ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
     export MINDS_WORKSPACE_GIT_URL="$fct_wt"
+    # Explicit opt-in so the desktop client honors the MINDS_WORKSPACE_* vars
+    # on any tier (the form ignores them otherwise; see _operator_workspace_default).
+    export MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
     if [ -n "{{branch}}" ]; then
         export MINDS_WORKSPACE_BRANCH="{{branch}}"
     else
@@ -393,6 +434,9 @@ minds-start agent_name="mindtest" branch="":
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
     fi
+    # Put the Node version apps/minds pins (.nvmrc) first on PATH so pnpm's
+    # engine-strict check passes regardless of the shell's default node.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm start
 
 # Stop the minds desktop client started in this worktree by `just minds-start`.
@@ -492,6 +536,10 @@ minds-stop:
 
 # Build the minds desktop client distributable (slow; uses todesktop).
 minds-build:
+    #!/bin/bash
+    set -ueo pipefail
+    # Match apps/minds's pinned Node (.nvmrc) so pnpm's engine-strict passes.
+    . apps/minds/scripts/select_node_version.sh || exit 2
     cd apps/minds && pnpm build
 
 # Sync this repo's mngr changes (and the FCT worktree's template state)
@@ -599,13 +647,14 @@ forward-system-interface agent_name:
     fi
 
     # Inject the token where the agent's cloudflare-tunnel service
-    # (libs/cloudflare_tunnel/.../runner.py) watches for it. Strip any
-    # existing CLOUDFLARE_TUNNEL_TOKEN line first so we don't keep two
-    # copies, then atomic-rename so the watcher never observes a
-    # half-written file. CF tokens are base64url-y, so single-quoting
-    # the value is safe.
+    # (libs/cloudflare_tunnel/.../runner.py) watches for it:
+    # runtime/secrets/cloudflare_tunnel.env, one of the per-secret env files
+    # in the runtime/secrets/ directory. We own that file outright, so just
+    # write it via an atomic rename so the watcher never observes a
+    # half-written file. CF tokens are base64url-y, so single-quoting the
+    # value is safe.
     uv run mngr exec "$AGENT_ID" \
-        "mkdir -p runtime && { [ -f runtime/secrets ] && grep -Ev '^export[[:space:]]+CLOUDFLARE_TUNNEL_TOKEN=' runtime/secrets || true; printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN'; } > runtime/secrets.tmp && mv runtime/secrets.tmp runtime/secrets"
+        "mkdir -p runtime/secrets && printf 'export CLOUDFLARE_TUNNEL_TOKEN=%s\n' '$TOKEN' > runtime/secrets/cloudflare_tunnel.env.tmp && mv runtime/secrets/cloudflare_tunnel.env.tmp runtime/secrets/cloudflare_tunnel.env"
 
     URL=$(uv run mngr imbue_cloud tunnels services add \
         "$TUNNEL_NAME" system_interface http://localhost:8000 \
@@ -730,13 +779,82 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
     [ -n "$base_url" ] && printf 'export ANTHROPIC_BASE_URL=%s\n' "$base_url" >> "$env_file"
     echo "Wrote $env_file (mode 600)"
 
-# Destroy and remove every host in the pool with status='released'.
-# Sources .minds/<env>/neon.sh for DATABASE_URL.
-cleanup-pool-hosts env="production":
+# === minds pool hosts (OVH-backed, leased mode) ===
+#
+# Thin wrappers around the env-aware `minds pool {create,list,destroy}` CLI,
+# which resolves the management SSH key, OVH AK/AS/CK, AND (for staging /
+# production) the host_pool DSN from the activated tier's Vault entries
+# automatically -- so you never export creds or pass --database-url by hand.
+# dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
+# minds env first:  eval "$(uv run minds env activate <name>)"
+
+# Bake one or more pre-provisioned pool hosts for the activated minds env.
+#
+# The baked version comes entirely from <workspace_dir> (a forever-claude-template
+# checkout) -- check it out at the branch/tag you want baked first. <attributes>
+# is only the lease-match label the desktop client sends (e.g. repo_branch_or_tag);
+# it does NOT select the baked version. Extra flags forward to `minds pool create`
+# (e.g. --no-recycle, --mngr-source <monorepo-root>).
+#
+# Usage:
+#   eval "$(uv run minds env activate staging)"
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
+#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-EAST-VA ~/project/forever-claude-template 2
+bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --attributes '{{attributes}}' \
+        --workspace-dir "{{workspace_dir}}" \
+        {{extra_args}}
+
+# List pool_hosts rows for the activated minds env (read-only).
+list-pool-hosts:
+    uv run minds pool list
+
+# Destroy a single pool host: cancel its OVH VPS, then drop its pool_hosts row.
+# Find the id with `just list-pool-hosts`. Extra flags forward to `minds pool
+# destroy` (e.g. --force to drop a non-released row, --skip-vps-cancel if the
+# VPS is already gone).
+#
+#   just destroy-pool-host <pool-host-id>
+#
+# Note: the steady-state teardown is automatic -- the connector releases a host
+# when its lease ends and an hourly Modal cron (`cleanup_removing_pool_hosts`)
+# sweeps any stragglers; `minds env destroy` removes every VPS for a whole tier.
+# This recipe is the manual single-host escape hatch.
+destroy-pool-host pool_host_id *extra_args:
+    uv run minds pool destroy "{{pool_host_id}}" {{extra_args}}
+
+# Args forward as-is, e.g. `just release patch`, `just release patch --dry-run
+# --minor mngr`, or `just release --watch`. See scripts/release.py's header for
+# the full interface.
+# Selectively bump and publish changed packages to PyPI.
+release *args:
+    uv run scripts/release.py {{args}}
+
+# Reads GH_TOKEN + ANTHROPIC_API_KEY from Vault (run `vault login -method=oidc` first); set
+# CHANGELOG_VERIFY=quick|full to run the agent once during deploy. Idempotent:
+# removes any existing schedule before recreating, so this is also how you
+# redeploy after editing scripts/changelog_consolidation_prompt.md or
+# scripts/changelog_deploy.sh.
+# (Re)deploy the nightly changelog-consolidation schedule from current source.
+changelog-deploy:
+    bash scripts/changelog_deploy.sh
+
+# Opens a PR (which you can merge before re-running a blocked release) by
+# running the same agent the schedule runs nightly. Reads the provider +
+# plugin-disable args from scripts/changelog_schedule_utils.py; the trigger
+# name and mngr namespace are kept in sync with that module by hand, as in
+# changelog_deploy.sh.
+# Trigger an on-demand changelog-consolidation run to consolidate pending entries.
+changelog-trigger:
     #!/bin/bash
     set -ueo pipefail
-    set -a
-    . .minds/{{env}}/neon.sh
-    set +a
-    uv run python apps/remote_service_connector/scripts/cleanup_released_hosts.py \
-        --database-url "$DATABASE_URL"
+    # Isolated mngr config namespace (mirrors changelog_deploy.sh) so we don't
+    # load the repo's .mngr/settings.toml, whose plugins won't import here.
+    export MNGR_ROOT_NAME="mngr-changelog-schedule"
+    unset MNGR_HOST_DIR MNGR_PREFIX
+    provider="$(uv run python scripts/changelog_schedule_utils.py --print-provider)"
+    disable_args="$(uv run python scripts/changelog_schedule_utils.py --print-disable-plugin-args)"
+    uv run mngr schedule run changelog-consolidation --provider "$provider" $disable_args
