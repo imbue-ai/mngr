@@ -23,10 +23,12 @@ of `libs/mngr` config helpers).
   mngr's **existing** config-merge model -- assign-by-default, opt-in `__extend`, and the
   narrowing guard -- instead of the special-purpose `deep_merge_settings` (hook
   concatenation) added by the collision fix.
-- Stay **schema-free**: `ClaudeAgentConfig.settings_overrides` remains `dict[str, Any]`.
-  mngr never enumerates or validates Claude's `settings.json` fields -- the same
-  treatment it already gives the open-ended `commands.<cmd>.defaults: dict[str, Any]`
-  (the merge machinery stops at the open dict and walks its contents structurally).
+- Stay **schema-free**: `ClaudeAgentConfig.settings_overrides` remains `dict[str, Any]`, so
+  pydantic never enumerates or validates Claude's `settings.json` keys. The config-merge
+  machinery (`resolve_extends`, narrowing) operates *structurally* over whatever nesting the
+  TOML tables / JSON produce -- it descends into nested tables and resolves inner `__extend`
+  just as it does for the existing open `commands.<cmd>.defaults: dict[str, Any]` field. A
+  Claude key mngr doesn't know about is simply forwarded.
 - Let the user **control merge recursion depth via TOML nesting**: a nested TOML table
   recurses (sibling-preserving); a JSON-blob string leaf is parsed and treated as a
   **collection** value subject to the narrowing guard -- not an opaque scalar.
@@ -121,23 +123,36 @@ rather than a lower-precedence config layer.
 
 ### Deferred resolution against the runtime base (the crux)
 
+> **REVISED (pending architecture lock).** Two corrections from review, to be folded in once
+> the deferral approach is settled:
+> 1. **No `deep_assign`.** Reuse the existing machinery: `resolve_extends(provision_base,
+>    settings_overrides)` resolves `__extend` against the base (the depth lives inside
+>    `_apply_extend`), then a trivial **top-level** `{**provision_base, **resolved}` overlays
+>    the override's keys. The overlay is shallow precisely because `resolve_extends` already
+>    did the depth -- same as how `merge_with` overlays at config-load. No new merge function.
+> 2. **Deferral only where the base is runtime-built.** Cross-config-scope condensation
+>    (user < project < local `settings_overrides`) happens at config-load via normal
+>    `resolve_extends` + `merge_with` (a left fold). Deferral to provision is needed only for
+>    `__extend` that must resolve against the **provision base** (synced home settings + mngr
+>    hooks), which doesn't exist at config-load. Make this a **canonical shared "deferred
+>    `__extend` paths"** mechanism (generalize the `create_templates` carveout in
+>    `key_resolver.py`, and de-dup `_apply_template_extend` into `_apply_extend`), not a
+>    second special case.
+
 mngr's hooks are **built at provision time**, not present as a config layer at config-load.
-So `settings_overrides`' `__extend` keys cannot resolve at config-load against config
-layers -- a `hooks.SessionStart__extend` is meant to extend **mngr's runtime readiness
+So `settings_overrides`' `__extend` keys that target mngr's hooks/home base cannot resolve at
+config-load -- a `hooks.SessionStart__extend` is meant to extend **mngr's runtime readiness
 hooks**, which don't exist yet during config loading.
 
 Therefore:
 
-- `settings_overrides`' `__extend` keys are **deferred**: `resolve_extends` preserves them
+- Such `settings_overrides` `__extend` keys are **deferred**: `resolve_extends` preserves them
   through config-load (following the `create_templates` precedent), and mngr resolves them
-  at **provision time** via `resolve_extends(managed_base, settings_overrides)`.
-- The resolved override (now marker-free) is applied with a new `deep_assign(managed_base,
-  resolved)` -- recurse into dicts to preserve siblings, override leaf/list/scalar replaces
-  the base leaf. The `__extend` keys already incorporated the base value (concat), so the
-  subsequent assign does not double-count.
-- After applying, run the narrowing check (`would_assignment_narrow` per resolved leaf,
-  or `detect_settings_narrowing` over the whole override) against `managed_base`; on any
-  violation, raise the standard narrowing error unless the escape hatch is set.
+  at **provision time** via `resolve_extends(provision_base, settings_overrides)`, then
+  overlays the result top-level onto `provision_base` (see REVISED note above).
+- Run the narrowing check (`would_assignment_narrow` / `detect_settings_narrowing`) against
+  `provision_base`; on any violation, raise the standard narrowing error unless the escape
+  hatch is set.
 
 **Note:** because resolution is deferred to provision, the base for `__extend` and for
 narrowing is **mngr's built hooks**, which is precisely what makes "extend mngr's
@@ -170,26 +185,53 @@ SessionStart" work and "silently replace mngr's SessionStart" fail loudly.
   longer silently concatenates hooks; the additive path is `__extend`. (This changes the
   interim PR behavior, but that behavior was never released.)
 
+### Claude's hook schema (important for the examples)
+
+A hook event is a **list of groups**, each group a dict with an optional `matcher` and a
+`hooks` list. mngr emits a singleton group, e.g.:
+
+```json
+"SessionStart": [ { "hooks": [ {"type": "command", "command": "<mngr readiness>"} ] } ]
+```
+
+For a given event, Claude runs **every** group whose `matcher` matches (no matcher =
+always). So a non-singleton `SessionStart` list is just multiple independent hook groups,
+all active. This means:
+
+- Adding a user hook = **appending a group to the event list** (a *list* concat), not a dict
+  merge. The additive operator is therefore `SessionStart__extend = [ {group} ]`.
+- You cannot target mngr's existing group's inner `hooks` list via a dotted path
+  (`SessionStart.hooks__extend`) -- `SessionStart` is a **list**, and dotted paths have no
+  array index. Append a new group instead; both groups' hooks run.
+
 ### Worked examples
 
-Reviewer's case -- add a `SessionStart` hook without dropping mngr's readiness hooks:
+Reviewer's case -- add a `SessionStart` hook without dropping mngr's readiness hooks (append
+a group via list-concat `__extend`):
 
 ```toml
 [agent_types.coder.settings_overrides.hooks]
 SessionStart__extend = '[{"hooks": [{"type": "command", "command": "..."}]}]'
 ```
--> concatenates onto mngr's readiness `SessionStart` hooks. Both fire.
+-> appends a second group; mngr's group and the user's group both run.
 
 ```toml
 [agent_types.coder.settings_overrides]
 model = "opus"        # scalar assign, no narrowing
 ```
 
+Preserve a sibling under a nested dict (the #1647 case) -- `__extend` at the nested level:
+
+```toml
+[agent_types.coder.settings_overrides.permissions__extend]
+allow = ["Bash(npm *)"]   # mngr/home permissions.defaultMode survives the one-level merge
+```
+
 ```toml
 [agent_types.coder.settings_overrides.hooks]
 SessionStart = '[{"hooks": [{"type": "command", "command": "..."}]}]'
 ```
--> assign replaces mngr's `SessionStart` list (drops readiness) -> **narrowing error**.
+-> bare assign replaces mngr's `SessionStart` list (drops its group) -> **narrowing error**.
 Fix by using `SessionStart__extend`, or set `allow_settings_key_assignment_narrowing`.
 
 Raw flag full-replace -> **narrowing error** (drops mngr's `hooks`):
@@ -200,10 +242,12 @@ mngr create coder -- --settings '{"hooks": {"SessionStart": [...]}}'
 ### Schema-free guarantee
 
 No code path enumerates Claude's settings keys. `resolve_extends`,
-`would_assignment_narrow`/`detect_settings_narrowing`, `deep_assign`, and
-`parse_scalar_value` operate structurally over `Mapping` / `list` / `set`. pydantic does
-not validate the inner content of `settings_overrides` (a typo in a Claude key is **not**
-caught) -- the intended trade-off of schema-free passthrough.
+`would_assignment_narrow`/`detect_settings_narrowing`, and `parse_scalar_value` operate
+structurally over `Mapping` / `list` / `set`. pydantic does not validate the inner content of
+`settings_overrides`: a mistyped Claude key is not validated *by mngr* -- we forward it
+verbatim. Claude itself may reject an unknown key; mngr neither catches nor suppresses that.
+This is the intended trade-off of schema-free passthrough (mngr does not track Claude's
+settings schema).
 
 ## Changes
 

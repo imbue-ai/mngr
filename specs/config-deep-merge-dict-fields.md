@@ -10,12 +10,36 @@ that closed PR #1647.
 
 Audience: developers working in `libs/mngr/imbue/mngr/config/`.
 
-## The change in one line
+> **OPEN -- is this change even needed?** mngr's existing dict `__extend` is a **one-level
+> shallow** merge (`{**current, **extend}`), and one level **already preserves siblings one
+> level down**. So #1647's case is solved by placing `__extend` at the right level --
+> `settings_overrides.permissions__extend = {allow = [...]}` keeps a sibling
+> `permissions.defaultMode` via the shallow merge, no recursion required. Deep recursion is
+> only needed when `__extend` is placed *too shallow* to reach the level you want merged
+> (e.g. `settings_overrides__extend = {permissions = {...}}` replaces all of `permissions`).
+> Since the user can always put `__extend` at the level they want merged, and Claude's
+> settings are essentially 2-level (a top key -> a flat dict of scalars/lists), one-level
+> `__extend` likely suffices -- and it stays consistent with mngr's deliberately
+> **non-recursive** `__extend` (env-settings-overrides line 43: "No recursion into nested
+> aggregates"). **Leaning: do NOT make `__extend` recursive.** Keep it one-level; users place
+> `__extend` at the level they want merged. The remainder of this spec describes the
+> recursive alternative for completeness, pending a decision.
+
+## The change in one line (recursive alternative)
 
 `_apply_extend`'s dict branch (`key_resolver.py`) currently does `{**current, **extend}`
-(shallow). Make it recurse: nested dicts merge key-by-key, nested lists concat, nested sets
-union, and a leaf (scalar / type-mismatch) takes the extender's value. Everything else --
-assign-by-default, narrowing, `resolve_extends`' cross-layer behavior -- stays exactly as is.
+(shallow, one level). The recursive alternative: when `__extend` merges two dicts, a nested
+value that is **itself a dict in both** is merged recursively rather than the inner dict being
+replaced wholesale; nested lists concat, nested sets union, leaves (scalar / type-mismatch)
+take the extender's value. This is gated entirely on `__extend` -- a bare assignment still
+replaces. Everything else -- assign-by-default, narrowing, `resolve_extends`' cross-layer
+behavior -- stays as is.
+
+**Note (per review):** this is NOT "nested dicts always merge key-by-key." Merging happens
+only under an `__extend`; without it, a dict assignment replaces. The question this spec
+turns on is whether a *single* `__extend` should recurse through all nested levels
+(recursive) or merge just one level and require a nested `__extend` to go deeper (the current
+one-level behavior -- the leaning above).
 
 ## Background
 
