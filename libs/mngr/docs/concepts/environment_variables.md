@@ -34,7 +34,7 @@ MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS='["--model","opus"]' mngr create my-agent
 
 ### Assigning vs extending
 
-The bare key is **always** an assignment — the override replaces whatever the lower-precedence layers produced. To opt into additive behavior (append for lists/tuples, shallow key-merge for dicts, union for sets), add `__extend` (or `__EXTEND` for env vars) to the leaf key:
+The bare key is **always** an assignment — the override replaces whatever the lower-precedence layers produced. To opt into additive behavior (append for lists/tuples, recursive key-merge for dicts, union for sets), add `__extend` (or `__EXTEND` for env vars) to the leaf key:
 
 ```bash
 # Replace the entire cli_args list:
@@ -47,6 +47,8 @@ MNGR__AGENT_TYPES__MY_CLAUDE__CLI_ARGS__EXTEND='["--debug"]' mngr create
 ```
 
 The same `__extend` suffix is recognised in TOML, in `--setting`, and in `mngr config set / extend` — one rule, four call sites.
+
+Dict extension is **recursive**: a nested `key__extend` inside an `__extend` value merges deeper (extending `base[key]`), while a nested bare `key` replaces at that level (preserving its siblings). This is backward-compatible — any value that nests no inner `__extend` marker merges exactly as the previous one-level operator did (bare nested keys replace, siblings survive).
 
 `__extend` on a scalar field raises `ConfigParseError`. A shape mismatch (e.g. a string value used to extend a list field) also raises.
 

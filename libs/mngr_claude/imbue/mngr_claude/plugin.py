@@ -314,9 +314,11 @@ class ClaudeAgentConfig(AgentTypeConfig):
     )
     settings_overrides: dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value overrides **deep-merged** into settings.json at provisioning time "
-        "(nested keys preserve sibling values from the home base; lists concatenate). "
-        "Example: {'model': 'opus[1m]', 'fastMode': True}. "
+        description="A patch merged onto your home Claude settings at provisioning: a bare key "
+        "replaces (and warns if it drops a sibling aggregate); `key__extend` merges; nest "
+        "`__extend` to merge deeper. Cross-config-scope `__extend` accumulation is not supported "
+        "(a higher scope's settings_overrides replaces a lower scope's). "
+        "Example: {'model': 'opus[1m]', 'permissions__extend': {'allow__extend': ['Bash(npm *)']}}. "
         "Not applied in use_env_config_dir mode (there is no per-agent settings.json to merge into).",
     )
     emit_common_transcript: bool = Field(

@@ -3,7 +3,7 @@
 Recognizes the ``__extend`` suffix on leaf keys and resolves it against the
 current config state into a plain assignment. The bare key is always an
 assignment; ``key__extend`` means "extend the base value": concat for
-list/tuple, shallow key-merge for dict, union for set/frozenset.
+list/tuple, recursive key-merge for dict, union for set/frozenset.
 
 The resolver runs before ``parse_config``; the raw dict it returns contains
 no ``__extend`` keys, so the parser never has to know about the operator.
