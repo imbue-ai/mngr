@@ -4540,6 +4540,36 @@ def test_build_settings_json_local_context_no_flags() -> None:
     assert "fastMode" not in data
 
 
+def test_build_settings_json_includes_readiness_hooks() -> None:
+    """_build_settings_json folds mngr's always-on readiness hooks into settings.json."""
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(check_installation=False)
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    assert "SessionStart" in data["hooks"]
+
+
+def test_build_settings_json_deep_merges_settings_overrides_preserving_siblings() -> None:
+    """settings_overrides deep-merges so a nested override preserves sibling keys (#1647).
+
+    A base settings.json with ``permissions.defaultMode`` plus a settings_overrides
+    setting ``permissions.allow`` must end up with BOTH keys -- the override must not
+    wipe the sibling from the home base.
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "acceptEdits"}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False, settings_overrides={"permissions": {"allow": ["Bash(npm *)"]}}
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================

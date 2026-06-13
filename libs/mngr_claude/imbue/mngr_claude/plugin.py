@@ -527,7 +527,16 @@ def _build_settings_json(
 
     Uses the local file as a base when sync_local is True and the file exists,
     otherwise uses generated defaults. Applies context-dependent flags
-    (e.g. skipDangerousModePermissionPrompt for unattended) and user overrides.
+    (e.g. skipDangerousModePermissionPrompt for unattended), folds in mngr's
+    own Claude hooks (readiness; optional credential-sync on macOS; optional
+    permission auto-allow), and deep-merges the user's ``settings_overrides``.
+
+    The hooks land in the config-dir ``settings.json`` (the "user" layer Claude
+    reads from ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file,
+    so a user's own ``--settings`` passes through and Claude layers it natively.
+    ``settings_overrides`` is deep-merged (not shallow ``dict.update``) so nested
+    siblings survive (e.g. a ``permissions.allow`` override does not wipe a
+    ``permissions.defaultMode`` from the home base -- the #1647 fix).
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
@@ -538,8 +547,20 @@ def _build_settings_json(
             data = _generate_claude_home_settings()
     else:
         data = _generate_claude_home_settings()
+    # Flags are flat scalars, so a shallow update is correct here.
     data.update(compute_settings_json_flags(ctx))
-    data.update(config.settings_overrides)
+
+    # Fold in mngr's own hooks (concatenated into the hook event lists by
+    # merge_hooks_config), then deep-merge the user's settings_overrides.
+    hook_configs = [build_readiness_hooks_config()]
+    if config.sync_credentials_on_login and is_macos():
+        hook_configs.append(build_credential_sync_hooks_config())
+    if config.auto_allow_permissions:
+        hook_configs.append(build_permission_auto_allow_hooks_config())
+    for hook_config in hook_configs:
+        data = merge_hooks_config(data, hook_config) or data
+
+    data = deep_merge_settings(data, config.settings_overrides)
     return json.dumps(data, indent=2) + "\n"
 
 
