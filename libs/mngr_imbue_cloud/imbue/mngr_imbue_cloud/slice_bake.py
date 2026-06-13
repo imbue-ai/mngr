@@ -31,6 +31,7 @@ def build_slice_bake_remote_command(
     attributes_json: str,
     box_public_address: str,
     pool_public_key: str,
+    slice_vcpus: int,
 ) -> str:
     """Render the bash run on the box to bake one slice and print create JSON to stdout.
 
@@ -59,6 +60,10 @@ def build_slice_bake_remote_command(
         f"providers.{SLICE_PROVIDER_INSTANCE}.box_public_address={box_public_address}",
         "-S",
         f"providers.{SLICE_PROVIDER_INSTANCE}.pool_authorized_public_key={pool_public_key}",
+        # The VM gets exactly the vCPU count the slice advertises (so the
+        # leased host's actual cores match its attributes), not the provider default.
+        "-S",
+        f"providers.{SLICE_PROVIDER_INSTANCE}.slice_vcpus={slice_vcpus}",
         "--label",
         f"workspace={BAKED_SERVICES_AGENT_NAME}",
         "--label",

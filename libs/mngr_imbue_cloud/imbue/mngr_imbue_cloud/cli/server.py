@@ -552,6 +552,8 @@ def _bake_and_record_one_slice(
             attributes_json=attributes_json,
             box_public_address=address,
             pool_public_key=pool_public_key,
+            # Give the VM the vCPU count the slice advertises so actual == attributes.
+            slice_vcpus=int(attributes["cpus"]),
         )
         logger.info("Baking slice {} on {} ({})", host_name, server.id, address)
         bake_result = _run_remote(

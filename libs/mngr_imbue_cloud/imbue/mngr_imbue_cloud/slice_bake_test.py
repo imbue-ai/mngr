@@ -17,6 +17,7 @@ def _bake_command() -> str:
         attributes_json='{"memory_gb": 8, "cpus": 3}',
         box_public_address="15.204.140.221",
         pool_public_key="ssh-ed25519 AAAAC3pool key-comment",
+        slice_vcpus=3,
     )
 
 
@@ -31,6 +32,11 @@ def test_bake_command_injects_box_address_and_pool_key_via_setting_overrides() -
     command = _bake_command()
     assert "providers.imbue_cloud_slice.box_public_address=15.204.140.221" in command
     assert "providers.imbue_cloud_slice.pool_authorized_public_key=ssh-ed25519 AAAAC3pool key-comment" in command
+
+
+def test_bake_command_sets_vm_vcpus_to_match_advertised_cpus() -> None:
+    command = _bake_command()
+    assert "providers.imbue_cloud_slice.slice_vcpus=3" in command
 
 
 def test_bake_command_points_at_fct_config_dir_so_templates_load_without_git() -> None:
