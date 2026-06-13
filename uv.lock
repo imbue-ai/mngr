@@ -1980,6 +1980,7 @@ source = { editable = "libs/mngr_imbue_cloud" }
 dependencies = [
     { name = "click" },
     { name = "click-option-group" },
+    { name = "concurrency-group" },
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
@@ -1996,6 +1997,7 @@ dependencies = [
 requires-dist = [
     { name = "click" },
     { name = "click-option-group" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "libs/imbue_common" },
     { name = "imbue-mngr", editable = "libs/mngr" },
