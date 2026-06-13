@@ -349,7 +349,7 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
     only. An ``<opt>__extend`` against a ``None`` base elsewhere
     (``commands.<name>.<opt>__extend`` here) still flows through ``_apply_extend``,
     which treats ``current_value=None`` as assign-via-extend and collapses to a
-    bare key. Locks in the depth/scope guard in ``_is_create_template_option_path``.
+    bare key. Locks in the depth/scope guard in ``is_deferred_extend_path``.
     """
     base = MngrConfig()
     resolved = resolve_extends(
@@ -357,3 +357,38 @@ def test_resolve_extends_does_not_preserve_extend_outside_create_templates() -> 
         {"commands": {"create": {"env__extend": ["X=1"]}}},
     )
     assert resolved == {"commands": {"create": {"env": ["X=1"]}}}
+
+
+def test_resolve_extends_preserves_extend_inside_settings_overrides() -> None:
+    """An ``<key>__extend`` anywhere under ``agent_types.<name>.settings_overrides``
+    whose base lookup yields ``None`` is preserved verbatim through config-load,
+    destined for the provision-time fold against the concrete settings base ``B``.
+
+    ``settings_overrides`` is schemaless, so the base lookup is ``None``; without
+    the deferred-path carveout the marker would collapse to a bare assign at
+    config-load instead of merging onto the home settings.json at provision.
+    """
+    base = MngrConfig()
+    resolved = resolve_extends(
+        base,
+        {
+            "agent_types": {
+                "my_claude": {"settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(npm *)"]}}}
+            }
+        },
+    )
+    assert resolved == {
+        "agent_types": {
+            "my_claude": {"settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(npm *)"]}}}
+        }
+    }
+
+
+def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> None:
+    """The settings_overrides carveout is a *prefix* match: a marker nested several
+    levels deep under settings_overrides is also preserved, not just a top-level one.
+    """
+    base = MngrConfig()
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"hooks": {"SessionStart__extend": [{"x": 1}]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override

@@ -270,28 +270,81 @@ def resolve_extends(
             current = result[bare]
         else:
             current = _walk_to_field(base, path + (bare,))
-        # Preserve the __extend suffix inside a create template when the base
-        # has no value to extend. apply_create_template will resolve it against
-        # the create command's runtime params instead of collapsing to assign.
-        if current is None and _is_create_template_option_path(path):
+        # Preserve the __extend suffix inside a deferred-path subtree when the
+        # base has no value to extend. The marker is resolved later against a
+        # concrete runtime base (create-command params for templates; the
+        # provision settings base ``B`` for settings_overrides) rather than
+        # collapsing to assign at config-load.
+        if current is None and is_deferred_extend_path(path):
             result[key] = value
             continue
         result[bare] = _apply_extend(current, value, field_path)
     return result
 
 
-def _is_create_template_option_path(path: tuple[str, ...]) -> bool:
-    """Return True when ``path`` is the options of a create template.
+class _ExactDepthMatcher(BaseModel):
+    """Matches a path of an exact length whose leading segments equal ``prefix``.
+
+    The path must be exactly ``len(prefix) + 1`` segments long (the trailing
+    segment is the dynamic container name). Used for ``create_templates``, whose
+    options live exactly one level inside the container --
+    ``('create_templates', '<name>')`` -- so deeper paths (structurally invalid
+    template bodies) are not given the preserve-extend treatment.
+    """
+
+    prefix: tuple[str, ...]
+
+    def matches(self, path: tuple[str, ...]) -> bool:
+        return len(path) == len(self.prefix) + 1 and path[: len(self.prefix)] == self.prefix
+
+
+class _PrefixMatcher(BaseModel):
+    """Matches any path at or below ``prefix``.
+
+    Used for ``settings_overrides``: a marker living directly inside, or at any
+    depth under, ``('agent_types', '<name>', 'settings_overrides')`` is deferred
+    to the provision-time fold, so the match is on the prefix rather than an exact
+    depth. ``resolve_extends`` passes the path of the dict *containing* the marker,
+    which equals the prefix when the marker sits directly inside settings_overrides
+    -- hence ``>=`` rather than ``>``. The ``<name>`` segment is dynamic, matched
+    by the ``__wildcard__`` sentinel below.
+    """
+
+    prefix: tuple[str, ...]
+
+    def matches(self, path: tuple[str, ...]) -> bool:
+        if len(path) < len(self.prefix):
+            return False
+        return all(_segment_matches(expected, actual) for expected, actual in zip(self.prefix, path, strict=False))
+
+
+# Sentinel marking a path segment whose concrete value is a user-chosen name
+# (e.g. the agent-type name or the template name) and so matches any segment.
+_WILDCARD_SEGMENT: Final[str] = "__wildcard__"
+
+
+def _segment_matches(expected: str, actual: str) -> bool:
+    return expected == _WILDCARD_SEGMENT or expected == actual
+
+
+# Registry of paths whose ``__extend`` markers are *deferred*: preserved verbatim
+# at config-load (when the base has no value to extend) and resolved later
+# against a concrete runtime base. Each entry must have a wired consumer:
+#   - ``create_templates.<name>`` -> ``apply_create_template`` (cli/common_opts.py)
+#   - ``agent_types.<name>.settings_overrides`` -> ``_build_settings_json``
+#     (mngr_claude/plugin.py), folded against the provision base ``B``.
+_DEFERRED_EXTEND_MATCHERS: Final[tuple[_ExactDepthMatcher | _PrefixMatcher, ...]] = (
+    _ExactDepthMatcher(prefix=("create_templates",)),
+    _PrefixMatcher(prefix=("agent_types", _WILDCARD_SEGMENT, "settings_overrides")),
+)
+
+
+def is_deferred_extend_path(path: tuple[str, ...]) -> bool:
+    """Return True when ``path`` lies in a deferred-``__extend`` subtree.
 
     Used by ``resolve_extends`` to recognise leaf keys that should keep their
-    ``__extend`` suffix for deferred runtime resolution by
-    ``apply_create_template`` rather than being eagerly resolved against the
-    config-load-time base.
-
-    Template options live exactly one level inside the ``create_templates``
-    container -- ``('create_templates', '<name>')`` -- so the check is on the
-    exact depth rather than a prefix match. Deeper paths would mean a
-    structurally invalid template body (rejected by ``_parse_create_templates``)
-    and should not silently get the preserve-extend treatment.
+    ``__extend`` suffix for deferred runtime resolution rather than being eagerly
+    resolved against the config-load-time base. See ``_DEFERRED_EXTEND_MATCHERS``
+    for the registry of deferred paths and their consumers.
     """
-    return len(path) == 2 and path[0] == "create_templates"
+    return any(matcher.matches(path) for matcher in _DEFERRED_EXTEND_MATCHERS)
