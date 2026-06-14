@@ -779,7 +779,7 @@ def usage(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="usage",
     one_line_description="Show rolling-window usage / quota data from agent statusline events",
-    synopsis="mngr usage [OPTIONS] [COMMAND]",
+    synopsis="mngr usage [--max-age DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]",
     description="""Reports rolling-window usage / quota data captured by an agent's
 statusline.
 
