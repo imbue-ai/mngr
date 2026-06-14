@@ -179,6 +179,27 @@ def test_combine_patches_bare_plus_assign_same_layer_raises() -> None:
         combine_patches({}, {"f": 1, "f__assign": 2})
 
 
+def test_combine_patches_higher_assign_dict_plus_higher_extend_dict_in_same_layer() -> None:
+    """Within one ``higher`` layer, ``f__assign`` (dict) followed by ``f__extend``
+    (dict) recursively combines the extend onto the just-assigned dict, keeping the
+    ``__assign`` suffix."""
+    combined = combine_patches(
+        {"f": {"keep": 1}},
+        {"f__assign": {"a__extend": ["x"]}, "f__extend": {"a__extend": ["y"]}},
+    )
+    assert combined == {"f__assign": {"a__extend": ["x", "y"]}}
+
+
+def test_combine_patches_lower_assign_dict_plus_higher_extend_dict() -> None:
+    """A lower ``f__assign`` dict extended by a higher ``f__extend`` dict combines the
+    two dict patches recursively and retains the ``__assign`` suffix."""
+    combined = combine_patches(
+        {"f__assign": {"a__extend": ["x"]}},
+        {"f__extend": {"a__extend": ["y"]}},
+    )
+    assert combined == {"f__assign": {"a__extend": ["x", "y"]}}
+
+
 def test_combine_patches_combines_set_markers() -> None:
     combined = combine_patches({"f__extend": {"A"}}, {"f__extend": ["B"]})
     assert combined == {"f__extend": {"A", "B"}}

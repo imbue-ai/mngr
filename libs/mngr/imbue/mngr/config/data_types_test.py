@@ -19,16 +19,12 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
-from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.data_types import StaticList
-from imbue.mngr.config.data_types import StaticTuple
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.data_types import split_cli_args_string
-from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.loader import parse_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
@@ -40,6 +36,10 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
+from imbue.overlay.markers import StaticList
+from imbue.overlay.markers import StaticTuple
+from imbue.overlay.merge import would_assignment_narrow
 
 
 class _TestAgentTypeConfig(AgentTypeConfig):

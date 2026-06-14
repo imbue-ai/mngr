@@ -60,8 +60,14 @@ def test_prevent_builtin_exception_raises() -> None:
     rc.check_builtin_exception_raises(_DIR, snapshot(0))
 
 
+# The 1 here is ``parse_scalar_value`` in operators.py: it JSON-parses a raw
+# override string and, on ``JSONDecodeError``, falls back to treating the input
+# as a plain string. This is the intended "JSON-or-raw-string" value semantics
+# for a single CLI/env/TOML override token (not corrupt user config), so the
+# fallback is correct rather than a swallowed parse error. Moved verbatim from
+# mngr's key_resolver_primitives.py, where it was likewise counted.
 def test_prevent_silent_decode_error_catches() -> None:
-    rc.check_silent_decode_error_catches(_DIR, snapshot(0))
+    rc.check_silent_decode_error_catches(_DIR, snapshot(1))
 
 
 # --- Import style ---

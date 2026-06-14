@@ -29,7 +29,6 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import StaticList
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -103,6 +102,7 @@ from imbue.mngr_claude.plugin import get_files_for_deploy
 from imbue.mngr_claude.plugin import on_before_create
 from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import register_cli_options
+from imbue.overlay.markers import StaticList
 
 # =============================================================================
 # Test Helpers
