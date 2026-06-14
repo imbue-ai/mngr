@@ -10,6 +10,7 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
+from imbue.mngr.api.find import _with_unreachable_hint
 from imbue.mngr.api.find import describe_unreachable_endpoints
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
@@ -1115,3 +1116,24 @@ def test_describe_unreachable_endpoints_aggregates_across_providers(
     assert "50.17.2.88" in hint
     assert "10.0.0.1" in hint
     assert "vultr" not in hint
+
+
+def test_with_unreachable_hint_preserves_user_input_error_type() -> None:
+    """An unknown agent name yields a UserInputError; the hint is appended, type preserved."""
+    original = UserInputError("Could not find agent with ID or name: my-agent")
+
+    result = _with_unreachable_hint(original, " Note: host X unreachable.")
+
+    assert isinstance(result, UserInputError)
+    assert str(result) == "Could not find agent with ID or name: my-agent Note: host X unreachable."
+
+
+def test_with_unreachable_hint_preserves_agent_not_found_error_type() -> None:
+    """An unknown agent id yields an AgentNotFoundError; the hint is appended, type preserved."""
+    original = AgentNotFoundError("agent-123")
+
+    result = _with_unreachable_hint(original, " Note: host X unreachable.")
+
+    assert isinstance(result, AgentNotFoundError)
+    assert "agent-123" in str(result)
+    assert "host X unreachable" in str(result)

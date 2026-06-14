@@ -568,6 +568,15 @@ def describe_unreachable_endpoints(providers: Sequence[BaseProviderInstance]) ->
     )
 
 
+def _with_unreachable_hint(
+    error: UserInputError | AgentNotFoundError, hint: str
+) -> UserInputError | AgentNotFoundError:
+    """Re-create ``error`` with ``hint`` appended, preserving its type (and its tailored help text)."""
+    if isinstance(error, AgentNotFoundError):
+        return AgentNotFoundError(f"{error.agent_identifier}{hint}")
+    return UserInputError(f"{error}{hint}")
+
+
 def find_one_agent_and_agents_by_host(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -596,14 +605,16 @@ def find_one_agent_and_agents_by_host(
 
     try:
         host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
-    except UserInputError as e:
-        # Only the genuine no-match case is plausibly explained by an
-        # unreachable host whose agents never made it into agents_by_host;
-        # filter_one_agent also raises UserInputError on a multi-match, where
-        # the agent WAS found and the hint would mislead.
+    except (UserInputError, AgentNotFoundError) as e:
+        # A no-match might be genuine, or the agent's host may have been
+        # unreachable during discovery (so it never made it into
+        # agents_by_host). filter_one_agent raises AgentNotFoundError for an
+        # unknown id and UserInputError for an unknown name -- but also for a
+        # multi-match, where the agent WAS found and the hint would mislead, so
+        # gate on a true zero-match.
         hint = describe_unreachable_endpoints(providers)
         if hint and not _filter_all_agents(address.agent, agents_by_host):
-            raise UserInputError(f"{e}{hint}") from e
+            raise _with_unreachable_hint(e, hint) from e
         raise
     return host_ref, agent_ref, agents_by_host
 

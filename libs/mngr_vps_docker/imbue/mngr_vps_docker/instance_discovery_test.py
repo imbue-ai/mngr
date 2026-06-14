@@ -141,16 +141,17 @@ class _DiscoveryTestProvider(VpsDockerProvider):
     def _read_records_from_vps(
         self,
         vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]], bool]:
         # When a test wants to drive the *real* _read_records_from_vps logic
         # (cache-fallback or state-container-not-ready paths), it sets the
         # vps_ip in per_vps_outer_errors or state_container_ready, and we
         # route through the superclass method (which will in turn use our
         # overridden _make_outer_for_vps_ip below).
-        # Otherwise short-circuit with the canned per-VPS payload.
+        # Otherwise short-circuit with the canned per-VPS payload (reachable).
         if vps_ip in self.per_vps_outer_errors or vps_ip in self.state_container_ready:
             return super()._read_records_from_vps(vps_ip)
-        return self.per_vps_records.get(vps_ip, ([], {}))
+        records, agent_data = self.per_vps_records.get(vps_ip, ([], {}))
+        return records, agent_data, False
 
     @contextmanager
     def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
@@ -253,10 +254,11 @@ def test_read_records_from_vps_falls_back_to_cache_on_host_connection_error(
     provider._host_record_cache[host_b] = cached_on_other_vps
     provider.per_vps_outer_errors["10.0.0.1"] = HostConnectionError("connection refused")
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.1")
+    records, agent_data, is_unreachable = provider._read_records_from_vps("10.0.0.1")
 
     assert records == [cached_on_unreachable]
     assert agent_data == {}
+    assert is_unreachable is True
 
 
 def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
@@ -265,10 +267,11 @@ def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
     """If a VPS is unreachable and we have no cache, return empty -- not raise."""
     provider.per_vps_outer_errors["10.0.0.3"] = HostConnectionError("no route to host")
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.3")
+    records, agent_data, is_unreachable = provider._read_records_from_vps("10.0.0.3")
 
     assert records == []
     assert agent_data == {}
+    assert is_unreachable is True
 
 
 def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTestProvider) -> None:
@@ -278,9 +281,10 @@ def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTest
     provider._host_record_cache[host_c] = cached
     provider.per_vps_outer_errors["10.0.0.4"] = MngrError("docker inspect failed")
 
-    records, _agent_data = provider._read_records_from_vps("10.0.0.4")
+    records, _agent_data, is_unreachable = provider._read_records_from_vps("10.0.0.4")
 
     assert records == [cached]
+    assert is_unreachable is True
 
 
 def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
@@ -294,10 +298,12 @@ def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
     """
     provider.state_container_ready["10.0.0.6"] = False
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.6")
+    records, agent_data, is_unreachable = provider._read_records_from_vps("10.0.0.6")
 
     assert records == []
     assert agent_data == {}
+    # The outer connection succeeded -- "no container yet" is not unreachable.
+    assert is_unreachable is False
 
 
 # =========================================================================
@@ -445,15 +451,6 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
 # =========================================================================
 # unreachable_endpoints -- so callers can explain a missing agent
 # =========================================================================
-
-
-def test_unreachable_endpoint_recorded_when_ssh_fails(provider: _DiscoveryTestProvider) -> None:
-    """A VPS we cannot read is recorded so a missing agent can be explained, not assumed absent."""
-    provider.per_vps_outer_errors["10.0.0.7"] = HostConnectionError("no route to host")
-
-    provider._read_records_from_vps("10.0.0.7")
-
-    assert provider.unreachable_endpoints == ("10.0.0.7",)
 
 
 def test_discover_records_unreachable_endpoints_and_resets_between_sweeps(

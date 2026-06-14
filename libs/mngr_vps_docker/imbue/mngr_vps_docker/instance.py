@@ -401,8 +401,8 @@ class VpsDockerProvider(BaseProviderInstance):
         result (the host itself may still appear, as offline, but its agent
         list comes back empty). Exposing the endpoints lets callers such as
         ``mngr connect`` tell "no such agent" apart from "the agent's host
-        was unreachable". Populated by ``_read_records_from_vps`` and reset at
-        the start of each ``_discover_host_records_with_agents`` sweep.
+        was unreachable". Populated and reset per sweep in
+        ``_discover_host_records_with_agents``.
         """
         return tuple(self._unreachable_endpoints)
 
@@ -1595,7 +1595,7 @@ class VpsDockerProvider(BaseProviderInstance):
     def _read_records_from_vps(
         self,
         vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]], bool]:
         """Read the (single) host record + agent data from one VPS.
 
         Each VPS hosts exactly one mngr container (1:1 invariant). We find
@@ -1611,27 +1611,25 @@ class VpsDockerProvider(BaseProviderInstance):
         records for that VPS so the hosts still appear in the listing
         (with an offline state) instead of disappearing entirely; one bad
         VPS must not silently drop its hosts.
+
+        The third element is ``True`` iff the VPS was unreachable (the SSH
+        path raised); the caller records the endpoint so ``mngr connect`` can
+        tell "no such agent" apart from "agent's host was unreachable".
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 host_id = _read_host_id_label_from_vps(outer)
                 if host_id is None:
                     logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
-                    return [], {}
+                    return [], {}, False
                 host_store = open_host_store(outer, host_volume_name_for(host_id))
                 record = host_store.read_host_record()
                 if record is None:
                     logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
-                    return [], {}
+                    return [], {}, False
                 agent_data = host_store.list_persisted_agent_data()
-                return [record], {host_id: agent_data}
+                return [record], {host_id: agent_data}, False
         except MngrError as e:
-            # Record the unreachable endpoint so callers (e.g. ``mngr connect``)
-            # can distinguish "no such agent" from "agent's host was
-            # unreachable". A plain append is safe across the parallel fan-out:
-            # CPython's GIL makes ``list.append`` atomic, and the list is reset
-            # single-threaded before the fan-out begins.
-            self._unreachable_endpoints.append(vps_ip)
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
@@ -1650,7 +1648,7 @@ class VpsDockerProvider(BaseProviderInstance):
                     self.name,
                     e,
                 )
-            return cached_records, {}
+            return cached_records, {}, True
 
     def _discover_host_records_with_agents(
         self,
@@ -1667,8 +1665,8 @@ class VpsDockerProvider(BaseProviderInstance):
         time bounded by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
-        # Reset before the fan-out (single-threaded) so ``unreachable_endpoints``
-        # reflects only this sweep; the parallel workers below only append.
+        # Reset so ``unreachable_endpoints`` reflects only this sweep; it is
+        # repopulated single-threaded in the join loop below.
         self._unreachable_endpoints.clear()
         if not vps_ips:
             return [], {}
@@ -1687,8 +1685,10 @@ class VpsDockerProvider(BaseProviderInstance):
                 ) as executor:
                     futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
 
-                for future in futures:
-                    records, agent_data = future.result()
+                for vps_ip, future in zip(vps_ips, futures, strict=False):
+                    records, agent_data, is_unreachable = future.result()
+                    if is_unreachable:
+                        self._unreachable_endpoints.append(vps_ip)
                     all_records.extend(records)
                     for host_id, agents in agent_data.items():
                         all_agent_data.setdefault(host_id, []).extend(agents)
