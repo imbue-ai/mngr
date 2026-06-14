@@ -2096,6 +2096,18 @@ def _handle_dev_styleguide() -> Response:
     return HTMLResponse(content=render_dev_styleguide_page())
 
 
+# How often the chrome-events stream re-asserts the current non-HEALTHY
+# system-interface statuses, on top of the one-shot connect-time snapshot and
+# the per-transition pushes. This is a self-healing backstop: a chrome renderer
+# that lost its in-memory health state (e.g. a reloaded webview whose one-shot
+# ``system_interface_status`` was never replayed) re-learns a still-stuck
+# workspace within this interval and can finally redirect to the recovery page,
+# even though the tracker emitted no fresh transition. Re-asserting ``stuck`` is
+# idempotent client-side (the recovery-redirect lock prevents re-navigation), so
+# the only cost is one tiny event per non-healthy agent per interval.
+_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS: Final[float] = 15.0
+
+
 async def _handle_chrome_events(
     request: Request,
     auth_store: AuthStoreDep,
@@ -2182,6 +2194,9 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+            # Anchor the periodic re-assert clock to the connect-time snapshot
+            # just sent, so the first backstop re-assert is a full interval out.
+            last_status_reassert = time.monotonic()
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -2202,15 +2217,23 @@ async def _handle_chrome_events(
             #
             # Clearing at the bottom of the loop instead would lose the
             # wakeup for any producer that fires between the drain and the
-            # bottom-of-loop clear, leaving the queued item idle for up to
-            # 30s -- a UX regression for health-state transitions like
-            # RESTARTING -> HEALTHY.
+            # bottom-of-loop clear, leaving the queued item idle until the
+            # next idle-wake timeout -- a UX regression for health-state
+            # transitions like RESTARTING -> HEALTHY.
             shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
             while connected and not shutdown_event.is_set():
-                # Wait for a change signal or timeout (timeout for disconnect checks).
+                # Wait for a change signal or timeout. The timeout bounds both
+                # disconnect-detection latency and -- since the periodic status
+                # backstop below only runs on a loop wake -- the worst-case
+                # re-assert cadence on an otherwise-idle connection. Cap it at
+                # the re-assert interval so a steadily-stuck workspace really is
+                # re-asserted on that cadence rather than being stretched to a
+                # longer idle-wake period.
                 try:
-                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(
+                        change_event.wait(), timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                    )
                 except TimeoutError:
                     pass
                 # Clear BEFORE draining so any producer firing between drain
@@ -2233,6 +2256,25 @@ async def _handle_chrome_events(
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
+
+                # Periodic backstop: re-assert the current non-HEALTHY statuses
+                # even when no transition fired this tick. The tracker only
+                # *transitions* on edges (HEALTHY <-> STUCK/RESTARTING/...), so a
+                # workspace that is steadily STUCK emits nothing after its one
+                # initial edge. A renderer that lost that one-shot event (e.g. a
+                # reloaded chrome webview) would otherwise never re-learn it and
+                # never redirect to the recovery page. Re-asserting is idempotent
+                # client-side (the recovery-redirect lock prevents re-navigation).
+                now = time.monotonic()
+                if (
+                    tracker is not None
+                    and now - last_status_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                ):
+                    last_status_reassert = now
+                    for aid, status in tracker.snapshot_all().items():
+                        yield "data: {}\n\n".format(
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        )
 
                 # Each workspace entry carries its mind liveness (derived from
                 # discovery host state + any optimistic override), so a liveness
