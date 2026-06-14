@@ -104,28 +104,6 @@ def test_detect_settings_narrowing_exempts_settings_patch_field() -> None:
     assert detect_settings_narrowing(base, override) == []
 
 
-def test_logging_config_merge_overrides_all_fields() -> None:
-    """Merging LoggingConfig should override all fields from override."""
-    base = LoggingConfig()
-    override = LoggingConfig(
-        file_level=LogLevel.TRACE,
-        log_dir=Path("/custom/logs"),
-        max_log_size_mb=20,
-        console_level=LogLevel.DEBUG,
-        is_logging_commands=False,
-        is_logging_command_output=True,
-    )
-
-    merged = base.merge_with(override)
-
-    assert merged.file_level == LogLevel.TRACE
-    assert merged.log_dir == Path("/custom/logs")
-    assert merged.max_log_size_mb == 20
-    assert merged.console_level == LogLevel.DEBUG
-    assert merged.is_logging_commands is False
-    assert merged.is_logging_command_output is True
-
-
 def test_env_var_from_string_parses_simple_pair() -> None:
     """EnvVar.from_string should parse KEY=value format."""
     env_var = EnvVar.from_string("KEY=value")
@@ -304,143 +282,11 @@ def test_agent_type_config_merge_with_accepts_base_class_override() -> None:
 # =============================================================================
 
 
-def test_provider_instance_config_merge_with_returns_override_backend() -> None:
-    """ProviderInstanceConfig.merge_with should return override's backend."""
-    base = ProviderInstanceConfig(backend=ProviderBackendName("local"))
-    override = ProviderInstanceConfig(backend=ProviderBackendName("docker"))
-    merged = base.merge_with(override)
-    assert merged.backend == ProviderBackendName("docker")
-
-
 class _TestProviderConfigWithListAndDict(ProviderInstanceConfig):
     """Test config with list and dict fields for testing merge behavior."""
 
     tags: list[str] = Field(default_factory=list)
     options: dict[str, str] = Field(default_factory=dict)
-
-
-def test_provider_instance_config_merge_replaces_lists() -> None:
-    """ProviderInstanceConfig.merge_with assigns list fields from override (no concat)."""
-    base = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=["tag1", "tag2"],
-        options={},
-    )
-    override = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=["tag3"],
-        options={},
-    )
-    merged = base.merge_with(override)
-    assert isinstance(merged, _TestProviderConfigWithListAndDict)
-    assert merged.tags == ["tag3"]
-
-
-def test_provider_instance_config_merge_replaces_dicts() -> None:
-    """ProviderInstanceConfig.merge_with assigns dict fields from override (no key-merge)."""
-    base = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=[],
-        options={"key1": "val1", "key2": "base_val"},
-    )
-    override = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=[],
-        options={"key2": "override_val", "key3": "val3"},
-    )
-    merged = base.merge_with(override)
-    assert isinstance(merged, _TestProviderConfigWithListAndDict)
-    assert merged.options == {"key2": "override_val", "key3": "val3"}
-
-
-def test_provider_instance_config_merge_keeps_unset_list() -> None:
-    """ProviderInstanceConfig.merge_with keeps the base list when the override never set it.
-
-    "Never set" is expressed by omitting the field from the override (so it is
-    absent from ``model_fields_set``), matching how a real config layer that
-    doesn't mention the key is parsed.
-    """
-    base = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=["tag1"],
-        options={},
-    )
-    override = _TestProviderConfigWithListAndDict.model_construct(
-        backend=ProviderBackendName("local"),
-        options={},
-    )
-    merged = base.merge_with(override)
-    assert isinstance(merged, _TestProviderConfigWithListAndDict)
-    assert merged.tags == ["tag1"]
-
-
-def test_provider_instance_config_merge_keeps_unset_dict() -> None:
-    """ProviderInstanceConfig.merge_with keeps the base dict when the override never set it."""
-    base = _TestProviderConfigWithListAndDict(
-        backend=ProviderBackendName("local"),
-        tags=[],
-        options={"key1": "val1"},
-    )
-    override = _TestProviderConfigWithListAndDict.model_construct(
-        backend=ProviderBackendName("local"),
-        tags=[],
-    )
-    merged = base.merge_with(override)
-    assert isinstance(merged, _TestProviderConfigWithListAndDict)
-    assert merged.options == {"key1": "val1"}
-
-
-class _TestProviderConfigWithBoolAndTuple(ProviderInstanceConfig):
-    """Test config with non-None-default fields (a bool and a tuple)."""
-
-    is_special: bool = Field(default=False)
-    extra_args: tuple[str, ...] = Field(default=())
-
-
-def test_provider_instance_config_merge_keeps_unset_non_none_default_fields() -> None:
-    """An override that sets only one field must not reset other fields to their defaults.
-
-    Regression test: a create template applies ``providers.<name>.is_enabled=true``
-    as a single-key override. The parsed override carries every other field at its
-    model default (``is_special=False``, ``extra_args=()``), but only ``is_enabled``
-    is in ``model_fields_set``. The merge must preserve the base's non-default values
-    rather than clobbering them with the override's defaults.
-    """
-    base = _TestProviderConfigWithBoolAndTuple(
-        backend=ProviderBackendName("local"),
-        is_enabled=False,
-        is_special=True,
-        extra_args=("--workdir=/",),
-    )
-    # Mirror how parse_config builds a single-key --setting override.
-    override = _TestProviderConfigWithBoolAndTuple.model_construct(is_enabled=True)
-    merged = base.merge_with(override)
-    assert isinstance(merged, _TestProviderConfigWithBoolAndTuple)
-    assert merged.is_enabled is True
-    assert merged.is_special is True
-    assert merged.extra_args == ("--workdir=/",)
-
-
-# =============================================================================
-# Tests for PluginConfig
-# =============================================================================
-
-
-def test_plugin_config_merge_with_overrides_enabled() -> None:
-    """PluginConfig.merge_with should override enabled field."""
-    base = PluginConfig(enabled=True)
-    override = PluginConfig(enabled=False)
-    merged = base.merge_with(override)
-    assert merged.enabled is False
-
-
-def test_plugin_config_merge_with_keeps_base_when_override_does_not_touch_enabled() -> None:
-    """PluginConfig.merge_with keeps base when override doesn't include ``enabled`` in model_fields_set."""
-    base = PluginConfig(enabled=True)
-    # ``model_construct()`` with no kwargs leaves model_fields_set empty.
-    override = PluginConfig.model_construct()
-    merged = base.merge_with(override)
-    assert merged.enabled is True
 
 
 # =============================================================================
@@ -599,101 +445,6 @@ def test_mngr_config_merge_with_merges_logging(mngr_test_prefix: str) -> None:
 
 
 # =============================================================================
-# Tests for CommandDefaults.merge_with
-# =============================================================================
-
-
-def test_command_defaults_merge_with_replaces_defaults() -> None:
-    """CommandDefaults.merge_with assigns the defaults dict when the override touches it."""
-    base = CommandDefaults(defaults={"name": "base", "other": "base_value"})
-    override = CommandDefaults(defaults={"name": "override"})
-    merged = base.merge_with(override)
-    assert merged.defaults == {"name": "override"}
-
-
-def test_command_defaults_merge_with_preserves_defaults_when_override_does_not_touch_them() -> None:
-    """When override touches only default_subcommand, base's defaults survive."""
-    base = CommandDefaults(defaults={"name": "base"})
-    # model_construct with only default_subcommand simulates a layer that wrote
-    # ``[commands.create] default_subcommand = "x"`` without setting defaults.
-    override = CommandDefaults.model_construct(default_subcommand="x")
-    merged = base.merge_with(override)
-    assert merged.defaults == {"name": "base"}
-    assert merged.default_subcommand == "x"
-
-
-def test_command_defaults_merge_with_override_wins_for_default_subcommand() -> None:
-    """CommandDefaults.merge_with should let override win for default_subcommand."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults(default_subcommand="list")
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == "list"
-
-
-def test_command_defaults_merge_with_keeps_base_default_subcommand_when_override_none() -> None:
-    """CommandDefaults.merge_with should keep base default_subcommand when override is None."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults()
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == "create"
-
-
-def test_command_defaults_merge_with_empty_string_default_subcommand() -> None:
-    """CommandDefaults.merge_with should allow empty string to disable defaulting."""
-    base = CommandDefaults(default_subcommand="create")
-    override = CommandDefaults(default_subcommand="")
-    merged = base.merge_with(override)
-    assert merged.default_subcommand == ""
-
-
-def test_command_defaults_merge_with_default_subcommand_independent_of_defaults() -> None:
-    """CommandDefaults.merge_with should merge default_subcommand and defaults independently."""
-    base = CommandDefaults(defaults={"host": "local"}, default_subcommand="create")
-    override = CommandDefaults(defaults={"host": "docker"}, default_subcommand="list")
-    merged = base.merge_with(override)
-    # defaults is assign-by-default; only the override's keys remain.
-    assert merged.defaults == {"host": "docker"}
-    assert merged.default_subcommand == "list"
-
-
-# =============================================================================
-# Tests for CreateTemplate.merge_with
-# =============================================================================
-
-
-def test_create_template_merge_with_replaces_options() -> None:
-    """CreateTemplate.merge_with assigns options from override (no key-merge)."""
-    base = CreateTemplate(options={"new_host": "local", "target_path": "/base"})
-    override = CreateTemplate(options={"new_host": "docker"})
-    merged = base.merge_with(override)
-    assert merged.options == {"new_host": "docker"}
-
-
-def test_create_template_merge_with_preserves_options_when_override_does_not_touch_them() -> None:
-    """An override that doesn't touch options leaves the base's options intact."""
-    base = CreateTemplate(options={"connect": True, "reuse": True})
-    override = CreateTemplate.model_construct()
-    merged = base.merge_with(override)
-    assert merged.options == {"connect": True, "reuse": True}
-
-
-def test_create_template_merge_with_empty_base() -> None:
-    """CreateTemplate.merge_with should handle empty base template."""
-    base = CreateTemplate()
-    override = CreateTemplate(options={"new_host": "docker"})
-    merged = base.merge_with(override)
-    assert merged.options["new_host"] == "docker"
-
-
-def test_create_template_merge_with_empty_override() -> None:
-    """CreateTemplate.merge_with should handle empty override template."""
-    base = CreateTemplate(options={"new_host": "local"})
-    override = CreateTemplate()
-    merged = base.merge_with(override)
-    assert merged.options["new_host"] == "local"
-
-
-# =============================================================================
 # Tests for MngrConfig.create_templates
 # =============================================================================
 
@@ -831,14 +582,6 @@ def test_provider_instance_config_is_enabled_can_be_set_false() -> None:
     """ProviderInstanceConfig.is_enabled can be set to False."""
     config = ProviderInstanceConfig(backend=ProviderBackendName("local"), is_enabled=False)
     assert config.is_enabled is False
-
-
-def test_provider_instance_config_merge_preserves_is_enabled_false() -> None:
-    """ProviderInstanceConfig merge should preserve is_enabled when set to False in override."""
-    base = ProviderInstanceConfig(backend=ProviderBackendName("local"), is_enabled=True)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("local"), is_enabled=False)
-    merged = base.merge_with(override)
-    assert merged.is_enabled is False
 
 
 # =============================================================================
@@ -1009,33 +752,6 @@ def test_provider_instance_config_destroyed_host_persisted_seconds_can_be_set() 
     assert config.destroyed_host_persisted_seconds == 86400.0
 
 
-def test_provider_instance_config_merge_overrides_destroyed_host_persisted_seconds() -> None:
-    base = ProviderInstanceConfig(
-        backend=ProviderBackendName("local"),
-        destroyed_host_persisted_seconds=3600.0,
-    )
-    override = ProviderInstanceConfig(
-        backend=ProviderBackendName("local"),
-        destroyed_host_persisted_seconds=7200.0,
-    )
-    merged = base.merge_with(override)
-    assert merged.destroyed_host_persisted_seconds == 7200.0
-
-
-def test_provider_instance_config_merge_keeps_base_when_override_unset() -> None:
-    # An override that does not set the field (absent from model_fields_set, as a
-    # real config layer that omits the key is parsed) leaves the base value intact.
-    base = ProviderInstanceConfig(
-        backend=ProviderBackendName("local"),
-        destroyed_host_persisted_seconds=3600.0,
-    )
-    override = ProviderInstanceConfig.model_construct(
-        backend=ProviderBackendName("local"),
-    )
-    merged = base.merge_with(override)
-    assert merged.destroyed_host_persisted_seconds == 3600.0
-
-
 def test_mngr_config_default_destroyed_host_persisted_seconds_is_seven_days(mngr_test_prefix: str) -> None:
     config = MngrConfig(prefix=mngr_test_prefix)
     assert config.default_destroyed_host_persisted_seconds == 60.0 * 60.0 * 24.0 * 7.0
@@ -1068,22 +784,6 @@ def test_mngr_config_merge_keeps_base_destroyed_host_persisted_seconds_when_over
 def test_provider_instance_config_min_online_host_age_seconds_defaults_to_none() -> None:
     config = ProviderInstanceConfig(backend=ProviderBackendName("test"))
     assert config.min_online_host_age_seconds is None
-
-
-def test_provider_instance_config_merge_overrides_min_online_host_age_seconds() -> None:
-    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
-    override = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=600.0)
-    merged = base.merge_with(override)
-    assert merged.min_online_host_age_seconds == 600.0
-
-
-def test_provider_instance_config_merge_keeps_base_min_online_host_age_seconds_when_override_unset() -> None:
-    # The override omits the field, so it stays out of model_fields_set and the
-    # base value is preserved (the real parse path never sets a field to None).
-    base = ProviderInstanceConfig(backend=ProviderBackendName("test"), min_online_host_age_seconds=300.0)
-    override = ProviderInstanceConfig.model_construct(backend=ProviderBackendName("test"))
-    merged = base.merge_with(override)
-    assert merged.min_online_host_age_seconds == 300.0
 
 
 def test_mngr_config_default_min_online_host_age_seconds_is_ten_minutes(mngr_test_prefix: str) -> None:

@@ -30,6 +30,7 @@ list / unset; ``settings_overrides`` with bare keys, ``__extend``, nested
 """
 
 import inspect
+from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
@@ -43,8 +44,11 @@ from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_p
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import CommandDefaults
+from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
@@ -245,14 +249,138 @@ def _reference_assign_scalar(base_value: Any, override_value: Any) -> Any:
     return override_value if override_value is not None else base_value
 
 
-def _reference_merge_container_dict(base: dict[Any, Any], override: dict[Any, Any]) -> dict[Any, Any]:
+def _reference_retry_merge(base: RetryConfig, override: RetryConfig) -> RetryConfig:
+    """Frozen copy of the old ``RetryConfig.merge_with`` body (deleted in production),
+    kept here as the independent "old" reference for the equivalence guard.
+
+    Scalar fields: override wins if not None.
+    """
+    return RetryConfig(
+        connect_retry_times=override.connect_retry_times
+        if override.connect_retry_times is not None
+        else base.connect_retry_times,
+        connect_retry_delay=override.connect_retry_delay
+        if override.connect_retry_delay is not None
+        else base.connect_retry_delay,
+    )
+
+
+def _reference_logging_merge(base: LoggingConfig, override: LoggingConfig) -> LoggingConfig:
+    """Frozen copy of the old ``LoggingConfig.merge_with`` body (deleted in production),
+    kept here as the independent "old" reference for the equivalence guard.
+
+    Scalar fields: override wins if not None.
+    """
+    return LoggingConfig(
+        file_level=override.file_level if override.file_level is not None else base.file_level,
+        log_dir=override.log_dir if override.log_dir is not None else base.log_dir,
+        max_log_size_mb=override.max_log_size_mb if override.max_log_size_mb is not None else base.max_log_size_mb,
+        console_level=override.console_level if override.console_level is not None else base.console_level,
+        log_file_path=override.log_file_path if override.log_file_path is not None else base.log_file_path,
+        is_logging_commands=override.is_logging_commands
+        if override.is_logging_commands is not None
+        else base.is_logging_commands,
+        is_logging_command_output=override.is_logging_command_output
+        if override.is_logging_command_output is not None
+        else base.is_logging_command_output,
+        is_logging_env_vars=override.is_logging_env_vars
+        if override.is_logging_env_vars is not None
+        else base.is_logging_env_vars,
+        event_type=override.event_type if override.event_type is not None else base.event_type,
+        event_source=override.event_source if override.event_source is not None else base.event_source,
+        enable_paramiko_logging=override.enable_paramiko_logging
+        if override.enable_paramiko_logging is not None
+        else base.enable_paramiko_logging,
+    )
+
+
+def _reference_provider_merge(
+    base: ProviderInstanceConfig, override: ProviderInstanceConfig
+) -> ProviderInstanceConfig:
+    """Frozen copy of the old ``ProviderInstanceConfig.merge_with`` body (deleted in
+    production), kept here as the independent "old" reference for the equivalence guard.
+
+    Uses ``model_fields_set`` so an override only replaces the fields it actually set.
+    """
+    if not isinstance(override, base.__class__):
+        raise ConfigParseError(f"Cannot merge {base.__class__.__name__} with different provider config type")
+
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+    base_values = base.model_dump()
+    override_values = override.model_dump()
+    merged_values: dict[str, Any] = dict(base_values)
+    for field_name in explicitly_set:
+        merged_values[field_name] = override_values[field_name]
+    return base.__class__(**merged_values)
+
+
+def _reference_plugin_merge(base: Any, override: Any) -> Any:
+    """Frozen copy of the old ``PluginConfig.merge_with`` body (deleted in production),
+    kept here as the independent "old" reference for the equivalence guard.
+
+    Uses ``model_fields_set`` so plugin subclasses that add extra fields get correct
+    assign-by-default semantics on those fields too.
+    """
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+    override_values = override.model_dump()
+    updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+    return base.model_copy_update(*updates)
+
+
+def _reference_command_defaults_merge(base: CommandDefaults, override: CommandDefaults) -> CommandDefaults:
+    """Frozen copy of the old ``CommandDefaults.merge_with`` body (deleted in production),
+    kept here as the independent "old" reference for the equivalence guard.
+    """
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+    merged_defaults = override.defaults if "defaults" in explicitly_set else base.defaults
+    merged_default_subcommand = (
+        override.default_subcommand if "default_subcommand" in explicitly_set else base.default_subcommand
+    )
+    return base.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
+
+
+def _reference_create_template_merge(base: CreateTemplate, override: CreateTemplate) -> CreateTemplate:
+    """Frozen copy of the old ``CreateTemplate.merge_with`` body (deleted in production),
+    kept here as the independent "old" reference for the equivalence guard.
+    """
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+    merged_options = override.options if "options" in explicitly_set else base.options
+    return base.__class__(options=merged_options)
+
+
+# Per-container-field entry merge: ``agent_types`` entries still merge via the kept
+# production ``AgentTypeConfig.merge_with``; the other container entries' old
+# ``merge_with`` bodies were deleted, so the reference dispatches to the frozen copies
+# above. This keeps the equivalence guard genuinely independent of the deleted code.
+_CONTAINER_ENTRY_REFERENCE_MERGE: dict[str, Callable[[Any, Any], Any]] = {
+    "agent_types": lambda base_entry, override_entry: base_entry.merge_with(override_entry),
+    "providers": _reference_provider_merge,
+    "plugins": _reference_plugin_merge,
+    "commands": _reference_command_defaults_merge,
+    "create_templates": _reference_create_template_merge,
+}
+
+
+def _reference_merge_container_dict(
+    base: dict[Any, Any], override: dict[Any, Any], entry_merge: Callable[[Any, Any], Any]
+) -> dict[Any, Any]:
     """Frozen copy of the old ``data_types._merge_container_dict``: per-key additive
-    merge (key in both -> entry ``merge_with``; key in one side -> carried through).
+    merge (key in both -> entry merge via ``entry_merge``; key in one side -> carried
+    through). ``entry_merge`` reproduces the entry type's own (now-deleted, except
+    ``AgentTypeConfig``) ``merge_with`` so the reference stays independent of production.
     """
     merged: dict[Any, Any] = {}
     for key in set(base.keys()) | set(override.keys()):
         if key in base and key in override:
-            merged[key] = base[key].merge_with(override[key])
+            merged[key] = entry_merge(base[key], override[key])
         elif key in override:
             merged[key] = override[key]
         else:
@@ -267,19 +395,29 @@ def _reference_mngr_config_merge(base: MngrConfig, override: MngrConfig) -> Mngr
     invokes the *container entries'* own ``merge_with`` but never ``MngrConfig``'s) so
     the property test below is a genuine old == new check.
     """
-    merged_agent_types = _reference_merge_container_dict(base.agent_types, override.agent_types)
-    merged_providers = _reference_merge_container_dict(base.providers, override.providers)
-    merged_plugins = _reference_merge_container_dict(base.plugins, override.plugins)
-    merged_commands = _reference_merge_container_dict(base.commands, override.commands)
-    merged_create_templates = _reference_merge_container_dict(base.create_templates, override.create_templates)
+    merged_agent_types = _reference_merge_container_dict(
+        base.agent_types, override.agent_types, _CONTAINER_ENTRY_REFERENCE_MERGE["agent_types"]
+    )
+    merged_providers = _reference_merge_container_dict(
+        base.providers, override.providers, _CONTAINER_ENTRY_REFERENCE_MERGE["providers"]
+    )
+    merged_plugins = _reference_merge_container_dict(
+        base.plugins, override.plugins, _CONTAINER_ENTRY_REFERENCE_MERGE["plugins"]
+    )
+    merged_commands = _reference_merge_container_dict(
+        base.commands, override.commands, _CONTAINER_ENTRY_REFERENCE_MERGE["commands"]
+    )
+    merged_create_templates = _reference_merge_container_dict(
+        base.create_templates, override.create_templates, _CONTAINER_ENTRY_REFERENCE_MERGE["create_templates"]
+    )
 
     merged_retry = (
-        base.retry.merge_with(override.retry)
+        _reference_retry_merge(base.retry, override.retry)
         if base.retry is not None and override.retry is not None
         else (override.retry if override.retry is not None else base.retry)
     )
     merged_logging = (
-        base.logging.merge_with(override.logging)
+        _reference_logging_merge(base.logging, override.logging)
         if base.logging is not None and override.logging is not None
         else (override.logging if override.logging is not None else base.logging)
     )

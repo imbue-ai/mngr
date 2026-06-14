@@ -475,37 +475,6 @@ class ProviderInstanceConfig(FrozenModel):
         "Overrides the global default_min_online_host_age_seconds when set.",
     )
 
-    def merge_with(self, override: "ProviderInstanceConfig") -> "ProviderInstanceConfig":
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so an override only replaces the fields it
-        actually set; fields the override left untouched keep the base value.
-        This matches ``AgentTypeConfig`` / ``PluginConfig`` and is what keeps a
-        higher-precedence layer that touches a single field (e.g. a create
-        template's ``--setting providers.<name>.is_enabled=true``) from
-        silently resetting every other provider field -- like
-        ``is_run_as_root`` -- back to its model default. Relying on
-        "override wins unless its value is None" was wrong here: a field whose
-        default is a non-None value (a ``bool`` default of ``False``, an empty
-        tuple, ...) would clobber the base even when the override never set it.
-
-        Aggregate fields still flip to assign-by-default: a list / dict / set
-        the override explicitly sets replaces the base value rather than
-        appending. Use the ``field__extend`` operator for additive behavior.
-        """
-        if not isinstance(override, self.__class__):
-            raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with different provider config type")
-
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        base_values = self.model_dump()
-        override_values = override.model_dump()
-        merged_values: dict[str, Any] = dict(base_values)
-        for field_name in explicitly_set:
-            merged_values[field_name] = override_values[field_name]
-        return self.__class__(**merged_values)
-
 
 class PluginConfig(FrozenModel):
     """Base configuration for a plugin."""
@@ -514,19 +483,6 @@ class PluginConfig(FrozenModel):
         default=True,
         description="Whether this plugin is enabled",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "PluginConfig":
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so plugin subclasses that add extra fields
-        get correct assign-by-default semantics on those fields too.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
-        return self.model_copy_update(*updates)
 
 
 class CommandDefaults(FrozenModel):
@@ -547,24 +503,6 @@ class CommandDefaults(FrozenModel):
         description="Default subcommand when this group is invoked with no recognized command. "
         "Empty string disables defaulting (shows help instead).",
     )
-
-    def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
-
-        Uses ``model_fields_set`` so a layer that touches only
-        ``default_subcommand`` (without writing any per-param defaults) leaves
-        the base's ``defaults`` intact. When the override does touch
-        ``defaults``, assign-by-default applies — the whole map replaces. Use
-        ``defaults__extend = { ... }`` to opt into key-merge.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        merged_defaults = override.defaults if "defaults" in explicitly_set else self.defaults
-        merged_default_subcommand = (
-            override.default_subcommand if "default_subcommand" in explicitly_set else self.default_subcommand
-        )
-        return self.__class__(defaults=merged_defaults, default_subcommand=merged_default_subcommand)
 
 
 class CreateTemplateName(str):
@@ -605,20 +543,6 @@ class CreateTemplate(FrozenModel):
         description="Map of parameter name to value for create command options",
     )
 
-    def merge_with(self, override: Self) -> Self:
-        """Merge this template with an override template.
-
-        Uses ``model_fields_set`` so a layer that doesn't touch ``options``
-        leaves the base intact. When the override does touch ``options``,
-        assign-by-default applies — the whole map replaces. Use
-        ``options__extend`` to opt into key-merge.
-        """
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-        merged_options = override.options if "options" in explicitly_set else self.options
-        return self.__class__(options=merged_options)
-
 
 class RetryConfig(FrozenModel):
     """Configuration for connection retry behavior.
@@ -636,22 +560,6 @@ class RetryConfig(FrozenModel):
         default="5s",
         description="Delay between connection retries (e.g., '5s', '1m')",
     )
-
-    def merge_with(self, override: "RetryConfig") -> "RetryConfig":
-        """Merge this config with an override config.
-
-        Important note: despite the type signatures, any of these fields may be None in the override--this means that they were NOT set in the toml (and thus should be ignored)
-
-        Scalar fields: override wins if not None
-        """
-        return RetryConfig(
-            connect_retry_times=override.connect_retry_times
-            if override.connect_retry_times is not None
-            else self.connect_retry_times,
-            connect_retry_delay=override.connect_retry_delay
-            if override.connect_retry_delay is not None
-            else self.connect_retry_delay,
-        )
 
 
 class MngrConfig(FrozenModel):

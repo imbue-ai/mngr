@@ -979,7 +979,7 @@ def _parse_commands(raw_commands: dict[str, dict[str, Any]]) -> dict[str, Comman
     first-class field.
 
     Only fields actually present in ``raw_defaults`` end up in
-    ``model_fields_set`` so ``CommandDefaults.merge_with`` can distinguish
+    ``model_fields_set`` so the overlay config merge can distinguish
     "layer touched defaults" from "layer touched only default_subcommand".
     """
     commands: dict[str, CommandDefaults] = {}
