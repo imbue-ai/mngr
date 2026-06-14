@@ -97,9 +97,8 @@ full model entitlement).
 
 ## Waiting reason
 
-Like `mngr_claude`, codex surfaces *why* an agent is waiting via the
-`claude`-parallel `waiting_reason` listing field (`mngr list`), reading marker
-files without SSH/tmux:
+Codex surfaces *why* an agent is waiting via the `waiting_reason` listing field
+(`mngr list`), reading marker files without SSH/tmux:
 
 - `PERMISSIONS` -- blocked on a tool-approval dialog. The `PermissionRequest`
   hook touches a `permissions_waiting` marker (and `get_lifecycle_state` reports

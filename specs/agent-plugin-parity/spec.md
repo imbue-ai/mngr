@@ -972,15 +972,16 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
 - **claude** (`plugin.py:2759`): `agent_field_generators` -> `waiting_reason`, reading the
   `permissions_waiting`/`active` markers without SSH/tmux to report `PERMISSIONS` vs
   `END_OF_TURN`. Claude does **not** implement `offline_agent_field_generators`.
-- **antigravity**: implements neither, and explicitly **cannot surface a permission-WAITING
-  reason** -- agy fires no hook (and emits no permission-request event) while blocked at a
-  permission dialog, so there's no signal. `END_OF_TURN` would be implementable from the
-  `active` marker alone.
-- **opencode**: implements neither. Its only extension point is the in-process event bus
-  (`session.status`/`session.idle`/`message.*`); permissions are an upfront config policy
-  (`allow`/`deny`/`ask`) and opencode **emits no permission-request event** when an `ask`
-  policy blocks, so `PERMISSIONS` is **not feasible** without an upstream change. `END_OF_TURN`
-  is feasible from the `active` marker.
+- **antigravity**: implements neither, and has **no interactive permission prompt to surface** --
+  agy fires no hook (and emits no permission-request event) while blocked at a permission dialog,
+  so there's no `PERMISSIONS` signal to work around. `END_OF_TURN` would be implementable from the
+  `active` marker alone but adds nothing over RUNNING/WAITING.
+- **opencode**: implements neither, and has **no interactive permission prompt to surface**. Its
+  only extension point is the in-process event bus (`session.status`/`session.idle`/`message.*`);
+  permissions are an upfront config policy (`allow`/`deny`/`ask`) and opencode **emits no
+  permission-request event** when an `ask` policy blocks, so there's no `PERMISSIONS` signal to
+  work around. `END_OF_TURN` would be implementable from the `active` marker alone but adds nothing
+  over RUNNING/WAITING.
 - **codex**: **implements `waiting_reason`** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
   hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a
@@ -989,14 +990,15 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   does), so cleanup is `PostToolUse` + `Stop` only. `END_OF_TURN` follows from the `active`
   marker (OR of `codex_root_active` and a non-empty `codex_subagents/`, recomputed under lock).
   Verified live against codex 0.139.0 with the exact production inline hook commands. Codex
-  does **not** implement `offline_agent_field_generators`. See
-  `codex-waiting-reason-scoping.md` for the design and the live verification trace.
+  does **not** implement `offline_agent_field_generators`.
 
 Note: core has no first-class "WAITING reason" -- WAITING is binary (marker absent); the
-`waiting_reason` field is a plugin-specific embellishment. Surfacing *why* an agent is
-WAITING (PERMISSIONS vs END_OF_TURN) requires the CLI to expose a permission-dialog signal;
-only claude (today) and codex (feasible) have one. agy and opencode emit no permission-request
-event, so they are limited to `END_OF_TURN`.
+`waiting_reason` field is a plugin-specific embellishment. It exists to work around the
+interactive permission prompting in claude and codex -- surfacing *why* an agent is blocked on
+a tool-approval dialog (PERMISSIONS vs END_OF_TURN), which requires the CLI to expose a
+permission-dialog signal. agy and opencode have no such prompt to work around: permissions are
+an upfront config policy and they emit no permission-request event, so the only reason they
+could surface is `END_OF_TURN`, which adds nothing over the existing RUNNING/WAITING state.
 
 ### Q. Installation management & version pinning
 
@@ -1118,8 +1120,9 @@ so on.
    host paths over the host shell so it works remotely.
 
 Then the claude features no port has matched yet, in roughly descending value: **session
-preservation on destroy**, **deploy/scheduling contributions**, **field generators
-(waiting_reason)**, and the **streaming snapshot**.
+preservation on destroy**, **deploy/scheduling contributions**, and the **streaming
+snapshot**. (`waiting_reason` is matched by codex and not planned for agy/opencode, so it is
+no longer a general leftover.)
 
 Correctness hardening (shell-quoting of args, onboarding edge cases, etc.) is continuous,
 not a milestone -- expect it throughout. For a concrete worked example of this whole
