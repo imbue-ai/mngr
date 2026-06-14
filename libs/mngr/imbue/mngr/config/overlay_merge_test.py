@@ -38,6 +38,8 @@ from typing import Any
 import pytest
 from pydantic import Field
 
+from imbue.mngr.config.agent_config_registry import _METADATA_FIELDS
+from imbue.mngr.config.agent_config_registry import _apply_custom_overrides_to_parent_config
 from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -54,6 +56,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.overlay.merge import combine_patches
+from imbue.overlay.merge import merge
 
 
 def _reference_agent_type_merge(base: AgentTypeConfig, override: AgentTypeConfig) -> AgentTypeConfig:
@@ -637,3 +640,285 @@ def test_mngr_reference_does_not_call_mngr_merge_with() -> None:
     # must never delegate the whole-config merge to the method under test.
     assert "base.merge_with(override)" not in source
     assert "base.__class__(" in source
+
+
+# =============================================================================
+# _apply_custom_overrides_to_parent_config (parent_type inheritance) equivalence guard
+# =============================================================================
+#
+# The ``parent_type`` inheritance path
+# (``agent_config_registry._apply_custom_overrides_to_parent_config``) now computes
+# its result via the same overlay node algebra (``merge_models_via_overlay`` with
+# ``drop_field_names=_METADATA_FIELDS`` and ``serialize_as_any=True``), the
+# class-switching variant that re-parses into ``type(parent)``. The section below
+# freezes the *old* field-by-field body verbatim as
+# ``_reference_apply_custom_overrides`` and asserts the production function reproduces
+# it over the corpus from the (now-deleted) prototype test.
+# ``_reference_apply_custom_overrides`` never calls
+# ``_apply_custom_overrides_to_parent_config``, so the equality is a real check, not a
+# tautology (guarded by ``test_parent_type_reference_does_not_call_production``).
+
+
+def _reference_apply_custom_overrides(
+    parent_config: AgentTypeConfig,
+    custom_config: AgentTypeConfig,
+) -> AgentTypeConfig:
+    """The OLD ``_apply_custom_overrides_to_parent_config`` body, frozen verbatim as the
+    "old" side of the equivalence guard.
+
+    This is the exact field-by-field logic the production function had before being
+    rewired onto the overlay algebra. It must stay independent of the new path (it does
+    not call ``_apply_custom_overrides_to_parent_config``) so the property test below is
+    a genuine old == new check. ``merge`` is the unified combine; the production code
+    discards its narrowings (the ``[0]``), so this reference does too.
+    """
+    explicitly_set_fields = custom_config.model_fields_set
+    if not explicitly_set_fields - _METADATA_FIELDS:
+        return parent_config
+
+    custom_values = custom_config.model_dump()
+    parent_values = parent_config.model_dump()
+    updates: list[tuple[str, Any]] = []
+    for field_name in explicitly_set_fields:
+        if field_name in _METADATA_FIELDS:
+            continue
+        field_info = custom_config.__class__.model_fields.get(field_name)
+        if field_info is not None and is_settings_patch_field(field_info.metadata):
+            updates.append((field_name, merge(parent_values.get(field_name) or {}, custom_values[field_name])[0]))
+        else:
+            updates.append((field_name, custom_values[field_name]))
+    if not updates:
+        return parent_config
+    return parent_config.model_copy_update(*updates)
+
+
+# Each case is ``(label, parent, custom)``. ``parent`` plays the role
+# ``resolve_agent_type`` gives it: either a bare ``config_class()`` or a config already
+# folded with a parent user block. ``custom`` is the child ``[agent_types.X]`` block,
+# always carrying ``parent_type`` (and often ``plugin``) so the ``_METADATA_FIELDS``
+# skip is exercised. The corpus spans: child sets disjoint / overlapping / no fields;
+# ``settings_overrides`` bare / ``__extend`` / nested / ``__assign`` / accumulating
+# across the parent+child boundary; subclass-only fields on child and/or parent;
+# ``_METADATA_FIELDS`` present on the child (must be ignored); and a
+# ``ClaudeAgentConfig`` parent so the class-switching crux is exercised.
+_PARENT_TYPE_CASES: list[tuple[str, AgentTypeConfig, AgentTypeConfig]] = [
+    # --- the parent_user_config is None branch: bare defaults parent ---
+    ("bare_parent_child_scalar", AgentTypeConfig(), _agent(parent_type="claude", command="c")),
+    (
+        "bare_claude_parent_child_scalar",
+        ClaudeAgentConfig(),
+        _claude(parent_type="claude", command="my-claude"),
+    ),
+    # --- child sets only metadata: must return parent unchanged ---
+    ("child_only_metadata", ClaudeAgentConfig(), _claude(parent_type="claude")),
+    ("child_only_metadata_plus_plugin", ClaudeAgentConfig(), _claude(parent_type="claude", plugin="claude")),
+    (
+        "child_only_metadata_nonbare_parent",
+        ClaudeAgentConfig(auto_dismiss_dialogs=True, cli_args=("a",)),
+        _claude(parent_type="claude"),
+    ),
+    # --- metadata present on child alongside real fields (metadata ignored) ---
+    (
+        "child_metadata_and_fields",
+        ClaudeAgentConfig(),
+        _claude(parent_type="claude", plugin="claude", cli_args=("x",), auto_dismiss_dialogs=True),
+    ),
+    # --- scalar fields: disjoint / overlapping ---
+    (
+        "scalars_disjoint",
+        _claude(command="base-cmd"),
+        _claude(parent_type="claude", cli_args=("a",)),
+    ),
+    (
+        "scalars_overlap",
+        _claude(command="base-cmd", version="1.0.0"),
+        _claude(parent_type="claude", command="ovr-cmd"),
+    ),
+    # --- subclass-only fields on child and/or parent ---
+    (
+        "subclass_field_on_child",
+        ClaudeAgentConfig(),
+        _claude(parent_type="claude", auto_dismiss_dialogs=True),
+    ),
+    (
+        "subclass_field_on_parent_only",
+        ClaudeAgentConfig(auto_dismiss_dialogs=True),
+        _claude(parent_type="claude", cli_args=("x",)),
+    ),
+    (
+        "subclass_field_on_both",
+        ClaudeAgentConfig(auto_dismiss_dialogs=True, auto_allow_permissions=True),
+        _claude(parent_type="claude", auto_dismiss_dialogs=False),
+    ),
+    (
+        "subclass_version_overlap",
+        ClaudeAgentConfig(version="1.0.0"),
+        _claude(parent_type="claude", version="2.0.0"),
+    ),
+    # --- other tuple/aggregate fields: assign-by-default ---
+    (
+        "env_assign",
+        _claude(env=("A=1", "B=2")),
+        _claude(parent_type="claude", env=("C=3",)),
+    ),
+    (
+        "env_base_carry",
+        _claude(env=("A=1",)),
+        _claude(parent_type="claude", create_directory=("/tmp",)),
+    ),
+    # --- settings_overrides: bare keys, accumulation across parent/child ---
+    (
+        "settings_bare_disjoint",
+        _claude(settings_overrides={"model": "sonnet"}),
+        _claude(parent_type="claude", settings_overrides={"env": "x"}),
+    ),
+    (
+        "settings_bare_overlap",
+        _claude(settings_overrides={"model": "sonnet", "k": 1}),
+        _claude(parent_type="claude", settings_overrides={"model": "opus"}),
+    ),
+    (
+        "settings_parent_only",
+        _claude(settings_overrides={"model": "sonnet"}),
+        _claude(parent_type="claude", cli_args=("x",)),
+    ),
+    (
+        "settings_child_only",
+        ClaudeAgentConfig(),
+        _claude(parent_type="claude", settings_overrides={"model": "opus"}),
+    ),
+    # --- settings_overrides: __extend accumulation across the boundary ---
+    (
+        "settings_extend_accumulate",
+        _claude(settings_overrides={"permissions__extend": {"allow__extend": ["Bash(a)"]}}),
+        _claude(
+            parent_type="claude",
+            settings_overrides={"permissions__extend": {"allow__extend": ["Bash(b)"]}},
+        ),
+    ),
+    (
+        "settings_nested_extend",
+        _claude(settings_overrides={"model": "sonnet", "permissions__extend": {"allow__extend": ["Bash(a)"]}}),
+        _claude(
+            parent_type="claude",
+            settings_overrides={"env": "x", "permissions__extend": {"allow__extend": ["Bash(b)"]}},
+        ),
+    ),
+    (
+        "settings_extend_over_bare",
+        _claude(settings_overrides={"permissions": {"allow": ["x"]}}),
+        _claude(parent_type="claude", settings_overrides={"permissions__extend": {"allow__extend": ["y"]}}),
+    ),
+    (
+        "settings_bare_over_extend",
+        _claude(settings_overrides={"permissions__extend": {"allow": ["x"]}}),
+        _claude(parent_type="claude", settings_overrides={"permissions": {"allow": ["y"]}}),
+    ),
+    # --- settings_overrides: __assign ---
+    (
+        "settings_assign_marker",
+        _claude(settings_overrides={"model": "sonnet"}),
+        _claude(parent_type="claude", settings_overrides={"model__assign": "opus"}),
+    ),
+    (
+        "settings_assign_then_extend",
+        _claude(settings_overrides={"hooks__extend": {"a": [1]}}),
+        _claude(
+            parent_type="claude",
+            settings_overrides={"hooks__assign": {"b": [2]}, "hooks__extend": {"c": [3]}},
+        ),
+    ),
+    # --- child sets settings to empty dict over a non-empty parent (combine no-op) ---
+    (
+        "settings_child_empty",
+        _claude(settings_overrides={"model": "sonnet"}),
+        _claude(parent_type="claude", settings_overrides={}),
+    ),
+    # --- combined: subclass + settings + scalars together ---
+    (
+        "combined_all_kinds",
+        _claude(
+            auto_dismiss_dialogs=True,
+            cli_args="--base arg",
+            settings_overrides={"model": "sonnet", "permissions__extend": {"allow__extend": ["Bash(a)"]}},
+        ),
+        _claude(
+            parent_type="claude",
+            plugin="claude",
+            cli_args=("c",),
+            version="2.0.0",
+            settings_overrides={"env": "x", "permissions__extend": {"allow__extend": ["Bash(b)"]}},
+        ),
+    ),
+    # --- base-class parent (no subclass fields), base-class child ---
+    (
+        "base_class_parent_and_child",
+        _agent(command="base"),
+        _agent(parent_type="some-parent", cli_args=("a",)),
+    ),
+]
+
+
+@pytest.mark.parametrize("parent,custom", [pytest.param(p, c, id=label) for label, p, c in _PARENT_TYPE_CASES])
+def test_apply_custom_overrides_matches_frozen_reference(
+    parent: AgentTypeConfig,
+    custom: AgentTypeConfig,
+) -> None:
+    """The production (overlay-backed) ``_apply_custom_overrides_to_parent_config``
+    reproduces the frozen field-by-field reference exactly, value-for-value, and the
+    output is the *parent's* concrete class (class-switching)."""
+    expected = _reference_apply_custom_overrides(parent, custom)
+    actual = _apply_custom_overrides_to_parent_config(parent, custom)
+    assert actual == expected
+    assert type(actual) is type(expected)
+    assert type(actual) is type(parent)
+
+
+def test_apply_custom_overrides_two_call_resolve_pattern() -> None:
+    """Reproduce ``resolve_agent_type``'s two-call sequence end to end: fold a parent
+    user block onto bare defaults, then fold the child onto that. Each call goes through
+    the production (overlay-backed) function and must match the frozen two-call result.
+    """
+    parent_user_config = _claude(auto_dismiss_dialogs=True, settings_overrides={"model": "sonnet"})
+    custom_config = _claude(
+        parent_type="claude",
+        plugin="claude",
+        cli_args=("--child",),
+        settings_overrides={"permissions__extend": {"allow__extend": ["Bash(npm *)"]}},
+    )
+
+    # Frozen reference two-call path.
+    expected_parent_base = _reference_apply_custom_overrides(ClaudeAgentConfig(), parent_user_config)
+    expected = _reference_apply_custom_overrides(expected_parent_base, custom_config)
+
+    # Production two-call path.
+    actual_parent_base = _apply_custom_overrides_to_parent_config(ClaudeAgentConfig(), parent_user_config)
+    actual = _apply_custom_overrides_to_parent_config(actual_parent_base, custom_config)
+
+    assert actual_parent_base == expected_parent_base
+    assert actual == expected
+    assert type(actual) is ClaudeAgentConfig
+
+
+def test_apply_custom_overrides_class_switching_base_child_into_claude_parent() -> None:
+    """A base ``AgentTypeConfig`` child folded onto a ``ClaudeAgentConfig`` parent must
+    yield a ``ClaudeAgentConfig`` -- the subclass-only fields supplied by the parent (the
+    child never set them). This is the class-switching crux in isolation."""
+    parent = ClaudeAgentConfig(auto_dismiss_dialogs=True, settings_overrides={"model": "sonnet"})
+    custom = _agent(parent_type="claude", cli_args=("b",))
+    expected = _reference_apply_custom_overrides(parent, custom)
+    actual = _apply_custom_overrides_to_parent_config(parent, custom)
+    assert actual == expected
+    assert type(actual) is ClaudeAgentConfig
+    # The parent's subclass-only field survives (the child could not have set it).
+    assert actual.auto_dismiss_dialogs is True
+
+
+def test_parent_type_reference_does_not_call_production() -> None:
+    """Guard against the equivalence test becoming tautological: the frozen reference
+    must not call the production ``_apply_custom_overrides_to_parent_config`` it
+    reproduces. The reference performs the field-by-field merge by hand, never through
+    the function under test."""
+    source = inspect.getsource(_reference_apply_custom_overrides)
+    assert "_apply_custom_overrides_to_parent_config(" not in source
+    assert "parent_config.model_copy_update(" in source

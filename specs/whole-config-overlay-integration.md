@@ -217,9 +217,9 @@ untouched. The harder top-level concerns all resolved:
 
 ### parent_type inheritance (class-switching) -- also proven
 
-A third additive prototype (`config/overlay_merge_parent_type_prototype.py` + 30-case test)
-reproduces `_apply_custom_overrides_to_parent_config` (the `parent_type` path), **30/30
-`old == new`**, config + mngr_claude suites green. It is the same pipeline plus three deltas:
+A third additive prototype (since promoted into production and deleted -- see the production
+wiring status below) reproduced `_apply_custom_overrides_to_parent_config` (the `parent_type`
+path), **30/30 `old == new`**, config + mngr_claude suites green. It is the same pipeline plus three deltas:
 drop `_METADATA_FIELDS` (`parent_type`/`plugin`) from the child's sparse dump (reproduces the
 function's skip and its empty-override early return); the settings-patch combine is
 `merge(...)[0]` (value-identical to `combine_patches`, same `__extend` marking); and the output
@@ -253,8 +253,17 @@ verified reproduced (incl. `RetryConfig`'s per-field None handling -- the sub-mo
 `exclude_unset` + combine matches; and provider `ScalarStrTuple` -- the marker only affects
 narrowing, which the merge doesn't do, and is re-applied on reparse).
 
-Remaining: wire `parent_type` / `_apply_custom_overrides_to_parent_config` (low risk, prototype
-kept); remove the vestigial `merge_with` methods; and the narrowing-routing axis (route
+`_apply_custom_overrides_to_parent_config` (the `parent_type` inheritance path) is now also WIRED
+to the overlay pipeline in production: it delegates to `merge_models_via_overlay(parent_config,
+custom_config, settings_patch_field_names=<discovered>, drop_field_names=_METADATA_FIELDS,
+serialize_as_any=True)`. The base operand is the parent, so the output re-parses into
+`type(parent)` (the class switch); `_METADATA_FIELDS` (`parent_type`/`plugin`) drop from the
+child's sparse dump (reproducing the function's skip and its empty-override early return);
+`settings_overrides` accumulates across the boundary. Behavior-identical (frozen-old reference
+equivalence test in `config/overlay_merge_test.py` + the config/cli/mngr_claude suites green); the
+prototype is deleted. With this, all three merge axes are wired to the single overlay pipeline.
+
+Remaining: remove the vestigial `merge_with` methods; and the narrowing-routing axis (route
 `detect_settings_narrowing` / the discarded cross-scope narrowings through overlay -- where enabler
 (b) returns). The top-level `parse_config` None-padding can also be dropped now that the overlay
 pipeline's None-drop handles it, but that is optional cleanup, not required.

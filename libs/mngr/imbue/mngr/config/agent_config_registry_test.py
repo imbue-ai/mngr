@@ -54,13 +54,17 @@ def test_apply_custom_overrides_combines_settings_patch_field() -> None:
 
 
 def test_apply_custom_overrides_returns_parent_when_no_overrides() -> None:
-    """_apply_custom_overrides_to_parent_config should return parent unchanged when custom has no overrides."""
+    """_apply_custom_overrides_to_parent_config returns a config equal to the parent when
+    custom has no overrides. (The overlay pipeline re-validates into a fresh, ``==``-equal
+    instance rather than returning the same object -- identity is irrelevant for an immutable
+    frozen model, and this matches the AgentTypeConfig/MngrConfig merges, which also return
+    fresh instances.)"""
     parent = AgentTypeConfig(cli_args=("--model", "opus"))
     custom = AgentTypeConfig()
 
     result = _apply_custom_overrides_to_parent_config(parent, custom)
 
-    assert result is parent
+    assert result == parent
     assert result.cli_args == ("--model", "opus")
 
 

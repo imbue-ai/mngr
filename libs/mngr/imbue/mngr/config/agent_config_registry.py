@@ -1,5 +1,3 @@
-from typing import Any
-
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -10,11 +8,11 @@ from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import is_settings_patch_field
+from imbue.mngr.config.data_types import _settings_patch_field_names
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
-from imbue.overlay.merge import merge
 
 # Fields on AgentTypeConfig that are routing metadata (not runtime config values).
 # These are skipped when applying custom overrides to a parent config.
@@ -112,32 +110,33 @@ def _apply_custom_overrides_to_parent_config(
     Exception: a field marked ``SettingsPatchField`` (e.g.
     ``ClaudeAgentConfig.settings_overrides``) is a settings *patch* that
     **accumulates** across the parent/child inheritance boundary rather than
-    assigning. Parent and child values are combined per-key via ``merge`` (the
-    unified combine; its narrowings are discarded here -- cross-scope narrowing of
-    ``settings_overrides`` at config-load is intentionally not surfaced, deferred
-    together with the broader narrowing-philosophy decision; see
-    ``specs/config-merge-operators.md``). The combine preserves / combines
-    ``__extend`` markers with higher/child-bare-wins, so the parent's non-overlapping
-    keys survive into the child.
-    """
-    explicitly_set_fields = custom_config.model_fields_set
-    if not explicitly_set_fields - _METADATA_FIELDS:
-        return parent_config
+    assigning. Parent and child values are combined per-key (the parent's
+    non-overlapping keys survive into the child, with higher/child-bare-wins for
+    overlapping keys, preserving / combining ``__extend`` markers). Cross-scope
+    narrowing of ``settings_overrides`` at config-load is intentionally not
+    surfaced, deferred together with the broader narrowing-philosophy decision;
+    see ``specs/config-merge-operators.md``.
 
-    custom_values = custom_config.model_dump()
-    parent_values = parent_config.model_dump()
-    updates: list[tuple[str, Any]] = []
-    for field_name in explicitly_set_fields:
-        if field_name in _METADATA_FIELDS:
-            continue
-        field_info = custom_config.__class__.model_fields.get(field_name)
-        if field_info is not None and is_settings_patch_field(field_info.metadata):
-            updates.append((field_name, merge(parent_values.get(field_name) or {}, custom_values[field_name])[0]))
-        else:
-            updates.append((field_name, custom_values[field_name]))
-    if not updates:
-        return parent_config
-    return parent_config.model_copy_update(*updates)
+    The result is computed via the overlay node algebra (serialize ->
+    pre-process -> overlay-merge -> reparse) in
+    ``overlay_merge.merge_models_via_overlay``, behavior-identical to the old
+    field-by-field copy. ``parent_config`` is the base, so the output re-parses
+    into ``type(parent_config)`` (the class-switching crux: a base-class
+    ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields a
+    ``ClaudeAgentConfig``, its subclass-only fields supplied by the parent).
+    ``_METADATA_FIELDS`` (``parent_type`` / ``plugin``) are dropped from the
+    child's sparse dump (inheritance routing, never runtime config), and
+    ``serialize_as_any`` keeps subclass-only fields through the dump. See
+    ``specs/whole-config-overlay-integration.md``.
+    """
+    settings_patch_field_names = _settings_patch_field_names(type(parent_config))
+    return merge_models_via_overlay(
+        parent_config,
+        custom_config,
+        settings_patch_field_names=settings_patch_field_names,
+        drop_field_names=frozenset(_METADATA_FIELDS),
+        serialize_as_any=True,
+    )
 
 
 def _check_agent_type_not_disabled(
