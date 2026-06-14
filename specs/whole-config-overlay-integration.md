@@ -263,10 +263,30 @@ child's sparse dump (reproducing the function's skip and its empty-override earl
 equivalence test in `config/overlay_merge_test.py` + the config/cli/mngr_claude suites green); the
 prototype is deleted. With this, all three merge axes are wired to the single overlay pipeline.
 
-Remaining: remove the vestigial `merge_with` methods; and the narrowing-routing axis (route
-`detect_settings_narrowing` / the discarded cross-scope narrowings through overlay -- where enabler
-(b) returns). The top-level `parse_config` None-padding can also be dropped now that the overlay
-pipeline's None-drop handles it, but that is optional cleanup, not required.
+**Narrowing routing (done -- the cross-scope part, via forward-pass).** The merge now exposes
+`MngrConfig.merge_with_narrowings(override) -> (config, paths)` (built on
+`merge_models_via_overlay_with_narrowings`, which uses `merge_narrowing_allowed` and filters to
+`SettingsPatchField` paths); the loader forwards those into its existing flag-gated
+`narrowing_violations` aggregation. This surfaces the previously-silent cross-scope
+`settings_overrides` data loss (a higher scope's bare key dropping a lower scope's aggregate) as
+the standard narrowing error, escapable via the flag or `__extend`/`__assign`. Crucially this
+needed **no Stage 2 decision and no enabler (b)**: the narrowings are *passed forward* (not raised
+in the merge) into the existing flag-gated path, and `detect_settings_narrowing` is kept unchanged
+for all non-`SettingsPatchField` fields (so `cli_args`/`Static` stay correctly exempt without the
+JSON serializer). No config in the test corpus tripped the new narrowing.
+
+**Vestigial `merge_with` methods -- kept (deliberately).** The six sub-model `merge_with` methods
+are production-dead, but removing them is **not** clean: they are the *live frozen reference* the
+`overlay_merge_test.py` equivalence guard compares the overlay path against, and
+`PluginConfig.merge_with` has seven subclass overrides across separate plugin projects. They are
+harmless and serve a purpose (the equivalence anchor), so they stay; a full removal (inlining
+frozen reference copies + a cross-project plugin sweep) is a deferred low-priority cleanup.
+
+Remaining (optional, deferred): the full `detect_settings_narrowing` replacement (Part A -- a
+high-effort equivalence refactor needing enabler (b)/`Static` re-marking, bundled with the Stage 2
+flag decision); the vestigial-method removal above; and dropping the now-redundant `parse_config`
+None-padding. None are required -- the integration's substantive value (all three merge axes on
+overlay + cross-scope narrowing surfaced) is complete.
 
 ## Honest assessment / recommended phasing
 
