@@ -38,15 +38,14 @@ class MngrError(ClickException):
     def show(self, file: IO[Any] | None = None) -> None:
         """Render the error with a bold-red ``Error:`` prefix on a color-capable terminal.
 
-        Click's default ``ClickException.show`` emits an uncolored ``Error: ...``
-        line, which is indistinguishable from normal output -- so an actionable
-        failure (e.g. "run ``mngr gcp prepare`` first") reads as ordinary text.
-        Wrapping the line in the shared ``ERROR_COLOR`` makes it visually distinct
-        without changing exit semantics (this is still a clean exit-1, not a
-        traceback). Gated on ``should_use_color`` so piped or ``NO_COLOR`` output
-        stays plain, mirroring the colored ``ERROR:`` prefix that ``logger.error``
-        already uses.
+        Gated on ``should_use_color`` so piped or ``NO_COLOR`` output stays plain,
+        mirroring the colored ``ERROR:`` prefix that ``logger.error`` already uses.
         """
+        # Click's standalone-mode handler calls ``e.show()`` with no argument, so
+        # ``file`` must default. Resolve stderr lazily here rather than as a default
+        # value because the repo swaps ``sys.stderr`` at runtime (see
+        # ``BufferingStreamWrapper`` in utils/logging.py); a def-time default would
+        # bind a stale stream.
         if file is None:
             file = get_text_stream("stderr")
         message = f"Error: {self.format_message()}"
