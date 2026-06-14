@@ -42,19 +42,3 @@ class LatchkeyPluginConfig(PluginConfig):
             "Path to the upstream ``latchkey`` CLI. When unset, the CLI falls back to ``latchkey`` on ``PATH``."
         ),
     )
-
-    def merge_with(self, override: "PluginConfig") -> "LatchkeyPluginConfig":
-        merged_enabled = override.enabled if override.enabled is not None else self.enabled
-        if not isinstance(override, LatchkeyPluginConfig):
-            return self.__class__(
-                enabled=merged_enabled,
-                directory=self.directory,
-                latchkey_binary=self.latchkey_binary,
-            )
-        return self.__class__(
-            enabled=merged_enabled,
-            directory=override.directory if override.directory is not None else self.directory,
-            latchkey_binary=(
-                override.latchkey_binary if override.latchkey_binary is not None else self.latchkey_binary
-            ),
-        )

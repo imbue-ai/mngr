@@ -73,19 +73,6 @@ class UsagePluginConfig(PluginConfig):
         "Set to False to discard usage data on destroy.",
     )
 
-    def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
-        """Merge with override config (FrozenModel-style)."""
-        if not isinstance(override, UsagePluginConfig):
-            return self
-        return UsagePluginConfig(
-            enabled=override.enabled if override.enabled is not None else self.enabled,
-            max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
-            since_seconds=override.since_seconds if override.since_seconds is not None else self.since_seconds,
-            preserve_on_destroy=(
-                override.preserve_on_destroy if override.preserve_on_destroy is not None else self.preserve_on_destroy
-            ),
-        )
-
 
 class CostSnapshot(FrozenModel):
     """Session-level cost snapshot supplied by the writer.

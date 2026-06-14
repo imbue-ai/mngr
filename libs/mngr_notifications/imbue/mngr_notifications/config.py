@@ -30,18 +30,3 @@ class NotificationsPluginConfig(PluginConfig):
         description="Custom shell command to run on notification click. "
         "$MNGR_AGENT_NAME is set in the environment to the agent's name.",
     )
-
-    def merge_with(self, override: "PluginConfig") -> "NotificationsPluginConfig":
-        """Merge this config with an override config."""
-        if not isinstance(override, NotificationsPluginConfig):
-            return self
-        return NotificationsPluginConfig(
-            enabled=override.enabled if override.enabled is not None else self.enabled,
-            notification_only=override.notification_only
-            if override.notification_only is not None
-            else self.notification_only,
-            terminal_app=override.terminal_app if override.terminal_app is not None else self.terminal_app,
-            custom_terminal_command=override.custom_terminal_command
-            if override.custom_terminal_command is not None
-            else self.custom_terminal_command,
-        )
