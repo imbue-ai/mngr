@@ -21,7 +21,6 @@ is not involved in pool provisioning at all.
 import json as _json
 import os
 import shlex
-import sys
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -34,9 +33,14 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
+from imbue.mngr_imbue_cloud.pool_bake import BAKED_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
+from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
+from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.pool_bake import run_mngr_command
+from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -138,51 +142,12 @@ def resolve_pool_database_url(explicit: str | None) -> str:
 
 _CONTAINER_SSH_PORT: Final[int] = 2222
 
-# Constant agent name baked onto every pool host. The minds-side
-# adoption code (``ImbueCloudHost.create_agent_state``) explicitly keeps
-# the bake's agent name verbatim -- so the bake must use the same name
-# the user's ``mngr create system-services@<host>.imbue_cloud_<slug>``
-# does, otherwise the user's lease ends up with an agent whose tmux
-# session is named after a per-bake UUID instead of ``system-services``.
-# Tracked at ``libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/host.py:67-75``
-# (the ``ImbueCloudHost`` docstring spells the contract out).
-_BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
-
-# Path inside the pool host's container of the FCT bootstrap's
-# initial-chat sentinel. The bootstrap writes this file after creating
-# the chat agent on first boot, then skips the create on every later
-# boot if it sees the file. Removing it at bake time means the user's
-# first lease + start re-fires the create, this time with the
-# lease-rewritten ``/mngr/data.json`` ``host_name`` (the user's
-# workspace name) so the chat agent inherits the right name. The file
-# lives inside ``runtime/`` which is already a git worktree at bake
-# time, so ``_init_runtime_worktree`` skips on every subsequent
-# bootstrap run and the in-container ``rm`` is enough (no commit or
-# push needed -- the on-disk working-tree state survives all subsequent
-# mngr stop/start cycles inside the same container).
-_INITIAL_CHAT_SENTINEL_PATH: Final[str] = "/code/runtime/initial_chat_created"
-
 # mngr env-override key that turns off the OVH provider's cancelled-VPS recycling
 # for the inner ``mngr create``. Setting it forces a fresh OVH order instead of
 # reclaiming a cancelled VPS -- useful for testing the fresh-provision path.
 _OVH_ENABLE_RECYCLE_ENV_KEY: Final[str] = "MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED"
 
-# 30 min: the inner ``mngr create ... --template ovh`` builds a fresh
-# Docker image on the leased VPS, which can take 10-20 min (network bound).
-# A previous 10-min cap occasionally killed otherwise-healthy provisions.
-_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 1800
 _SSH_COMMAND_TIMEOUT_SECONDS: Final[int] = 60
-
-# Manual rsync excludes layered on top of `--filter=:- .gitignore`. The
-# filter handles `__pycache__`, `.venv`, `node_modules`, `.test_output`,
-# `.mypy_cache`, `.ruff_cache`, `.pytest_cache`, `.external_worktrees`, and
-# anything else mngr's gitignore lists. These two patterns are NOT in
-# .gitignore so we exclude them explicitly:
-#   - `.git`: gitignore never lists it; it's git's internal dir.
-#   - `uv.lock`: intentionally committed at the mngr root, but each install
-#     context should regenerate its own.
-_RSYNC_MANUAL_EXCLUDES: Final[tuple[str, ...]] = (".git", "uv.lock")
-_GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 
 # INSERT statement for a freshly-baked pool host row. The column list MUST
 # stay in sync with the ``pool_hosts`` schema declared in
@@ -250,61 +215,6 @@ def pool() -> None:
     """Pool host provisioning (OVH + Neon)."""
 
 
-def _stream_subprocess_line(line: str, is_stdout: bool) -> None:
-    """Mirror a child-process line to our stderr in real time.
-
-    Used as the ``on_output`` callback for streaming ``mngr`` invocations
-    so a multi-minute pool-host bake isn't a silent black box. The child
-    mngr already routes its own ``logger.*`` traffic to its events.jsonl;
-    this surfaces the same lines (plus any plain stdout/stderr writes)
-    in the parent's terminal as the bake progresses.
-    """
-    suffix = "" if line.endswith("\n") else "\n"
-    sys.stderr.write(line + suffix)
-    sys.stderr.flush()
-
-
-def _run_mngr_command(
-    args: list[str],
-    cwd: Path | None = None,
-    timeout: int = _MNGR_COMMAND_TIMEOUT_SECONDS,
-    is_streaming: bool = False,
-    extra_env: dict[str, str] | None = None,
-) -> FinishedProcess:
-    """Run a mngr CLI command and return the result.
-
-    When ``is_streaming=True`` the child's stdout and stderr are mirrored
-    to our stderr line-by-line via ``_stream_subprocess_line`` (and still
-    captured in the returned ``FinishedProcess``). Use this for the
-    inner ``mngr create`` during pool baking -- the run takes 8-15
-    minutes and otherwise produces no visible output until completion,
-    which makes diagnosing pool-bake failures (or just confirming that
-    provisioning is making progress) difficult.
-
-    ``extra_env`` merges into ``os.environ`` for the subprocess.
-    Used by the pool-bake to thread ``MNGR_VPS_EXTRA_TAGS`` (so the
-    spawned VPS gets the activated minds env's ``minds_env=<name>``
-    tag) without polluting the calling process's own env.
-    """
-    full_command = ["mngr"] + args
-    logger.info("  Running: {}", " ".join(full_command))
-    on_output = _stream_subprocess_line if is_streaming else None
-    subprocess_env: dict[str, str] | None = None
-    if extra_env:
-        subprocess_env = dict(os.environ)
-        subprocess_env.update(extra_env)
-    cg = ConcurrencyGroup(name="pool-mngr")
-    with cg:
-        return cg.run_process_to_completion(
-            command=full_command,
-            timeout=float(timeout),
-            is_checked_after=False,
-            cwd=cwd,
-            on_output=on_output,
-            env=subprocess_env,
-        )
-
-
 def _run_ssh_command(
     vps_address: str,
     ssh_key_path: str,
@@ -339,101 +249,6 @@ def _run_ssh_command(
         logger.warning("SSH command failed: {}", result.stderr.strip())
         return False
     return True
-
-
-def _get_agent_info(
-    agent_name: str,
-    *,
-    host_name: str,
-    provider: str = "ovh",
-) -> dict[str, Any] | None:
-    """Query mngr list --format json and find the agent by name + host name.
-
-    Scopes to ``--provider <provider>`` (the bake only ever creates on ovh
-    today, so the default matches the call site) and passes ``--on-error
-    continue`` so unrelated stale hosts on the operator's machine -- e.g. a
-    pre-existing leased pool host whose container's ``/code/`` workdir has
-    been wiped -- do not abort the listing and lose the just-created agent's
-    record. The bake still treats "agent not in output" as a failure: that
-    path is handled by the normal "agent_info is None" check at the call
-    site, so genuine create failures are not papered over.
-
-    ``host_name`` MUST be the bake's per-bake-unique host name (not the
-    constant agent name). The operator's local mngr state accumulates one
-    ``system-services`` agent per bake (each on a different host), so
-    filtering on agent name alone returns the first match -- which under
-    sequential bakes is some prior bake's stale agent on a different VPS.
-    Disambiguating on ``host.name`` makes the lookup unambiguous because
-    the bake's host name carries a per-bake hex suffix.
-    """
-    result = _run_mngr_command(
-        [
-            "list",
-            "--format",
-            "json",
-            "--provider",
-            provider,
-            "--on-error",
-            "continue",
-            "--include",
-            f'name == "{agent_name}" && host.name == "{host_name}"',
-        ],
-        timeout=60,
-    )
-    if result.returncode != 0:
-        logger.warning("mngr list failed: {}", result.stderr)
-        return None
-
-    try:
-        data = _json.loads(result.stdout)
-    except _json.JSONDecodeError:
-        logger.warning("Failed to parse mngr list output")
-        return None
-
-    agents: list[dict[str, Any]] = []
-    if isinstance(data, dict) and "agents" in data:
-        agents = data["agents"]
-    elif isinstance(data, list):
-        agents = data
-    else:
-        return None
-
-    for agent in agents:
-        if not isinstance(agent, dict) or agent.get("name") != agent_name:
-            continue
-        host = agent.get("host")
-        if isinstance(host, dict) and host.get("name") == host_name:
-            return agent
-    return None
-
-
-def _sync_mngr_into_template(mngr_source: Path, workspace_dir: Path) -> None:
-    """Rsync the mngr monorepo into the template's vendor/mngr/ directory."""
-    vendor_mngr = workspace_dir / "vendor" / "mngr"
-    vendor_mngr.mkdir(parents=True, exist_ok=True)
-    exclude_args: list[str] = []
-    for pattern in _RSYNC_MANUAL_EXCLUDES:
-        exclude_args.extend(["--exclude", pattern])
-    command = (
-        ["rsync", "-a", "--delete", f"--filter={_GITIGNORE_RSYNC_FILTER}"]
-        + exclude_args
-        + [
-            f"{mngr_source}/",
-            f"{vendor_mngr}/",
-        ]
-    )
-    logger.info("Syncing mngr source into {}", vendor_mngr)
-    cg = ConcurrencyGroup(name="rsync-vendor")
-    with cg:
-        result = cg.run_process_to_completion(
-            command=command,
-            is_checked_after=False,
-            timeout=120.0,
-        )
-    if result.returncode != 0:
-        raise PoolBakeError(
-            f"rsync of {mngr_source} into {vendor_mngr} failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
 
 
 def build_extra_tags_env_value(tags: tuple[str, ...]) -> str:
@@ -481,165 +296,24 @@ def _checked_ssh_command(vps_address: str, ssh_key_path: str, port: int, command
         raise PoolBakeError(f"{label} failed on VPS {vps_address}; aborting bake")
 
 
-class PoolBakeError(RuntimeError):
-    """Raised when a required pool-bake step fails irrecoverably."""
+def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_address: str) -> None:
+    """OVH-specific ``on_host_ready`` step run mid-bake (ufw + management key).
 
-
-def _create_single_pool_host(
-    workspace_dir: Path,
-    attributes: dict[str, Any],
-    management_public_key: str,
-    database_url: str,
-    region: str,
-    extra_tags: tuple[str, ...],
-    is_recycle_enabled: bool,
-) -> bool:
-    """Create a single pool host. Returns True on success.
-
-    Inserts a row with the request-side ``attributes`` dict so the connector's
-    ``attributes @>`` match can find it. ``extra_tags`` is a tuple of
-    ``KEY=VALUE`` strings forwarded as ``MNGR_VPS_EXTRA_TAGS`` to the inner
-    ``mngr create``; ``mngr_ovh`` then attaches them as additional OVH IAM
-    v2 tags alongside ``mngr-provider`` / ``mngr-host-id``.
-
-    When ``is_recycle_enabled`` is False, the inner ``mngr create`` gets the
-    ``MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false`` env override so the
-    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
+    These steps are OVH-only: a freshly-ordered OVH VPS needs ufw installed +
+    configured and the pool management key authorized on both the VPS and the
+    container (slices instead authorize the pool key at carve time and rely on the
+    box's own firewall + lima's port-forwarding, so they pass no hook). The VPS SSH
+    endpoint + on-disk key come from ``mngr create --format json`` (the
+    ``vps_ssh_key`` sits next to the container key the bake recorded). Called by
+    the OVH bake right after the shared FCT bake returns.
     """
-    suffix = uuid4().hex
-    # ``agent_name`` is the contract with ``ImbueCloudHost.create_agent_state``
-    # (see ``host.py`` docstring): adoption preserves the bake's name
-    # verbatim, so this must match the minds-side default agent name
-    # ``system-services`` to give the user's tmux session a sane label
-    # instead of a per-bake UUID. ``host_name`` keeps the suffix so the
-    # operator's local mngr state can distinguish pool hosts across
-    # sequential bakes; the user's chosen workspace name overwrites it at
-    # lease time via ``ImbueCloudProvider.create_host``.
-    agent_name = _BAKED_SERVICES_AGENT_NAME
-    host_name = f"pool-{suffix}-host"
-    address = f"{agent_name}@{host_name}.ovh"
-    # The FCT bootstrap's ``_create_initial_chat_agent`` derives the
-    # chat-agent name from ``$MNGR_HOST_DIR/data.json``'s ``host_name``
-    # (see ``forever-claude-template/libs/bootstrap/src/bootstrap/manager.py``
-    # :func:`_build_create_chat_command`). Captured here so the post-bake
-    # cleanup can target it by name for ``mngr destroy``.
-    bootstrap_chat_agent_name = host_name
-
-    logger.info("Creating pool host: {} (region={})", address, region)
-
-    mngr_command = [
-        "create",
-        address,
-        "--new-host",
-        "--no-connect",
-        "--idle-mode",
-        "disabled",
-        "--template",
-        "main",
-        "--template",
-        "ovh",
-        "--label",
-        f"workspace={agent_name}",
-        "--label",
-        "user_created=true",
-        "--label",
-        "is_primary=true",
-        "--label",
-        f"pool_attributes={_json.dumps(attributes)}",
-        "--host-env",
-        "MNGR_HOST_DIR=/mngr",
-        "--pass-host-env",
-        "MNGR_PREFIX",
-        # Per-bake region: the ``ovh`` create template does NOT bake one
-        # in, so every host can land in a different OVH datacenter.
-        "-b",
-        f"--ovh-datacenter={region}",
-    ]
-
-    pool_create_env: dict[str, str] = {}
-    if extra_tags:
-        pool_create_env["MNGR_VPS_EXTRA_TAGS"] = build_extra_tags_env_value(extra_tags)
-        logger.info("  Tagging VPS with extra tags: {}", pool_create_env["MNGR_VPS_EXTRA_TAGS"])
-    if not is_recycle_enabled:
-        pool_create_env[_OVH_ENABLE_RECYCLE_ENV_KEY] = "false"
-        logger.info("  Recycling disabled: forcing a fresh OVH VPS order (no cancelled-VPS reuse)")
-
-    create_result = _run_mngr_command(
-        mngr_command, cwd=workspace_dir, is_streaming=True, extra_env=pool_create_env or None
-    )
-    if create_result.returncode != 0:
-        logger.error("mngr create failed: {}", create_result.stderr)
-        return False
-
-    logger.info("  Created agent: {}", agent_name)
-
-    # The agent NAME (``system-services``) is constant across every bake,
-    # so the operator's local mngr state can accumulate several
-    # ``system-services`` agents (one per bake, each on a different
-    # host). Subsequent ``mngr stop``/``mngr exec`` calls in this bake
-    # MUST use the per-bake-unique address to target the just-created
-    # agent specifically -- ``mngr stop system-services`` alone is
-    # ambiguous under sequential bakes and can pick the wrong one
-    # (silently, since ``--on-error continue`` is the mngr default).
-    full_address = f"{agent_name}@{host_name}.ovh"
-
-    stop_result = _run_mngr_command(["stop", full_address])
-    if stop_result.returncode != 0:
-        raise PoolBakeError(
-            f"`mngr stop {full_address}` failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
-        )
-
-    logger.info("  Ensuring sshd is running in container")
-    # Match the cloud-init bump we apply to the host VPS (and the lima
-    # provider's sshd config): the default ``MaxStartups=10:30:100``
-    # caps the pre-auth queue tightly, and the imbue_cloud lease + claim
-    # flow plus parallel ``mngr observe`` discovery routinely exceeds it
-    # and loses connections mid-rsync. ``shlex.join`` packs the whole
-    # sshd invocation into a single ``mngr exec`` COMMAND positional
-    # (mngr exec parses ``AGENTS... COMMAND`` so multi-token commands
-    # have to arrive as one shell-quoted string).
-    sshd_command = shlex.join(["/usr/sbin/sshd", "-o", "MaxSessions=100", "-o", "MaxStartups=100:30:200"])
-    _run_mngr_command(
-        ["exec", full_address, sshd_command],
-        timeout=30,
-    )
-
-    agent_info = _get_agent_info(agent_name, host_name=host_name)
-    if agent_info is None:
-        logger.error("Could not find agent info for {}", agent_name)
-        return False
-
-    host = agent_info.get("host")
-    if not isinstance(host, dict):
-        logger.error("No host info in agent data")
-        return False
-
-    ssh = host.get("ssh")
-    if not isinstance(ssh, dict):
-        logger.error("No SSH info in host data")
-        return False
-
-    vps_address = ssh.get("host")
-    if not isinstance(vps_address, str):
-        logger.error("No VPS address in SSH info")
-        return False
-
-    container_key_path = ssh.get("key_path")
-    if not isinstance(container_key_path, str):
-        logger.error("No SSH key path in host data")
-        return False
-
-    agent_id = str(agent_info.get("id", ""))
-    host_id = str(host.get("id", ""))
-    if not agent_id or not host_id:
-        logger.error("Missing agent_id or host_id")
-        return False
-
-    vps_key_path = str(Path(container_key_path).parent / "vps_ssh_key")
-
-    # Install + configure ufw on the VPS. Each step must succeed; we bail
-    # on the whole bake if anything fails (otherwise the host would land
-    # in the pool with no firewall and a half-applied policy).
+    if not baked.ssh_host or not baked.ssh_key_path:
+        raise PoolBakeError("`mngr create --format json` did not expose the VPS ssh endpoint for hardening")
+    vps_address = baked.ssh_host
+    vps_key_path = str(Path(baked.ssh_key_path).parent / "vps_ssh_key")
+    # Install + configure ufw on the VPS. Each step must succeed; we bail on the
+    # whole bake if anything fails (otherwise the host would land in the pool with
+    # no firewall and a half-applied policy).
     logger.info("  Installing + configuring ufw on VPS {}", vps_address)
     for ufw_command in _ufw_provision_commands(_CONTAINER_SSH_PORT):
         _checked_ssh_command(vps_address, vps_key_path, 22, ufw_command, label=f"ufw step {ufw_command!r}")
@@ -651,58 +325,70 @@ def _create_single_pool_host(
         + " >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
     )
     _checked_ssh_command(vps_address, vps_key_path, 22, install_cmd, label="install management key on VPS")
-
     logger.info("  Installing management key in container via mngr exec")
-    container_install = _run_mngr_command(["exec", full_address, install_cmd], timeout=60)
+    container_install = run_mngr_command(["exec", full_address, install_cmd], timeout=60)
     if container_install.returncode != 0:
         raise PoolBakeError(
-            f"installing management key inside container for {agent_name} failed: {container_install.stderr.strip()}"
+            f"installing management key inside container for {full_address} failed: {container_install.stderr.strip()}"
         )
 
-    # During the bake the services agent booted and the FCT bootstrap created
-    # an initial chat agent named after the BAKE's host name. That name is
-    # wrong for the user's eventual workspace (the user picks their own host
-    # name at lease time), and the bootstrap won't recreate the chat agent
-    # on later starts because of the sentinel file it wrote. Tear both
-    # down so the user's first start gets a fresh chat agent named after
-    # their own host name.
-    logger.info("  Destroying bootstrap-created chat agent: {}", bootstrap_chat_agent_name)
-    # ``mngr exec`` parses ``AGENTS... COMMAND`` -- the LAST positional
-    # goes to ``COMMAND`` and the rest to ``AGENTS``. Passing a multi-
-    # token command as separate argv entries makes click treat all but
-    # the last as agent names ("No agent(s) found matching: destroy,
-    # mngr, pool-..."). Pack the whole remote command into one
-    # shell-quoted string so it lands as a single ``COMMAND`` positional;
-    # the remote sshd parses it back via bash.
-    chat_destroy_cmd = shlex.join(["mngr", "destroy", bootstrap_chat_agent_name, "--force"])
-    chat_destroy = _run_mngr_command(
-        ["exec", full_address, chat_destroy_cmd],
-        timeout=120,
-    )
-    if chat_destroy.returncode != 0:
-        # Failing the bake instead of warning -- a destroy that errors
-        # out almost always means a vendored-mngr / FCT-template version
-        # skew (e.g. an `agent_types` field the older vendored mngr
-        # doesn't recognize), and shipping a pool host whose internal
-        # bootstrap state we don't actually understand has bitten us
-        # before. Better to abort + clean up than land a half-known
-        # host in the pool.
-        raise PoolBakeError(
-            f"destroying bootstrap chat agent {bootstrap_chat_agent_name!r} via "
-            f"`mngr exec {full_address} {chat_destroy_cmd!r}` failed "
-            f"(exit {chat_destroy.returncode}): {chat_destroy.stderr.strip()}"
-        )
 
-    logger.info("  Removing initial-chat sentinel: {}", _INITIAL_CHAT_SENTINEL_PATH)
-    sentinel_rm_cmd = shlex.join(["rm", "-f", _INITIAL_CHAT_SENTINEL_PATH])
-    sentinel_rm = _run_mngr_command(
-        ["exec", full_address, sentinel_rm_cmd],
-        timeout=30,
+def _create_single_pool_host(
+    workspace_dir: Path,
+    attributes: dict[str, Any],
+    management_public_key: str,
+    database_url: str,
+    region: str,
+    extra_tags: tuple[str, ...],
+    is_recycle_enabled: bool,
+) -> bool:
+    """Create a single OVH pool host. Returns True on success.
+
+    Delegates the provider-generic FCT bake (create + stop + sshd hardening +
+    chat-agent teardown) to :func:`bake_pool_host`, supplying only the
+    OVH-specific pieces: the ``ovh`` provider + per-bake datacenter, the
+    cancelled-VPS recycle override, the ufw + management-key hook, the extra OVH
+    IAM tags, and the OVH ``pool_hosts`` insert. The row's ``attributes`` are the
+    request-side dict so the connector's ``attributes @>`` match can find it.
+
+    ``extra_tags`` is a tuple of ``KEY=VALUE`` strings forwarded as
+    ``MNGR_VPS_EXTRA_TAGS`` to the inner ``mngr create``; ``mngr_ovh`` attaches
+    them as additional OVH IAM v2 tags. When ``is_recycle_enabled`` is False the
+    OVH provider orders a fresh VPS instead of reclaiming a cancelled one.
+    """
+    host_name = f"pool-{uuid4().hex}-host"
+    logger.info("Creating OVH pool host: {} (region={})", host_name, region)
+
+    # Per-bake region: the ``ovh`` create template does NOT bake one in, so every
+    # host can land in a different OVH datacenter. ``--pass-host-env MNGR_PREFIX``
+    # keeps the VPS's mngr on the operator's prefix.
+    extra_create_args = ["--pass-host-env", "MNGR_PREFIX", "-b", f"--ovh-datacenter={region}"]
+
+    extra_create_env: dict[str, str] = {}
+    if extra_tags:
+        extra_create_env["MNGR_VPS_EXTRA_TAGS"] = build_extra_tags_env_value(extra_tags)
+        logger.info("  Tagging VPS with extra tags: {}", extra_create_env["MNGR_VPS_EXTRA_TAGS"])
+    if not is_recycle_enabled:
+        extra_create_env[_OVH_ENABLE_RECYCLE_ENV_KEY] = "false"
+        logger.info("  Recycling disabled: forcing a fresh OVH VPS order (no cancelled-VPS reuse)")
+
+    baked = bake_pool_host(
+        provider_instance="ovh",
+        host_name=host_name,
+        attributes=attributes,
+        workspace_dir=workspace_dir,
+        extra_create_args=extra_create_args,
+        extra_create_env=extra_create_env or None,
     )
-    if sentinel_rm.returncode != 0:
-        raise PoolBakeError(
-            f"removing initial-chat sentinel {_INITIAL_CHAT_SENTINEL_PATH!r} failed: {sentinel_rm.stderr.strip()}"
-        )
+    if not baked.ssh_host:
+        raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
+
+    # OVH-specific host hardening: a fresh OVH VPS needs ufw + the pool management
+    # key (slices authorize the pool key at carve time, so they skip this). Done
+    # after the FCT bake; the host is not yet in the pool (no row), so the brief
+    # pre-ufw window is not user-reachable.
+    full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
+    _harden_ovh_vps(management_public_key, baked, full_address)
 
     row_id = uuid4()
     conn = psycopg2.connect(database_url)
@@ -713,9 +399,9 @@ def _create_single_pool_host(
                     _INSERT_POOL_HOST_SQL,
                     build_pool_host_insert_values(
                         row_id=str(row_id),
-                        vps_address=vps_address,
-                        agent_id=agent_id,
-                        host_id=host_id,
+                        vps_address=baked.ssh_host,
+                        agent_id=baked.agent_id,
+                        host_id=baked.host_id,
                         host_name=host_name,
                         container_ssh_port=_CONTAINER_SSH_PORT,
                         attributes_json=_json.dumps(attributes),
@@ -725,7 +411,7 @@ def _create_single_pool_host(
     finally:
         conn.close()
 
-    logger.info("  Pool host ready: id={}, agent_id={}, vps_address={}", row_id, agent_id, vps_address)
+    logger.info("  Pool host ready: id={}, agent_id={}, vps_address={}", row_id, baked.agent_id, baked.ssh_host)
     return True
 
 
@@ -831,7 +517,7 @@ def pool_create(
 
     workspace_path = Path(workspace_dir)
     if mngr_source is not None:
-        _sync_mngr_into_template(Path(mngr_source), workspace_path)
+        sync_mngr_into_template(Path(mngr_source), workspace_path)
 
     logger.info(
         "Creating {} pool host(s) with region={}, attributes={}, tags={}",

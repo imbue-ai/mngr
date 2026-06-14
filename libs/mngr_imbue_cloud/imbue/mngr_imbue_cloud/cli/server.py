@@ -30,6 +30,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
@@ -54,14 +55,14 @@ from imbue.mngr_imbue_cloud.cli.admin import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
+from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
+from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
-from imbue.mngr_imbue_cloud.slice_bake import build_chat_teardown_container_command
-from imbue.mngr_imbue_cloud.slice_bake import build_slice_bake_remote_command
-from imbue.mngr_imbue_cloud.slice_bake import build_slice_vm_teardown_command
-from imbue.mngr_imbue_cloud.slice_bake import build_wait_for_sentinel_container_command
-from imbue.mngr_imbue_cloud.slice_bake import parse_create_json_from_output
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
 def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
@@ -340,223 +341,175 @@ def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
     return {"memory_gb": sizing["advertised_memory_gb"], "cpus": sizing["vcpus"]}
 
 
-# Default on-box layout the bake assumes (created by the sync step).
-_BOX_MNGR_REMOTE_NAME: str = "mngr"
-_BOX_FCT_REMOTE_NAME: str = "forever-claude-template"
-# rsync excludes layered on top of ``--filter=:- .gitignore`` (mirrors the minds
-# vendor-sync / admin pool create rsync). ``.external_worktrees`` is gitignored
-# so it is already covered, but kept explicit for the FCT sync below.
-_RSYNC_MANUAL_EXCLUDES: tuple[str, ...] = (".git", "uv.lock", ".external_worktrees")
-_UV_SYNC_TIMEOUT_SECONDS: float = 900.0
-_SLICE_BAKE_TIMEOUT_SECONDS: float = 2700.0
-_BOX_SSH_TIMEOUT_SECONDS: float = 120.0
-_SENTINEL_POLL_TIMEOUT_SECONDS: float = 480.0
+# Default FCT workspace checkout to bake from when --workspace-dir is omitted.
+_DEFAULT_FCT_WORKSPACE: Path = Path.home() / "project" / "forever-claude-template"
+# Provider instance name the slice bake targets; -S overrides under this key
+# carry the box address + per-slice carve sizing into the create.
+_SLICE_PROVIDER_INSTANCE: str = "imbue_cloud_slice"
 
 
-def _remote_home(ssh_user: str) -> str:
-    return f"/home/{ssh_user}"
-
-
-def _ssh_transport_args(private_key_path: Path) -> list[str]:
-    return [
-        "-i",
-        str(private_key_path),
-        "-o",
-        "StrictHostKeyChecking=accept-new",
-        "-o",
-        "ConnectTimeout=20",
-        "-o",
-        "ServerAliveInterval=30",
-    ]
-
-
-def _run_remote(
+def _build_slice_create_args(
     *,
-    address: str,
-    ssh_user: str,
+    server: BareMetalServer,
+    sizing: dict[str, int],
+    pool_public_key: str,
     private_key_path: Path,
-    port: int,
-    command: str,
-    timeout_seconds: float,
-    label: str,
-    is_streaming: bool,
-) -> Any:
-    """Run a command over SSH and return the FinishedProcess (does not raise on non-zero)."""
-    ssh_command = [
-        "ssh",
-        *_ssh_transport_args(private_key_path),
-        "-p",
-        str(port),
-        f"{ssh_user}@{address}",
-        command,
-    ]
-    on_output = (lambda line, _is_stdout: logger.info("  [{}] {}", label, line.rstrip())) if is_streaming else None
-    cg = ConcurrencyGroup(name=f"slice-{label}")
-    with cg:
-        return cg.run_process_to_completion(
-            command=ssh_command,
-            timeout=timeout_seconds,
-            is_checked_after=False,
-            on_output=on_output,
-        )
-
-
-def _rsync_dir_to_box(
-    *,
-    local_dir: Path,
-    remote_dest: str,
-    address: str,
     ssh_user: str,
-    private_key_path: Path,
-    extra_excludes: tuple[str, ...],
-) -> None:
-    """Rsync ``local_dir`` to ``ssh_user@address:remote_dest`` (gitignore-filtered)."""
-    exclude_args: list[str] = []
-    for pattern in extra_excludes:
-        exclude_args.extend(["--exclude", pattern])
-    ssh_transport = "ssh " + " ".join(_ssh_transport_args(private_key_path))
-    command = [
-        "rsync",
-        "-a",
-        "--delete",
-        "--filter=:- .gitignore",
-        *exclude_args,
-        "-e",
-        ssh_transport,
-        f"{local_dir}/",
-        f"{ssh_user}@{address}:{remote_dest}/",
-    ]
-    cg = ConcurrencyGroup(name="slice-rsync")
-    with cg:
-        result = cg.run_process_to_completion(command=command, timeout=600.0, is_checked_after=False)
-    if result.returncode != 0:
-        raise BareMetalProvisioningError(
-            f"rsync of {local_dir} to {address}:{remote_dest} failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
+    port_range_start: int,
+    port_range_end: int,
+) -> list[str]:
+    """Render the ``-S`` provider-config overrides that point one slice bake at this box.
+
+    The carve knobs (vcpus / memory / disk) are computed per box so the leased
+    host's actual size matches its advertised attributes; the box address + lima
+    user + pool key + this bake's disjoint port window are passed the same way.
+    Concurrent bakes get disjoint ``slice_port_range_*`` windows so their in-VM
+    port probes cannot pick the same box ports.
+    """
+    prefix = f"providers.{_SLICE_PROVIDER_INSTANCE}"
+    overrides = {
+        "box_public_address": str(server.public_address),
+        "box_ssh_user": ssh_user,
+        "pool_private_key_path": str(private_key_path),
+        "pool_authorized_public_key": pool_public_key,
+        "slice_region": server.region,
+        "slice_vcpus": str(sizing["vcpus"]),
+        "slice_memory_mib": str(sizing["memory_mib"]),
+        "slice_disk_gib": str(sizing["disk_gib"]),
+        "slice_port_range_start": str(port_range_start),
+        "slice_port_range_end": str(port_range_end),
+    }
+    args: list[str] = []
+    for key, value in overrides.items():
+        args.extend(["-S", f"{prefix}.{key}={value}"])
+    return args
 
 
-def _sync_repos_to_box(
+def _rollback_slice_vm(*, server: BareMetalServer, ssh_user: str, private_key_path: Path, host_id: str) -> None:
+    """Best-effort: destroy a carved slice VM whose later bake/bookkeeping failed, so it does not leak.
+
+    Drives ``limactl delete`` / ``disk delete`` over SSH on the box (via the same
+    SSH-backed client the carve uses) for the deterministic instance/disk names
+    derived from ``host_id``. Swallows + logs any failure -- the caller is already
+    on a failure path -- so it never masks the original error.
+    """
+    client = LimaSliceVpsClient(
+        box_address=str(server.public_address),
+        box_ssh_user=ssh_user,
+        private_key_path=str(private_key_path),
+    )
+    instance_id = VpsInstanceId(slice_lima_instance_name(HostId(host_id)))
+    try:
+        client.destroy_instance(instance_id)
+    except (MngrError, OSError) as exc:
+        logger.warning("Rollback of orphaned slice VM for {} on {} failed: {}", host_id, server.public_address, exc)
+
+
+def _bake_one_slice(
     *,
-    mngr_source: Path,
+    server: BareMetalServer,
+    sizing: dict[str, int],
     workspace_dir: Path,
-    address: str,
-    ssh_user: str,
+    pool_public_key: str,
     private_key_path: Path,
-) -> None:
-    """Put this branch's mngr + the FCT workspace on the box, ready to bake.
+    database_url: str,
+    port_range_start: int,
+    port_range_end: int,
+) -> dict[str, Any]:
+    """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
-    Idempotent. Rsyncs the monorepo to ``~/mngr`` and ``uv sync --all-packages``
-    there (so ``~/mngr/.venv/bin/mngr`` has the slice provider), rsyncs the FCT
-    workspace to ``~/forever-claude-template`` (minus its own vendored mngr), then
-    copies the just-synced monorepo into the FCT workspace's ``vendor/mngr`` so the
-    baked container's mngr matches this branch.
+    Returns an outcome dict (never raises). The slice provider carves the VM over
+    SSH on the box and bakes the shared container; the provider-generic
+    :func:`bake_pool_host` runs the FCT bake + chat-agent teardown. Any failure
+    after the VM exists rolls the VM back so it does not leak its box slot/ports.
     """
-    home = _remote_home(ssh_user)
-    logger.info("Syncing mngr -> {}:{}/{}", address, home, _BOX_MNGR_REMOTE_NAME)
-    _rsync_dir_to_box(
-        local_dir=mngr_source,
-        remote_dest=_BOX_MNGR_REMOTE_NAME,
-        address=address,
-        ssh_user=ssh_user,
-        private_key_path=private_key_path,
-        extra_excludes=_RSYNC_MANUAL_EXCLUDES,
-    )
-    logger.info("Running uv sync --all-packages on {}", address)
-    uv_result = _run_remote(
-        address=address,
-        ssh_user=ssh_user,
-        private_key_path=private_key_path,
-        port=22,
-        command=f"cd {_BOX_MNGR_REMOTE_NAME} && $HOME/.local/bin/uv sync --all-packages",
-        timeout_seconds=_UV_SYNC_TIMEOUT_SECONDS,
-        label="uv-sync",
-        is_streaming=True,
-    )
-    if uv_result.returncode != 0:
-        raise BareMetalProvisioningError(f"uv sync on {address} failed: {uv_result.stderr.strip()}")
-    logger.info("Syncing FCT workspace -> {}:{}/{}", address, home, _BOX_FCT_REMOTE_NAME)
-    _rsync_dir_to_box(
-        local_dir=workspace_dir,
-        remote_dest=_BOX_FCT_REMOTE_NAME,
-        address=address,
-        ssh_user=ssh_user,
-        private_key_path=private_key_path,
-        # Keep the FCT's own uv.lock (its Dockerfile COPYs it); only drop .git
-        # (we git-init fresh on the box), .external_worktrees, and the vendored
-        # mngr (overwritten with the monorepo next).
-        extra_excludes=(".git", ".external_worktrees", "vendor/mngr"),
-    )
-    logger.info("Refreshing {}:{}/vendor/mngr from the synced monorepo", address, _BOX_FCT_REMOTE_NAME)
-    vendor_sync = _run_remote(
-        address=address,
-        ssh_user=ssh_user,
-        private_key_path=private_key_path,
-        port=22,
-        command=(
-            f"mkdir -p {_BOX_FCT_REMOTE_NAME}/vendor/mngr && "
-            f"rsync -a --delete --exclude .venv --exclude .git "
-            f"{home}/{_BOX_MNGR_REMOTE_NAME}/ {home}/{_BOX_FCT_REMOTE_NAME}/vendor/mngr/"
-        ),
-        timeout_seconds=300.0,
-        label="vendor-sync",
-        is_streaming=False,
-    )
-    if vendor_sync.returncode != 0:
-        raise BareMetalProvisioningError(f"vendor/mngr refresh on {address} failed: {vendor_sync.stderr.strip()}")
-    # mngr's source + project-config discovery is git-root based, and the FCT
-    # bootstrap expects /mngr/code to be a git checkout -- but the rsync excludes
-    # .git. Make the synced workspace a real (single-commit) git repo so the bake
-    # behaves exactly like the OVH pool bake from an operator's FCT checkout.
-    # Idempotent: re-runs just add a fresh commit (or no-op when unchanged).
-    git_init = _run_remote(
-        address=address,
-        ssh_user=ssh_user,
-        private_key_path=private_key_path,
-        port=22,
-        command=(
-            f"cd {_BOX_FCT_REMOTE_NAME} && git init -q && git add -A && "
-            "git -c user.email=bake@imbue.com -c user.name=slice-bake commit -q -m bake "
-            "--allow-empty >/dev/null 2>&1; git rev-parse --is-inside-work-tree"
-        ),
-        timeout_seconds=180.0,
-        label="git-init",
-        is_streaming=False,
-    )
-    if git_init.returncode != 0:
-        raise BareMetalProvisioningError(f"git init of FCT workspace on {address} failed: {git_init.stderr.strip()}")
-
-
-def _wait_for_container_sentinel(
-    *,
-    address: str,
-    container_port: int,
-    private_key_path: Path,
-    timeout_seconds: float,
-) -> bool:
-    """Wait (in the container's shell) for the FCT initial-chat sentinel; return True once present.
-
-    Returns False on timeout (the bootstrap may not have created a chat agent --
-    e.g. inference creds absent -- in which case there is nothing to tear down).
-    """
-    result = _run_remote(
-        address=address,
-        ssh_user="root",
-        private_key_path=private_key_path,
-        port=container_port,
-        command=build_wait_for_sentinel_container_command(int(timeout_seconds)),
-        timeout_seconds=timeout_seconds + 60.0,
-        label="sentinel-wait",
-        is_streaming=False,
-    )
-    return result.returncode == 0
+    ssh_user = server.lima_service_user or "limahost"
+    host_name = f"slice-{uuid4().hex}"
+    attributes = slice_advertised_attributes(sizing)
+    attributes_json = json.dumps(attributes)
+    try:
+        baked = bake_pool_host(
+            provider_instance=_SLICE_PROVIDER_INSTANCE,
+            host_name=host_name,
+            attributes=attributes,
+            workspace_dir=workspace_dir,
+            extra_create_args=_build_slice_create_args(
+                server=server,
+                sizing=sizing,
+                pool_public_key=pool_public_key,
+                private_key_path=private_key_path,
+                ssh_user=ssh_user,
+                port_range_start=port_range_start,
+                port_range_end=port_range_end,
+            ),
+            on_failure_after_create=lambda failed: _rollback_slice_vm(
+                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=failed.host_id
+            ),
+        )
+        if baked.outer_ssh_port is None or baked.ssh_port is None:
+            _rollback_slice_vm(
+                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
+            )
+            raise BareMetalProvisioningError(
+                f"slice {host_name} create JSON missing the forwarded ports (vm={baked.outer_ssh_port}, "
+                f"container={baked.ssh_port})"
+            )
+        host_id_obj = HostId(baked.host_id)
+        values = build_slice_pool_host_insert_values(
+            row_id=str(uuid4()),
+            box_public_address=str(server.public_address),
+            agent_id=baked.agent_id,
+            host_id=baked.host_id,
+            host_name=host_name,
+            vm_ssh_host_port=baked.outer_ssh_port,
+            container_ssh_host_port=baked.ssh_port,
+            attributes_json=attributes_json,
+            region=server.region,
+            bare_metal_server_id=str(server.id),
+            lima_instance_name=slice_lima_instance_name(host_id_obj),
+            lima_disk_name=slice_lima_disk_name(host_id_obj),
+        )
+        try:
+            conn = psycopg2.connect(database_url)
+            try:
+                insert_slice_pool_host(conn, values)
+            finally:
+                conn.close()
+        except (psycopg2.Error, OSError):
+            _rollback_slice_vm(
+                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
+            )
+            raise
+        logger.info(
+            "Slice {} ready on {} (host_id={}, ports vm={}/container={})",
+            host_name,
+            server.public_address,
+            baked.host_id,
+            baked.outer_ssh_port,
+            baked.ssh_port,
+        )
+        return {
+            "host_name": host_name,
+            "server_id": str(server.id),
+            "host_id": baked.host_id,
+            "agent_id": baked.agent_id,
+            "vm_ssh_port": baked.outer_ssh_port,
+            "container_ssh_port": baked.ssh_port,
+            "attributes": attributes,
+            "status": "succeeded",
+        }
+    except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError) as exc:
+        logger.warning("Slice bake {} failed: {}", host_name, exc)
+        return {"host_name": host_name, "server_id": str(server.id), "status": "failed", "error": str(exc)}
 
 
 def _bake_into_outcomes(
     *,
     server: BareMetalServer,
     sizing: dict[str, int],
-    private_key_path: Path,
+    workspace_dir: Path,
     pool_public_key: str,
+    private_key_path: Path,
     database_url: str,
     port_range_start: int,
     port_range_end: int,
@@ -564,206 +517,18 @@ def _bake_into_outcomes(
     outcomes_lock: "threading.Lock",
 ) -> None:
     """Thread target: bake one slice and append its outcome under the lock."""
-    outcome = _bake_and_record_one_slice(
+    outcome = _bake_one_slice(
         server=server,
         sizing=sizing,
-        private_key_path=private_key_path,
+        workspace_dir=workspace_dir,
         pool_public_key=pool_public_key,
+        private_key_path=private_key_path,
         database_url=database_url,
         port_range_start=port_range_start,
         port_range_end=port_range_end,
     )
     with outcomes_lock:
         outcomes.append(outcome)
-
-
-def _tear_down_orphaned_slice_vm(
-    *,
-    address: str,
-    ssh_user: str,
-    private_key_path: Path,
-    host_id: HostId,
-) -> None:
-    """Best-effort: destroy a just-baked slice VM whose bookkeeping failed, so it does not leak.
-
-    Runs ``limactl delete``/``disk delete`` on the box (as the lima user) for the
-    deterministic instance/disk names derived from ``host_id``. Logs and swallows
-    any failure -- the caller is already on a failure path, and the operator will
-    see the recorded bake failure -- but never raises, so it does not mask the
-    original error.
-    """
-    teardown_command = build_slice_vm_teardown_command(
-        slice_lima_instance_name(host_id), slice_lima_disk_name(host_id)
-    )
-    try:
-        result = _run_remote(
-            address=address,
-            ssh_user=ssh_user,
-            private_key_path=private_key_path,
-            port=22,
-            command=teardown_command,
-            timeout_seconds=_BOX_SSH_TIMEOUT_SECONDS,
-            label=f"rollback:{host_id.get_uuid().hex}",
-            is_streaming=False,
-        )
-    except OSError as exc:
-        logger.warning("Could not reach {} to roll back orphaned slice VM for {}: {}", address, host_id, exc)
-        return
-    if result.returncode != 0:
-        logger.warning(
-            "Rollback of orphaned slice VM for {} on {} failed (exit {}): {}",
-            host_id,
-            address,
-            result.returncode,
-            result.stderr.strip(),
-        )
-
-
-def _bake_and_record_one_slice(
-    *,
-    server: BareMetalServer,
-    sizing: dict[str, int],
-    private_key_path: Path,
-    pool_public_key: str,
-    database_url: str,
-    port_range_start: int,
-    port_range_end: int,
-) -> dict[str, Any]:
-    """Bake one slice on its box and insert its pool_hosts row. Returns an outcome dict (never raises).
-
-    ``port_range_start`` / ``port_range_end`` bound the box host ports this bake may
-    forward. Concurrent bakes are each handed a disjoint window so they cannot pick
-    the same ports (see :func:`partition_port_range`).
-    """
-    address = server.public_address
-    ssh_user = server.lima_service_user or "root"
-    host_name = f"slice-{uuid4().hex}"
-    attributes = slice_advertised_attributes(sizing)
-    attributes_json = json.dumps(attributes)
-    try:
-        if not address:
-            raise BareMetalProvisioningError(f"server {server.id} has no public_address; cannot bake")
-        home = _remote_home(ssh_user)
-        bake_command = build_slice_bake_remote_command(
-            fct_dir=f"{home}/{_BOX_FCT_REMOTE_NAME}",
-            mngr_bin=f"{home}/{_BOX_MNGR_REMOTE_NAME}/.venv/bin/mngr",
-            host_name=host_name,
-            attributes_json=attributes_json,
-            box_public_address=address,
-            pool_public_key=pool_public_key,
-            region=server.region,
-            # The VM gets exactly the per-box-computed sizing (so actual == advertised).
-            slice_vcpus=sizing["vcpus"],
-            slice_memory_mib=sizing["memory_mib"],
-            slice_disk_gib=sizing["disk_gib"],
-            port_range_start=port_range_start,
-            port_range_end=port_range_end,
-        )
-        logger.info("Baking slice {} on {} ({})", host_name, server.id, address)
-        bake_result = _run_remote(
-            address=address,
-            ssh_user=ssh_user,
-            private_key_path=private_key_path,
-            port=22,
-            command=bake_command,
-            timeout_seconds=_SLICE_BAKE_TIMEOUT_SECONDS,
-            label=f"bake:{host_name}",
-            is_streaming=True,
-        )
-        if bake_result.returncode != 0:
-            raise BareMetalProvisioningError(
-                f"bake of {host_name} on {address} failed (exit {bake_result.returncode}): {bake_result.stderr.strip()}"
-            )
-        # ``host_id`` is the one field parse_create_json_from_output guarantees, and
-        # it is the rollback key (the lima instance/disk names derive from it). The
-        # VM definitely exists on the box now, so any failure past this point must
-        # destroy it -- otherwise it leaks its box slot + forwarded ports (no
-        # pool_hosts row will reference it, so capacity accounting can't see it).
-        # The remaining create-JSON fields are extracted INSIDE the protected block
-        # below so a missing/invalid key (KeyError/ValueError) also tears down the VM.
-        created = parse_create_json_from_output(bake_result.stdout)
-        host_id = str(created["host_id"])
-        host_id_obj = HostId(host_id)
-        try:
-            agent_id = str(created["agent_id"])
-            container_ssh_port = int(created["ssh_port"])
-            vm_ssh_port = int(created["outer_ssh_port"])
-            # Tear down the bootstrap-created chat agent + sentinel so the user's
-            # first lease re-creates the chat agent under their own workspace name.
-            is_sentinel_present = _wait_for_container_sentinel(
-                address=address,
-                container_port=container_ssh_port,
-                private_key_path=private_key_path,
-                timeout_seconds=_SENTINEL_POLL_TIMEOUT_SECONDS,
-            )
-            if is_sentinel_present:
-                teardown = _run_remote(
-                    address=address,
-                    ssh_user="root",
-                    private_key_path=private_key_path,
-                    port=container_ssh_port,
-                    command=build_chat_teardown_container_command(host_name),
-                    timeout_seconds=180.0,
-                    label=f"teardown:{host_name}",
-                    is_streaming=True,
-                )
-                if teardown.returncode != 0:
-                    raise BareMetalProvisioningError(
-                        f"chat-agent teardown for {host_name} failed (exit {teardown.returncode}): "
-                        f"{teardown.stderr.strip()}"
-                    )
-            else:
-                logger.warning("No initial-chat sentinel appeared for {}; skipping chat teardown", host_name)
-
-            # Insert the available slice pool_hosts row (laptop-side).
-            values = build_slice_pool_host_insert_values(
-                row_id=str(uuid4()),
-                box_public_address=address,
-                agent_id=agent_id,
-                host_id=host_id,
-                host_name=host_name,
-                vm_ssh_host_port=vm_ssh_port,
-                container_ssh_host_port=container_ssh_port,
-                attributes_json=attributes_json,
-                region=server.region,
-                bare_metal_server_id=str(server.id),
-                lima_instance_name=slice_lima_instance_name(host_id_obj),
-                lima_disk_name=slice_lima_disk_name(host_id_obj),
-            )
-            conn = psycopg2.connect(database_url)
-            try:
-                insert_slice_pool_host(conn, values)
-            finally:
-                conn.close()
-        except (BareMetalProvisioningError, psycopg2.Error, KeyError, ValueError, OSError):
-            _tear_down_orphaned_slice_vm(
-                address=address,
-                ssh_user=ssh_user,
-                private_key_path=private_key_path,
-                host_id=host_id_obj,
-            )
-            raise
-        logger.info(
-            "Slice {} ready on {} (host_id={}, ports vm={}/container={})",
-            host_name,
-            address,
-            host_id,
-            vm_ssh_port,
-            container_ssh_port,
-        )
-        return {
-            "host_name": host_name,
-            "server_id": str(server.id),
-            "host_id": host_id,
-            "agent_id": agent_id,
-            "vm_ssh_port": vm_ssh_port,
-            "container_ssh_port": container_ssh_port,
-            "attributes": attributes,
-            "status": "succeeded",
-        }
-    except (BareMetalProvisioningError, psycopg2.Error, KeyError, ValueError, OSError) as exc:
-        logger.warning("Slice bake {} failed: {}", host_name, exc)
-        return {"host_name": host_name, "server_id": str(server.id), "status": "failed", "error": str(exc)}
 
 
 @server.command(name="allocate-slice")
@@ -778,7 +543,7 @@ def _bake_and_record_one_slice(
     "--mngr-source",
     type=click.Path(exists=True),
     default=None,
-    help="mngr monorepo root to sync onto the box (default: this checkout).",
+    help="mngr monorepo root to vendor into the FCT workspace (default: this checkout).",
 )
 @click.option("--dry-run", is_flag=True, default=False, help="Report placement + slice sizing; do not bake.")
 @click.option("--database-url", default=None)
@@ -793,12 +558,13 @@ def allocate_slice(
 
     Picks the ready server with the most free slots (one server per invocation: a
     server's per-slice vCPU/RAM/disk are fixed by its registration, so a batch is
-    homogeneous), syncs this branch's mngr + the FCT workspace onto it once, then
-    bakes the slices in parallel -- each carves a lima VM, bakes the shared
-    vps_docker container + FCT workspace, authorizes the pool key, tears down the
-    bootstrap chat agent, and inserts an ``available`` slice ``pool_hosts`` row.
-    The per-slice sizing is computed from the server's stored memory-per-slice +
-    CPU overcommit + disk. ``--dry-run`` only reports placement + sizing.
+    homogeneous), vendors this branch's mngr into the FCT workspace once, then
+    bakes the slices in parallel from here -- each ``mngr create`` drives the slice
+    provider, which carves a lima VM over SSH on the box and bakes the shared
+    container, exactly like an OVH pool bake. Each bake authorizes the pool key,
+    tears down the bootstrap chat agent, and inserts an ``available`` slice
+    ``pool_hosts`` row. The per-slice sizing comes from the server's stored
+    memory-per-slice + CPU overcommit + disk. ``--dry-run`` only reports placement.
     """
     if count <= 0:
         raise click.UsageError("--count must be positive")
@@ -838,33 +604,25 @@ def allocate_slice(
     # conventional FCT checkout for the workspace).
     repo_root = Path(__file__).resolve().parents[5]
     resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
-    resolved_workspace_dir = (
-        Path(workspace_dir) if workspace_dir else Path.home() / "project" / "forever-claude-template"
-    )
+    resolved_workspace_dir = Path(workspace_dir) if workspace_dir else _DEFAULT_FCT_WORKSPACE
     if not resolved_workspace_dir.is_dir():
         raise click.UsageError(
             f"FCT workspace not found at {resolved_workspace_dir}; pass --workspace-dir explicitly."
         )
     if not server.public_address:
-        raise click.UsageError(f"server {server.id} has no public_address; cannot sync")
+        raise click.UsageError(f"server {server.id} has no public_address; cannot bake")
+
+    # Vendor this branch's mngr into the FCT workspace once (the baked container
+    # builds its mngr from vendor/mngr); the parallel bakes then share it.
+    sync_mngr_into_template(resolved_mngr_source, resolved_workspace_dir)
 
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
-        # Sync the chosen box once (serial) before the parallel bakes, so the
-        # concurrent bakes don't race on the rsync / uv sync.
-        _sync_repos_to_box(
-            mngr_source=resolved_mngr_source,
-            workspace_dir=resolved_workspace_dir,
-            address=server.public_address,
-            ssh_user=server.lima_service_user or "root",
-            private_key_path=private_key_path,
-        )
-
         # Bake all slices in parallel (one thread each). Each bake is a separate
-        # mngr create process that picks the lowest free ports in the window it is
-        # given; handing each a DISJOINT sub-range of the box port range stops
-        # concurrent bakes from deterministically choosing the same ports (the
-        # in-process probe can't see a sibling bake's not-yet-bound choice).
+        # ``mngr create`` that drives the slice provider to carve a VM (over SSH on
+        # the box) and pick the lowest free ports in the window it is given; handing
+        # each a DISJOINT sub-range of the box port range stops concurrent bakes
+        # from deterministically choosing the same ports.
         outcomes: list[dict[str, Any]] = []
         outcomes_lock = threading.Lock()
         port_windows = [
@@ -877,8 +635,9 @@ def allocate_slice(
                 kwargs=dict(
                     server=server,
                     sizing=sizing,
-                    private_key_path=private_key_path,
+                    workspace_dir=resolved_workspace_dir,
                     pool_public_key=pool_public_key,
+                    private_key_path=private_key_path,
                     database_url=resolved_database_url,
                     port_range_start=port_windows[idx][0],
                     port_range_end=port_windows[idx][1],

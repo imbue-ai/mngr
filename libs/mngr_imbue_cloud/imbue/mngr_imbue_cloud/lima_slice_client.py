@@ -1,3 +1,6 @@
+import base64
+import json
+import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Final
@@ -12,24 +15,14 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.lima_slice import build_slice_lima_yaml
+from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
-from imbue.mngr_lima.limactl import limactl_delete
-from imbue.mngr_lima.limactl import limactl_disk_create
-from imbue.mngr_lima.limactl import limactl_disk_delete
-from imbue.mngr_lima.limactl import limactl_list
-from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
 from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
 from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
-
-# The client runs limactl on the machine it executes on (the bare-metal box,
-# where mngr is installed). The slice VM's forwarded ports are reachable at the
-# box's own interface; the provider connects to them via loopback while baking
-# on the box, and the admin records the box's external address for outside use.
-_LOOPBACK_ADDRESS: Final[str] = "127.0.0.1"
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -38,6 +31,34 @@ _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
 }
 
 _DISK_NAME_SUFFIX: Final[str] = "-data"
+
+# limactl is extracted to /usr/local/bin and uv to ~/.local/bin by the box prep
+# (``bare_metal_prep.build_box_prep_script``). A non-interactive SSH shell may
+# not source the lima user's profile, so we set PATH explicitly. limactl refuses
+# to run as root, so the box is always reached as the dedicated lima user.
+_BOX_PATH_PREFIX: Final[str] = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
+# A slice VM boots in a few minutes; give limactl start a generous cap.
+_LIMA_START_TIMEOUT_SECONDS: Final[float] = 1800.0
+_LIMA_SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
+_BOX_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
+
+
+def parse_listening_ports(ss_output: str) -> set[int]:
+    """Parse TCP listening ports from ``ss -Htln`` output (numeric, no header).
+
+    The local-address field is the 4th whitespace-separated column; the port is
+    whatever follows its last ``:`` (handles IPv6 ``[::]:<port>`` and ``*:<port>``).
+    Lines that don't parse are skipped. Pure so it can be unit-tested without a box.
+    """
+    ports: set[int] = set()
+    for line in ss_output.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        port_text = fields[3].rsplit(":", 1)[-1]
+        if port_text.isdigit():
+            ports.add(int(port_text))
+    return ports
 
 
 class SliceProvisionResult(FrozenModel):
@@ -50,18 +71,30 @@ class SliceProvisionResult(FrozenModel):
 
 
 class LimaSliceVpsClient(VpsClientInterface):
-    """VpsClientInterface backed by a local lima VM -- a 'slice' on a bare-metal box.
+    """VpsClientInterface backed by a lima VM -- a 'slice' -- carved on a bare-metal box.
 
-    Drives ``limactl`` on the machine it runs on (the box, where mngr is
-    installed and vendored). Provisioning is multi-step (build YAML -> create disk
-    -> start VM), so ``create_instance`` raises like the OVH client and
-    ``SliceVpsDockerProvider`` calls :meth:`provision_slice_vm` directly. Ordering
-    / snapshot / ssh-key API operations are unavailable; the lifecycle methods the
-    shared ``VpsDockerProvider`` needs (destroy / status / ip) are implemented.
+    Drives ``limactl`` **over SSH on the box** (as the dedicated lima user, using
+    the pool management key), so the whole bake runs from the operator's laptop
+    exactly like an OVH VPS bake: this carves the bare VM (the "OS reinstall"
+    equivalent), then the shared ``VpsDockerProvider`` reaches the VM's
+    box-forwarded ports to build the container. Carving is multi-step (ship YAML
+    -> create disk -> start VM), so ``create_instance`` raises like the OVH client
+    and ``SliceVpsDockerProvider`` calls :meth:`provision_slice_vm` directly.
+    Ordering / snapshot / ssh-key API operations are unavailable.
+
+    Does NOT keep ``mngr_lima`` in the loop for the remote calls: it renders the
+    handful of ``limactl`` invocations itself and runs them over SSH (``mngr_lima``
+    only knows how to run limactl locally), so the box needs nothing but limactl.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    box_address: str = Field(description="SSH-reachable address of the bare-metal box that hosts the slices")
+    box_ssh_user: str = Field(description="Dedicated non-root lima user on the box (owns the VMs)")
+    private_key_path: str | None = Field(
+        default=None,
+        description="Path to the pool management private key used to SSH the box (None only in unit tests).",
+    )
     vm_image_url: str | None = Field(
         default=None,
         description="Optional override of the lima guest image URL (defaults to mngr_lima's Debian image).",
@@ -73,6 +106,39 @@ class LimaSliceVpsClient(VpsClientInterface):
             "provision_slice_vm() and torn down via destroy_instance(); they have no cloud ordering, "
             "snapshot, or ssh-key API."
         )
+
+    def _box_ssh_command(self, remote_command: str) -> list[str]:
+        """Build the argv that runs ``remote_command`` on the box as the lima user."""
+        if not self.private_key_path:
+            raise LimaCommandError("ssh", 1, "no pool private key configured for the slice box")
+        return [
+            "ssh",
+            "-i",
+            self.private_key_path,
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            f"ConnectTimeout={_BOX_CONNECT_TIMEOUT_SECONDS}",
+            "-o",
+            "ServerAliveInterval=30",
+            f"{self.box_ssh_user}@{self.box_address}",
+            f"{_BOX_PATH_PREFIX} {remote_command}",
+        ]
+
+    def _run_on_box(
+        self, remote_command: str, *, timeout: float, label: str, is_streaming: bool = False
+    ) -> tuple[int | None, str, str]:
+        """Run a command on the box over SSH; return (returncode, stdout, stderr)."""
+        on_output = (lambda line, _is_stdout: logger.info("  [{}] {}", label, line.rstrip())) if is_streaming else None
+        cg = ConcurrencyGroup(name=f"slice-box-{label}")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=self._box_ssh_command(remote_command),
+                timeout=timeout,
+                is_checked_after=False,
+                on_output=on_output,
+            )
+        return result.returncode, result.stdout, result.stderr
 
     def provision_slice_vm(
         self,
@@ -90,11 +156,12 @@ class LimaSliceVpsClient(VpsClientInterface):
         boot_disk_gib: int,
         extra_root_authorized_keys: tuple[str, ...] = (),
     ) -> SliceProvisionResult:
-        """Create and start a VPS-parity lima VM for ``host_id`` and return its handle.
+        """Create and start a VPS-parity lima VM for ``host_id`` on the box and return its handle.
 
-        Pre-creates the lima-managed btrfs data disk (Lima only auto-formats an
+        Renders the slice YAML locally, ships it to the box, pre-creates the
+        lima-managed btrfs data disk (Lima only auto-formats an
         ``additionalDisks`` entry whose disk record already exists), then starts
-        the VM from the slice YAML.
+        the VM -- all via ``limactl`` over SSH on the box.
         """
         instance_name = slice_lima_instance_name(host_id)
         disk_name = slice_lima_disk_name(host_id)
@@ -114,12 +181,36 @@ class LimaSliceVpsClient(VpsClientInterface):
         )
         if self.vm_image_url is not None:
             config["images"] = [{"location": self.vm_image_url}]
-        yaml_path = write_lima_yaml(config)
-        cg = ConcurrencyGroup(name="slice-provision")
-        with cg:
-            limactl_disk_create(cg, disk_name, f"{disk_gib}GiB")
-            limactl_start_new(cg, instance_name, yaml_path)
-        logger.info("Provisioned slice VM {} (disk {})", instance_name, disk_name)
+        yaml_text = write_lima_yaml(config).read_text()
+
+        # Ship the YAML to the box (base64 to dodge quoting), pre-create the disk,
+        # then start the VM.
+        remote_yaml_path = f"/tmp/{instance_name}.yaml"
+        encoded = base64.b64encode(yaml_text.encode()).decode()
+        ship_command = f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(remote_yaml_path)}"
+        ship_rc, _ship_out, ship_err = self._run_on_box(
+            ship_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ship-yaml"
+        )
+        if ship_rc != 0:
+            raise LimaCommandError("ship yaml", ship_rc or 1, ship_err)
+
+        disk_command = f"limactl disk create {shlex.quote(disk_name)} --size {shlex.quote(f'{disk_gib}GiB')}"
+        disk_rc, _disk_out, disk_err = self._run_on_box(
+            disk_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-create"
+        )
+        if disk_rc != 0:
+            raise LimaCommandError("disk create", disk_rc or 1, disk_err)
+
+        start_command = (
+            f"limactl --log-level=info start --name={shlex.quote(instance_name)} {shlex.quote(remote_yaml_path)}"
+        )
+        start_rc, _start_out, start_err = self._run_on_box(
+            start_command, timeout=_LIMA_START_TIMEOUT_SECONDS, label=f"start:{instance_name}", is_streaming=True
+        )
+        if start_rc != 0:
+            raise LimaCommandError("start", start_rc or 1, start_err)
+
+        logger.info("Provisioned slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
         return SliceProvisionResult(
             instance_name=instance_name,
             disk_name=disk_name,
@@ -128,29 +219,63 @@ class LimaSliceVpsClient(VpsClientInterface):
         )
 
     def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        """Delete the slice's lima VM and its btrfs data disk (frees the box slot)."""
+        """Delete the slice's lima VM and its btrfs data disk on the box (frees the box slot)."""
         instance_name = str(instance_id)
         disk_name = f"{instance_name}{_DISK_NAME_SUFFIX}"
-        cg = ConcurrencyGroup(name="slice-destroy")
-        with cg:
-            limactl_delete(cg, instance_name)
-            limactl_disk_delete(cg, disk_name)
-        logger.info("Destroyed slice VM {} (disk {})", instance_name, disk_name)
+        delete_command = f"limactl delete --force {shlex.quote(instance_name)}"
+        delete_rc, _out, delete_err = self._run_on_box(
+            delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="delete"
+        )
+        if delete_rc != 0:
+            raise LimaCommandError("delete", delete_rc or 1, delete_err)
+        disk_delete_command = f"limactl disk delete --force {shlex.quote(disk_name)}"
+        disk_rc, _disk_out, disk_err = self._run_on_box(
+            disk_delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-delete"
+        )
+        if disk_rc != 0:
+            stderr_lower = disk_err.lower()
+            # Tolerate the disk already being absent (e.g. a partial prior teardown).
+            if "not found" not in stderr_lower and "does not exist" not in stderr_lower:
+                raise LimaCommandError("disk delete", disk_rc or 1, disk_err)
+            logger.debug("Lima disk {} already absent, skipping", disk_name)
+        logger.info("Destroyed slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
 
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
-        cg = ConcurrencyGroup(name="slice-status")
-        with cg:
-            instances = limactl_list(cg)
-        for instance in instances:
+        list_rc, list_out, list_err = self._run_on_box(
+            "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("list", list_rc or 1, list_err)
+        for line in list_out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                instance = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima instance JSON: {}", exc)
+                continue
             if instance.get("name") == str(instance_id):
                 return _LIMA_STATUS_MAP.get(str(instance.get("status", "")), VpsInstanceStatus.UNKNOWN)
         return VpsInstanceStatus.UNKNOWN
 
+    def get_listening_ports(self) -> set[int]:
+        """Return the set of TCP ports currently in LISTEN state on the box.
+
+        Used by the slice provider to pick free box-forwarded ports for a new VM.
+        Parses ``ss -Htln`` (numeric, no header): the local-address field is the
+        4th column; the port is whatever follows its last ``:`` (handles IPv6
+        ``[::]:<port>`` too).
+        """
+        rc, out, err = self._run_on_box("ss -Htln", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ss")
+        if rc != 0:
+            raise LimaCommandError("ss -Htln", rc or 1, err)
+        return parse_listening_ports(out)
+
     def get_instance_ip(self, instance_id: VpsInstanceId) -> str:
-        # The provider bakes on the box itself, reaching the VM's forwarded ports
-        # via loopback. External reachability uses the box's recorded public
-        # address (held by the admin/connector layer), not this value.
-        return _LOOPBACK_ADDRESS
+        # The slice's sshd is forwarded on the box's own interface; external
+        # consumers (and the laptop-side bake) reach it at the box's address.
+        return self.box_address
 
     def create_instance(
         self,

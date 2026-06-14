@@ -1475,7 +1475,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             container_ssh_port=self.config.container_ssh_port,
             box_public_address=lease_result.vps_address,
         )
-        lima_client = LimaSliceVpsClient()
+        # The rebuild never carves/destroys a VM (it only tears down + rebuilds the
+        # container on the already-leased slice via the forwarded ports below), so
+        # the lima client's box-SSH coordinates are unused here; pass the address
+        # for completeness and no pool key (limactl is never invoked on this path).
+        lima_client = LimaSliceVpsClient(
+            box_address=lease_result.vps_address,
+            box_ssh_user=slice_config.box_ssh_user,
+            private_key_path=None,
+        )
         provider = SliceVpsDockerProvider(
             name=self.name,
             host_dir=self.config.host_dir,

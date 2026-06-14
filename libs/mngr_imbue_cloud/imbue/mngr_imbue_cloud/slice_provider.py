@@ -1,4 +1,3 @@
-import socket
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -54,7 +53,18 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
     backend: ProviderBackendName = Field(default=ProviderBackendName("imbue_cloud_slice"))
     box_public_address: str = Field(
         default="127.0.0.1",
-        description="Address external consumers use to reach slices on this box (recorded on the pool row).",
+        description="Address external consumers use to reach slices on this box (also where the bake SSHes to carve).",
+    )
+    box_ssh_user: str = Field(
+        default="limahost",
+        description="Dedicated non-root lima user on the box; the bake SSHes in as this user to run limactl.",
+    )
+    pool_private_key_path: str | None = Field(
+        default=None,
+        description=(
+            "Path (on the machine running the bake) to the pool management private key used to SSH the box "
+            "for the limactl carve. Set by ``admin server allocate-slice`` from POOL_SSH_PRIVATE_KEY."
+        ),
     )
     pool_authorized_public_key: str | None = Field(
         default=None,
@@ -84,15 +94,19 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
 class SliceVpsDockerProvider(VpsDockerProvider):
     """A VpsDockerProvider whose 'VPS' is a lima VM we run on a bare-metal box.
 
-    Reuses the shared container bake unchanged; the only differences from a real
-    VPS are confined to overridable seams: the outer/inner SSH reach a forwarded
-    port on the box (not :22 / :container_ssh_port on a unique IP), and the btrfs
-    fs is the lima data disk mounted at ``btrfs_mount_path`` (so we create the
-    per-host subvolume directly, with no loopback image).
+    The bake runs from wherever ``mngr create`` is invoked (the operator's laptop,
+    like an OVH bake): ``create_host`` carves the VM by driving limactl over SSH on
+    the box (via :class:`LimaSliceVpsClient`), then reaches the VM's box-forwarded
+    ports to build the container. Reuses the shared container bake unchanged; the
+    only differences from a real VPS are confined to overridable seams: the
+    outer/inner SSH reach a forwarded port on the box (not :22 / :container_ssh_port
+    on a unique IP), and the btrfs fs is the lima data disk mounted at
+    ``btrfs_mount_path`` (so we create the per-host subvolume directly, with no
+    loopback image).
 
-    Used only for the on-box bake (one slice per ``create_host`` call); slice
-    discovery / lease / teardown go through the connector + the DB, not this
-    provider, so per-host ports live in instance state for the duration of the bake.
+    One slice per ``create_host`` call; slice discovery / lease / teardown go
+    through the connector + the DB, not this provider, so per-host ports live in
+    instance state for the duration of the bake.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -153,22 +167,18 @@ class SliceVpsDockerProvider(VpsDockerProvider):
     def _find_two_free_box_ports(self) -> tuple[int, int]:
         """Find two free host ports on the box within the configured slice range.
 
-        Determines which ports in the range are already bound (so concurrently
-        baked slices don't collide) and delegates the choice to the pure
-        ``allocate_slice_ports``.
+        Queries the box's listening ports over SSH (the bake runs off-box now, so a
+        local bind probe would test the wrong machine), then delegates the choice
+        to the pure ``allocate_slice_ports``. Concurrent bakes are each handed a
+        disjoint sub-range via ``-S slice_port_range_*`` so they cannot collide on a
+        port that a sibling has chosen but not yet bound.
         """
         range_start = self.slice_config.slice_port_range_start
         range_end = self.slice_config.slice_port_range_end
         if range_start is None or range_end is None:
             raise MngrError("slice_port_range_start/end must be set to carve a slice")
-        used: set[int] = set()
-        for port in range(range_start, range_end):
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    probe.bind(("0.0.0.0", port))
-                except OSError:
-                    used.add(port)
+        listening = self.lima_client.get_listening_ports()
+        used = {port for port in listening if range_start <= port < range_end}
         return allocate_slice_ports(used, range_start, range_end)
 
     def create_host(
@@ -353,8 +363,8 @@ class SliceVpsDockerProvider(VpsDockerProvider):
 class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     """Backend for the slice provider (lima-VM "VPS" on a bare-metal box).
 
-    Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``) which
-    runs on the box; the lima client drives limactl locally there.
+    Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``), run from
+    the operator's machine; the lima client drives limactl over SSH on the box.
     """
 
     @staticmethod
@@ -387,7 +397,11 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         if not isinstance(config, SliceVpsDockerProviderConfig):
             raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
-        lima_client = LimaSliceVpsClient()
+        lima_client = LimaSliceVpsClient(
+            box_address=config.box_public_address,
+            box_ssh_user=config.box_ssh_user,
+            private_key_path=config.pool_private_key_path,
+        )
         return SliceVpsDockerProvider(
             name=name,
             host_dir=config.host_dir,

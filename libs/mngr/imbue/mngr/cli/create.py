@@ -1878,10 +1878,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
 
     Always includes ``agent_id`` / ``host_id`` / ``host_name``. For a remote
     host it adds the agent SSH connection (``ssh_user`` / ``ssh_host`` /
-    ``ssh_port``); when the provider exposes a separate outer/management sshd
-    (e.g. a slice's VM-root port reached via a box-forwarded port) it also adds
-    ``outer_ssh_port``. Pool-bake tooling consumes these to build a pool row
-    without a second ``mngr list`` round-trip.
+    ``ssh_port`` / ``ssh_key_path``); when the provider exposes a separate
+    outer/management sshd (e.g. a slice's VM-root port reached via a
+    box-forwarded port) it also adds ``outer_ssh_port``. Pool-bake tooling
+    consumes these to build a pool row -- and to reach the host for any
+    post-bake SSH steps -- without a second ``mngr list`` round-trip.
     """
     result_data: dict[str, Any] = {
         "agent_id": str(result.agent.id),
@@ -1890,10 +1891,11 @@ def _build_create_result_data(result: CreateAgentResult) -> dict[str, Any]:
     }
     ssh_connection = result.host.get_ssh_connection_info()
     if ssh_connection is not None:
-        ssh_user, ssh_host, ssh_port, _key_path = ssh_connection
+        ssh_user, ssh_host, ssh_port, key_path = ssh_connection
         result_data["ssh_user"] = ssh_user
         result_data["ssh_host"] = ssh_host
         result_data["ssh_port"] = ssh_port
+        result_data["ssh_key_path"] = str(key_path)
     outer_ssh_port = result.host.get_outer_ssh_port()
     if outer_ssh_port is not None:
         result_data["outer_ssh_port"] = outer_ssh_port

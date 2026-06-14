@@ -910,7 +910,7 @@ mngr imbue_cloud admin server allocate-slice [OPTIONS]
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of slices to bake on the chosen server. | `1` |
 | `--workspace-dir` | path | forever-claude-template checkout to bake from (default: $HOME/project/forever-claude-template). | None |
-| `--mngr-source` | path | mngr monorepo root to sync onto the box (default: this checkout). | None |
+| `--mngr-source` | path | mngr monorepo root to vendor into the FCT workspace (default: this checkout). | None |
 | `--dry-run` | boolean | Report placement + slice sizing; do not bake. | `False` |
 | `--database-url` | text |  | None |
 
