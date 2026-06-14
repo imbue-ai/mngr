@@ -49,10 +49,16 @@ from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import ScalarStrTuple
 from imbue.mngr.config.data_types import SettingsPatchField
+from imbue.mngr.config.data_types import _CONTAINER_DICT_FIELDS
+from imbue.mngr.config.data_types import detect_settings_narrowing
+from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.overlay_merge import _is_settings_patch_narrowing
+from imbue.mngr.config.overlay_merge import _overlay_all_narrowing_paths
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigParseError
@@ -1060,3 +1066,212 @@ def test_parent_type_reference_does_not_call_production() -> None:
     source = inspect.getsource(_reference_apply_custom_overrides)
     assert "_apply_custom_overrides_to_parent_config(" not in source
     assert "parent_config.model_copy_update(" in source
+
+
+# =============================================================================
+# Overlay (with Static* re-marking) vs detect_settings_narrowing equivalence
+# =============================================================================
+#
+# Migrating ALL narrowing onto the overlay path: the overlay pipeline strips ``Static*``
+# markers in ``model_dump`` and so would wrongly flag a replacement of an atomic aggregate
+# (a string-shaped ``cli_args``, a provider's ``allowed_ssh_cidrs``, an explicit
+# ``StaticList`` / ``StaticDict``) as narrowing. ``_overlay_all_narrowing_paths`` now
+# re-marks those values after the dump. This section proves that, with re-marking, the
+# overlay path reproduces the model-walking ``detect_settings_narrowing`` *exactly* for the
+# non-settings fields (the settings-patch subset is filtered out, matching what the walker
+# itself exempts). A mismatch on any corpus case is a real semantic divergence, not a test
+# bug, and must be reported rather than worked around.
+
+
+class _ProviderWithScalarTuple(ProviderInstanceConfig):
+    """Stand-in provider subclass carrying a ``ScalarStrTuple`` field (mirroring the AWS
+    provider's ``allowed_ssh_cidrs``), so the corpus exercises the ``ScalarTuple`` /
+    narrowing-exempt re-marking inside a container entry without depending on the aws
+    package. The ``ScalarStrTuple`` after-validator runs under ``model_validate`` (which
+    ``_parse_providers`` uses), wrapping the value in ``ScalarTuple``.
+    """
+
+    allowed_ssh_cidrs: ScalarStrTuple = Field(default=("0.0.0.0/0",))
+
+
+@pytest.fixture
+def _registered_narrowing_classes() -> Iterator[None]:
+    """Register the stand-in container-entry classes for the narrowing-equivalence corpus:
+    ``claude`` -> the settings-bearing agent subclass, and ``docker`` -> the provider
+    subclass carrying ``allowed_ssh_cidrs`` (so provider blocks with that field parse and
+    its ``ScalarTuple`` re-marking is exercised). Reset both registries after each test."""
+    reset_agent_config_registry()
+    reset_provider_config_registry()
+    register_agent_config("claude", _MngrClaudeLikeConfig)
+    register_provider_config("docker", _ProviderWithScalarTuple)
+    try:
+        yield
+    finally:
+        reset_agent_config_registry()
+        reset_provider_config_registry()
+
+
+# Each case is ``(label, base_layers, override_raw)`` -- the same shape as ``_MNGR_CASES``:
+# ``base_layers`` are raw TOML-shaped dicts merged into the initial config to form the
+# base accumulator, ``override_raw`` is parsed into a padded sparse layer. The corpus
+# deliberately spans every narrowing shape the spec calls out.
+_NARROWING_CASES: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = [
+    # --- scalar override: nothing narrows ---
+    ("scalar_override", [{"prefix": "base-"}], {"prefix": "ovr-"}),
+    ("empty_override", [{"prefix": "base-"}], {}),
+    # --- list/tuple field: narrowed (drop an entry) ---
+    ("list_field_narrowed", [{"unset_vars": ["A", "B", "C"]}], {"unset_vars": ["A", "B"]}),
+    # --- list/tuple field: cleared ([] over non-empty) ---
+    ("list_field_cleared", [{"unset_vars": ["A", "B"]}], {"unset_vars": []}),
+    # --- list/tuple field: superset (no narrowing) ---
+    ("list_field_superset", [{"unset_vars": ["A", "B"]}], {"unset_vars": ["A", "B", "C"]}),
+    # --- list/tuple field: unchanged (no narrowing) ---
+    ("list_field_unchanged", [{"unset_vars": ["A", "B"]}], {"unset_vars": ["A", "B"]}),
+    # --- enabled_backends list narrowed / replaced ---
+    ("backends_replaced", [{"enabled_backends": ["docker", "modal"]}], {"enabled_backends": ["docker"]}),
+    # --- cli_args as a STRING (-> StringDerivedTuple, EXEMPT) over a list ---
+    (
+        "cli_args_string_over_list_exempt",
+        [{"agent_types": {"a": {"cli_args": ["x", "y", "z"]}}}],
+        {"agent_types": {"a": {"cli_args": "--only one"}}},
+    ),
+    # --- cli_args as a LIST that drops entries (-> should narrow) ---
+    (
+        "cli_args_list_drops_narrows",
+        [{"agent_types": {"a": {"cli_args": ["x", "y", "z"]}}}],
+        {"agent_types": {"a": {"cli_args": ["x", "y"]}}},
+    ),
+    # --- provider allowed_ssh_cidrs (ScalarStrTuple, EXEMPT) replaced with a narrower tuple ---
+    (
+        "allowed_ssh_cidrs_replaced_exempt",
+        [{"providers": {"p": {"backend": "docker", "allowed_ssh_cidrs": ["0.0.0.0/0", "10.0.0.0/8"]}}}],
+        {"providers": {"p": {"backend": "docker", "allowed_ssh_cidrs": ["203.0.113.4/32"]}}},
+    ),
+    # --- container entry ADDED: no narrowing ---
+    (
+        "agent_types_entry_added",
+        [{"agent_types": {"foo": {"command": "c", "env": ["A=1", "B=2"]}}}],
+        {"agent_types": {"bar": {"command": "d"}}},
+    ),
+    (
+        "providers_entry_added",
+        [{"providers": {"p": {"backend": "docker"}}}],
+        {"providers": {"q": {"backend": "docker"}}},
+    ),
+    (
+        "plugins_entry_added",
+        [{"plugins": {"pl": {"enabled": True}}}],
+        {"plugins": {"other": {"enabled": False}}},
+    ),
+    # --- container entry whose INNER aggregate narrows ---
+    (
+        "agent_types_inner_env_narrows",
+        [{"agent_types": {"a": {"env": ["A=1", "B=2", "C=3"]}}}],
+        {"agent_types": {"a": {"env": ["A=1"]}}},
+    ),
+    (
+        "agent_types_inner_env_superset",
+        [{"agent_types": {"a": {"env": ["A=1", "B=2"]}}}],
+        {"agent_types": {"a": {"env": ["A=1", "B=2", "C=3"]}}},
+    ),
+    # --- dict-valued aggregate fields (commands' nested defaults / pre_command_scripts) ---
+    (
+        "pre_command_scripts_dict_narrows",
+        [{"pre_command_scripts": {"create": ["echo a"], "start": ["echo b"]}}],
+        {"pre_command_scripts": {"create": ["echo a"]}},
+    ),
+    (
+        "work_dir_extra_paths_narrows",
+        [{"work_dir_extra_paths": {"/a": "COPY", "/b": "SHARE"}}],
+        {"work_dir_extra_paths": {"/a": "COPY"}},
+    ),
+    # --- nested model with a dropped inner list inside a command's defaults dict ---
+    (
+        "commands_defaults_inner_list_narrows",
+        [{"commands": {"create": {"new_host": "docker", "extra": ["a", "b"]}}}],
+        {"commands": {"create": {"extra": ["a"]}}},
+    ),
+    # --- settings_overrides narrowing (settings-patch -> must be FILTERED OUT on both sides) ---
+    (
+        "settings_overrides_present",
+        [{"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "sonnet", "k": 1}}}}],
+        {"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "opus"}}}},
+    ),
+    # --- mixture: scalar + narrowing list + exempt cli_args string + added entry ---
+    (
+        "combined_mixture",
+        [
+            {
+                "prefix": "base-",
+                "unset_vars": ["A", "B", "C"],
+                "agent_types": {
+                    "a": {"cli_args": ["x", "y", "z"], "env": ["E=1", "E=2"]},
+                    "keep": {"command": "kept"},
+                },
+            }
+        ],
+        {
+            "prefix": "ovr-",
+            "unset_vars": ["A"],
+            "agent_types": {
+                "a": {"cli_args": "--single", "env": ["E=1"]},
+                "new": {"command": "added"},
+            },
+        },
+    ),
+]
+
+
+def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> list[str]:
+    """Run ``_overlay_all_narrowing_paths`` with the SAME kwargs ``MngrConfig.merge_with_narrowings``
+    uses, then drop the ``SettingsPatchField``-rooted paths (reusing the production
+    ``_is_settings_patch_narrowing``) -- the subset ``detect_settings_narrowing`` exempts.
+    """
+    settings_patch_field_names = get_settings_patch_field_names(type(override))
+    base_fields = dict(base)
+    override_fields = dict(override)
+    merged_classes: dict[str, dict[Any, type[Any]]] = {
+        field_name: {
+            **{key: type(value) for key, value in (base_fields.get(field_name) or {}).items()},
+            **{key: type(value) for key, value in (override_fields.get(field_name) or {}).items()},
+        }
+        for field_name in _CONTAINER_DICT_FIELDS
+    }
+    all_paths = _overlay_all_narrowing_paths(
+        base,
+        override,
+        settings_patch_field_names=settings_patch_field_names,
+        serialize_as_any=True,
+        container_dict_field_names=_CONTAINER_DICT_FIELDS,
+        drop_none_values=True,
+        settings_patch_field_names_for_class=get_settings_patch_field_names,
+    )
+    return [
+        dotted_path
+        for dotted_path in all_paths
+        if not _is_settings_patch_narrowing(
+            dotted_path,
+            settings_patch_field_names,
+            _CONTAINER_DICT_FIELDS,
+            merged_classes,
+            get_settings_patch_field_names,
+        )
+    ]
+
+
+@pytest.mark.usefixtures("_registered_narrowing_classes")
+@pytest.mark.parametrize(
+    "base_layers,override_raw", [pytest.param(layers, o, id=label) for label, layers, o in _NARROWING_CASES]
+)
+def test_overlay_non_settings_narrowing_matches_walker(
+    base_layers: list[dict[str, Any]], override_raw: dict[str, Any]
+) -> None:
+    """With ``Static*`` re-marking, the NON-settings subset of the overlay narrowing paths
+    reproduces ``detect_settings_narrowing`` exactly over the corpus. Compared as sorted
+    lists so order is irrelevant. A failure here is a real semantic divergence between the
+    overlay narrowing detector and the model-walker -- do not weaken this assertion."""
+    base = _base_from_layers(*base_layers)
+    override = _parse_layer(override_raw)
+    overlay_paths = sorted(_overlay_non_settings_narrowings(base, override))
+    walker_paths = sorted(detect_settings_narrowing(base, override))
+    assert overlay_paths == walker_paths

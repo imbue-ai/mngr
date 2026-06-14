@@ -25,11 +25,16 @@ specific contracts.
 """
 
 from collections.abc import Callable
+from collections.abc import Mapping
 from typing import Any
 from typing import TypeVar
 
 from pydantic import BaseModel
 
+from imbue.overlay.markers import StaticDict
+from imbue.overlay.markers import StaticList
+from imbue.overlay.markers import StaticTuple
+from imbue.overlay.markers import is_static_marker
 from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lower
 from imbue.overlay.node_merge import merge_narrowing_allowed
@@ -271,6 +276,92 @@ def _is_settings_patch_narrowing(
     return False
 
 
+def _collect_static_marker_paths(model: BaseModel) -> set[tuple[str, ...]]:
+    """Collect the dotted paths (as segment tuples) of every ``Static*`` marker value
+    living on the *live* ``model``, matching the sparse ``model_dump(exclude_unset=True)``.
+
+    ``model_dump`` strips ``Static*`` subclasses (``ScalarTuple`` / ``StringDerivedTuple``
+    / ``StaticList`` / ``StaticDict``) back to plain aggregates, so the overlay path would
+    wrongly flag a higher-layer replacement of one (e.g. a string-shaped ``cli_args`` or a
+    provider's ``allowed_ssh_cidrs``) as narrowing. Recording the marker paths here lets a
+    consumer re-mark the dumped dict before pre-processing.
+    """
+    paths: set[tuple[str, ...]] = set()
+    _walk_for_static_markers(model, (), paths)
+    return paths
+
+
+def _walk_for_static_markers(value: Any, path: tuple[str, ...], paths: set[tuple[str, ...]]) -> None:
+    """Recurse ``value``, adding the path of every ``Static*`` marker leaf to ``paths``.
+
+    Recurses into ``BaseModel`` sub-fields (via ``model_fields_set``, so it visits exactly
+    the set fields the sparse ``model_dump(exclude_unset=True)`` carries) and into
+    ``Mapping`` values (a container dict's entries, which are themselves models).
+    ``is_static_marker`` is checked *before* ``Mapping`` because a ``StaticDict`` is both --
+    it is an atomic leaf, not a container to recurse into. Keys are stringified to match
+    ``model_dump``'s key serialization. ``dict(model)`` yields the ``{field: value}`` map
+    without per-field ``getattr``; intersecting with ``model_fields_set`` keeps it sparse.
+    """
+    if is_static_marker(value):
+        paths.add(path)
+        return
+    if isinstance(value, BaseModel):
+        set_fields = value.model_fields_set
+        for field_name, field_value in dict(value).items():
+            if field_name in set_fields:
+                _walk_for_static_markers(field_value, path + (field_name,), paths)
+        return
+    if isinstance(value, Mapping):
+        for key, sub_value in value.items():
+            _walk_for_static_markers(sub_value, path + (str(key),), paths)
+
+
+def _remark_static_leaves(dumped: dict[str, Any], static_paths: set[tuple[str, ...]]) -> dict[str, Any]:
+    """Re-wrap the leaf at each ``static_paths`` location of the freshly-dumped ``dumped``
+    dict in the matching ``Static*`` marker (by shape: ``tuple`` -> ``StaticTuple``,
+    ``list`` -> ``StaticList``, ``dict`` -> ``StaticDict``), so ``lift`` carries it through
+    as an atomic, narrowing-exempt leaf.
+
+    Mutates ``dumped`` in place (and returns it). The re-mark is a pure no-op round-trip
+    (``StaticList(list(x)) == x``; see ``markers.py``), so it never changes the value, only
+    its narrowing-exempt marking. A path whose intermediate segment is absent (the field
+    was not in the sparse dump) is skipped defensively.
+    """
+    markers_by_shape: dict[type, Callable[[Any], Any]] = {tuple: StaticTuple, list: StaticList, dict: StaticDict}
+    for path in static_paths:
+        if not path:
+            continue
+        container: Any = dumped
+        for segment in path[:-1]:
+            if not isinstance(container, Mapping) or segment not in container:
+                container = None
+                break
+            container = container[segment]
+        if not isinstance(container, dict):
+            continue
+        leaf_key = path[-1]
+        if leaf_key not in container:
+            continue
+        leaf = container[leaf_key]
+        marker = markers_by_shape.get(type(leaf)) or markers_by_shape.get(_aggregate_shape(leaf))
+        if marker is not None:
+            container[leaf_key] = marker(leaf)
+    return dumped
+
+
+def _aggregate_shape(value: Any) -> type | None:
+    """Return the builtin aggregate base (``tuple`` / ``list`` / ``dict``) of ``value``,
+    so a marker can be chosen even if a previous re-mark already wrapped the leaf in a
+    ``Static*`` subclass. Returns ``None`` for a non-aggregate."""
+    if isinstance(value, tuple):
+        return tuple
+    if isinstance(value, list):
+        return list
+    if isinstance(value, dict):
+        return dict
+    return None
+
+
 def merge_models_via_overlay(
     base: ModelT,
     override: BaseModel,
@@ -339,7 +430,78 @@ def merge_models_via_overlay_with_narrowings(
     ``Static*`` markers do not survive the ``model_dump``.
     """
     config_class = type(base)
+    pipeline = _run_overlay_pipeline(
+        base,
+        override,
+        settings_patch_field_names=settings_patch_field_names,
+        drop_field_names=drop_field_names,
+        serialize_as_any=serialize_as_any,
+        container_dict_field_names=container_dict_field_names,
+        drop_none_values=drop_none_values,
+        settings_patch_field_names_for_class=settings_patch_field_names_for_class,
+    )
+    settings_narrowings = [
+        dotted_path
+        for dotted_path in pipeline.all_narrowings
+        if _is_settings_patch_narrowing(
+            dotted_path,
+            settings_patch_field_names,
+            container_dict_field_names,
+            pipeline.merged_classes,
+            pipeline.entry_patch_fn,
+        )
+    ]
 
+    merged_dict = _from_operator_dict(
+        lower(pipeline.merged_patch),
+        settings_patch_field_names,
+        container_dict_field_names,
+        pipeline.merged_classes,
+        pipeline.entry_patch_fn,
+    )
+    merged_dict = _reparse_container_entries(
+        merged_dict, container_dict_field_names, pipeline.base_classes, pipeline.override_classes
+    )
+    return config_class.model_validate(merged_dict), settings_narrowings
+
+
+class _OverlayPipelineResult(BaseModel):
+    """The shared outputs of the serialize -> re-mark -> pre-process -> lift ->
+    ``merge_narrowing_allowed`` pipeline, consumed both by the value-producing public
+    merge (which lowers ``merged_patch`` and re-parses) and by
+    ``_overlay_all_narrowing_paths`` (which only reads ``all_narrowings``)."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    merged_patch: Any
+    all_narrowings: list[str]
+    base_classes: dict[str, dict[Any, type[BaseModel]]]
+    override_classes: dict[str, dict[Any, type[BaseModel]]]
+    merged_classes: dict[str, dict[Any, type[BaseModel]]]
+    entry_patch_fn: SettingsPatchFieldNamesFn
+
+
+def _run_overlay_pipeline(
+    base: BaseModel,
+    override: BaseModel,
+    *,
+    settings_patch_field_names: frozenset[str],
+    drop_field_names: frozenset[str],
+    serialize_as_any: bool,
+    container_dict_field_names: frozenset[str],
+    drop_none_values: bool,
+    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None,
+) -> _OverlayPipelineResult:
+    """Run the serialize -> re-mark -> pre-process -> ``lift`` -> ``merge_narrowing_allowed``
+    pipeline and return the merged patch plus *all* narrowing paths (unfiltered) and the
+    class tables needed to lower/reparse.
+
+    The override sparse dump is re-marked (``_remark_static_leaves``) so the ``Static*``
+    markers ``model_dump`` strips are restored as atomic leaves before pre-processing --
+    only the override (higher) side needs it, since ``would_assignment_narrow`` exempts an
+    assignment when the *override* value is a static marker (the base side carries no
+    weight in that exemption).
+    """
     # Internal invariant (caller-side programming error, never a user/runtime
     # condition): a per-entry settings discoverer is required to pre-process container
     # entries. ``assert`` documents the contract without a user-facing exception.
@@ -361,6 +523,10 @@ def merge_models_via_overlay_with_narrowings(
 
     base_full = base.model_dump(serialize_as_any=serialize_as_any)
     override_sparse = override.model_dump(exclude_unset=True, serialize_as_any=serialize_as_any)
+    # Restore the ``Static*`` markers that ``model_dump`` stripped from the override, so a
+    # higher-layer replacement of an atomic aggregate (a string-shaped ``cli_args``, a
+    # provider's ``allowed_ssh_cidrs``, etc.) is correctly exempt from narrowing.
+    override_sparse = _remark_static_leaves(override_sparse, _collect_static_marker_paths(override))
 
     lower_patch = lift(
         _to_operator_dict(
@@ -395,28 +561,47 @@ def merge_models_via_overlay_with_narrowings(
         )
     )
     # ``merge_narrowing_allowed`` (not ``combine``) so the merge also returns the
-    # narrowing paths without raising. Only the ``SettingsPatchField``-rooted ones are
-    # surfaced; the rest are the responsibility of the loader's
-    # ``detect_settings_narrowing`` (which exempts settings fields).
+    # narrowing paths without raising.
     merged_patch, all_narrowings = merge_narrowing_allowed(lower_patch, higher_patch)
-    settings_narrowings = [
-        dotted_path
-        for dotted_path in all_narrowings
-        if _is_settings_patch_narrowing(
-            dotted_path,
-            settings_patch_field_names,
-            container_dict_field_names,
-            merged_classes,
-            entry_patch_fn,
-        )
-    ]
-
-    merged_dict = _from_operator_dict(
-        lower(merged_patch),
-        settings_patch_field_names,
-        container_dict_field_names,
-        merged_classes,
-        entry_patch_fn,
+    return _OverlayPipelineResult(
+        merged_patch=merged_patch,
+        all_narrowings=all_narrowings,
+        base_classes=base_classes,
+        override_classes=override_classes,
+        merged_classes=merged_classes,
+        entry_patch_fn=entry_patch_fn,
     )
-    merged_dict = _reparse_container_entries(merged_dict, container_dict_field_names, base_classes, override_classes)
-    return config_class.model_validate(merged_dict), settings_narrowings
+
+
+def _overlay_all_narrowing_paths(
+    base: BaseModel,
+    override: BaseModel,
+    *,
+    settings_patch_field_names: frozenset[str],
+    drop_field_names: frozenset[str] = frozenset(),
+    serialize_as_any: bool = False,
+    container_dict_field_names: frozenset[str] = frozenset(),
+    drop_none_values: bool = False,
+    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
+) -> list[str]:
+    """Return the FULL (unfiltered) list of overlay narrowing paths for ``override`` over
+    ``base`` -- every dotted path where a higher-precedence bare assign drops a non-empty
+    aggregate, with no ``SettingsPatchField`` filter applied.
+
+    Runs the same serialize -> re-mark -> pre-process -> ``lift`` -> ``merge_narrowing_allowed``
+    pipeline as ``merge_models_via_overlay_with_narrowings`` (sharing
+    ``_run_overlay_pipeline``), but skips the settings-patch filter. Exposed for the
+    migration's equivalence test against ``detect_settings_narrowing``; the public merge
+    functions are unaffected.
+    """
+    pipeline = _run_overlay_pipeline(
+        base,
+        override,
+        settings_patch_field_names=settings_patch_field_names,
+        drop_field_names=drop_field_names,
+        serialize_as_any=serialize_as_any,
+        container_dict_field_names=container_dict_field_names,
+        drop_none_values=drop_none_values,
+        settings_patch_field_names_for_class=settings_patch_field_names_for_class,
+    )
+    return pipeline.all_narrowings
