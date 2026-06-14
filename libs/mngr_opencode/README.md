@@ -52,7 +52,11 @@ hook mechanism. mngr leans into that shape:
   approval prompt (an `ask` permission policy), opencode emits `permission.asked`;
   the plugin tracks pending prompts and keeps a `permissions_waiting` marker, which
   promotes the agent to WAITING and surfaces a `PERMISSIONS` reason. An idle agent
-  whose turn is complete reports `END_OF_TURN`.
+  whose turn is complete reports `END_OF_TURN`. Unlike codex (whose hook model fires
+  nothing when a dialog is cancelled, briefly mislabeling the reason), answering or
+  cancelling an opencode prompt clears the marker promptly: a denial emits
+  `permission.replied` *and* `session.idle`, and an abort emits `session.idle` —
+  each clears it (verified live against opencode 1.17.7).
 - **Transcripts**: the same plugin writes the raw transcript and, on session
   idle, rebuilds the common-format transcript `mngr transcript` reads — both
   in-process, no background converter or supervisor.

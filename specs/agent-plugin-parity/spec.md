@@ -990,7 +990,14 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   `event` hook in `mngr_opencode_plugin.ts`), so it tracks the set of pending request ids and keeps
   a `permissions_waiting` marker present while any prompt is open -- the multi-session analog of
   codex's single touch/remove flag (opencode is a server with concurrent subagent sessions).
-  Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`).
+  Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`), and a
+  fresh server clears a marker left by a prior killed/crashed server at startup (codex clears at a
+  fresh root turn; claude has a startup reset). The gating rule lives in one shared
+  `_classify_waiting_reason` routed through both the lifecycle promotion and the field generator, so
+  the two cannot drift (mirrors codex). Notably opencode does **not** inherit codex's cancelled-dialog
+  limitation: codex's hook model fires no terminal hook on Esc/No, stranding both markers until the
+  next turn, but opencode's event bus emits `permission.replied` (on deny) and/or `session.idle` (on
+  deny *and* abort), each of which clears the marker promptly -- verified live against 1.17.7.
   `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is present,
   mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. Covered live
   by a release test (`test_opencode_waiting_reason_reports_permissions`): a real `bash: ask` agent
