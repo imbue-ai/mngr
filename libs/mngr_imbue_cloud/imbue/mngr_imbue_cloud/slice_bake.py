@@ -136,6 +136,22 @@ def build_wait_for_sentinel_container_command(timeout_seconds: int) -> str:
 
 
 @pure
+def build_slice_vm_teardown_command(lima_instance_name: str, lima_disk_name: str) -> str:
+    """Render the command (run as the box's lima user) that destroys a slice's lima VM + data disk.
+
+    Used to roll back a slice whose VM was already carved on the box but whose
+    bookkeeping then failed (e.g. the laptop-side pool_hosts insert raised), so the
+    VM does not leak its box slot and forwarded ports. Mirrors the connector's
+    release-time teardown; both commands are idempotent (``--force`` no-ops when the
+    instance/disk is already gone).
+    """
+    return (
+        f"limactl delete --force {shlex.quote(lima_instance_name)} && "
+        f"limactl disk delete --force {shlex.quote(lima_disk_name)}"
+    )
+
+
+@pure
 def parse_create_json_from_output(stdout: str) -> dict[str, Any]:
     """Return the ``mngr create --format json`` object from the bake's stdout.
 

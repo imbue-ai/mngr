@@ -58,6 +58,7 @@ from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slice_bake import build_chat_teardown_container_command
 from imbue.mngr_imbue_cloud.slice_bake import build_slice_bake_remote_command
+from imbue.mngr_imbue_cloud.slice_bake import build_slice_vm_teardown_command
 from imbue.mngr_imbue_cloud.slice_bake import build_wait_for_sentinel_container_command
 from imbue.mngr_imbue_cloud.slice_bake import parse_create_json_from_output
 
@@ -571,6 +572,48 @@ def _bake_into_outcomes(
         outcomes.append(outcome)
 
 
+def _tear_down_orphaned_slice_vm(
+    *,
+    address: str,
+    ssh_user: str,
+    private_key_path: Path,
+    host_id: HostId,
+) -> None:
+    """Best-effort: destroy a just-baked slice VM whose bookkeeping failed, so it does not leak.
+
+    Runs ``limactl delete``/``disk delete`` on the box (as the lima user) for the
+    deterministic instance/disk names derived from ``host_id``. Logs and swallows
+    any failure -- the caller is already on a failure path, and the operator will
+    see the recorded bake failure -- but never raises, so it does not mask the
+    original error.
+    """
+    teardown_command = build_slice_vm_teardown_command(
+        slice_lima_instance_name(host_id), slice_lima_disk_name(host_id)
+    )
+    try:
+        result = _run_remote(
+            address=address,
+            ssh_user=ssh_user,
+            private_key_path=private_key_path,
+            port=22,
+            command=teardown_command,
+            timeout_seconds=_BOX_SSH_TIMEOUT_SECONDS,
+            label=f"rollback:{host_id.get_uuid().hex}",
+            is_streaming=False,
+        )
+    except OSError as exc:
+        logger.warning("Could not reach {} to roll back orphaned slice VM for {}: {}", address, host_id, exc)
+        return
+    if result.returncode != 0:
+        logger.warning(
+            "Rollback of orphaned slice VM for {} on {} failed (exit {}): {}",
+            host_id,
+            address,
+            result.returncode,
+            result.stderr.strip(),
+        )
+
+
 def _bake_and_record_one_slice(
     *,
     server: BareMetalServer,
@@ -624,55 +667,66 @@ def _bake_and_record_one_slice(
         agent_id = str(created["agent_id"])
         container_ssh_port = int(created["ssh_port"])
         vm_ssh_port = int(created["outer_ssh_port"])
-
-        # Tear down the bootstrap-created chat agent + sentinel so the user's
-        # first lease re-creates the chat agent under their own workspace name.
-        is_sentinel_present = _wait_for_container_sentinel(
-            address=address,
-            container_port=container_ssh_port,
-            private_key_path=private_key_path,
-            timeout_seconds=_SENTINEL_POLL_TIMEOUT_SECONDS,
-        )
-        if is_sentinel_present:
-            teardown = _run_remote(
-                address=address,
-                ssh_user="root",
-                private_key_path=private_key_path,
-                port=container_ssh_port,
-                command=build_chat_teardown_container_command(host_name),
-                timeout_seconds=180.0,
-                label=f"teardown:{host_name}",
-                is_streaming=True,
-            )
-            if teardown.returncode != 0:
-                raise BareMetalProvisioningError(
-                    f"chat-agent teardown for {host_name} failed (exit {teardown.returncode}): "
-                    f"{teardown.stderr.strip()}"
-                )
-        else:
-            logger.warning("No initial-chat sentinel appeared for {}; skipping chat teardown", host_name)
-
-        # Insert the available slice pool_hosts row (laptop-side).
+        # The VM definitely exists on the box now, so any failure past this point
+        # must destroy it -- otherwise it leaks its box slot + forwarded ports
+        # (no pool_hosts row will reference it, so capacity accounting can't see it).
         host_id_obj = HostId(host_id)
-        values = build_slice_pool_host_insert_values(
-            row_id=str(uuid4()),
-            box_public_address=address,
-            agent_id=agent_id,
-            host_id=host_id,
-            host_name=host_name,
-            vm_ssh_host_port=vm_ssh_port,
-            container_ssh_host_port=container_ssh_port,
-            attributes_json=attributes_json,
-            region=server.region,
-            bare_metal_server_id=str(server.id),
-            lima_instance_name=slice_lima_instance_name(host_id_obj),
-            lima_disk_name=slice_lima_disk_name(host_id_obj),
-        )
-        conn = psycopg2.connect(database_url)
         try:
-            insert_slice_pool_host(conn, values)
-        finally:
-            conn.close()
+            # Tear down the bootstrap-created chat agent + sentinel so the user's
+            # first lease re-creates the chat agent under their own workspace name.
+            is_sentinel_present = _wait_for_container_sentinel(
+                address=address,
+                container_port=container_ssh_port,
+                private_key_path=private_key_path,
+                timeout_seconds=_SENTINEL_POLL_TIMEOUT_SECONDS,
+            )
+            if is_sentinel_present:
+                teardown = _run_remote(
+                    address=address,
+                    ssh_user="root",
+                    private_key_path=private_key_path,
+                    port=container_ssh_port,
+                    command=build_chat_teardown_container_command(host_name),
+                    timeout_seconds=180.0,
+                    label=f"teardown:{host_name}",
+                    is_streaming=True,
+                )
+                if teardown.returncode != 0:
+                    raise BareMetalProvisioningError(
+                        f"chat-agent teardown for {host_name} failed (exit {teardown.returncode}): "
+                        f"{teardown.stderr.strip()}"
+                    )
+            else:
+                logger.warning("No initial-chat sentinel appeared for {}; skipping chat teardown", host_name)
+
+            # Insert the available slice pool_hosts row (laptop-side).
+            values = build_slice_pool_host_insert_values(
+                row_id=str(uuid4()),
+                box_public_address=address,
+                agent_id=agent_id,
+                host_id=host_id,
+                host_name=host_name,
+                vm_ssh_host_port=vm_ssh_port,
+                container_ssh_host_port=container_ssh_port,
+                attributes_json=attributes_json,
+                region=server.region,
+                bare_metal_server_id=str(server.id),
+                lima_instance_name=slice_lima_instance_name(host_id_obj),
+                lima_disk_name=slice_lima_disk_name(host_id_obj),
+            )
+            conn = psycopg2.connect(database_url)
+            try:
+                insert_slice_pool_host(conn, values)
+            finally:
+                conn.close()
+        except (BareMetalProvisioningError, psycopg2.Error, KeyError, ValueError, OSError):
+            _tear_down_orphaned_slice_vm(
+                address=address,
+                ssh_user=ssh_user,
+                private_key_path=private_key_path,
+                host_id=host_id_obj,
+            )
+            raise
         logger.info(
             "Slice {} ready on {} (host_id={}, ports vm={}/container={})",
             host_name,

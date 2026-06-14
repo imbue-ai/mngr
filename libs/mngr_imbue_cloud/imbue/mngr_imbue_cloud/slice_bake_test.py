@@ -5,6 +5,7 @@ import pytest
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.slice_bake import build_chat_teardown_container_command
 from imbue.mngr_imbue_cloud.slice_bake import build_slice_bake_remote_command
+from imbue.mngr_imbue_cloud.slice_bake import build_slice_vm_teardown_command
 from imbue.mngr_imbue_cloud.slice_bake import build_wait_for_sentinel_container_command
 from imbue.mngr_imbue_cloud.slice_bake import parse_create_json_from_output
 
@@ -68,6 +69,18 @@ def test_wait_for_sentinel_uses_remote_timeout_loop() -> None:
     assert "timeout 300" in command
     assert "until test -f" in command
     assert "/code/runtime/initial_chat_created" in command
+
+
+def test_slice_vm_teardown_command_deletes_instance_and_disk() -> None:
+    command = build_slice_vm_teardown_command("mngr-slice-abc", "mngr-slice-abc-data")
+    assert command == ("limactl delete --force mngr-slice-abc && limactl disk delete --force mngr-slice-abc-data")
+
+
+def test_slice_vm_teardown_command_quotes_unsafe_names() -> None:
+    # Defense-in-depth: names flow into a shell command and must be shell-quoted.
+    command = build_slice_vm_teardown_command("a b; rm -rf /", "d$x")
+    assert command.startswith("limactl delete --force 'a b; rm -rf /' && ")
+    assert "'d$x'" in command
 
 
 def test_parse_create_json_returns_object_with_host_id() -> None:
