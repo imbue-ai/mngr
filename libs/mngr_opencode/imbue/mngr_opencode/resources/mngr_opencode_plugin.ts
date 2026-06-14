@@ -183,10 +183,11 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   }
 
   // Permission ids currently awaiting a reply. The permissions_waiting marker is
-  // present iff this set is non-empty. opencode emits one `permission.updated` per
-  // tool blocked on approval (carrying the permission id) and one
-  // `permission.replied` when it is answered; tracking ids (rather than a single
-  // flag like codex) handles concurrent prompts, e.g. from task-tool subagents.
+  // present iff this set is non-empty. The binary emits one `permission.asked` per
+  // tool blocked on approval (carrying the request `id`) and one `permission.replied`
+  // (carrying `requestID`) when it is answered; the handlers also accept the SDK stub
+  // aliases (see the header and the two handlers below). Tracking ids (rather than a
+  // single flag like codex) handles concurrent prompts, e.g. from task-tool subagents.
   const pendingPermissions = new Set<string>()
 
   const refreshPermissionsMarker = (): void => {
