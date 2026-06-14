@@ -140,6 +140,18 @@ class LimaSliceVpsClient(VpsClientInterface):
             )
         return result.returncode, result.stdout, result.stderr
 
+    def _remove_remote_file(self, remote_path: str) -> None:
+        """Best-effort ``rm -f`` of a file on the box (used to scrub the shipped YAML).
+
+        Logged at debug and never raised: cleanup runs on both the success and the
+        failure path, so it must not mask the carve's own error.
+        """
+        rc, _out, err = self._run_on_box(
+            f"rm -f {shlex.quote(remote_path)}", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="rm-yaml"
+        )
+        if rc != 0:
+            logger.debug("Could not remove remote file {} on {}: {}", remote_path, self.box_address, err.strip())
+
     def provision_slice_vm(
         self,
         *,
@@ -184,31 +196,39 @@ class LimaSliceVpsClient(VpsClientInterface):
         yaml_text = write_lima_yaml(config).read_text()
 
         # Ship the YAML to the box (base64 to dodge quoting), pre-create the disk,
-        # then start the VM.
+        # then start the VM. The YAML embeds the VM's SSH host private key, so write
+        # it 0600 (``umask 077`` before the redirect) and always remove it once the
+        # VM has started -- it must not linger world-readable in /tmp on the box.
         remote_yaml_path = f"/tmp/{instance_name}.yaml"
         encoded = base64.b64encode(yaml_text.encode()).decode()
-        ship_command = f"echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(remote_yaml_path)}"
+        ship_command = f"umask 077 && echo {shlex.quote(encoded)} | base64 -d > {shlex.quote(remote_yaml_path)}"
         ship_rc, _ship_out, ship_err = self._run_on_box(
             ship_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="ship-yaml"
         )
         if ship_rc != 0:
+            self._remove_remote_file(remote_yaml_path)
             raise LimaCommandError("ship yaml", ship_rc or 1, ship_err)
 
-        disk_command = f"limactl disk create {shlex.quote(disk_name)} --size {shlex.quote(f'{disk_gib}GiB')}"
-        disk_rc, _disk_out, disk_err = self._run_on_box(
-            disk_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-create"
-        )
-        if disk_rc != 0:
-            raise LimaCommandError("disk create", disk_rc or 1, disk_err)
+        try:
+            disk_command = f"limactl disk create {shlex.quote(disk_name)} --size {shlex.quote(f'{disk_gib}GiB')}"
+            disk_rc, _disk_out, disk_err = self._run_on_box(
+                disk_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-create"
+            )
+            if disk_rc != 0:
+                raise LimaCommandError("disk create", disk_rc or 1, disk_err)
 
-        start_command = (
-            f"limactl --log-level=info start --name={shlex.quote(instance_name)} {shlex.quote(remote_yaml_path)}"
-        )
-        start_rc, _start_out, start_err = self._run_on_box(
-            start_command, timeout=_LIMA_START_TIMEOUT_SECONDS, label=f"start:{instance_name}", is_streaming=True
-        )
-        if start_rc != 0:
-            raise LimaCommandError("start", start_rc or 1, start_err)
+            start_command = (
+                f"limactl --log-level=info start --name={shlex.quote(instance_name)} {shlex.quote(remote_yaml_path)}"
+            )
+            start_rc, _start_out, start_err = self._run_on_box(
+                start_command, timeout=_LIMA_START_TIMEOUT_SECONDS, label=f"start:{instance_name}", is_streaming=True
+            )
+            if start_rc != 0:
+                raise LimaCommandError("start", start_rc or 1, start_err)
+        finally:
+            # The host-key-bearing YAML is no longer needed once the VM is started
+            # (or the carve has failed): never leave it on the box.
+            self._remove_remote_file(remote_yaml_path)
 
         logger.info("Provisioned slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
         return SliceProvisionResult(
