@@ -677,19 +677,29 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
 
 
 @click.group(name="usage", invoke_without_command=True)
-@click.option(
-    "--max-age",
-    default=None,
-    help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
-)
-@click.option(
+@optgroup.group("Aggregation")
+@optgroup.option(
     "--since",
     default=None,
     help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
     "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
     "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
 )
-@click.option(
+@optgroup.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
+    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
+    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
+)
+@optgroup.group("Display")
+@optgroup.option(
+    "--max-age",
+    default=None,
+    help="Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config.",
+)
+@optgroup.option(
     "--detail",
     is_flag=True,
     default=False,
@@ -697,14 +707,6 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "(human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each "
     "source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown "
     "for terseness; the per-mode cost lines and window lines are unchanged.",
-)
-@click.option(
-    "--preserved/--no-preserved",
-    default=True,
-    show_default=True,
-    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
-    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
-    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
 )
 @add_agent_filter_options
 @optgroup.option(
