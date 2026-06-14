@@ -883,9 +883,12 @@ mngr imbue_cloud admin server register [OPTIONS]
 | `--plan-code` | text | Catalog planCode the box was ordered as. | None |
 | `--region` | text | OVH datacenter code (e.g. vin). | None |
 | `--public-address` | text | SSH-reachable public address of the box. | None |
-| `--ram-gb` | integer | Total RAM in GB (drives slot count). | None |
+| `--ram-gb` | integer | Total RAM in GB. | None |
 | `--cpu-cores` | integer | Physical CPU cores. | None |
 | `--cpu-threads` | integer | CPU threads. | None |
+| `--disk-gb` | integer | Usable disk in GB for slice data (split across slices). | None |
+| `--memory-per-slice-gb` | integer | RAM (GB) each slice on this box advertises; sets slot count + per-slice sizing. | None |
+| `--cpu-overcommit` | float | CPU overcommit factor for sizing each slice's vCPUs. | `2.0` |
 | `--raid-level` | text | RAID level configured at install (e.g. RAID1). | None |
 | `--lima-service-user` | text | Non-root OS user that owns the box's lima VMs. | `limahost` |
 | `--ovh-order-id` | text | OVH order id, if known. | None |
@@ -905,11 +908,10 @@ mngr imbue_cloud admin server allocate-slice [OPTIONS]
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--count` | integer | Number of slices to bake (placed across ready servers). | `1` |
-| `--overcommit-ratio` | float |  | `1.5` |
+| `--count` | integer | Number of slices to bake on the chosen server. | `1` |
 | `--workspace-dir` | path | forever-claude-template checkout to bake from (default: $HOME/project/forever-claude-template). | None |
 | `--mngr-source` | path | mngr monorepo root to sync onto the box (default: this checkout). | None |
-| `--dry-run` | boolean | Report placement + slice attributes; do not bake. | `False` |
+| `--dry-run` | boolean | Report placement + slice sizing; do not bake. | `False` |
 | `--database-url` | text |  | None |
 
 ## mngr imbue_cloud admin server set-status
