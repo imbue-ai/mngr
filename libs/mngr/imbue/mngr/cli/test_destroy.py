@@ -888,7 +888,7 @@ def test_destroy_via_stdin(
             catch_exceptions=False,
         )
 
-        assert destroy_result.exit_code == 0
+        assert destroy_result.exit_code == 0, f"Destroy failed: {destroy_result.output}"
 
         wait_for(
             lambda: not tmux_session_exists(session_name1) and not tmux_session_exists(session_name2),
