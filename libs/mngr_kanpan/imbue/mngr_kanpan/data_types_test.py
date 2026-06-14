@@ -4,8 +4,12 @@ from datetime import timezone
 import pytest
 from pydantic import ValidationError
 
+from imbue.mngr.config.data_types import LoggingConfig
+from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_kanpan.data_sources.github import CiField
 from imbue.mngr_kanpan.data_sources.github import CiStatus
@@ -14,6 +18,7 @@ from imbue.mngr_kanpan.data_sources.github import PrState
 from imbue.mngr_kanpan.data_types import AgentBoardEntry
 from imbue.mngr_kanpan.data_types import BoardSection
 from imbue.mngr_kanpan.data_types import BoardSnapshot
+from imbue.mngr_kanpan.data_types import CustomCommand
 from imbue.mngr_kanpan.data_types import KanpanPluginConfig
 from imbue.mngr_kanpan.data_types import section_label
 
@@ -144,61 +149,6 @@ def test_board_snapshot_with_errors() -> None:
     assert snapshot.errors[0] == "Connection failed"
 
 
-def test_kanpan_plugin_config_merge_with_column_order() -> None:
-    base = KanpanPluginConfig(column_order=["name", "state", "ci"])
-    override = KanpanPluginConfig(column_order=["name", "ci"])
-    merged = base.merge_with(override)
-    assert merged.column_order == ["name", "ci"]
-
-
-def test_kanpan_plugin_config_merge_with_column_order_none_keeps_base() -> None:
-    base = KanpanPluginConfig(column_order=["name", "state", "ci"])
-    override = KanpanPluginConfig()
-    merged = base.merge_with(override)
-    assert merged.column_order == ["name", "state", "ci"]
-
-
-def test_kanpan_plugin_config_merge_with_section_order() -> None:
-    base = KanpanPluginConfig(section_order=[BoardSection.PR_MERGED, BoardSection.MUTED])
-    override = KanpanPluginConfig(section_order=[BoardSection.STILL_COOKING, BoardSection.PR_MERGED])
-    merged = base.merge_with(override)
-    assert merged.section_order == [BoardSection.STILL_COOKING, BoardSection.PR_MERGED]
-
-
-def test_kanpan_plugin_config_merge_with_section_order_none_keeps_base() -> None:
-    base = KanpanPluginConfig(section_order=[BoardSection.PR_MERGED, BoardSection.MUTED])
-    override = KanpanPluginConfig()
-    merged = base.merge_with(override)
-    assert merged.section_order == [BoardSection.PR_MERGED, BoardSection.MUTED]
-
-
-def test_kanpan_config_merge_with_data_sources() -> None:
-    base = KanpanPluginConfig(
-        data_sources={"github": {"enabled": True}},
-    )
-    override = KanpanPluginConfig(
-        data_sources={"github": {"enabled": False}},
-    )
-    merged = base.merge_with(override)
-    assert merged.data_sources["github"]["enabled"] is False
-
-
-def test_kanpan_config_merge_with_shell_commands() -> None:
-    base = KanpanPluginConfig(
-        shell_commands={
-            "slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"},
-        },
-    )
-    override = KanpanPluginConfig(
-        shell_commands={
-            "jira": {"name": "Jira", "header": "JIRA", "command": "find-jira"},
-        },
-    )
-    merged = base.merge_with(override)
-    assert "slack" in merged.shell_commands
-    assert "jira" in merged.shell_commands
-
-
 def test_kanpan_plugin_config_staleness_threshold_default_unset() -> None:
     config = KanpanPluginConfig()
     assert config.staleness_threshold_seconds is None
@@ -219,8 +169,92 @@ def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
     assert config.effective_staleness_threshold_seconds() == 42.0
 
 
-def test_kanpan_plugin_config_merge_with_staleness_threshold() -> None:
-    base = KanpanPluginConfig(staleness_threshold_seconds=600.0)
-    override = KanpanPluginConfig(staleness_threshold_seconds=120.0)
-    merged = base.merge_with(override)
-    assert merged.staleness_threshold_seconds == 120.0
+# The kanpan plugin no longer carries a custom ``merge_with`` that unions its dict fields
+# across config scopes. Cross-scope merges now go through the standard overlay pipeline,
+# which assigns-by-default and relies on ``detect_settings_narrowing`` to catch any
+# cross-scope drop. These tests lock in that the per-field paths
+# (``plugins.kanpan.<field>``) are flagged on a drop and pass on a pure superset addition.
+
+
+def _kanpan_mngr_config_base(plugin_config: KanpanPluginConfig) -> MngrConfig:
+    # ``model_construct`` mirrors how the loader builds the lower (base) scope: every
+    # top-level container is populated so the narrowing walk has a fully-formed base.
+    return MngrConfig.model_construct(
+        prefix="mngr-",
+        default_host_dir="~/.mngr",
+        agent_types={},
+        providers={},
+        plugins={PluginName("kanpan"): plugin_config},
+        logging=LoggingConfig(),
+        commands={},
+    )
+
+
+def _kanpan_mngr_config_override(plugin_config: KanpanPluginConfig) -> MngrConfig:
+    # ``model_construct`` mirrors the higher (override) scope: only ``plugins`` is set, so
+    # ``model_fields_set`` reflects exactly the field the higher scope wrote.
+    return MngrConfig.model_construct(plugins={PluginName("kanpan"): plugin_config})
+
+
+def test_kanpan_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
+    base = _kanpan_mngr_config_base(
+        KanpanPluginConfig.model_construct(
+            commands={
+                "a": CustomCommand.model_construct(name="A"),
+                "b": CustomCommand.model_construct(name="B"),
+            }
+        )
+    )
+    override = _kanpan_mngr_config_override(
+        KanpanPluginConfig.model_construct(commands={"a": CustomCommand.model_construct(name="A")})
+    )
+    assert "plugins.kanpan.commands" in detect_settings_narrowing(base, override)
+
+
+def test_kanpan_commands_cross_scope_superset_does_not_narrow() -> None:
+    base = _kanpan_mngr_config_base(
+        KanpanPluginConfig.model_construct(commands={"a": CustomCommand.model_construct(name="A")})
+    )
+    override = _kanpan_mngr_config_override(
+        KanpanPluginConfig.model_construct(
+            commands={
+                "a": CustomCommand.model_construct(name="A"),
+                "b": CustomCommand.model_construct(name="B"),
+            }
+        )
+    )
+    assert "plugins.kanpan.commands" not in detect_settings_narrowing(base, override)
+
+
+def test_kanpan_shell_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
+    base = _kanpan_mngr_config_base(
+        KanpanPluginConfig.model_construct(
+            shell_commands={
+                "slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"},
+                "jira": {"name": "Jira", "header": "JIRA", "command": "find-jira"},
+            }
+        )
+    )
+    override = _kanpan_mngr_config_override(
+        KanpanPluginConfig.model_construct(
+            shell_commands={"slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"}}
+        )
+    )
+    assert "plugins.kanpan.shell_commands" in detect_settings_narrowing(base, override)
+
+
+def test_kanpan_shell_commands_cross_scope_superset_does_not_narrow() -> None:
+    base = _kanpan_mngr_config_base(
+        KanpanPluginConfig.model_construct(
+            shell_commands={"slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"}}
+        )
+    )
+    override = _kanpan_mngr_config_override(
+        KanpanPluginConfig.model_construct(
+            shell_commands={
+                "slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"},
+                "jira": {"name": "Jira", "header": "JIRA", "command": "find-jira"},
+            }
+        )
+    )
+    assert "plugins.kanpan.shell_commands" not in detect_settings_narrowing(base, override)
