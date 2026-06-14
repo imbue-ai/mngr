@@ -15,13 +15,11 @@ from typing import Final
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.pure import pure
 
-# Operator suffix on a leaf key indicating "extend the current value".
-# Lowercase form used in the common surface syntax (TOML, override paths, keys).
+# Operator suffix on a leaf key indicating "extend the current value". Consumers
+# compile every surface (TOML, override paths, env vars) down to this single
+# lowercase form before handing the dict to the algebra, so there is no
+# case-specific variant here.
 EXTEND_SUFFIX: Final[str] = "__extend"
-
-# Uppercase form for env-var path segments. Matches the all-uppercase
-# convention for env-var path segments.
-EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
 
 # Operator suffix on a leaf key indicating "assign the value, but do not record a
 # narrowing violation". Behaviorally identical to a bare assign (replace the value

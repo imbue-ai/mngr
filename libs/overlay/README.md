@@ -39,9 +39,10 @@ Aggregate values can be wrapped in a **`Static*` marker** (`StaticList`, `Static
 narrowing." `ScalarTuple` is a `StaticTuple` subclass for a tuple that is semantically a
 single scalar (e.g. a value written as one string and coerced to a tuple).
 
-The suffix constants (`EXTEND_SUFFIX` = `__extend`, `EXTEND_SUFFIX_ENV` = `__EXTEND`,
-`ASSIGN_SUFFIX` = `__assign`) and key helpers are exported for surfaces that emit or
-recognise them.
+The suffix constants (`EXTEND_SUFFIX` = `__extend`, `ASSIGN_SUFFIX` = `__assign`) and
+key helpers are exported for surfaces that emit or recognise them. There is a single
+lowercase form of each operator -- a consumer that reads a case-folded surface (e.g.
+all-uppercase environment variables) normalises to it before calling the library.
 
 ### Within-layer resolution is order-independent
 
