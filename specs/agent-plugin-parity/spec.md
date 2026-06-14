@@ -157,7 +157,7 @@ don't have, learned the hard way on pi:
 
 ## Current state matrix
 
-Y = implemented, partial = present but incomplete, - = absent.
+Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not applicable.
 
 | Dimension | claude | antigravity | pi-coding | opencode | codex |
 |---|---|---|---|---|---|
