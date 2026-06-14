@@ -85,7 +85,41 @@ def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
     return any(isinstance(item, SettingsPatchField) for item in metadata)
 
 
-class ScalarTuple(tuple):
+class StaticTuple(tuple):
+    """Marker tuple subclass for an aggregate value that is **atomic**: replacing it
+    from a higher-precedence settings layer is a value-set, not aggregate narrowing,
+    so it is exempt from the narrowing check.
+
+    The ``Static*`` family (``StaticTuple`` / ``StaticList`` / ``StaticDict``) lets a
+    producer mark an aggregate as a coherent whole that higher layers *replace*
+    rather than *narrow*. ``ScalarTuple`` (a scalar-shaped tuple, e.g. a
+    string-derived ``cli_args`` or a replace-by-default ``allowed_ssh_cidrs``) is a
+    ``StaticTuple`` -- its long-standing exemption is the same concept.
+
+    The marker survives ``model_construct`` (which bypasses validation) but is not
+    preserved through ``model_dump`` / merges; that is enough because narrowing
+    detection always compares a freshly-parsed layer (which retains the marker)
+    against the already-merged base.
+    """
+
+
+class StaticList(list):
+    """Marker list subclass for an atomic list aggregate, exempt from narrowing.
+
+    See ``StaticTuple``: a higher-precedence layer replacing a ``StaticList`` is a
+    value-set, not aggregate narrowing.
+    """
+
+
+class StaticDict(dict):
+    """Marker dict subclass for an atomic dict aggregate, exempt from narrowing.
+
+    See ``StaticTuple``: a higher-precedence layer replacing a ``StaticDict`` is a
+    value-set, not aggregate narrowing.
+    """
+
+
+class ScalarTuple(StaticTuple):
     """Marker tuple subclass for a tuple-typed field whose value is semantically a
     single scalar: replacing it from a higher-precedence settings layer is scalar
     replacement, not aggregate narrowing.
@@ -123,6 +157,16 @@ class StringDerivedTuple(ScalarTuple):
     the loader can mark *only* the string-shaped writes of fields that otherwise
     merge additively.
     """
+
+
+def _is_static_marker(value: Any) -> bool:
+    """Return True if ``value`` is a ``Static*`` marker (atomic aggregate).
+
+    A ``Static*`` override is a value-set, not narrowing: it replaces the whole
+    aggregate as a coherent unit. Covers ``StaticTuple`` (and its ``ScalarTuple`` /
+    ``StringDerivedTuple`` subclasses), ``StaticList``, and ``StaticDict``.
+    """
+    return isinstance(value, (StaticTuple, StaticList, StaticDict))
 
 
 def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
@@ -217,11 +261,11 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     """
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return False
+    # A ``Static*`` override replaces the whole aggregate as a coherent unit
+    # (value-set, not narrowing), regardless of the base aggregate shape.
+    if _is_static_marker(override_value):
+        return False
     if isinstance(base_value, (list, tuple)):
-        # Mirror the ScalarTuple exemption in ``_check_narrowing`` so the
-        # template-application guard agrees with the settings-layer guard.
-        if isinstance(override_value, ScalarTuple):
-            return False
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return False
         return True
@@ -349,13 +393,12 @@ def _check_narrowing(
         return
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return
+    # A ``Static*`` override (e.g. a string-derived ``cli_args``, a replace-by-default
+    # ``allowed_ssh_cidrs``, or an explicitly atomic ``StaticList`` / ``StaticDict``)
+    # replaces the whole aggregate as a coherent unit -- a value-set, not narrowing.
+    if _is_static_marker(override_value):
+        return
     if isinstance(base_value, (list, tuple)):
-        # Scalar replacement intent: the override is either a string-derived value
-        # (e.g. ``cli_args = "..."`` in TOML) or a replace-by-default field (e.g.
-        # ``allowed_ssh_cidrs``); either way the whole value is replaced as a
-        # coherent unit, not narrowed as a list.
-        if isinstance(override_value, ScalarTuple):
-            return
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return
         violations.append(".".join(path))
