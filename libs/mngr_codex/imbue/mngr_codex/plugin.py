@@ -154,6 +154,21 @@ _APPROVAL_POLICY_NEVER: Final[str] = "never"
 _VERSION_SPLIT_SENTINEL: Final[str] = "__MNGR_CODEX_VERSION_SPLIT__"
 
 
+class CodexUpdatePolicy(UpperCaseStrEnum):
+    """How mngr acts on an outdated codex CLI at provision (see ``CodexAgentConfig.update_policy``).
+
+    The network-free version check always runs regardless of policy; only the action
+    taken when codex is outdated differs.
+    """
+
+    # Upgrade silently (run ``codex update``, no prompt).
+    AUTO = auto()
+    # Prompt to update on an attended local run, otherwise just notify.
+    ASK = auto()
+    # Never update; only log a non-blocking notice.
+    NEVER = auto()
+
+
 def _load_codex_resource_script(filename: str) -> str:
     """Load a resource script from the mngr_codex resources package."""
     resource_files = importlib.resources.files(_codex_resources)
@@ -221,31 +236,25 @@ class CodexAgentConfig(AgentTypeConfig):
         description="When True, trust the source repo and allow the codex hook-review bypass "
         "without prompting. When False (default), the user is prompted interactively.",
     )
-    # check_for_updates is mngr's well-behaved replacement for codex's own
-    # ``check_for_update_on_startup`` (which mngr disables because its blocking
-    # "Update available!" prompt would intercept the first pasted message). At
-    # provision, mngr compares ``codex --version`` to the latest version codex itself
-    # recorded in ~/.codex/version.json (no network call) and surfaces an available
-    # update -- interactively a prompt to update now, otherwise a non-blocking notice.
-    check_for_updates: bool = Field(
-        default=True,
-        description="When True, check at provision whether the codex CLI is outdated (comparing "
-        "`codex --version` to the latest version codex last recorded in ~/.codex/version.json -- "
-        "no network call) and surface it: an interactive prompt to run `codex update`, or a "
-        "non-blocking notice when non-interactive. mngr disables codex's own blocking startup "
-        "update prompt, so this is the replacement.",
-    )
-    # auto_update is the opt-in to let mngr run ``codex update`` itself. ``codex update``
-    # self-detects the install method (brew/npm/standalone), so mngr needs no
-    # per-method logic. Off by default: updating mutates the user's *global* codex
-    # install, so we only do it on an explicit opt-in or an interactive yes.
-    auto_update: bool = Field(
-        default=False,
-        description="When True, run `codex update` automatically (no prompt) whenever the check "
-        "finds codex is outdated. `codex update` self-detects the install method. Default False: "
-        "mngr instead prompts interactively, or just notifies when non-interactive. Note: updating "
-        "mutates the user's global codex install. Implies the update check even if "
-        "check_for_updates is False.",
+    # update_policy governs how mngr handles an outdated codex CLI at provision. mngr
+    # always runs a network-free check (comparing ``codex --version`` to the latest
+    # version codex itself recorded in ~/.codex/version.json) -- it is the well-behaved
+    # replacement for codex's own ``check_for_update_on_startup``, which mngr disables
+    # because its blocking "Update available!" prompt would intercept the first pasted
+    # message. The check is best-effort: any probe/parse failure is swallowed and never
+    # blocks provisioning. Only the *action* taken when codex is outdated is governed by
+    # this policy: ``auto`` upgrades, ``ask`` prompts (attended) or notifies, ``never``
+    # only notifies. ``codex update`` self-detects the install method (brew/npm/
+    # standalone), so mngr needs no per-method logic.
+    update_policy: CodexUpdatePolicy = Field(
+        default=CodexUpdatePolicy.ASK,
+        description="How mngr handles an outdated codex CLI at provision (it always runs a "
+        "network-free version check, best-effort -- failures never block provisioning). "
+        "`AUTO`: run `codex update` with no prompt. `ASK` (default): prompt to update on an "
+        "attended local run (interactive tty + local host, not `--yes`), otherwise just log a "
+        "non-blocking notice (unattended remote/deploy hosts, or any non-interactive run). "
+        "`NEVER`: only log a non-blocking notice, never update. Updating mutates the user's "
+        "*global* codex install. mngr always disables codex's own blocking startup update prompt.",
     )
     # emit_common_transcript gates the rollout -> common-schema converter. The
     # raw transcript is always captured (HasTranscriptMixin); only the common
@@ -567,14 +576,14 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         mngr disables codex's own ``check_for_update_on_startup`` (its blocking
         "Update available!" prompt would intercept the first pasted message), so this
         is the well-behaved replacement: a network-free check (codex's own
-        ``version.json`` vs ``codex --version``) plus, when outdated, either an
-        automatic ``codex update`` (``auto_update``), an interactive prompt, or a
-        non-blocking notice. Updating is optional -- an outdated codex still runs --
-        so, unlike workspace trust, a declined or non-interactive case never aborts
-        provisioning, and any probe/parse failure is swallowed (debug-logged).
+        ``version.json`` vs ``codex --version``) that always runs, plus -- when
+        outdated -- the action chosen by ``update_policy``: an automatic ``codex
+        update`` (``AUTO``), an interactive prompt on an attended local run else a
+        notice (``ASK``), or just a non-blocking notice (``NEVER``). Updating is
+        optional -- an outdated codex still runs -- so, unlike workspace trust, a
+        declined, never, or non-interactive case never aborts provisioning, and any
+        probe/parse failure is swallowed (debug-logged) so the check never blocks.
         """
-        if not (self.agent_config.check_for_updates or self.agent_config.auto_update):
-            return
         installed, latest = self._read_codex_versions(host, user_codex_home)
         if installed is None or latest is None:
             logger.debug(
@@ -637,25 +646,35 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
     def _handle_codex_update_available(
         self, host: OnlineHostInterface, installed: str, latest: str, mngr_ctx: MngrContext
     ) -> None:
-        """Apply or surface an available codex update.
+        """Apply or surface an available codex update, per ``update_policy``.
 
-        ``auto_update`` -> run ``codex update`` with no prompt. Otherwise, when
-        interactive (and not ``--yes``), prompt to update now. In every other case
-        (``--yes`` or non-interactive), just log a non-blocking notice -- we never
-        mutate the user's *global* codex install at provision without an explicit
-        opt-in (the ``auto_update`` flag) or an interactive yes. (``--yes`` clears
-        blocking prerequisites like trust, but an optional global upgrade is heavier,
-        so it is gated on ``auto_update`` alone, not on auto-approve.)
+        ``AUTO`` -> run ``codex update`` with no prompt. ``ASK`` -> prompt to update
+        only on an *attended* run (a local host driven from an interactive terminal,
+        and not ``--yes``); in every other case (``--yes``, non-interactive, or an
+        *unattended* remote/deploy host) just log a non-blocking notice. ``NEVER`` ->
+        only the notice. We never mutate the *global* codex install at provision
+        without ``AUTO`` or an interactive yes.
+
+        Unattended is keyed off ``not host.is_local`` -- mirroring the claude plugin's
+        ``is_unattended`` -- so provisioning a *remote* codex agent from a local tty
+        never prompts (and never silently upgrades the remote's global install), even
+        though the local terminal is interactive. (``--yes`` clears blocking
+        prerequisites like trust, but an optional global upgrade is heavier, so it is
+        gated on ``AUTO`` alone, not on auto-approve.)
         """
-        should_update = self.agent_config.auto_update
-        if not should_update and mngr_ctx.is_interactive and not mngr_ctx.is_auto_approve:
+        # Attended = a local host driven from an interactive terminal. A remote/deploy
+        # host is unattended even when the local stdout is a tty, so it never prompts.
+        is_attended = mngr_ctx.is_interactive and host.is_local
+        policy = self.agent_config.update_policy
+        should_update = policy is CodexUpdatePolicy.AUTO
+        if policy is CodexUpdatePolicy.ASK and is_attended and not mngr_ctx.is_auto_approve:
             should_update = self._prompt_user_to_update_codex(installed, latest)
         if should_update:
             self._run_codex_update(host, installed, latest)
             return
         logger.warning(
             "A newer codex CLI is available ({} -> {}). Run `codex update` to upgrade, or set "
-            "`auto_update = true` on the codex agent type to have mngr do it. (mngr disables "
+            '`update_policy = "AUTO"` on the codex agent type to have mngr do it. (mngr disables '
             "codex's own blocking startup update prompt, so it won't interrupt the agent.)",
             installed,
             latest,

@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import time
+from abc import abstractmethod
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
@@ -11,6 +12,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -93,6 +95,7 @@ from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import prepare_btrfs_on_outer
@@ -120,64 +123,127 @@ class ParsedVpsBuildOptions(FrozenModel):
 
     region: str = Field(description="VPS region")
     plan: str = Field(description="VPS plan")
-    os_id: int | str = Field(
-        description=(
-            "VPS OS image identifier. Most providers use an integer image id; "
-            "providers that catalog images by name (e.g. OVH classic VPS) use a string."
-        ),
-    )
     git_depth: int | None = Field(
         default=None, description="Git clone depth for build context, or None for full clone"
     )
     docker_build_args: tuple[str, ...] = Field(description="Remaining args passed to docker build")
 
 
-def _parse_build_args(
+def extract_single_value_arg(args: Sequence[str], flag: str) -> tuple[str | None, list[str]]:
+    """Pop ``--flag=VALUE`` once from ``args``. Returns ``(value or None, remaining)``.
+
+    If ``flag`` appears multiple times the last occurrence wins (matching how
+    docker's CLI treats repeated single-value flags). Composable building
+    block: each provider's ``_parse_build_args`` chains a few of these to
+    peel off its own knobs before walking the remainder for docker forwarding.
+    """
+    value: str | None = None
+    remaining: list[str] = []
+    for arg in args:
+        if arg.startswith(flag):
+            value = arg.split("=", 1)[1]
+        else:
+            remaining.append(arg)
+    return value, remaining
+
+
+def extract_git_depth(args: Sequence[str]) -> tuple[int | None, list[str]]:
+    """Pop ``--git-depth=N`` from ``args``. Shared because it's about the *local*
+    mngr build context (shallow-cloning the upload tarball), not the VPS, so
+    every provider accepts it under the same name.
+    """
+    raw, remaining = extract_single_value_arg(args, "--git-depth=")
+    return (int(raw) if raw is not None else None), remaining
+
+
+def extract_presence_flag(args: Sequence[str], flag: str) -> tuple[bool, list[str]]:
+    """Pop a presence-only flag like ``--aws-spot`` from ``args``.
+
+    Returns ``(True, remaining)`` if any element of ``args`` equals ``flag``
+    exactly, else ``(False, args_as_list)``. The flag MUST be passed with no
+    value: ``--aws-spot=true`` or ``--aws-spot=`` raises because that shape
+    suggests the caller expected a value-bearing flag (likely a typo).
+
+    Composable building block for boolean opt-in knobs (e.g. ``--aws-spot``).
+    """
+    present = False
+    remaining: list[str] = []
+    for arg in args:
+        if arg == flag:
+            present = True
+        elif arg.startswith(f"{flag}="):
+            raise MngrError(f"{flag} is a presence-only flag; pass it as bare {flag!r} (no value). Got: {arg!r}")
+        else:
+            remaining.append(arg)
+    return present, remaining
+
+
+_VPS_MIGRATION_HINT: Final[str] = (
+    "Build args are now per-provider: use --aws-region= / --aws-instance-type= / --aws-ami=, "
+    "--vultr-region= / --vultr-plan=, or --ovh-datacenter= (alias --ovh-region=) / --ovh-plan= "
+    "(matching your provider). The old --vps-os= / --vps-image= / --vps-ami= image-selection args "
+    "are also removed; image selection lives on the provider config (default_os_id for Vultr, "
+    "default_image_name for OVH, default_ami_id / default_ami_by_region for AWS)."
+)
+
+
+def raise_if_vps_migration_arg(arg: str) -> None:
+    """Raise the dedicated migration error if ``arg`` uses the dropped shared ``--vps-*`` prefix.
+
+    Called by every provider's parser (and by ``MinimalVpsDockerProvider``)
+    so callers still passing ``--vps-region=`` etc. get a clear pointer at
+    the new per-provider name rather than having the arg silently forwarded
+    to docker (which would either error opaquely or, worse, succeed for a
+    flag that happens to be a valid docker flag).
+    """
+    if arg.startswith("--vps-"):
+        raise MngrError(f"{arg.split('=', 1)[0]} is no longer supported. {_VPS_MIGRATION_HINT}")
+
+
+def raise_if_unknown_provider_arg(arg: str, provider_prefix: str, valid_args: Sequence[str]) -> None:
+    """Raise if ``arg`` starts with ``--<provider_prefix>-`` but isn't one of ``valid_args``.
+
+    Lets a provider's parser catch typos / unknown flags up front, with a
+    specific error that lists what was actually accepted. ``valid_args``
+    should be the full flag spellings (e.g. ``("--aws-region=", ...)``) so
+    the error message matches the user-facing names exactly.
+    """
+    if not arg.startswith(f"--{provider_prefix}-"):
+        return
+    raise MngrError(f"Unknown {provider_prefix} build arg: {arg}. Valid args: {', '.join(valid_args)}")
+
+
+def parse_vps_build_args(
     build_args: Sequence[str] | None,
     *,
+    provider_prefix: str,
     default_region: str,
     default_plan: str,
-    default_os_id: int | str,
+    plan_arg_name: str,
 ) -> ParsedVpsBuildOptions:
-    """Parse build args, separating VPS provisioning args from Docker build args.
+    """Convenience parser for the common provider shape (region + plan + git-depth).
 
-    VPS-specific args use the --vps- prefix (e.g., --vps-region=ewr).
-    ``--git-depth=N`` controls the git clone depth for the build context.
-    Everything else is passed through to docker build on the VPS.
-
-    ``--vps-os=`` values are cast to ``int`` only when ``default_os_id`` is
-    itself an integer (preserving Vultr's existing semantics). When the
-    default is a string the parsed value is kept as a string -- providers
-    like OVH classic VPS use string image names rather than integer ids.
+    Builds the standard four-step parse out of ``extract_single_value_arg``,
+    ``extract_git_depth``, ``raise_if_vps_migration_arg``, and
+    ``raise_if_unknown_provider_arg``. Vultr and OVH (which only have a
+    region + plan) call this directly; AWS has its own composition because
+    it also accepts ``--aws-ami=``. Custom providers with their own knobs
+    should compose the helpers directly rather than extending this function.
     """
-    region = default_region
-    plan = default_plan
-    os_id: int | str = default_os_id
-    git_depth: int | None = None
+    args = list(build_args or ())
+    region_arg = f"--{provider_prefix}-region="
+    plan_arg = f"--{provider_prefix}-{plan_arg_name}="
+    region, args = extract_single_value_arg(args, region_arg)
+    plan, args = extract_single_value_arg(args, plan_arg)
+    git_depth, args = extract_git_depth(args)
     docker_build_args: list[str] = []
-
-    if build_args:
-        for arg in build_args:
-            if arg.startswith("--vps-region="):
-                region = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-plan="):
-                plan = arg.split("=", 1)[1]
-            elif arg.startswith("--vps-os="):
-                raw_os = arg.split("=", 1)[1]
-                os_id = int(raw_os) if isinstance(default_os_id, int) else raw_os
-            elif arg.startswith("--git-depth="):
-                git_depth = int(arg.split("=", 1)[1])
-            elif arg.startswith("--vps-"):
-                raise MngrError(
-                    f"Unknown VPS build arg: {arg}. Valid VPS args: --vps-region=, --vps-plan=, --vps-os=, --git-depth="
-                )
-            else:
-                docker_build_args.append(arg)
-
+    for arg in args:
+        raise_if_vps_migration_arg(arg)
+        raise_if_unknown_provider_arg(arg, provider_prefix, (region_arg, plan_arg, "--git-depth="))
+        docker_build_args.append(arg)
     return ParsedVpsBuildOptions(
-        region=region,
-        plan=plan,
-        os_id=os_id,
+        region=region or default_region,
+        plan=plan or default_plan,
         git_depth=git_depth,
         docker_build_args=tuple(docker_build_args),
     )
@@ -217,8 +283,8 @@ def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
     return None
 
 
-def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> list[str]:
-    """Compose the tag list passed to the VPS create call.
+def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> dict[str, str]:
+    """Compose the tag mapping passed to the VPS create call.
 
     Always emits ``mngr-host-id=<id>`` and ``mngr-provider=<name>``. The
     ``extra_tags_raw`` string is a comma-separated list of ``key=value``
@@ -226,17 +292,63 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     minds-side pool-bake sets ``MNGR_VPS_EXTRA_TAGS=minds_env=<name>``
     so the env's destroy can later find + delete the instance via the
     Vultr tag filter. Empty / whitespace-only entries are skipped so
-    trailing commas don't produce blank tags.
+    trailing commas don't produce blank tags. Entries without an ``=``
+    are rejected so misconfigured callers fail fast instead of silently
+    losing the tag.
 
     Pulled out to module scope so the comma-splitting behaviour is unit
     testable without standing up an entire provisioning flow.
     """
-    tags = [f"mngr-host-id={host_id}", f"mngr-provider={provider_name}"]
-    for tag in extra_tags_raw.split(","):
-        stripped = tag.strip()
-        if stripped:
-            tags.append(stripped)
+    tags: dict[str, str] = {"mngr-host-id": str(host_id), "mngr-provider": provider_name}
+    for entry in extra_tags_raw.split(","):
+        stripped = entry.strip()
+        if not stripped:
+            continue
+        if "=" not in stripped:
+            raise MngrError(f"Invalid VPS extra tag {stripped!r}: expected ``key=value``")
+        key, _, value = stripped.partition("=")
+        tags[key.strip()] = value.strip()
     return tags
+
+
+def _wait_for_cloud_init_marker(
+    outer: OuterHostInterface,
+    timeout_seconds: float,
+    *,
+    poll_interval_seconds: float = 5.0,
+    slow_threshold_seconds: float = 30.0,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """Poll the VPS for /var/run/mngr-ready, the cloud-init completion marker.
+
+    Returns once the marker file appears. Swallows ``HostConnectionError``
+    from each poll: cloud-init runs ``apt-get install`` and Docker setup
+    which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
+    writing the sshd tuning). Each poll's underlying retry budget already
+    absorbs single in-flight disruptions; a connection error that propagates
+    past that means the system is still settling. Keep polling --
+    ``timeout_seconds`` is the hard wall.
+
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
+    so tests can drive this without slow real-time waits; defaults preserve
+    the production cadence (poll every 5s, warn if total > 30s).
+
+    ``clock`` and ``sleeper`` are injected so tests can run against a
+    virtual clock and avoid any real-time sleep.
+    """
+    start = clock()
+    while clock() - start < timeout_seconds:
+        try:
+            if check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
+                elapsed = clock() - start
+                if elapsed > slow_threshold_seconds:
+                    logger.warning("Cloud-init took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
+                return
+        except HostConnectionError as e:
+            logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
+        sleeper(poll_interval_seconds)
+    raise MngrError(f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS.")
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -254,6 +366,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
+    _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -276,6 +389,38 @@ class VpsDockerProvider(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
         self._container_running_cache.clear()
+        self._instances_cache = None
+
+    def _fetch_provider_instances(self) -> list[dict[str, Any]]:
+        """Provider-specific listing hook: return the raw instance dicts from the API.
+
+        Default returns ``[]`` so subclasses without a tag-based listing API
+        (e.g. OVH, which uses ``_list_provider_vps_hostnames`` directly) can
+        opt out. Subclasses with one (currently AWS and Vultr) override to
+        call their typed client's ``list_instances``; the result is cached
+        for the duration of a single command via ``_list_instances_cached``.
+        """
+        return []
+
+    def _list_instances_cached(self) -> list[dict[str, Any]]:
+        """List instances tagged for this provider, caching for the duration of the command.
+
+        Subclasses customise *what* gets listed by overriding
+        ``_fetch_provider_instances``; the cache scaffolding lives here.
+        """
+        if self._instances_cache is not None:
+            return self._instances_cache
+        self._instances_cache = self._fetch_provider_instances()
+        return self._instances_cache
+
+    def _validate_provider_args_for_create(self) -> None:
+        """Hook called by ``_provision_vps`` immediately before ``create_instance``.
+
+        Default no-op. Subclasses override to enforce provider-specific
+        pre-create invariants (e.g. AWS's pytest-only "must have
+        auto_shutdown_seconds set" guard) at the natural moment in the
+        lifecycle, instead of piggy-backing on a property accessor.
+        """
 
     # =========================================================================
     # Key Management
@@ -429,17 +574,7 @@ class VpsDockerProvider(BaseProviderInstance):
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            if check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
-                elapsed = time.monotonic() - start
-                if elapsed > 30.0:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: 30s)", elapsed)
-                return
-            time.sleep(5.0)
-        raise MngrError(
-            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
-        )
+        _wait_for_cloud_init_marker(outer, timeout_seconds=timeout_seconds)
 
     def _wait_for_sshd_on_vps(self, vps_ip: str, timeout_seconds: float) -> None:
         """Wait for sshd on the VPS to be ready."""
@@ -514,7 +649,14 @@ class VpsDockerProvider(BaseProviderInstance):
         logger.info("Creating VPS Docker host {} ({}) ...", name, host_id)
 
         parsed = self._parse_build_args(build_args)
-        region, plan, os_id = parsed.region, parsed.plan, parsed.os_id
+
+        # Fail fast before provisioning a (billable) VPS: a DEPOT build needs
+        # DEPOT_TOKEN, but the build only runs after the VPS exists and
+        # cloud-init completes -- so a missing token would otherwise waste a
+        # full provision. Only an actual build (non-empty docker_build_args)
+        # needs the token; a plain image pull does not.
+        if parsed.docker_build_args:
+            ensure_depot_token_available(self.config.builder)
 
         _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
@@ -529,9 +671,7 @@ class VpsDockerProvider(BaseProviderInstance):
             vps_instance_id, vps_ip = self._provision_vps(
                 host_id=host_id,
                 name=name,
-                region=region,
-                plan=plan,
-                os_id=os_id,
+                parsed=parsed,
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
@@ -546,9 +686,8 @@ class VpsDockerProvider(BaseProviderInstance):
                     vps_instance_id=vps_instance_id,
                     vps_ssh_key_id=vps_ssh_key_id,
                     vps_host_public_key=vps_host_public_key,
-                    region=region,
-                    plan=plan,
-                    os_id=os_id,
+                    region=parsed.region,
+                    plan=parsed.plan,
                     image=image,
                     tags=tags,
                     build_args=build_args,
@@ -595,7 +734,6 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_public_key: str,
         region: str,
         plan: str,
-        os_id: int | str,
         image: ImageReference | None,
         tags: Mapping[str, str] | None,
         build_args: Sequence[str] | None,
@@ -652,7 +790,6 @@ class VpsDockerProvider(BaseProviderInstance):
             lifecycle=lifecycle,
             region=region,
             plan=plan,
-            os_id=os_id,
             vps_instance_id=vps_instance_id,
             vps_ssh_key_id=vps_ssh_key_id,
             vps_host_public_key=vps_host_public_key,
@@ -697,13 +834,41 @@ class VpsDockerProvider(BaseProviderInstance):
             except (HostConnectionError, MngrError) as e:
                 logger.warning("Failed to remove volume {} for host {}: {}", volume_name, host_id, e)
 
+    def _create_vps_instance(
+        self,
+        parsed: ParsedVpsBuildOptions,
+        label: str,
+        user_data: str,
+        ssh_key_ids: Sequence[str],
+        tags: Mapping[str, str],
+    ) -> VpsInstanceId:
+        """Provider hook that issues the cloud-API instance create.
+
+        Default implementation: call the shared ``self.vps_client.create_instance``
+        with the standard (label, region, plan, user_data, ssh_key_ids, tags)
+        shape, which is what every current backend's wire contract needs.
+
+        Providers that have per-host knobs beyond region + plan (e.g. AWS's
+        ``--aws-ami=`` override) override this hook to pass their extra kwargs
+        through their own concrete typed client (``self.aws_client`` rather
+        than the shared interface). That way the shared ``VpsClientInterface``
+        contract stays minimal and per-provider extensions don't ripple across
+        every other provider's signature.
+        """
+        return self.vps_client.create_instance(
+            label=label,
+            region=parsed.region,
+            plan=parsed.plan,
+            user_data=user_data,
+            ssh_key_ids=ssh_key_ids,
+            tags=tags,
+        )
+
     def _provision_vps(
         self,
         host_id: HostId,
         name: HostName,
-        region: str,
-        plan: str,
-        os_id: int | str,
+        parsed: ParsedVpsBuildOptions,
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
@@ -712,21 +877,33 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Returns (vps_instance_id, vps_ip).
         """
+        # Provider-specific pre-create checks (e.g. AWS's pytest-only "must
+        # have auto_shutdown_seconds set" guard). Runs before the VPS-create
+        # API call so a failed check never leaves a billable VPS behind; the
+        # SSH key uploaded by ``create_host`` above is cleaned up by that
+        # function's except block on raise.
+        self._validate_provider_args_for_create()
+
         vps_host_private_key = vps_host_key_path.read_text()
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
             install_gvisor_runtime=self.config.install_gvisor_runtime,
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
         )
 
-        logger.log(LogLevel.BUILD.value, "Creating VPS instance (region: {}, plan: {})...", region, plan, source="vps")
+        logger.log(
+            LogLevel.BUILD.value,
+            "Creating VPS instance (region: {}, plan: {})...",
+            parsed.region,
+            parsed.plan,
+            source="vps",
+        )
         with log_span("Creating VPS instance"):
             vps_tags = build_vps_tags(host_id, self.name, os.environ.get("MNGR_VPS_EXTRA_TAGS", ""))
-            vps_instance_id = self.vps_client.create_instance(
+            vps_instance_id = self._create_vps_instance(
+                parsed=parsed,
                 label=f"mngr-{name}",
-                region=region,
-                plan=plan,
-                os_id=os_id,
                 user_data=user_data,
                 ssh_key_ids=[vps_ssh_key_id],
                 tags=vps_tags,
@@ -736,7 +913,7 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
                 vps_instance_id,
-                timeout_seconds=self.config.vps_boot_timeout,
+                timeout_seconds=self.config.instance_boot_timeout,
             )
         logger.log(LogLevel.BUILD.value, "VPS active (IP: {})", vps_ip, source="vps")
 
@@ -841,8 +1018,9 @@ class VpsDockerProvider(BaseProviderInstance):
                     # above; host_backup writes request.json / reads result.json).
                     f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
                     # Read-only view of the outer's <btrfs-mount>/snapshots/
-                    # directory so restic-in-container can read the snapshot
-                    # the outer helper produced at <btrfs-mount>/snapshots/current.
+                    # directory so restic-in-container can read the per-request
+                    # snapshots the outer helper produces at
+                    # <btrfs-mount>/snapshots/<name>.
                     f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
                 ],
                 labels=labels,
@@ -889,7 +1067,6 @@ class VpsDockerProvider(BaseProviderInstance):
         lifecycle: HostLifecycleOptions | None,
         region: str,
         plan: str,
-        os_id: int | str,
         vps_instance_id: VpsInstanceId,
         vps_ssh_key_id: str,
         vps_host_public_key: str,
@@ -932,7 +1109,6 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_instance_id=vps_instance_id,
                 region=region,
                 plan=plan,
-                os_id=os_id,
                 start_args=effective_start_args,
                 image=base_image,
                 container_name=container_name,
@@ -1008,14 +1184,20 @@ class VpsDockerProvider(BaseProviderInstance):
         host.write_file(commands_dir / "shutdown.sh", shutdown_script.encode())
         host.execute_idempotent_command(f"chmod +x {commands_dir / 'shutdown.sh'}")
 
+    @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
-        """Parse build args, separating VPS provisioning args from Docker build args."""
-        return _parse_build_args(
-            build_args,
-            default_region=self.config.default_region,
-            default_plan=self.config.default_plan,
-            default_os_id=self.config.default_os_id,
-        )
+        """Parse build args, separating provisioning knobs from docker build args.
+
+        Each concrete VpsDockerProvider subclass implements its own parser
+        because the set of accepted flags is per-provider (AWS has
+        ``--aws-region=`` / ``--aws-instance-type=`` / ``--aws-ami=``; Vultr
+        and OVH have a simpler region + plan shape; ``MinimalVpsDockerProvider``
+        accepts only ``--git-depth=`` and docker passthrough). For the common
+        region + plan + git-depth shape, ``parse_vps_build_args`` is a ready-made
+        convenience; for custom shapes, compose the lower-level helpers
+        (``extract_single_value_arg``, ``extract_git_depth``,
+        ``raise_if_vps_migration_arg``, ``raise_if_unknown_provider_arg``).
+        """
 
     # =========================================================================
     # Core Lifecycle: stop_host
@@ -1354,11 +1536,20 @@ class VpsDockerProvider(BaseProviderInstance):
 
         return result
 
+    def _get_effective_auto_shutdown_seconds(self) -> int | None:
+        """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
+
+        Subclasses can override this to add provider-specific escape hatches
+        (e.g., a test-only env-var that forces a TTL regardless of project
+        config). The base implementation simply returns the configured value.
+        """
+        return self.config.auto_shutdown_seconds
+
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH-reachable hostnames for VPSes owned by this provider instance.
 
         Each entry is whatever the provider hands back as the SSH target
-        for one of its VPSes -- a public IPv4 (Vultr) or a provider DNS
+        for one of its VPSes -- a public IPv4 (Vultr, AWS) or a provider DNS
         name (OVH classic VPS like ``vps-eec8860b.vps.ovh.us``). The
         discovery machinery below treats it as an opaque ``hostname``
         passed to paramiko.
@@ -1374,6 +1565,17 @@ class VpsDockerProvider(BaseProviderInstance):
         listing API can opt out without overriding.
         """
         return []
+
+    def _credentials_configured(self) -> bool:
+        """Return True iff the provider's API credentials are resolvable.
+
+        Used by ``_find_host_record`` to short-circuit a full discovery sweep
+        when no credentials are available. Subclasses override to check their
+        own credential source. The default returns True so providers that
+        don't carry credentials (test doubles, OVH IAM via env) opt in
+        automatically.
+        """
+        return True
 
     def _read_records_from_vps(
         self,
@@ -1474,6 +1676,10 @@ class VpsDockerProvider(BaseProviderInstance):
             for cached_record in self._host_record_cache.values():
                 if cached_record.certified_host_data.host_name == str(host):
                     return cached_record
+
+        if not self._credentials_configured():
+            logger.warning("{} credentials not configured, cannot resolve host", self.config.backend)
+            return None
 
         records = self._discover_host_records()
         for record in records:
@@ -1919,3 +2125,45 @@ class VpsDockerProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.remove_persisted_agent_data(agent_id)
+
+
+class MinimalVpsDockerProvider(VpsDockerProvider):
+    """``VpsDockerProvider`` for use cases where VPS provisioning is externally managed.
+
+    Pairs with a ``vps_client`` whose provisioning calls raise (e.g.
+    ``ExternallyManagedVpsClient``): some other system (an imbue_cloud pool
+    lease, a hand-rolled provisioner, etc.) already created the VPS. This
+    provider only ever runs the post-provisioning host-setup machinery --
+    ``teardown_container_on_existing_vps`` and ``create_host_on_existing_vps``
+    -- which take a caller-supplied ``outer`` and make no cloud-API calls.
+
+    Build args here are just the docker-side knobs that flow through to
+    ``docker build`` on the leased VPS: there is no cloud provider to
+    select a region / plan / image for. The parser extracts ``--git-depth=N``
+    (still relevant -- it controls the *local* mngr build context, not the
+    VPS) and forwards everything else verbatim. The legacy shared
+    ``--vps-*`` prefix is rejected with a migration error so a caller that
+    still passes the old shape gets a clear pointer rather than having the
+    arg silently land in docker.
+    """
+
+    def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
+        # Composed from the shared helpers rather than hand-rolling the same
+        # git-depth / --vps-* migration handling: this is the same pattern
+        # ``parse_vps_build_args`` and the AWS provider use, just without any
+        # region / plan extraction (provisioning lives outside this provider).
+        args = list(build_args or ())
+        git_depth, args = extract_git_depth(args)
+        docker_build_args: list[str] = []
+        for arg in args:
+            raise_if_vps_migration_arg(arg)
+            docker_build_args.append(arg)
+        # ``region`` / ``plan`` are unused on the externally-managed path
+        # (callers pass them as explicit kwargs to ``create_host_on_existing_vps``),
+        # so the sentinels are harmless.
+        return ParsedVpsBuildOptions(
+            region="",
+            plan="",
+            git_depth=git_depth,
+            docker_build_args=tuple(docker_build_args),
+        )

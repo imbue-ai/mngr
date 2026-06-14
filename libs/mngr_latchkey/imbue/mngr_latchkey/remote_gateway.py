@@ -6,7 +6,9 @@ each agent, this module installs the upstream ``latchkey`` CLI directly on
 the agent's outer host (the VPS) so a gateway can eventually be run there.
 """
 
+import secrets
 import shlex
+import tempfile
 import time
 from pathlib import Path
 from typing import Final
@@ -17,15 +19,21 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
+from imbue.mngr_latchkey.core import CredentialStatus
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.services_catalog import ServiceCatalogError
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
-LATCHKEY_VERSION: Final[str] = "2.15.4"
+LATCHKEY_VERSION: Final[str] = "2.16.0"
 
 # Port inside the container on which the VPS-resident gateway is reachable (the
 # VPS->container reverse tunnel binds it). Deliberately distinct from
@@ -199,27 +207,119 @@ def local_credentials_path(latchkey_directory: Path) -> Path:
     return latchkey_directory / _CREDENTIALS_FILENAME
 
 
-def sync_credentials(host: OuterHostInterface, latchkey_directory: Path) -> None:
-    """Copy the local encrypted latchkey credentials onto the VPS.
+def _services_allowed_for_host(latchkey_directory: Path, host_id: HostId) -> frozenset[str]:
+    """Resolve the canonical service names the host's permissions grant access to.
 
-    Reads ``<latchkey_directory>/credentials.json.enc`` from the local
-    (desktop-side) latchkey directory and writes it to ``~/.latchkey/`` on the
-    VPS so the remote latchkey CLI can decrypt the same credential store.
-    Raises :class:`RemoteGatewayError` if the local file is missing or unreadable.
+    Reads the per-host permissions file and maps its rule scopes back to
+    canonical service names via the bundled catalog. A host with no
+    permissions file (the deny-all default) resolves to the empty set, so
+    no credentials are shipped to it. Raises :class:`RemoteGatewayError`
+    if the permissions file is malformed or the bundled catalog cannot be
+    read (a packaging bug).
     """
-    local_path = local_credentials_path(latchkey_directory)
+    permissions_path = permissions_path_for_host(plugin_data_dir(latchkey_directory), host_id)
+    if not permissions_path.is_file():
+        logger.debug("No permissions file for host {} at {}; shipping no credentials", host_id, permissions_path)
+        return frozenset()
     try:
-        content = local_path.read_bytes()
-    except FileNotFoundError as e:
-        raise RemoteGatewayError(f"Local latchkey credentials file does not exist: {local_path}") from e
-    except OSError as e:
-        raise RemoteGatewayError(f"Failed to read local latchkey credentials file {local_path}: {e}") from e
+        config = load_permissions(permissions_path)
+        return ServicesCatalog().services_for_permissions(config)
+    except (LatchkeyStoreError, ServiceCatalogError) as e:
+        raise RemoteGatewayError(f"Failed to resolve allowed services for host {host_id}: {e}") from e
 
+
+def _services_with_stored_credentials(latchkey: Latchkey, service_names: frozenset[str]) -> frozenset[str]:
+    """Narrow ``service_names`` to those that actually have credentials stored.
+
+    A service can be granted by a host's permissions yet have no
+    credentials in the store (the user never set them up). Asking
+    ``latchkey auth re-encrypt`` to bundle such a service would fail, so
+    each candidate is probed with ``latchkey services info <service>
+    --offline`` and dropped when its credential status is ``MISSING``.
+    The offline probe reports stored state without a network round-trip.
+    Non-``MISSING`` states (``VALID`` / ``INVALID`` / ``UNKNOWN``) are
+    kept: the credentials exist (or their state is indeterminate), so the
+    re-encrypt can include them.
+    """
+    present: set[str] = set()
+    for service_name in sorted(service_names):
+        status = latchkey.services_info(service_name, is_offline=True).credential_status
+        if status is CredentialStatus.MISSING:
+            logger.debug("Service {} has no stored credentials; excluding it from the bundle", service_name)
+        else:
+            present.add(service_name)
+    return frozenset(present)
+
+
+def _remove_remote_credentials(host: OuterHostInterface, remote_path: Path) -> None:
+    """Remove the VPS credential store (idempotent) so no stale credentials linger.
+
+    Used when a host ends up with nothing to ship (deny-all, or every
+    granted service lacks stored credentials). ``rm -f`` never errors on a
+    missing file, so this is a no-op on first provisioning and a cleanup
+    on a later sync that revoked the host's last credential.
+    """
+    result = host.execute_idempotent_command(
+        f"rm -f {shlex.quote(str(remote_path))}", timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS
+    )
+    if not result.success:
+        raise RemoteGatewayError(
+            "Failed to clear latchkey credentials on VPS {}: {}".format(
+                host.get_name(), result.stderr.strip() or result.stdout.strip()
+            )
+        )
+
+
+def sync_credentials(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
+    """Ship a host-scoped subset of the local latchkey credentials onto the VPS.
+
+    Rather than copying the full desktop credential store verbatim, this
+    resolves the canonical services the host's permissions actually grant
+    (via :func:`_services_allowed_for_host`), drops the ones with no
+    stored credentials (via :func:`_services_with_stored_credentials`),
+    then re-encrypts a copy containing *only* those services' credentials
+    with the *same* encryption key
+    (:meth:`Latchkey.export_credentials_subset`). The filtered copy is
+    written to ``~/.latchkey/credentials.json.enc`` on the VPS. Keeping
+    the same key means the VPS gateway's derived password and the agents'
+    permissions-override JWTs keep validating; shipping only the granted,
+    actually-stored services means a VPS compromise cannot leak
+    credentials the agent was never permitted to use.
+
+    When nothing is left to ship, the remote store is removed instead, since
+    ``re-encrypt`` requires at least one service.
+
+    Raises :class:`RemoteGatewayError` if resolving the services, the
+    re-encrypt, or reading the filtered copy fails.
+    """
+    granted = _services_allowed_for_host(latchkey.latchkey_directory, host_id)
+    service_names = _services_with_stored_credentials(latchkey, granted)
     remote_path = _resolve_remote_latchkey_directory(host) / _CREDENTIALS_FILENAME
-    with log_span("Syncing latchkey credentials to VPS {} ({})", host.get_name(), remote_path):
-        # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
-        # the gateway never reads a half-written file mid-sync.
-        host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
+    if not service_names:
+        with log_span(
+            "Clearing latchkey credentials on VPS {} (nothing to ship for host {})", host.get_name(), host_id
+        ):
+            _remove_remote_credentials(host, remote_path)
+        return
+    with tempfile.TemporaryDirectory(prefix="mngr-latchkey-creds-") as tmpdir:
+        try:
+            latchkey.export_credentials_subset(Path(tmpdir), service_names)
+        except LatchkeyError as e:
+            raise RemoteGatewayError(f"Failed to export filtered latchkey credentials for host {host_id}: {e}") from e
+        subset_path = Path(tmpdir) / _CREDENTIALS_FILENAME
+        try:
+            content = subset_path.read_bytes()
+        except OSError as e:
+            raise RemoteGatewayError(f"Failed to read filtered latchkey credentials at {subset_path}: {e}") from e
+        with log_span(
+            "Syncing {} service(s) of latchkey credentials to VPS {} ({})",
+            len(service_names),
+            host.get_name(),
+            remote_path,
+        ):
+            # ``is_atomic`` writes to a sibling ``.tmp`` then ``mv``s it into place, so
+            # the gateway never reads a half-written file mid-sync.
+            host.write_file(remote_path, content, mode=_REMOTE_FILE_MODE, is_atomic=True)
 
 
 def sync_permissions(host: OuterHostInterface, latchkey_directory: Path, host_id: HostId) -> None:
@@ -282,7 +382,7 @@ def _pidfile_guarded_launch_script(pid_filename: str, cmdline_marker: str, launc
     )
 
 
-def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
+def _build_gateway_start_script(outer_port: int, key_file_path: Path, password_file_path: Path) -> str:
     """Build a script that starts a detached ``latchkey gateway`` unless one is already running.
 
     Launches the gateway under ``nohup`` with stdio detached so it outlives the
@@ -291,46 +391,103 @@ def _build_gateway_start_script(outer_port: int, encryption_key: str) -> str:
     the container via the reverse tunnel, never exposed off-host. Idempotency is
     via a PID file (see :func:`_pidfile_guarded_launch_script`).
 
-    ``encryption_key`` is interpolated as ``LATCHKEY_ENCRYPTION_KEY`` so the
-    gateway can decrypt the synced ``credentials.json.enc`` (it must be the same
-    key the desktop gateway uses).
+    The encryption key and the gateway listen password are *not* interpolated
+    into the command. Instead the caller writes them to the two 0600 temp files
+    at ``key_file_path`` / ``password_file_path``, and this script reads them
+    into ``LATCHKEY_ENCRYPTION_KEY`` / ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` and
+    then deletes the files immediately. Only the *paths* appear in the command
+    string, so the secrets never reach a process listing (``/proc/<pid>/cmdline``)
+    nor any command log, and they do not linger on the VPS disk. The reads are
+    synchronous in this (foreground) shell, so the values are captured into the
+    environment *before* the gateway is backgrounded: the gateway inherits them
+    at exec time and so never needs the files (deleting them right after the
+    read is therefore race-free).
+
+    ``LATCHKEY_ENCRYPTION_KEY`` must be the same key the desktop gateway uses so
+    the gateway can decrypt the synced ``credentials.json.enc``.
+    ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` is the desktop-derived shared password
+    (the value :meth:`Latchkey.derive_gateway_password` produces -- a pure
+    function of the shared encryption key) the agents already present as
+    ``LATCHKEY_GATEWAY_PASSWORD``.
 
     ``LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`` is set so the VPS gateway never
     refreshes OAuth credentials. The credentials here are a synced *copy* of the
     desktop's store (see :func:`sync_credentials`); the desktop-side latchkey is
     the single owner of credential refresh.
     """
+    key_q = shlex.quote(str(key_file_path))
+    password_q = shlex.quote(str(password_file_path))
     # Detach from the SSH session: nohup + closed stdin + redirected stdio so
-    # the channel can close while the gateway keeps running.
+    # the channel can close while the gateway keeps running. The two secret env
+    # vars are exported into this shell above, so the backgrounded gateway
+    # inherits them; only the non-secret config is interpolated here.
     launch_command = (
         f"LATCHKEY_GATEWAY_PORT={outer_port} LATCHKEY_GATEWAY_LISTEN_HOST=127.0.0.1 "
         f"LATCHKEY_DISABLE_COUNTING=1 LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1 "
-        f"LATCHKEY_ENCRYPTION_KEY={shlex.quote(encryption_key)} "
         f"nohup latchkey gateway "
         f'</dev/null >"$HOME/.latchkey/{_REMOTE_GATEWAY_LOG_FILENAME}" 2>&1'
     )
-    return _pidfile_guarded_launch_script(
+    guarded = _pidfile_guarded_launch_script(
         pid_filename=_REMOTE_GATEWAY_PID_FILENAME,
         cmdline_marker="gateway",
         launch_command=launch_command,
     )
+    return "\n".join(
+        (
+            "set -e",
+            # Safety net: drop the secret files on any early exit (e.g. a failed
+            # read aborts under ``set -e``) before the explicit deletion runs.
+            f"trap 'rm -f {key_q} {password_q}' EXIT",
+            # Read both secrets from their 0600 temp files into this shell's
+            # environment (synchronously, before any backgrounding).
+            f'LATCHKEY_ENCRYPTION_KEY="$(cat {key_q})"',
+            f'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(cat {password_q})"',
+            "export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD",
+            # The values now live in the environment (which the gateway inherits
+            # at launch), so delete the files immediately and drop the now-
+            # redundant trap.
+            f"rm -f {key_q} {password_q}",
+            "trap - EXIT",
+            guarded,
+        )
+    )
 
 
-def _ensure_latchkey_gateway_running(host: OuterHostInterface, latchkey_directory: Path) -> None:
+def _ensure_latchkey_gateway_running(
+    host: OuterHostInterface, latchkey_directory: Path, gateway_password: str
+) -> None:
     """Start ``latchkey gateway`` on the VPS unless it is already running.
 
     Launches ``LATCHKEY_GATEWAY_PORT=<OUTER_PORT> latchkey gateway`` bound to the
-    VPS loopback, detached so it survives the SSH session, with the local
-    latchkey encryption key (from ``<latchkey_directory>/encryption_key``)
-    injected as ``LATCHKEY_ENCRYPTION_KEY`` so it can decrypt the synced
-    credentials. Idempotent: a no-op when a gateway process is already present.
+    VPS loopback, detached so it survives the SSH session. The local latchkey
+    encryption key (from ``<latchkey_directory>/encryption_key``) and
+    ``gateway_password`` (the desktop-derived shared password) are written to
+    two short-lived 0600 files under the remote ``$HOME/.latchkey`` directory;
+    the start script reads them into ``LATCHKEY_ENCRYPTION_KEY`` /
+    ``LATCHKEY_GATEWAY_LISTEN_PASSWORD`` and deletes them immediately, so the
+    secrets never appear in a command string (and thus never in a process
+    listing or a log) and never persist on the VPS disk -- which matters because
+    the encrypted ``credentials.json.enc`` already lives there, so a persistent
+    key file beside it would be equivalent to storing the credentials in
+    plaintext. Idempotent: a no-op when a gateway process is already present.
     Raises :class:`RemoteGatewayError` if loading the key or the launch fails.
     """
     try:
         encryption_key = load_or_create_encryption_key(latchkey_directory).get_secret_value()
     except LatchkeyEncryptionKeyPermissionError as e:
         raise RemoteGatewayError(str(e)) from e
-    script = _build_gateway_start_script(OUTER_PORT, encryption_key)
+    remote_dir = _resolve_remote_latchkey_directory(host)
+    # Random, non-descriptive basenames per launch: they avoid collisions
+    # between concurrent provisions, keep the names unpredictable, and -- unlike
+    # descriptive names -- do not advertise which secret each file holds to
+    # anyone who can merely list the directory. The start script is handed the
+    # exact paths, so the names need not be meaningful; the files are 0600, read
+    # into the gateway's environment, and deleted immediately.
+    key_file_path = remote_dir / f"{secrets.token_hex(16)}.tmp"
+    password_file_path = remote_dir / f"{secrets.token_hex(16)}.tmp"
+    host.write_file(key_file_path, encryption_key.encode("utf-8"), mode=_REMOTE_FILE_MODE)
+    host.write_file(password_file_path, gateway_password.encode("utf-8"), mode=_REMOTE_FILE_MODE)
+    script = _build_gateway_start_script(OUTER_PORT, key_file_path, password_file_path)
     host_name = host.get_name()
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         result = host.execute_idempotent_command(script, timeout_seconds=_REMOTE_COMMAND_TIMEOUT_SECONDS)
@@ -535,14 +692,17 @@ def provision_remote_gateway(
     container_ssh_user: str,
     container_ssh_port: int,
     latchkey_directory: Path,
+    gateway_password: str,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway and tunnel it into the agent's container.
 
     Runs the full remote-gateway sequence on the agent's outer host (the VPS):
     install the latchkey CLI, start the gateway on the VPS loopback (with the
     local encryption key from ``latchkey_directory`` so it can decrypt synced
-    credentials), mint an ad-hoc VPS->container keypair, and reverse-tunnel the
-    gateway into the container so the agent's
+    credentials, and ``gateway_password`` -- the desktop-derived shared password
+    -- so it accepts the same agent traffic the local gateway does), mint an
+    ad-hoc VPS->container keypair, and reverse-tunnel the gateway into the
+    container so the agent's
     ``LATCHKEY_GATEWAY=http://127.0.0.1:INNER_PORT`` reaches it. The container's
     ssh user/port come from the inner host's SSH info; the container itself is
     located on the VPS by its host-id label.
@@ -559,7 +719,7 @@ def provision_remote_gateway(
         )
         return
     _ensure_latchkey_installed(host)
-    _ensure_latchkey_gateway_running(host, latchkey_directory)
+    _ensure_latchkey_gateway_running(host, latchkey_directory, gateway_password)
     container_name = _resolve_container_name_for_host(host, host_id)
     container_ssh_key_path = _ensure_container_tunnel_keypair(
         host, container_name=container_name, container_ssh_user=container_ssh_user

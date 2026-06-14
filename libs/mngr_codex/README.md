@@ -56,10 +56,9 @@ Set fields under an `[agent_types.codex]` table in your mngr config, or pass ove
 - `config_overrides` — free-form key/values merged last into the per-agent `config.toml`.
 - `auto_dismiss_dialogs` — when `true`, trust the repo and allow the hook bypass without
   prompting. Default: `false`.
-- `check_for_updates` — when `true`, check at provision whether the codex CLI is outdated
-  and surface it (see "Updates" below). Default: `true`.
-- `auto_update` — when `true`, run `codex update` automatically when an update is available,
-  without prompting. Default: `false`.
+- `update_policy` — how mngr handles an outdated codex CLI at provision (see "Updates" below):
+  `AUTO` (run `codex update`, no prompt), `ASK` (prompt on an attended local run, else just
+  notify), or `NEVER` (only notify). Default: `ASK`.
 - `emit_common_transcript` — emit the common-schema transcript. Default: `true`.
 
 ### Updates
@@ -69,13 +68,17 @@ own "Update available!" prompt is **blocking** and would intercept the first mes
 (an Enter could even select "Update now"). mngr surfaces updates itself instead: at provision it
 compares `codex --version` against the `latest_version` codex last recorded in its own
 `~/.codex/version.json` (no network call — codex refreshes that file on its own throttled
-schedule during your normal codex use). When codex is outdated it, in order of precedence: runs
-`codex update` if `auto_update` is set; otherwise prompts to update now if interactive; otherwise
-logs a non-blocking notice. `codex update` self-detects the install method (it runs
-`brew upgrade --cask codex` for a brew install, `npm i -g` for npm, the curl installer for
-standalone), so mngr needs no per-method logic. Updating is optional — an outdated codex still
-runs — so a declined prompt or a non-interactive run never blocks agent creation, and `--yes`
-does **not** trigger a global upgrade (only the explicit `auto_update` opt-in does).
+schedule during your normal codex use). The check always runs and is best-effort: any probe or
+parse failure is swallowed (debug-logged) and never blocks agent creation. When codex is outdated,
+the action is governed by `update_policy`: `AUTO` runs `codex update`; `ASK` (the default) prompts
+to update now only on an *attended* run — a local host driven from an interactive terminal, and
+not `--yes` — otherwise it logs a non-blocking notice (so an unattended remote/deploy agent
+defaults to neither prompting nor upgrading the remote's global install); `NEVER` only logs the
+notice. `codex update` self-detects the install method (it runs `brew upgrade --cask codex` for a
+brew install, `npm i -g` for npm, the curl installer for standalone), so mngr needs no per-method
+logic. Updating is optional — an outdated codex still runs — so a declined prompt, a `NEVER`
+policy, or a non-interactive run never blocks agent creation, and `--yes` does **not** trigger a
+global upgrade (only the explicit `AUTO` policy does).
 
 ### Model note
 

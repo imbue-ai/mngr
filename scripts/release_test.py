@@ -79,8 +79,8 @@ def test_gate_blocks_and_returns_false_with_pending_entries(
     assert "2 pending changelog entries" in err
     assert "libs/mngr/changelog/fake-a.md" in err
     assert "libs/mngr_lima/changelog/fake-b.md" in err
-    # The error path prints the on-demand command for the user to copy.
-    assert "mngr schedule run" in err
+    # The error path points the user at the on-demand trigger recipe.
+    assert "just changelog-trigger" in err
 
 
 def test_realign_dep_string_realigns_existing_pin_regardless_of_force() -> None:
