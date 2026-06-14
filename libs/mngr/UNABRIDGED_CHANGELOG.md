@@ -4,6 +4,56 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-13
+
+Fixed a data-loss bug in volume garbage collection and made discovery fail
+loudly (instead of silently skipping) when a provider's backend is unreachable.
+
+The data-loss bug: when the Docker daemon became briefly unavailable during a
+`mngr` operation that runs GC (e.g. a Docker daemon restart), the Docker
+provider's `discover_hosts` swallowed the failure and returned an empty host
+list. GC then treated every volume as orphaned and deleted it -- wiping the
+per-host data of still-live hosts, so their containers could no longer be
+restarted. The Docker provider's `discover_hosts` now raises
+`ProviderUnavailableError` when the daemon is unreachable instead of returning
+`[]`, so an unreachable daemon can no longer be mistaken for "this provider has
+zero hosts". GC skips an unavailable provider at its own boundary (it must not
+delete volumes it cannot verify).
+
+"Unreachable" is judged by the transport, not by the exception base class: a
+dropped connection or timeout (including the daemon disappearing mid-operation,
+which surfaces as a raw `requests` connection error rather than a
+`DockerException`) maps to `ProviderUnavailableError`, while a
+`docker.errors.APIError` -- meaning the daemon was reached and answered with an
+error -- propagates as a real fault. This keeps a healthy-but-erroring daemon
+from being silently treated as offline (and its provider wrongly skipped by GC).
+
+Discovery no longer hides an unreachable provider. Previously, multi-provider
+discovery silently skipped a provider whose backend was down. That meant a
+command could quietly do a partial job -- e.g. `mngr message my-agent`, intended
+to reach every instance of `my-agent`, could miss an instance on a down provider
+without telling you. Now `discover_hosts_and_agents` propagates
+`ProviderUnavailableError`, so commands that scan every provider (`message`,
+`limit`, `snapshot`, `create`) fail loudly rather than silently omit agents on
+the unreachable provider.
+
+Targeted commands now scope discovery so an *unrelated* down provider can't fail
+them. `mngr rsync`, `mngr git push`/`pull`, and `mngr event <host>` now resolve
+only the provider(s) that could actually hold the target -- via the `.PROVIDER`
+qualifier and/or the agent name (resolved through the discovery event stream) --
+instead of blindly scanning every provider. So `mngr rsync ./x agent@host.local`
+keeps working when an unrelated Docker daemon is down (Docker is never queried),
+while a command whose target really is on the down provider fails with a clear
+"provider is not available" error.
+
+- `mngr snapshot create`, `mngr snapshot list`, and `mngr snapshot destroy` now take agent and host targets as a single positional list. The `--agent`/`--host` flags have been removed; write `agent`, `agent@host[.provider]`, `@host[.provider]`, or a bare `host-...` ID instead.
+- `mngr event @host[.provider]` now narrows discovery to the pinned provider, matching the agent path's behavior.
+
+- `mngr message` (alias `msg`) no longer accepts `--provider`. The set of providers to query during discovery is now derived from the agent addresses themselves: the union of providers named by the addresses, or a full scan if any address omits its provider. Previously the discovery call ignored the providers named by the addresses and only honored `--provider`, so e.g. `mngr msg agent@host.provider_a --provider provider_b` would query the wrong provider and report the agent missing.
+- Internally, `mngr message` now routes through `find_all_agents` like the other agent-address subcommands instead of running its own CEL-filter pipeline. The `send_message_to_agents` API now accepts a pre-resolved `Sequence[AgentMatch]` instead of CEL `include_filters` / `exclude_filters` / `all_agents` / `provider_names`. No behavioral change for users beyond the `--provider` removal above.
+
+Fixed the DESCRIPTION (and other prose) sections of `mngr <command> --help` to be indented to the man-page depth of seven spaces in an interactive terminal (the pager / rich path). Previously these sections rendered flush-left, unlike the piped/plain output and the surrounding sections.
+
 ## 2026-06-12
 
 Updated the auto-generated `mngr create` docs for the `--adopt-session` option: a bare session ID is now searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents.
