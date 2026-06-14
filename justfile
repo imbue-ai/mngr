@@ -838,14 +838,14 @@ release *args:
 # removes any existing schedule before recreating, so this is also how you
 # redeploy after editing scripts/changelog_consolidation_prompt.md or
 # scripts/changelog_deploy.sh.
-# Authoritative changelog gate: fails if any project this branch touches is
-# missing its per-PR entry file. Computes the changed-file set against the real
-# base branch, so it must run on a real checkout (locally or the GitHub Actions
-# runner), NOT inside an offload sandbox -- the sandbox has no base ref and the
-# check would pass vacuously. Pure stdlib, so no `uv sync` needed.
+# Diffs against the real base branch, so it must run on a real checkout
+# (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
+# sandbox has no base ref and the check would pass vacuously. Bare `python`
+# (no `uv run`) because the gate is deliberately stdlib-only: no `uv sync`,
+# matching how the `check-changelog` CI job invokes it.
 # Check that this branch has a changelog entry per project it touches.
 check-changelog:
-    uv run python -m scripts.check_changelog_entries
+    python -m scripts.check_changelog_entries
 
 # (Re)deploy the nightly changelog-consolidation schedule from current source.
 changelog-deploy:
