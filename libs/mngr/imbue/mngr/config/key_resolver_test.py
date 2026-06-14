@@ -469,6 +469,18 @@ def test_combine_patches_higher_bare_dict_strips_lower_contribution() -> None:
     assert combined == {"permissions": {"deny__extend": ["Z"]}}
 
 
+def test_combine_patches_lower_bare_dict_with_nested_marker_plus_higher_extend() -> None:
+    """Row 2, dict case: a lower *bare* dict that itself carries a nested marker,
+    combined with a higher dict marker, must interleave the nested markers (not copy
+    the lower marker verbatim). The bare ``f`` slot is kept, and the nested
+    ``allow__extend`` markers from both layers accumulate in lower-then-higher order
+    so a later fold against a base extends correctly without inverting precedence."""
+    lower = {"permissions": {"defaultMode": "acceptEdits", "allow__extend": ["X"]}}
+    higher = {"permissions__extend": {"allow__extend": ["Y"]}}
+    combined = combine_patches(lower, higher)
+    assert combined == {"permissions": {"defaultMode": "acceptEdits", "allow__extend": ["X", "Y"]}}
+
+
 def _resolve_fold(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """The provision fold used in the associativity checks: resolve ``patch`` onto
     the concrete ``base`` and overlay the result, returning the full merged dict
@@ -495,6 +507,21 @@ def _resolve_fold(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]
         ),
         # Disjoint keys across layers (no whole-dict clobber).
         ({"p": {"k": 1}}, {"a__extend": ["x"]}, {"b__extend": ["y"]}),
+        # Lower *bare* dict carrying a nested marker + higher dict marker: the nested
+        # markers must interleave (lower then higher), not let the lower marker
+        # resolve last and override the higher contribution.
+        (
+            {"permissions": {"allow": ["base"]}},
+            {"permissions": {"defaultMode": "acceptEdits", "allow__extend": ["git"]}},
+            {"permissions__extend": {"allow__extend": ["npm"]}},
+        ),
+        # Value-level precedence: a lower bare dict and a higher marker both touch the
+        # same nested key; the higher layer must win at that key.
+        (
+            {"a": "base"},
+            {"a": {"c__extend": {"b": "lower"}}},
+            {"a__extend": {"c__extend": {"b": "higher"}}},
+        ),
     ],
 )
 def test_combine_patches_is_associative_with_the_fold(

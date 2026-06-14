@@ -218,8 +218,20 @@ def combine_patches(
             continue
         field_path = ".".join(path + (bare,))
         if bare in lower and not is_extend_key(bare):
-            # Lower has a concrete bare value -> extend it; stays bare.
-            result[bare] = apply_extend(lower[bare], value, field_path)
+            lower_value = lower[bare]
+            if isinstance(lower_value, Mapping) and isinstance(value, Mapping):
+                # Both sides are dict *patches* (either may carry nested markers).
+                # ``apply_extend`` would treat ``lower_value`` as a marker-free base
+                # and copy its nested markers verbatim, so they would later resolve in
+                # the wrong precedence order (lower over higher) and break
+                # associativity. Recurse via ``combine_patches`` instead, which
+                # interleaves both sides' nested markers correctly; the result stays
+                # bare (lower's bare ``f`` won the slot).
+                result[bare] = combine_patches(dict(lower_value), dict(value), path=path + (bare,))
+            else:
+                # Lower has a concrete bare leaf (list/tuple/set/scalar) -> extend it;
+                # stays bare. Leaf shapes carry no nested markers.
+                result[bare] = apply_extend(lower_value, value, field_path)
         elif key in lower:
             # Lower has a marker for the same field -> combine the marker values.
             result[key] = _combine_marker_values(lower[key], value, field_path, path + (bare,))
