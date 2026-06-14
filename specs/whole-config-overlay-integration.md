@@ -235,6 +235,30 @@ The value-merge axis of the integration is fully de-risked. What remains is prod
 coupled sparse-construction flip at the top level), the narrowing-routing axis (where enabler (b)
 returns), and folding each family in one at a time -- engineering, not feasibility.
 
+### Production wiring status (in progress on this branch)
+
+`AgentTypeConfig.merge_with` and `MngrConfig.merge_with` are now WIRED to the overlay pipeline in
+production (`config/overlay_merge.py::merge_models_via_overlay`), behavior-identical (frozen-old
+reference equivalence tests + the full config/cli/agents/mngr_claude suites green). The wiring
+confirmed the raw-drop-in property empirically and removed the now-dead `_merge_container_dict`
+and `_assign_scalar`.
+
+A notable consequence: the **only** production `merge_with` callers are the loader and
+`common_opts`, both calling `MngrConfig.merge_with`. So `AgentTypeConfig.merge_with` and the six
+sub-model `merge_with` methods (`ProviderInstanceConfig`, `PluginConfig`, `CommandDefaults`,
+`CreateTemplate`, `RetryConfig`, `LoggingConfig`) are now **vestigial in production** -- the
+overlay pipeline's generic `combine` subsumes them. This is the predicted "duplication dissolves"
+outcome; removing them (and their now-redundant tests) is a clean follow-up. Their semantics were
+verified reproduced (incl. `RetryConfig`'s per-field None handling -- the sub-models are sparse, so
+`exclude_unset` + combine matches; and provider `ScalarStrTuple` -- the marker only affects
+narrowing, which the merge doesn't do, and is re-applied on reparse).
+
+Remaining: wire `parent_type` / `_apply_custom_overrides_to_parent_config` (low risk, prototype
+kept); remove the vestigial `merge_with` methods; and the narrowing-routing axis (route
+`detect_settings_narrowing` / the discarded cross-scope narrowings through overlay -- where enabler
+(b) returns). The top-level `parse_config` None-padding can also be dropped now that the overlay
+pipeline's None-drop handles it, but that is optional cleanup, not required.
+
 ## Honest assessment / recommended phasing
 
 The pipeline is *feasible* (the `exclude_unset` insight is the load-bearing reason), but the
