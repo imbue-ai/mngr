@@ -530,9 +530,8 @@ _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 # EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
 # 2 GB) is too small for the full forever-claude-template build (uv sync + npm
-# ci/build OOMs/thrashes on 2 GB); t3.medium (4 GB) matches what the vultr
-# template provisions.
-_AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.medium"
+# ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
+_AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
 
 
 class BootstrapError(ValueError):

@@ -110,9 +110,9 @@ def aws_release_env(tmp_path: Path) -> Iterator[dict[str, str]]:
         f"\n[providers.{_AWS_PROVIDER_NAME}]\n"
         'backend = "aws"\n'
         f'default_region = "{_REGION}"\n'
-        # The default t3.small has only 2 GB; t3.medium (4 GB) matches what the
-        # vultr template provisions and gives Docker + runsc room to work.
-        'default_instance_type = "t3.medium"\n'
+        # Match the minds default (t3.large, 8 GB); the t3.small default's 2 GB
+        # is too small to give Docker + runsc room to work.
+        'default_instance_type = "t3.large"\n'
         # gVisor/runsc: install + select the runsc runtime for the agent
         # container, exactly as the minds-written provider block does.
         "install_gvisor_runtime = true\n"
