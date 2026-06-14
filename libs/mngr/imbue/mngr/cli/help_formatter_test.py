@@ -551,16 +551,6 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
         )
 
 
-# Per-command, long-form flags that are intentionally omitted from the synopsis
-# (niche flags, alternative spellings of things already represented, or flags
-# whose meaning is conveyed by a positional). If you add a new flag and decide
-# it doesn't belong in the synopsis, add it here; otherwise extend the synopsis.
-# The dict key is the help-registry key (e.g. "create", "snapshot.create").
-#
-# Most entries below were the baseline at the time the ratchet landed -- they
-# capture existing omissions so the test can run green while still catching
-# *new* drift. Promoting them to the synopsis (and removing them here) is a
-# fine follow-up.
 # The standard agent-filter flags injected by
 # ``imbue.mngr.cli.filter_opts.add_agent_filter_options``. Every command that
 # uses that decorator inherits this set under the "Filtering" optgroup; their
@@ -583,6 +573,16 @@ _AGENT_FILTER_FLAGS: frozenset[str] = frozenset(
 )
 
 
+# Per-command, long-form flags that are intentionally omitted from the synopsis
+# (niche flags, alternative spellings of things already represented, or flags
+# whose meaning is conveyed by a positional). If you add a new flag and decide
+# it doesn't belong in the synopsis, add it here; otherwise extend the synopsis.
+# The dict key is the help-registry key (e.g. "create", "snapshot.create").
+#
+# Most entries below were the baseline at the time the ratchet landed -- they
+# capture existing omissions so the test can run green while still catching
+# *new* drift. Promoting them to the synopsis (and removing them here) is a
+# fine follow-up.
 _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "create": frozenset(
         {
