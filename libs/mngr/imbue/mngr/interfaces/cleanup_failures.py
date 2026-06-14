@@ -1,7 +1,6 @@
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
-from typing import assert_never
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -51,14 +50,17 @@ class CleanupFailedGroup(ExceptionGroup[CleanupFailedError]):
 
 
 def _iter_cleanup_failures(group: BaseExceptionGroup[CleanupFailedError]) -> Iterator[CleanupFailure]:
-    """Yield every leaf's structured ``CleanupFailure``, recursing through nested groups."""
+    """Yield every leaf's structured ``CleanupFailure``, recursing through nested groups.
+
+    ``group.exceptions`` is ``CleanupFailedError | BaseExceptionGroup[CleanupFailedError]``; the
+    two cases are exhaustive, so the match needs no catch-all.
+    """
     for leaf in group.exceptions:
-        if isinstance(leaf, CleanupFailedError):
-            yield leaf.failure
-        elif isinstance(leaf, BaseExceptionGroup):
-            yield from _iter_cleanup_failures(leaf)
-        else:
-            assert_never(leaf)
+        match leaf:
+            case CleanupFailedError():
+                yield leaf.failure
+            case BaseExceptionGroup():
+                yield from _iter_cleanup_failures(leaf)
 
 
 @contextmanager
