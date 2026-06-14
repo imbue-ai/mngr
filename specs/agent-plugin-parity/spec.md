@@ -180,7 +180,7 @@ Y = implemented, partial = present but incomplete, - = absent (a gap), n/a = not
 | Session preserve on destroy | Y (online + offline) | - | - | - | - |
 | Streaming snapshot (live view) | Y | - | - | - | - |
 | Deploy file/env contributions | Y | - | - | - | - |
-| Field generators (waiting_reason) | Y (online) | - (blocked: no event) | n/a (no prompt) | - (doable, unimpl) | Y (online; PERMISSIONS + END_OF_TURN) |
+| Field generators (waiting_reason) | Y (online) | - (blocked: no event) | n/a (no prompt) | - (doable, unimpl) | Y (online) |
 | Installation management | Y | - | Y | - (no version pinning) | partial (mngr-side update notify + opt-in auto-update; no pinning) |
 | Extra agent subtypes | Y (guardian/fairy/headless) | - | - | - | - (app-server variant deferred) |
 
