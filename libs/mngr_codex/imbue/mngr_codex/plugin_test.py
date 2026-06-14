@@ -25,6 +25,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.utils.polling import wait_for
@@ -42,8 +43,6 @@ from imbue.mngr_codex.codex_config import is_project_trusted
 from imbue.mngr_codex.plugin import CodexAgent
 from imbue.mngr_codex.plugin import CodexAgentConfig
 from imbue.mngr_codex.plugin import CodexUpdatePolicy
-from imbue.mngr_codex.plugin import WaitingReason
-from imbue.mngr_codex.plugin import _classify_waiting_reason
 from imbue.mngr_codex.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_codex.plugin import _waiting_reason
 from imbue.mngr_codex.plugin import agent_field_generators
@@ -637,24 +636,6 @@ def test_resolve_lifecycle_state_for_permission(
     base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
 ) -> None:
     assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
-
-
-@pytest.mark.parametrize(
-    "is_active, is_blocked, expected",
-    [
-        # Idle (turn over): END_OF_TURN regardless of a stranded permission marker.
-        (False, False, WaitingReason.END_OF_TURN),
-        (False, True, WaitingReason.END_OF_TURN),
-        # In a turn: PERMISSIONS only while genuinely blocked, else actively running.
-        (True, True, WaitingReason.PERMISSIONS),
-        (True, False, None),
-    ],
-)
-def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: WaitingReason | None) -> None:
-    """The shared gating rule used by both get_lifecycle_state and the waiting_reason
-    field generator: PERMISSIONS is gated on is_active, so a stranded marker (active
-    absent) never yields PERMISSIONS."""
-    assert _classify_waiting_reason(is_active, is_blocked) == expected
 
 
 @pytest.mark.tmux
