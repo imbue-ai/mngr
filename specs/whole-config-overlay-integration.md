@@ -154,6 +154,38 @@ kind (scalars, container dicts, `SettingsPatchField`, `Static*`/`StringDerivedTu
 fields, `parent_type` chains). Build that harness before swapping the production path; keep the
 old path until it is green across the corpus.
 
+## Prototype result (AgentTypeConfig slice -- proven)
+
+A read-only, additive prototype (`config/overlay_merge_prototype.py` + property test, production
+untouched) validated the pipeline against `AgentTypeConfig`/`ClaudeAgentConfig.merge_with`:
+**30/30 `old == new` cases pass**, existing config tests green.
+
+Findings:
+
+- **The core insight holds with zero ceremony.** `override.model_dump(exclude_unset=True)` +
+  `base.model_dump()` + bare-`Default` `combine` reproduces assign-by-set-field directly. No
+  per-scalar handling.
+- **Only `settings_overrides` needed pre-processing:** rename the `SettingsPatchField` key to
+  `<field>__extend` on **both** sides so the algebra does `Extend`-over-`Extend` (accumulate),
+  then strip the synthetic suffix after merge. The marked field set is read generically from
+  `model_fields[...].metadata` -- no field name hard-coded.
+- **The one real discovery: use `lower`, not `finalize`, on the combined patch.** `merge_with`
+  stores the `combine_patches` output **verbatim** (inner `permissions__extend` / `allow__extend`
+  markers stay unresolved until `_build_settings_json`). `finalize` over-resolved them and
+  diverged; `lower` preserves them and matches.
+- **`cli_args` / `StringDerivedTuple` is a *non-issue* for the value merge.** The marker only
+  affects narrowing *warnings*, which `merge_with` does not perform; pydantic `==` compares
+  values (and `StringDerivedTuple == tuple`), not markers. So **the JSON-serializer enabler
+  "(b)" is NOT on the critical path for the merge** -- it matters only if/when the
+  `MngrConfig`-level narrowing is routed through overlay. This downgrades (b) from "step 1."
+- **Subclass works:** reparse via `type(base).model_validate(...)`; subclass-only fields
+  round-trip. pydantic `==` ignores `model_fields_set`, so reparse re-marking all fields as set
+  is harmless.
+- **Mode: python.** Matches what `merge_with` dumps; no json-mode coercion surface needed here.
+
+So the approach is proven on the representative slice. The remaining risk is **`MngrConfig`**, not
+`AgentTypeConfig`.
+
 ## Honest assessment / recommended phasing
 
 The pipeline is *feasible* (the `exclude_unset` insight is the load-bearing reason), but the
