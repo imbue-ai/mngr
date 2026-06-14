@@ -533,8 +533,6 @@ def config_set(ctx: click.Context, key: str, value: str, **kwargs: Any) -> None:
     try:
         _config_set_impl(ctx, key, value, **kwargs)
     except OverlayError as e:
-        # Catches mngr's own ``ConfigParseError`` (a subclass) plus any raw
-        # ``OverlayError`` from the merge algebra (e.g. a malformed ``__extend``).
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:
@@ -641,8 +639,6 @@ def config_extend(ctx: click.Context, key: str, value: str, **kwargs: Any) -> No
     try:
         _config_extend_impl(ctx, key, value, **kwargs)
     except OverlayError as e:
-        # Catches mngr's own ``ConfigParseError`` (a subclass) plus any raw
-        # ``OverlayError`` from the merge algebra (e.g. a malformed ``__extend``).
         logger.error("Invalid configuration: {}", e)
         ctx.exit(1)
     except AbortError as e:
