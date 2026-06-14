@@ -428,7 +428,7 @@ def _slice_run_in_container(
         baked.ssh_key_path,
         # Bake-time op to a container we just created, reached at a box-forwarded
         # port that earlier slices have reused with different host keys. Don't
-        # consult/!write the operator's shared known_hosts (a stale entry for this
+        # consult or write the operator's shared known_hosts (a stale entry for this
         # box:port from a prior slice would fail strict checking and break the
         # teardown). Mirrors the OVH admin bake's container SSH (`_run_ssh_command`).
         "-o",
