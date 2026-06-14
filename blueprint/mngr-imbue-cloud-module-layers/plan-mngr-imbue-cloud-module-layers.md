@@ -192,62 +192,59 @@ import it from there into `plugin/backends.py` (tier 1, importing lower — allo
 
 ## Compatibility with external importers
 
-`apps/minds` and `apps/remote_service_connector` import moved modules by path. Handle this in two commits
-within the same PR so the move stays mechanical and reviewable while leaving no lingering indirection:
+`apps/minds` and `apps/remote_service_connector` import moved modules by path. **Do not introduce re-export
+shims.** Every import site is rewritten to the new path in the same move, so there is no transitional
+indirection and no leftover cruft to remember to delete.
 
-1. **Move commit.** Create the packages, move files, update intra-plugin imports, add the contract and the
-   entry-point path changes. Add temporary thin re-export modules at each old root path (e.g. old
-   `bare_metal.py` re-exports the public names from `slices/bare_metal.py` via explicit
-   `from … import X as X` lines — never `import *`, never `__all__`, per the style guide) so the two external
-   projects keep working unchanged and the diff is easy to verify.
-2. **Cleanup commit.** Rewrite the external import sites in `apps/minds` and `apps/remote_service_connector` to
-   the new paths and delete the re-export shims. End state: no shims remain.
-
-**Decision to confirm with the user:** whether to keep the two-commit shim approach above, or skip shims and
-rewrite all in-repo call sites directly in the move commit (smaller indirection, larger single diff). The
-two-commit approach is recommended for reviewability.
+Because this is a monorepo, every importer is in-tree and editable in one pass: update the intra-plugin imports
+*and* the `apps/minds` + `apps/remote_service_connector` import sites together, in a single commit, so the tree
+stays green (no commit ever leaves a moved module unreachable from its callers). This is mechanical —
+each moved module has a known old path and a known new path, so the rewrite is a deterministic path
+substitution across the repo, verifiable by grepping that no `imbue.mngr_imbue_cloud.<old_path>` references
+remain. The resulting diff is larger than a shim-based move but contains zero indirection.
 
 Move the co-located test files alongside their modules (`bare_metal_test.py` -> `slices/bare_metal_test.py`,
 etc.), preserving the `*_test.py` (unit) and `test_*.py` (integration/acceptance) suffixes so test discovery
-and the test-type conventions are unaffected.
+and the test-type conventions are unaffected. Test files import the modules under test by path too, so they are
+part of the same single-pass rewrite.
 
 ## Migration plan (phases)
 
 **Phase 0 — guard.** Confirm a green baseline (`just test-quick libs/mngr_imbue_cloud` and the import-linter
 ratchet) before moving anything.
 
-**Phase 1 — packages, moves, contract (mechanical).**
+**Phase 1 — packages, moves, contract, and all import rewrites (mechanical, single green commit).**
 - Create `plugin/`, `bake/`, `providers/`, `hosts/`, `slices/`, `connector/` (each with empty `__init__.py`).
-- Move files per the layout table (excluding the `instance.py` decomposition, which is Phase 2).
+- Move files per the layout table (excluding the `instance.py` decomposition, which is Phase 2), with their
+  co-located test files.
 - Extract the two backend classes into `plugin/backends.py`; keep `SliceVpsDockerProviderConfig` in
   `providers/slice_provider.py`.
-- Update intra-plugin imports, the entry-point paths, and add the `import-linter` contract + `root_packages`
-  entry.
-- Add re-export shims for external importers (per Compatibility).
-- Run `import-linter` (via the ratchet) and `libs/mngr_imbue_cloud` tests.
+- Rewrite **every** importer to the new paths in the same commit — intra-plugin, the moved test files, and the
+  external `apps/minds` + `apps/remote_service_connector` sites — so no commit ever leaves a moved module
+  unreachable. No shims.
+- Update the entry-point paths and add the `import-linter` contract + `root_packages` entry.
+- Verify no `imbue.mngr_imbue_cloud.<old_path>` references remain (grep), run `import-linter` (via the
+  ratchet), and run the full suite (`just test-offload`) since three projects are touched.
 
 **Phase 2 — decompose `instance.py`.** Split into `providers/{instance,listing,wipe,rebuild}.py`. Re-run tests
 and the contract.
 
-**Phase 3 — external cleanup.** Rewrite `apps/minds` and `apps/remote_service_connector` import sites; delete
-shims. Run the full suite (`just test-offload`).
-
-Each phase is independently committable and leaves the tree green.
+Each phase is independently committable and leaves the tree green. Phase 1 touches three projects in one
+commit (the no-shim trade-off: one larger but indirection-free diff); add a changelog entry for each.
 
 ## Testing and verification
 
 - **Import ordering:** the repo-wide `test_no_import_layer_violations` ratchet enforces the new contract; run
   `uv run lint-imports` (or the meta-ratchet test) after each phase.
-- **No-inline-imports / no-`__init__`-code / no-`TYPE_CHECKING` ratchets:** ensure the moved code and shims do
-  not trip `test_ratchets.py` (shims use explicit `from … import X as X`, not `import *`/`__all__`; package
-  `__init__.py` files stay empty).
+- **No-inline-imports / no-`__init__`-code / no-`TYPE_CHECKING` ratchets:** ensure the moved code does not trip
+  `test_ratchets.py` (package `__init__.py` files stay empty; no inline imports introduced during the split).
 - **Type checking:** `test_no_type_errors` must stay green (run `uv sync --all-packages` first if it reports
   spurious failures after the moves).
 - **Behavior:** the existing `mngr_imbue_cloud`, `minds`, and `remote_service_connector` unit/integration test
   suites are the regression guard — a pure refactor must leave them all passing. Run the full `just
   test-offload` before finishing.
-- **Changelog:** add one `changelog/<branch>.md` entry per touched project (`libs/mngr_imbue_cloud`, and in
-  Phase 3 `apps/minds` + `apps/remote_service_connector`).
+- **Changelog:** add one `changelog/<branch>.md` entry per touched project. Phase 1 touches
+  `libs/mngr_imbue_cloud`, `apps/minds`, and `apps/remote_service_connector`, so all three need an entry.
 
 ## Risks and edge cases
 
@@ -261,8 +258,12 @@ Each phase is independently committable and leaves the tree green.
   the layer order. Validate with the contract.
 - **External coverage config.** The root `pyproject.toml` `--cov=imbue.mngr_imbue_cloud` flag is package-wide
   and unaffected by sub-packaging; no per-module cov paths to update.
-- **Shim lifetime.** Shims must be deleted in Phase 3; a lingering shim re-introduces the flat-import habit the
-  contract is meant to kill. The cleanup commit is part of this work, not a follow-up.
+- **Large single commit.** The no-shim approach makes Phase 1 one commit spanning three projects. Mitigate by
+  keeping it strictly mechanical (path substitution only, no logic edits) and by the grep + `import-linter` +
+  full-suite checks; reviewers can diff with whitespace/path-rename awareness.
+- **Missed importer leaves the tree red.** Because there are no shims, any importer not updated in the move
+  commit fails immediately. This is intended (it surfaces the problem at once rather than hiding it); the
+  pre-commit grep for residual `imbue.mngr_imbue_cloud.<old_path>` references is the guard.
 - **Lima socket-path length / runtime behavior.** None of this work changes runtime paths; behavior risk is
   limited to import wiring, which the test suites cover.
 
