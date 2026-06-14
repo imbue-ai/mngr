@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import CommandDefaults
@@ -848,6 +849,27 @@ def test_detect_settings_narrowing_allows_superset_list(mngr_test_prefix: str) -
     base = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE"])
     override = MngrConfig(prefix=mngr_test_prefix, unset_vars=["BASE", "EXTRA"])
     assert detect_settings_narrowing(base, override) == []
+
+
+class _NestedContainerNamed(FrozenModel):
+    """A sub-model with a field named like a top-level container (``commands``)."""
+
+    commands: dict[str, str] = Field(default_factory=dict)
+
+
+class _OuterWithNested(FrozenModel):
+    nested: _NestedContainerNamed = Field(default_factory=_NestedContainerNamed)
+
+
+def test_detect_settings_narrowing_flags_drop_in_nested_container_named_field() -> None:
+    """A sub-model field named like a top-level container dict (``commands``) is
+    narrowing-checked as a leaf aggregate at its full path -- not mis-treated as a
+    top-level container (which per-key recurses and silently skips dropped keys). The
+    ``_CONTAINER_DICT_FIELD_PATHS`` match is on the full path, so only the actual
+    top-level field qualifies."""
+    base = _OuterWithNested(nested=_NestedContainerNamed(commands={"a": "x"}))
+    override = _OuterWithNested(nested=_NestedContainerNamed(commands={"b": "y"}))
+    assert detect_settings_narrowing(base, override) == ["nested.commands"]
 
 
 def test_detect_settings_narrowing_flags_empty_override_clearing_non_empty_base(mngr_test_prefix: str) -> None:
