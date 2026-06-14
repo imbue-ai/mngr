@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from datetime import timezone
+from typing import Callable
 
 import pluggy
 import pytest
@@ -624,60 +625,84 @@ def test__agent_identifiers_for_targets_empty_input_returns_none() -> None:
 # =============================================================================
 
 
-def _make_snapshot_create_opts(**overrides: object) -> SnapshotCreateCliOptions:
-    """Construct a SnapshotCreateCliOptions with safe defaults; overrides win."""
-    defaults: dict[str, object] = dict(
-        identifiers=("agent1",),
-        name=None,
-        on_error="abort",
-        tag=(),
-        description=None,
-        restart_if_larger_than=None,
-        pause_during=True,
-        wait=True,
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
+def _make_snapshot_create_opts(
+    identifiers: tuple[str, ...] = ("agent1",),
+    name: str | None = None,
+    on_error: str = "abort",
+    tag: tuple[str, ...] = (),
+    description: str | None = None,
+    restart_if_larger_than: str | None = None,
+    pause_during: bool = True,
+    wait: bool = True,
+    output_format: str = "human",
+    quiet: bool = False,
+    verbose: int = 0,
+    log_file: str | None = None,
+    log_commands: bool | None = None,
+    plugin: tuple[str, ...] = (),
+    disable_plugin: tuple[str, ...] = (),
+) -> SnapshotCreateCliOptions:
+    """Construct a SnapshotCreateCliOptions with safe defaults, allowing overrides."""
+    return SnapshotCreateCliOptions(
+        identifiers=identifiers,
+        name=name,
+        on_error=on_error,
+        tag=tag,
+        description=description,
+        restart_if_larger_than=restart_if_larger_than,
+        pause_during=pause_during,
+        wait=wait,
+        output_format=output_format,
+        quiet=quiet,
+        verbose=verbose,
+        log_file=log_file,
+        log_commands=log_commands,
+        plugin=plugin,
+        disable_plugin=disable_plugin,
     )
-    defaults.update(overrides)
-    return SnapshotCreateCliOptions(**defaults)  # type: ignore[arg-type]
 
 
-def _make_snapshot_list_opts(**overrides: object) -> SnapshotListCliOptions:
-    """Construct a SnapshotListCliOptions with safe defaults; overrides win."""
-    defaults: dict[str, object] = dict(
-        identifiers=("agent1",),
-        limit=10,
-        after=None,
-        before=None,
-        output_format="json",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
+def _make_snapshot_list_opts(
+    identifiers: tuple[str, ...] = ("agent1",),
+    limit: int | None = 10,
+    after: str | None = None,
+    before: str | None = None,
+    output_format: str = "json",
+    quiet: bool = False,
+    verbose: int = 0,
+    log_file: str | None = None,
+    log_commands: bool | None = None,
+    plugin: tuple[str, ...] = (),
+    disable_plugin: tuple[str, ...] = (),
+) -> SnapshotListCliOptions:
+    """Construct a SnapshotListCliOptions with safe defaults, allowing overrides."""
+    return SnapshotListCliOptions(
+        identifiers=identifiers,
+        limit=limit,
+        after=after,
+        before=before,
+        output_format=output_format,
+        quiet=quiet,
+        verbose=verbose,
+        log_file=log_file,
+        log_commands=log_commands,
+        plugin=plugin,
+        disable_plugin=disable_plugin,
     )
-    defaults.update(overrides)
-    return SnapshotListCliOptions(**defaults)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
-    ("flag", "overrides"),
+    ("flag", "build_opts"),
     [
-        ("--tag", {"tag": ("k=v",)}),
-        ("--description", {"description": "anything"}),
-        ("--restart-if-larger-than", {"restart_if_larger_than": "5G"}),
-        ("--no-pause-during", {"pause_during": False}),
-        ("--no-wait", {"wait": False}),
+        ("--tag", lambda: _make_snapshot_create_opts(tag=("k=v",))),
+        ("--description", lambda: _make_snapshot_create_opts(description="anything")),
+        ("--restart-if-larger-than", lambda: _make_snapshot_create_opts(restart_if_larger_than="5G")),
+        ("--no-pause-during", lambda: _make_snapshot_create_opts(pause_during=False)),
+        ("--no-wait", lambda: _make_snapshot_create_opts(wait=False)),
     ],
 )
 def test_snapshot_create_future_flags_raise_not_implemented_error(
-    flag: str, overrides: dict[str, object]
+    flag: str, build_opts: Callable[[], SnapshotCreateCliOptions]
 ) -> None:
     """`mngr snapshot create`'s `[future]` flags must still raise NotImplementedError.
 
@@ -691,20 +716,19 @@ def test_snapshot_create_future_flags_raise_not_implemented_error(
         3. Remove the offending case from this test (and the matching
            branch in ``_check_create_future_options``).
     """
-    opts = _make_snapshot_create_opts(**overrides)
     with pytest.raises(NotImplementedError):
-        _check_create_future_options(opts)
+        _check_create_future_options(build_opts())
 
 
 @pytest.mark.parametrize(
-    ("flag", "overrides"),
+    ("flag", "build_opts"),
     [
-        ("--after", {"after": "2026-01-01"}),
-        ("--before", {"before": "2026-01-01"}),
+        ("--after", lambda: _make_snapshot_list_opts(after="2026-01-01")),
+        ("--before", lambda: _make_snapshot_list_opts(before="2026-01-01")),
     ],
 )
 def test_snapshot_list_future_flags_raise_not_implemented_error(
-    flag: str, overrides: dict[str, object]
+    flag: str, build_opts: Callable[[], SnapshotListCliOptions]
 ) -> None:
     """`mngr snapshot list`'s `[future]` flags must still raise NotImplementedError.
 
@@ -718,6 +742,5 @@ def test_snapshot_list_future_flags_raise_not_implemented_error(
         3. Remove the offending case from this test (and the matching
            branch in ``_check_list_future_options``).
     """
-    opts = _make_snapshot_list_opts(**overrides)
     with pytest.raises(NotImplementedError):
-        _check_list_future_options(opts)
+        _check_list_future_options(build_opts())

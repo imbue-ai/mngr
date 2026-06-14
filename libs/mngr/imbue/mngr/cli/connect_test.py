@@ -1,5 +1,7 @@
 """Unit tests for the connect CLI command."""
 
+from typing import Callable
+
 import pytest
 
 from imbue.mngr.cli.agent_selector import build_status_text
@@ -208,13 +210,13 @@ def test_handle_search_key_printable_but_no_character() -> None:
 
 
 @pytest.mark.parametrize(
-    ("flag", "overrides"),
+    ("flag", "build_opts"),
     [
-        ("--session-command", {"session_command": "/bin/zsh"}),
-        ("--no-reconnect", {"reconnect": False}),
+        ("--session-command", lambda: _make_connect_opts(session_command="/bin/zsh")),
+        ("--no-reconnect", lambda: _make_connect_opts(reconnect=False)),
     ],
 )
-def test_future_flags_raise_not_implemented_error(flag: str, overrides: dict[str, object]) -> None:
+def test_future_flags_raise_not_implemented_error(flag: str, build_opts: Callable[[], ConnectCliOptions]) -> None:
     """`mngr connect`'s `[future]` flags must still raise NotImplementedError.
 
     The synopsis at `mngr connect`'s ``CommandHelpMetadata`` intentionally
@@ -227,6 +229,5 @@ def test_future_flags_raise_not_implemented_error(flag: str, overrides: dict[str
         3. Remove the offending case from this test (and the matching
            branch in ``_check_connect_future_options``).
     """
-    opts = _make_connect_opts(**overrides)  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError):
-        _check_connect_future_options(opts)
+        _check_connect_future_options(build_opts())
