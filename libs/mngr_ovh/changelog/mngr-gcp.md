@@ -1,0 +1,3 @@
+## Internal: `_provision_vps` signature follows the shared base
+
+- `OvhProvider._provision_vps` now accepts the `vps_public_key` parameter that the shared `VpsDockerProvider.create_host` threads in (so it no longer re-reads the provider SSH keypair from disk inside the base implementation). OVH installs the SSH public key via its rebuild API rather than the base cloud-init path, so the parameter is accepted and ignored. No behavioral change for OVH.
