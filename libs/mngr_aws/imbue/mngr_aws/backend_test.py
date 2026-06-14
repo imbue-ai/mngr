@@ -1,20 +1,42 @@
 """Tests for AWS provider backend registration."""
 
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
+from datetime import timezone
+
 import boto3
 import pytest
+from botocore.stub import Stubber
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
+from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.backend import AwsProviderBackend
+from imbue.mngr_aws.backend import IDLE_SENTINEL_FILENAME
+from imbue.mngr_aws.backend import IDLE_WATCHER_UNIT_NAME
 from imbue.mngr_aws.backend import ParsedAwsBuildOptions
+from imbue.mngr_aws.backend import _build_idle_watcher_path_unit
+from imbue.mngr_aws.backend import _build_idle_watcher_service_unit
+from imbue.mngr_aws.backend import _build_sentinel_shutdown_script
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
+from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_aws.testing import clear_aws_env
+from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store import VpsHostConfig
+from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
 def test_backend_build_args_help_mentions_aws_specific_args() -> None:
@@ -59,6 +81,457 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None)
         aws_client=client,
         aws_config=config,
     )
+
+
+def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]:
+    """Build an AwsProvider whose EC2 client is a botocore Stubber.
+
+    Used by the ``_find_instance_for_host`` tests, which need to script a
+    ``describe_instances`` response (the tag-based lookup that resolves a
+    stopped instance) without any real AWS call.
+    """
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_seconds=3600)
+    session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
+    ec2 = session.client("ec2", region_name="us-east-1")
+    stubber = Stubber(ec2)
+    client = _StubbedAwsVpsClient(
+        session=session,
+        region="us-east-1",
+        ami_id="ami-x",
+        security_group=ExistingSecurityGroup(id="sg-x"),
+        stubbed_ec2_client=ec2,
+    )
+    provider = AwsProvider(
+        name=ProviderInstanceName("aws-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=mngr_ctx,
+        config=config,
+        vps_client=client,
+        aws_client=client,
+        aws_config=config,
+    )
+    return provider, stubber
+
+
+def _describe_instances_response(instances: list[dict]) -> dict:
+    return {"Reservations": [{"Instances": instances}]}
+
+
+def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
+    """Cache a record with ``vps_ip=None`` so the base on-volume path short-circuits.
+
+    The agent-data hooks call ``super()`` first (the authoritative on-volume
+    store) and only fall back to / additionally write EC2 tags. For a *stopped*
+    host the base raises ``HostNotFoundError`` (no reachable ``vps_ip``); seeding
+    such a record makes the base short-circuit immediately without any SSH or
+    discovery sweep, so these tag-path tests exercise the stopped-host fallback
+    without standing up a fake VPS.
+    """
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="myhost",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        stop_reason=HostState.STOPPED.value,
+    )
+    provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
+
+
+def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """``_find_instance_for_host`` resolves a (stopped) instance by its mngr-host-id tag, no SSH."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                {
+                    "InstanceId": "i-match",
+                    "State": {"Name": "stopped"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(host_id)},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+                {
+                    "InstanceId": "i-other",
+                    "State": {"Name": "running"},
+                    "Tags": [
+                        {"Key": "mngr-host-id", "Value": str(HostId.generate())},
+                        {"Key": "mngr-provider", "Value": "aws-test"},
+                    ],
+                },
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert found is not None
+    assert found["id"] == "i-match"
+
+
+def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: MngrContext) -> None:
+    """A host with no matching instance tag resolves to None (after a cache-refresh retry).
+
+    On a cache miss ``_find_instance_for_host`` refreshes the instance list once
+    and retries (so a just-created instance absent from a stale cache is still
+    found), hence two ``describe_instances`` calls before giving up.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    no_match = _describe_instances_response(
+        [
+            {
+                "InstanceId": "i-other",
+                "State": {"Name": "running"},
+                "Tags": [{"Key": "mngr-host-id", "Value": str(HostId.generate())}],
+            },
+        ]
+    )
+    stubber.add_response("describe_instances", no_match)
+    stubber.add_response("describe_instances", no_match)
+    stubber.activate()
+    try:
+        found = provider._find_instance_for_host(HostId.generate())
+    finally:
+        stubber.deactivate()
+    assert found is None
+
+
+def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict[str, str]) -> dict:
+    entry: dict = {"InstanceId": instance_id, "State": {"Name": state}}
+    if public_ip:
+        entry["PublicIpAddress"] = public_ip
+    entry["Tags"] = [{"Key": k, "Value": v} for k, v in tags.items()]
+    return entry
+
+
+def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext) -> None:
+    """persist_agent_data finds the instance by host tag and upserts a compact mngr-agent-<id> tag.
+
+    Exercises the stopped-host path (the on-volume base write is unavailable, so
+    only the EC2 tag is written); the seeded ``vps_ip=None`` record makes
+    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    _seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    expected_value = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={"Resources": ["i-1"], "Tags": [{"Key": f"mngr-agent-{agent_id}", "Value": expected_value}]},
+    )
+    stubber.activate()
+    try:
+        provider.persist_agent_data(
+            host_id,
+            {"id": str(agent_id), "name": "a1", "type": "command", "command": "sleep 1", "work_dir": "/w"},
+        )
+    finally:
+        stubber.deactivate()
+
+
+def _reachable_provider_with_record(temp_mngr_ctx: MngrContext, host_id: HostId) -> AwsProvider:
+    """Build a provider with a cached *reachable* (vps_ip set) record for ``host_id``.
+
+    Used by the running-host delegation tests: with a reachable record cached,
+    ``super().persist_agent_data`` reaches the on-volume store via
+    ``_make_outer_for_vps_ip`` instead of doing discovery / real SSH, so a test
+    can confirm the override does NOT bypass the authoritative on-volume path.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    certified = CertifiedHostData(
+        host_id=str(host_id),
+        host_name="myhost",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    provider._host_record_cache[host_id] = VpsDockerHostRecord(
+        certified_host_data=certified,
+        vps_ip="1.2.3.4",
+        config=VpsHostConfig(
+            vps_instance_id=VpsInstanceId("i-1"),
+            region="us-east-1",
+            plan="t3.small",
+            container_name="mngr-c",
+            volume_name="mngr-vol",
+        ),
+    )
+    return provider
+
+
+class _OnVolumeReached(MngrError):
+    """Sentinel raised by the test's outer to prove the on-volume path was entered."""
+
+
+def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(temp_mngr_ctx: MngrContext) -> None:
+    """For a running (reachable) host, persist_agent_data delegates to the on-volume base path.
+
+    Regression guard: the override must compose with ``super()`` (the
+    authoritative on-volume ``agents/<id>.json`` the SSH-based discovery reads
+    for running hosts), not replace it -- otherwise running AWS hosts list with
+    no agents. We prove delegation by making the on-volume access raise a unique
+    sentinel from ``_make_outer_for_vps_ip``: it surfaces only if ``super()`` was
+    actually invoked, and -- unlike ``HostNotFoundError`` -- is *not* swallowed,
+    so a genuine running-host write failure is never silently hidden.
+    """
+    host_id = HostId.generate()
+
+    class _OuterRaisingProvider(AwsProvider):
+        @contextmanager
+        def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
+            # The unreachable yield below keeps this a generator function (which
+            # @contextmanager requires); the raise fires before it is ever reached.
+            raise _OnVolumeReached("on-volume persist path entered")
+            yield
+
+    base = _reachable_provider_with_record(temp_mngr_ctx, host_id)
+    provider = _OuterRaisingProvider(
+        name=base.name,
+        host_dir=base.host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=base.config,
+        vps_client=base.aws_client,
+        aws_client=base.aws_client,
+        aws_config=base.aws_config,
+    )
+    provider._host_record_cache[host_id] = base._host_record_cache[host_id]
+
+    with pytest.raises(_OnVolumeReached):
+        provider.persist_agent_data(host_id, {"id": "agent-1", "name": "a1", "type": "command"})
+
+
+def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContext) -> None:
+    """list_persisted_agent_data_for_host parses mngr-agent-* tags off a (stopped) instance."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1", "stopped", "", {"mngr-host-id": str(host_id), f"mngr-agent-{agent_id}": agent_json}
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        agents = provider.list_persisted_agent_data_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert len(agents) == 1
+    assert agents[0]["id"] == str(agent_id)
+    assert agents[0]["name"] == "a1"
+
+
+def test_list_persisted_agent_data_skips_non_object_agent_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A mngr-agent-* tag whose value is valid JSON but not an object is skipped, not crashed on.
+
+    mngr only ever writes object-shaped values, so a scalar/array value means an
+    externally edited/corrupted tag. It must degrade gracefully (skip + warn) like
+    the unparseable-JSON case: appending a non-dict would make downstream
+    discovery (validate_and_create_discovered_agent's ``.get('id')``) raise
+    AttributeError and crash the whole sweep for every host. A well-formed sibling
+    tag is still returned.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    good_id = AgentId.generate()
+    bad_id = AgentId.generate()
+    good_json = json.dumps({"id": str(good_id), "name": "a1"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        f"mngr-agent-{good_id}": good_json,
+                        # Valid JSON, but a bare integer rather than an object.
+                        f"mngr-agent-{bad_id}": "5",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        agents = provider.list_persisted_agent_data_for_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert [a["id"] for a in agents] == [str(good_id)]
+    assert any("not a JSON object" in w for w in log_warnings), log_warnings
+
+
+def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
+    """A stopped instance (no public IP) is reconstructed from tags as a STOPPED host with its agents."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "mngr-provider": "aws-test",
+                        "Name": "mngr-myhost",
+                        f"mngr-agent-{agent_id}": agent_json,
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    hosts = list(result.keys())
+    assert len(hosts) == 1
+    assert hosts[0].host_id == host_id
+    assert str(hosts[0].host_name) == "myhost"
+    assert hosts[0].host_state == HostState.STOPPED
+    agents = result[hosts[0]]
+    assert len(agents) == 1
+    assert agents[0].agent_id == agent_id
+    assert str(agents[0].agent_name) == "a1"
+
+
+def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
+    """to_offline_host rebuilds a STOPPED offline host from tags when the base SSH path can't reach it."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "Name": "mngr-myhost",
+                        "mngr-created-at": "2026-01-01T00:00:00+00:00",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        offline = provider.to_offline_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert offline.id == host_id
+    assert str(offline.get_certified_data().host_name) == "myhost"
+    assert offline.get_state() == HostState.STOPPED
+
+
+def test_to_offline_host_warns_on_malformed_created_at_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """A malformed mngr-created-at tag is surfaced (warning) and falls back to now(), not silently swallowed."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopped",
+                    "",
+                    {"mngr-host-id": str(host_id), "Name": "mngr-myhost", "mngr-created-at": "not-a-timestamp"},
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        offline = provider.to_offline_host(host_id)
+    finally:
+        stubber.deactivate()
+    assert offline.id == host_id
+    assert offline.get_state() == HostState.STOPPED
+    assert any("Malformed mngr-created-at" in w for w in log_warnings), log_warnings
+
+
+def test_compact_agent_tag_value_falls_back_to_minimal_when_too_long(temp_mngr_ctx: MngrContext) -> None:
+    """When id+name+type would exceed the 256-char tag limit, type is dropped (id+name still fit)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "a1", "type": "x" * 300})
+    assert value is not None
+    assert len(value) <= 256
+    assert json.loads(value) == {"id": "agent-1", "name": "a1"}
+
+
+def test_compact_agent_tag_value_none_without_id_or_name(temp_mngr_ctx: MngrContext) -> None:
+    """No id or no name -> None (nothing resolvable to persist)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    assert provider._compact_agent_tag_value({"name": "a1"}) is None
+    assert provider._compact_agent_tag_value({"id": "agent-1"}) is None
+
+
+def test_compact_agent_tag_value_includes_labels_when_they_fit(temp_mngr_ctx: MngrContext) -> None:
+    """Labels round-trip in the tag when the encoded value fits the limit (so offline `mngr label` works)."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value(
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+    )
+    assert value is not None
+    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+
+
+def test_compact_agent_tag_value_drops_oversized_labels_with_warning(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """Labels too large to fit are dropped (id/name/type kept) and a warning is logged, not a silent no-op."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value(
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}}
+    )
+    assert value is not None
+    assert len(value) <= 256
+    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command"}
+    assert any("do not fit" in w for w in log_warnings), log_warnings
+
+
+def test_compact_agent_tag_value_none_when_id_and_name_alone_exceed_limit(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """An agent whose id+name alone overflow the tag limit yields None + a warning, not an over-limit value.
+
+    Otherwise persist_agent_data would hand an over-256-char value to CreateTags,
+    which AWS rejects -- crashing agent create instead of degrading gracefully.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "x" * 300})
+    assert value is None
+    assert any("id+name exceeds" in w for w in log_warnings), log_warnings
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(
@@ -267,3 +740,51 @@ def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
 
     with pytest.raises(MngrError, match="No AMI configured"):
         provider._create_vps_instance(parsed=parsed, label="test", user_data="", ssh_key_ids=(), tags={})
+
+
+def test_build_sentinel_shutdown_script_touches_the_sentinel_path() -> None:
+    """The in-container shutdown script signals idle by touching the given sentinel file.
+
+    The sentinel path is the only contract that ties the in-container write to
+    the host-side path unit's ``PathExists``, so it must appear verbatim (quoted
+    against spaces) and the script must ``touch`` it rather than kill pid 1.
+    """
+    sentinel = f"/mngr-vol/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
+    script = _build_sentinel_shutdown_script(sentinel)
+    assert script.startswith("#!/bin/bash\n")
+    assert f'touch "{sentinel}"' in script
+    assert "kill -TERM 1" not in script, "AWS shutdown must NOT kill the container; it signals via a sentinel"
+
+
+def test_build_idle_watcher_path_unit_watches_sentinel_and_targets_service() -> None:
+    """The systemd .path unit fires the watcher service when the sentinel appears.
+
+    ``PathExists`` must point at the outer-filesystem sentinel location and
+    ``Unit`` must name the paired ``.service`` so the trigger is wired correctly.
+    """
+    sentinel = f"/mngr-btrfs/abc123/host_dir/commands/{IDLE_SENTINEL_FILENAME}"
+    unit = _build_idle_watcher_path_unit(sentinel)
+    assert f"PathExists={sentinel}" in unit
+    assert f"Unit={IDLE_WATCHER_UNIT_NAME}.service" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_build_idle_watcher_service_unit_removes_sentinel_then_powers_off() -> None:
+    """The oneshot .service removes the sentinel, then powers the host off via ``shutdown -P now``.
+
+    Powering off (rather than calling the EC2 API) means no IAM role or awscli is
+    needed: EC2's ``InstanceInitiatedShutdownBehavior`` decides stop-vs-terminate.
+    The sentinel ``rm -f`` must run BEFORE the power-off so a later resume isn't
+    immediately re-stopped by the path unit.
+    """
+    sentinel = "/mngr-btrfs/deadbeef/host_dir/commands/stop-instance-requested"
+    unit = _build_idle_watcher_service_unit(sentinel)
+    assert "Type=oneshot" in unit
+    assert "shutdown -P now" in unit
+    assert f"rm -f {sentinel}" in unit
+    # rm must precede the power-off so resume gets a clean slate.
+    assert unit.index("rm -f") < unit.index("shutdown -P now")
+    # No IAM/awscli path: the watcher powers the host off, it does not call the EC2 API.
+    assert "stop-instances" not in unit
+    assert "--instance-ids" not in unit
+    assert "--region" not in unit
