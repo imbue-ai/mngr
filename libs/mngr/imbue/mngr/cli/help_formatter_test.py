@@ -646,51 +646,32 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     # is left out of the synopsis for readability and captured here.
     "usage": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
     "usage.wait": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
-    # Pre-existing commands whose synopses are placeholder-only ("[OPTIONS]")
-    # at the time this stricter ratchet landed. Captured as the baseline per
-    # the header comment above; promoting any of these to an enumerated
-    # synopsis (and removing them here) is a fine follow-up.
-    "connect": _AGENT_FILTER_FLAGS
-    | frozenset(
-        {
-            "--agent",
-            "--allow-unknown-host",
-            "--connect-command",
-            "--reconnect",
-            "--session-command",
-            "--start",
-        }
-    ),
-    "gc": frozenset({"--all-providers", "--dry-run", "--on-error", "--provider"}),
-    "kanpan": _AGENT_FILTER_FLAGS,
-    "list": _AGENT_FILTER_FLAGS
-    | frozenset(
-        {
-            "--addrs",
-            "--fields",
-            "--header",
-            "--ids",
-            "--limit",
-            "--on-error",
-            "--provider",
-            "--schema",
-            "--sort",
-            "--stdin",
-        }
-    ),
+    # ``mngr connect``'s synopsis enumerates the connect-specific options;
+    # the inherited agent-filter set is omitted, as is each ``[future]`` flag.
+    # The [future] flags are pinned by
+    # ``test_future_flags_raise_not_implemented_error`` in connect_test.py --
+    # implementing one of them must come with a synopsis update.
+    "connect": _AGENT_FILTER_FLAGS | frozenset({"--reconnect", "--session-command"}),
+    # ``mngr kanpan`` and ``mngr list`` synopses enumerate the most-useful
+    # filter flags; the rarely-used ``--label`` / ``--host-label`` (and for
+    # ``list``, ``--header`` / ``--stdin``-positional alias) are omitted.
+    "kanpan": frozenset({"--label", "--host-label"}),
+    "list": frozenset({"--label", "--host-label", "--header"}),
+    # ``mngr snapshot create`` and ``mngr snapshot list`` synopses enumerate
+    # the implemented options; the ``[future]`` stubs are pinned by
+    # ``test_snapshot_create_future_flags_raise_not_implemented_error`` and
+    # ``test_snapshot_list_future_flags_raise_not_implemented_error`` in
+    # snapshot_test.py -- implementing one must come with a synopsis update.
     "snapshot.create": frozenset(
         {
             "--description",
-            "--name",
-            "--on-error",
             "--pause-during",
             "--restart-if-larger-than",
             "--tag",
             "--wait",
         }
     ),
-    "snapshot.list": frozenset({"--after", "--before", "--limit"}),
-    "snapshot.destroy": frozenset({"--all-snapshots", "--dry-run", "--force", "--snapshot"}),
+    "snapshot.list": frozenset({"--after", "--before"}),
 }
 
 
