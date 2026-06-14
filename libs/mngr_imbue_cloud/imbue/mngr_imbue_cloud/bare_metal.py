@@ -25,6 +25,11 @@ PER_SLICE_MEMORY_OVERHEAD_MIB: Final[int] = 512
 # the usable disk is divided evenly among the box's slices.
 DISK_RESERVE_GB: Final[int] = 20
 
+# Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
+# floor(threads * ratio / slots)). Overridable per box at ``admin server
+# register --cpu-overcommit``; RAM is never overcommitted.
+DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 2.0
+
 # Range of host ports on each box reserved for slice port-forwards. Each slice
 # claims two: one -> the VM's root sshd, one -> the inner container sshd. Wide
 # enough (~10k ports) for large boxes carved into many slices.

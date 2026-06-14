@@ -31,6 +31,7 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
 from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
 from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
@@ -207,8 +208,9 @@ def list_servers(database_url: str | None) -> None:
 @click.option(
     "--cpu-overcommit",
     type=float,
-    required=True,
-    help="CPU overcommit factor for sizing each slice's vCPUs (e.g. 1.5).",
+    default=DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO,
+    show_default=True,
+    help="CPU overcommit factor for sizing each slice's vCPUs.",
 )
 @click.option("--raid-level", default=None, help="RAID level configured at install (e.g. RAID1).")
 @click.option("--lima-service-user", default="limahost", help="Non-root OS user that owns the box's lima VMs.")
