@@ -147,8 +147,9 @@ depending on the build machine's home directory path.
 # <agent_state_dir>/plugin/claude/anthropic/ (the per-agent replacement for ~/.claude/),
 # with session JSONLs filed under its projects/ subdir. Both live local mngr agents and
 # preserved agents mirror this layout, so --adopt-session can resolve a session ID against
-# either.
-_AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = Path("plugin") / "claude" / "anthropic"
+# either. Derived from the single-source ``get_agent_claude_config_dir`` (passing an empty
+# base yields the agent-relative subpath) so this layout never drifts from it.
+_AGENT_CLAUDE_CONFIG_RELPATH: Final[Path] = get_agent_claude_config_dir(Path())
 _AGENT_CLAUDE_PROJECTS_RELPATH: Final[Path] = _AGENT_CLAUDE_CONFIG_RELPATH / "projects"
 
 
