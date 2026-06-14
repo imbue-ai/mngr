@@ -238,8 +238,8 @@ Two sub-parts, with an open decision on the second:
 
 ## Out of scope / future
 
-- **EBS snapshots** (manual `mngr snapshot` backed by real EBS snapshots; the `AwsVpsClient`
-  methods already exist but are unwired). Revisit if backups/clone-from-snapshot are wanted.
+- **EBS snapshots** (manual `mngr snapshot` backed by real EBS snapshots; no `AwsVpsClient`
+  snapshot surface exists today). Revisit if backups/clone-from-snapshot are wanted.
 - **S3/SSM-backed offline metadata** so paused hosts list their agents like Modal, via the
   existing `persist_agent_data` / `list_persisted_agent_data_for_host` hooks. Would add an S3
   bucket (provisioned in `mngr aws prepare`) + `s3:*Object`/`ListBucket` IAM perms.

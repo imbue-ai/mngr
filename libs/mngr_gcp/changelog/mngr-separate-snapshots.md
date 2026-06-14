@@ -1,1 +1,4 @@
 Removed the dead VPS client methods `create_snapshot`, `delete_snapshot`, `list_snapshots`, and `list_ssh_keys` (and the now-unused `_boot_disk_source` helper and snapshots compute client) from `GcpVpsClient`. These had no production callers and are being dropped from the shared `VpsClientInterface`. The corresponding unit and release tests, plus the `FakeSnapshotsClient` test helper, were removed as well.
+
+
+The `mngr_gcp` README's snapshot note now states the GCP client exposes no disk-snapshot surface (rather than naming the removed `create_snapshot` / `list_snapshots` / `delete_snapshot` methods).
