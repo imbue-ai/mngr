@@ -19,6 +19,7 @@ from typing import Final
 
 import tomlkit
 from loguru import logger
+from tomlkit.items import Table
 
 from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 
@@ -170,7 +171,7 @@ def _existing_aws_provider_names(providers_mapping: Mapping[str, object]) -> set
     return {name for name in providers_mapping if name.startswith(_AWS_PROVIDER_NAME_PREFIX)}
 
 
-def _write_aws_provider_blocks(providers_section: tomlkit.items.Table, desired_names: tuple[str, ...]) -> None:
+def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[str, ...]) -> None:
     """Rewrite the ``[providers.aws-<region>]`` blocks so they exactly match ``desired_names``.
 
     Removes any stale ``aws-<region>`` blocks (AWS credentials removed, or
