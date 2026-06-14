@@ -2244,6 +2244,16 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # =============================================================================
 
 
+# The claude agent type (``ClaudeAgentConfig``, with a ``SettingsPatchField``
+# ``settings_overrides``) is registered by the autouse ``plugin_manager`` fixture --
+# claude is in the default ``enabled_plugins`` set -- so these tests parse
+# ``settings_overrides`` as a real accumulating patch field without any extra setup.
+# Each agent_types block declares ``parent_type = "claude"`` in *every* layer that
+# writes it, so the per-layer parse resolves ``my_claude`` to ``ClaudeAgentConfig``
+# (a layer omitting ``parent_type`` would fall back to the base ``AgentTypeConfig``,
+# which has no ``settings_overrides`` field).
+
+
 def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_key: str = "allow") -> None:
     """Project layer sets ``settings_overrides.permissions.allow = ["A"]`` on a
     claude-derived agent type; local layer assigns ``["B"]`` (dropping ``A``).
@@ -2259,6 +2269,7 @@ def _write_settings_overrides_narrowing_config(project_dir: Path, *, higher_key:
     )
     (project_dir / "settings.local.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
         "[agent_types.my_claude.settings_overrides.permissions]\n"
         f'{higher_key} = ["B"]\n'
     )
@@ -2272,7 +2283,9 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
 
     This is the previously-silent cross-scope ``settings_overrides`` drop: the
     ``SettingsPatchField`` exemption in ``detect_settings_narrowing`` makes it
-    invisible to the field-narrowing walker, but the overlay merge surfaces it.
+    invisible to the field-narrowing walker, but the overlay merge surfaces it. The
+    bare ``permissions`` dict in the local layer assign-replaces the project layer's
+    ``permissions`` dict, so the narrowing is recorded at the ``permissions`` path.
     """
     pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
     _write_settings_overrides_narrowing_config(project_dir)
@@ -2280,7 +2293,7 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
         load_config(pm=pm, concurrency_group=cg)
     message = str(exc_info.value)
     assert "narrowing" in message
-    assert "agent_types.my_claude.settings_overrides.permissions.allow" in message
+    assert "agent_types.my_claude.settings_overrides.permissions" in message
 
 
 def test_load_config_settings_overrides_narrowing_allowed_when_opted_in(
@@ -2297,7 +2310,10 @@ def test_load_config_settings_overrides_narrowing_allowed_when_opted_in(
         'allow = ["A"]\n'
     )
     (project_dir / "settings.local.toml").write_text(
-        'is_allowed_in_pytest = true\n\n[agent_types.my_claude.settings_overrides.permissions]\nallow = ["B"]\n'
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides.permissions]\n"
+        'allow = ["B"]\n'
     )
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
@@ -2330,7 +2346,10 @@ def test_load_config_settings_overrides_accumulation_does_not_narrow(
         'allow = ["A"]\n'
     )
     (project_dir / "settings.local.toml").write_text(
-        'is_allowed_in_pytest = true\n\n[agent_types.my_claude.settings_overrides]\nmodel = "sonnet"\n'
+        "is_allowed_in_pytest = true\n\n"
+        '[agent_types.my_claude]\nparent_type = "claude"\n'
+        "[agent_types.my_claude.settings_overrides]\n"
+        'model = "sonnet"\n'
     )
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
