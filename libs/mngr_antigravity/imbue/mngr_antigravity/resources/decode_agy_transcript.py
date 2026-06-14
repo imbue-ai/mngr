@@ -317,8 +317,8 @@ def stream_conversation(db_path: Path, conv_id: str, offset: int) -> tuple[list[
     writing this db (typically WAL), so it is *not* immutable, and ``immutable=1`` would skip
     locking/WAL handling and risk inconsistent or stale reads. ``mode=ro`` reads committed data
     safely; a rare ``SQLITE_BUSY`` during a checkpoint surfaces as ``sqlite3.Error`` and ``run_once``
-    just retries that conversation next pass. (Static-snapshot tooling that reads completed dbs --
-    e.g. the ``dev/`` reference decoder -- can use ``immutable=1``; a live streamer must not.)
+    just retries that conversation next pass. (Static-snapshot tooling that reads a completed,
+    no-longer-written db could use ``immutable=1``; a live streamer must not.)
     """
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     lines: list[str] = []
