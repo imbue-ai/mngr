@@ -21,6 +21,7 @@ exclude-newer = "2026-05-31T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
+overlay = { workspace = true }
 
 [tool.uv.workspace]
 members = ["libs/*", "apps/*"]

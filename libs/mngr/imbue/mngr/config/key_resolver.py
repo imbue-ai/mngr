@@ -22,17 +22,13 @@ from pydantic import BaseModel
 
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
-from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver_primitives import AssignDrop
-from imbue.mngr.config.key_resolver_primitives import apply_extend
-from imbue.mngr.config.key_resolver_primitives import assign_bare_key
-from imbue.mngr.config.key_resolver_primitives import bare_key
-from imbue.mngr.config.key_resolver_primitives import check_no_conflicting_assign
-from imbue.mngr.config.key_resolver_primitives import combine_patches
-from imbue.mngr.config.key_resolver_primitives import extend_dict
-from imbue.mngr.config.key_resolver_primitives import is_assign_key
-from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import InvalidKeyPathError
+from imbue.overlay.merge import apply_extend
+from imbue.overlay.operators import assign_bare_key
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import check_no_conflicting_assign
+from imbue.overlay.operators import is_assign_key
+from imbue.overlay.operators import is_extend_key
 
 
 def set_at_path(data: dict[str, Any], key_path: Sequence[str], value: Any) -> None:
@@ -157,56 +153,6 @@ def resolve_extends(
             continue
         result[bare] = apply_extend(current, value, field_path)
     return result
-
-
-def merge(lower: dict[str, Any], higher: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-    """Combine two settings patches, ``higher`` over ``lower``, returning the combined
-    patch and the dotted paths where a bare assign narrowed a non-empty lower aggregate.
-
-    The unified algebra: the value side is exactly ``combine_patches`` (the four-rule,
-    recursive, associative, marker-preserving combine), and the narrowing side records
-    -- recursively -- wherever a **bare** assign drops a non-empty aggregate entry from
-    the corresponding ``lower`` value. Narrowing is suppressed for ``__assign`` keys and
-    ``Static*`` values (both honored by the injected ``would_assignment_narrow``
-    checker). It is **not** gated on the global narrowing flag: that is the caller's
-    decision (see ``_build_settings_json``), which keeps ``merge`` a pure total
-    function.
-
-    - Against a **concrete** ``lower`` (no markers), every ``higher`` marker resolves
-      where ``lower`` has the key and is preserved where absent (combine semantics);
-      pair with ``finalize`` to drop any preserved-against-nothing marker.
-    - Against a **patch** ``lower``, unresolvable markers survive for later resolution.
-
-    Associativity (property-tested): ``finalize(merge(merge(B, X), Y)) ==
-    finalize(merge(B, merge(X, Y)))``. Pure; never raises for narrowing (only the
-    bare-plus-``__assign`` conflict, a parse error, can raise -- via
-    ``combine_patches``).
-    """
-    assign_drops: list[AssignDrop] = []
-    merged = combine_patches(lower, higher, assign_drops=assign_drops)
-    # ``combine_patches`` collected every bare-assign-over-concrete-lower candidate;
-    # keep only those that actually narrow (``__assign`` keys and ``Static*`` values
-    # were already excluded -- the former by ``combine_patches``, the latter here via
-    # ``would_assignment_narrow``).
-    narrowings = [
-        dotted
-        for lower_value, higher_value, dotted in assign_drops
-        if would_assignment_narrow(lower_value, higher_value)
-    ]
-    return merged, narrowings
-
-
-def finalize(patch: dict[str, Any]) -> dict[str, Any]:
-    """Resolve any remaining ``__extend`` markers in ``patch`` against an empty base
-    (extend-against-nothing = assign), recursively, producing a marker-free dict.
-
-    Pure. No assertion: a leftover marker resolving to a bare assign is the correct
-    "nothing to extend against" behavior, not a bug (a genuinely-forgotten base shows
-    up as missing base keys, which ordinary tests catch). ``extend_dict`` already
-    performs exactly this recursive resolve-against-empty, so ``finalize`` is a thin
-    name for it at the top level.
-    """
-    return extend_dict({}, patch, "")
 
 
 class _ExactDepthMatcher(BaseModel):

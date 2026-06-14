@@ -11,10 +11,10 @@ from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import is_settings_patch_field
-from imbue.mngr.config.key_resolver import merge
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
+from imbue.overlay.merge import merge
 
 # Fields on AgentTypeConfig that are routing metadata (not runtime config values).
 # These are skipped when applying custom overrides to a parent config.

@@ -1,126 +1,70 @@
-"""Pure ``__extend`` primitives, free of any config-model dependency.
+"""The core merge algebra: extend application, patch combination, and the unified
+``merge`` / ``finalize`` operations.
 
-These functions operate on plain dicts/lists/sets and the ``__extend`` operator
-suffix. They are split out from ``key_resolver`` (which additionally walks parsed
-config models) so that ``data_types`` -- the layer that *defines* the config
-models -- can use ``combine_patches`` without a circular import (``key_resolver``
-imports ``data_types``; ``data_types`` imports only these primitives).
-
-``key_resolver`` re-exports the operator helpers (``EXTEND_SUFFIX``,
-``is_extend_key``, ``bare_key``) so existing import sites keep working.
+Everything here operates purely on plain dicts/lists/sets/scalars plus the
+key-suffix operators and the ``Static*`` markers. ``apply_extend`` / ``extend_dict``
+resolve ``__extend`` against a concrete value; ``combine_patches`` condenses two
+marker-carrying patches without a base; ``merge`` wraps ``combine_patches`` with
+recursive narrowing detection; ``finalize`` resolves any remaining markers against
+an empty base. The narrowing predicate ``would_assignment_narrow`` lives here too,
+since ``merge`` filters the raw assign-drop candidates through it.
 """
 
-import json
 from collections.abc import Mapping
 from typing import Any
-from typing import Final
 
-from imbue.imbue_common.pure import pure
-from imbue.mngr.errors import ConfigParseError
+from imbue.overlay.errors import OverlayError
+from imbue.overlay.markers import is_static_marker
+from imbue.overlay.operators import ASSIGN_SUFFIX
+from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import assign_bare_key
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import check_no_conflicting_assign
+from imbue.overlay.operators import is_assign_key
+from imbue.overlay.operators import is_extend_key
+from imbue.overlay.operators import resolved_bare_key
 
 # A candidate bare-assign drop recorded by the combine algebra for narrowing analysis:
 # ``(lower_value, higher_value, dotted_path)``. ``combine_patches`` appends one for every
 # **bare** (not ``__assign``) assign that overrides a concrete lower value, to a list the
-# caller passes in. ``merge`` (in ``key_resolver``) then filters these through
-# ``would_assignment_narrow`` to get the real narrowing paths. Collecting raw candidates
-# here -- rather than importing ``would_assignment_narrow`` -- keeps these primitives free
-# of the config-model layer and avoids a circular import.
+# caller passes in. ``merge`` then filters these through ``would_assignment_narrow`` to
+# get the real narrowing paths. Collecting raw candidates here -- rather than running the
+# narrowing predicate inline -- keeps the combine step a pure structural transform.
 AssignDrop = tuple[Any, Any, str]
 
-# Operator suffix on a leaf key indicating "extend the current value".
-# Lowercase form used in TOML, ``--setting`` paths, and ``mngr config`` keys.
-EXTEND_SUFFIX: Final[str] = "__extend"
 
-# Uppercase form for env-var path segments. Matches the all-uppercase
-# convention for ``MNGR__*`` segments.
-EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
+def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
+    """Return True if assigning ``override_value`` over ``base_value`` would
+    drop at least one base entry (a missing list/set element, a missing dict
+    key, or an explicit empty aggregate over a non-empty base).
 
-# Operator suffix on a leaf key indicating "assign the value, but do not record a
-# narrowing violation". Behaviorally identical to a bare assign (replace the value
-# from the layer below) except the narrowing check is suppressed for this key --
-# the explicit "I am replacing this, don't warn" opt-out. Resolves in the
-# assign-phase (alongside bare keys), before any sibling ``__extend``.
-ASSIGN_SUFFIX: Final[str] = "__assign"
-
-
-@pure
-def parse_scalar_value(value_str: str) -> Any:
-    """Parse a raw string into the appropriate Python scalar/aggregate value.
-
-    JSON-parses first (so booleans, numbers, arrays, and objects work) and
-    falls back to the raw string when the input is not valid JSON. Shared by
-    the env-var loader, ``--setting``, ``mngr config set/extend``, and tests
-    so they all keep identical value semantics.
+    No-ops (override equals base) and supersets (every base entry survives, e.g.
+    the materialised result of an ``__extend`` operation) return ``False``. A
+    ``Static*`` override is also exempt -- it represents replacement of the whole
+    aggregate as a coherent unit (a value written as a single scalar, or a value
+    declared replace-by-default), not aggregate narrowing. Scalars and
+    empty/non-aggregate bases never narrow.
     """
-    try:
-        return json.loads(value_str)
-    except json.JSONDecodeError:
-        return value_str
-
-
-def is_extend_key(key: str) -> bool:
-    """Return True if ``key`` is an ``__extend``-suffixed leaf key.
-
-    The suffix must be preceded by at least one character so ``__extend``
-    on its own is not treated as a bare key whose ``bare`` would be empty.
-    """
-    return key.endswith(EXTEND_SUFFIX) and len(key) > len(EXTEND_SUFFIX)
-
-
-def bare_key(extend_key: str) -> str:
-    """Return the field name with the ``__extend`` suffix stripped."""
-    return extend_key[: -len(EXTEND_SUFFIX)]
-
-
-def is_assign_key(key: str) -> bool:
-    """Return True if ``key`` is an ``__assign``-suffixed leaf key.
-
-    Mirrors ``is_extend_key``: the suffix must be preceded by at least one
-    character so a bare ``__assign`` (whose ``assign_bare_key`` would be empty)
-    is not treated as an assign key.
-    """
-    return key.endswith(ASSIGN_SUFFIX) and len(key) > len(ASSIGN_SUFFIX)
-
-
-def assign_bare_key(assign_key: str) -> str:
-    """Return the field name with the ``__assign`` suffix stripped."""
-    return assign_key[: -len(ASSIGN_SUFFIX)]
-
-
-def resolved_bare_key(key: str) -> str:
-    """Return the bare field name for any key, stripping ``__extend``/``__assign``.
-
-    A bare key is returned unchanged. Used to detect operator collisions on the
-    same field within one layer.
-    """
-    if is_extend_key(key):
-        return bare_key(key)
-    if is_assign_key(key):
-        return assign_bare_key(key)
-    return key
-
-
-def check_no_conflicting_assign(value: Mapping[str, Any], field_path: str = "") -> None:
-    """Raise ``ConfigParseError`` if a dict has both a bare ``key`` and ``key__assign``.
-
-    The two are contradictory assigns of the same field in the same layer. (Two
-    ``key__assign`` or two ``key__extend`` cannot occur -- they would be duplicate
-    dict keys.) Checks only this dict level; recursion is handled by the callers
-    that descend into nested dicts.
-    """
-    assign_bare_names = {assign_bare_key(key) for key in value if is_assign_key(key)}
-    if not assign_bare_names:
-        return
-    bare_names = {key for key in value if not is_extend_key(key) and not is_assign_key(key)}
-    conflicts = sorted(assign_bare_names & bare_names)
-    if conflicts:
-        location = f" at '{field_path}'" if field_path else ""
-        names = ", ".join(conflicts)
-        raise ConfigParseError(
-            f"Conflicting assignment{location}: field(s) [{names}] have both a bare key and a "
-            f"'{ASSIGN_SUFFIX}' key in the same layer. Use exactly one of bare assign or "
-            f"'{ASSIGN_SUFFIX}' (assign without the narrowing check), not both."
-        )
+    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
+        return False
+    # A ``Static*`` override replaces the whole aggregate as a coherent unit
+    # (value-set, not narrowing), regardless of the base aggregate shape.
+    if is_static_marker(override_value):
+        return False
+    if isinstance(base_value, (list, tuple)):
+        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
+            return False
+        return True
+    if isinstance(base_value, (set, frozenset)):
+        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
+            return False
+        return True
+    # base_value is a non-empty dict
+    if not isinstance(override_value, dict):
+        return True
+    if any(key not in override_value for key in base_value):
+        return True
+    return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
 
 
 def apply_extend(
@@ -137,18 +81,18 @@ def apply_extend(
     (replacing ``current_value[key]``). A bare value that is itself a dict is
     resolved against an empty base so any markers nested inside it collapse
     (extend-against-nothing = assign). Within a level, bare keys are applied
-    before sibling ``__extend`` keys, matching ``resolve_extends``.
+    before sibling ``__extend`` keys.
 
     This recursion is backward-compatible: an ``extend_value`` that nests no
     ``__extend`` markers produces the same shallow ``{**current, **value}``
-    result as the pre-recursion operator (bare nested keys replace at their
-    level, preserving siblings of the extended dict).
+    result (bare nested keys replace at their level, preserving siblings of the
+    extended dict).
     """
     if current_value is None:
         # Field unset in base. Extend acts like assign, but the shape must
         # still be an aggregate; scalars cannot be the value of ``__extend``.
         if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
-            raise ConfigParseError(
+            raise OverlayError(
                 f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
                 f"got: {type(extend_value).__name__}"
             )
@@ -159,7 +103,7 @@ def apply_extend(
         return extend_value
     if isinstance(current_value, (list, tuple)):
         if not isinstance(extend_value, (list, tuple)):
-            raise ConfigParseError(
+            raise OverlayError(
                 f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
                 f"got: {type(extend_value).__name__}"
             )
@@ -167,7 +111,7 @@ def apply_extend(
         return tuple(merged) if isinstance(current_value, tuple) else merged
     if isinstance(current_value, (set, frozenset)):
         if not isinstance(extend_value, (list, tuple, set, frozenset)):
-            raise ConfigParseError(
+            raise OverlayError(
                 f"__extend on field '{field_path}' (set) requires a JSON array value; "
                 f"got: {type(extend_value).__name__}"
             )
@@ -175,12 +119,12 @@ def apply_extend(
         return frozenset(merged_set) if isinstance(current_value, frozenset) else merged_set
     if isinstance(current_value, Mapping):
         if not isinstance(extend_value, Mapping):
-            raise ConfigParseError(
+            raise OverlayError(
                 f"__extend on field '{field_path}' (dict) requires a JSON object value; "
                 f"got: {type(extend_value).__name__}"
             )
         return extend_dict(current_value, extend_value, field_path)
-    raise ConfigParseError(
+    raise OverlayError(
         f"__extend on field '{field_path}' is not valid: target field is a scalar "
         f"({type(current_value).__name__}); use bare assignment instead."
     )
@@ -198,7 +142,7 @@ def extend_dict(
     (extending ``current_value[key]``); a nested bare ``key`` assigns, replacing
     ``current_value[key]`` (a dict value is resolved against an empty base so any
     markers nested inside it collapse). Bare keys are applied before sibling
-    ``__extend`` keys, mirroring ``resolve_extends``'s within-level ordering.
+    ``__extend`` keys (the within-level assign-phase / extend-phase ordering).
 
     The result starts as a shallow copy of ``current_value`` so sibling keys that
     the patch does not mention are preserved.
@@ -236,12 +180,11 @@ def combine_patches(
     """Combine two settings "patches" into one, ``higher`` over ``lower``.
 
     A *patch* is a dict that may carry ``key__extend`` markers at any depth and
-    is destined to be resolved (``resolve_extends`` / ``merge`` + ``finalize``) onto
-    a concrete base later. ``combine_patches`` lets the per-scope (and
-    per-inheritance-layer) patches be condensed into a single patch *without* a
-    base, preserving / combining their markers so that resolving the combined
-    patch against a base ``B`` yields the same result as folding each patch onto
-    ``B`` in order (associativity).
+    is destined to be resolved (``merge`` + ``finalize``) onto a concrete base
+    later. ``combine_patches`` lets the per-layer patches be condensed into a
+    single patch *without* a base, preserving / combining their markers so that
+    resolving the combined patch against a base ``B`` yields the same result as
+    folding each patch onto ``B`` in order (associativity).
 
     Pure, recursive, and associative. Per key, the four-rule table (with ``f`` the
     bare key and ``f__extend`` the marker). A ``f__assign`` key behaves exactly
@@ -395,7 +338,55 @@ def _combine_marker_values(
     if isinstance(lower_value, (set, frozenset)) and isinstance(higher_value, (set, frozenset, list, tuple)):
         merged_set = set(lower_value) | set(higher_value)
         return frozenset(merged_set) if isinstance(lower_value, frozenset) else merged_set
-    raise ConfigParseError(
+    raise OverlayError(
         f"Cannot combine __extend values for field '{field_path}': incompatible shapes "
         f"({type(lower_value).__name__} and {type(higher_value).__name__})."
     )
+
+
+def merge(lower: dict[str, Any], higher: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Combine two settings patches, ``higher`` over ``lower``, returning the combined
+    patch and the dotted paths where a bare assign narrowed a non-empty lower aggregate.
+
+    The unified algebra: the value side is exactly ``combine_patches`` (the four-rule,
+    recursive, associative, marker-preserving combine), and the narrowing side records
+    -- recursively -- wherever a **bare** assign drops a non-empty aggregate entry from
+    the corresponding ``lower`` value. Narrowing is suppressed for ``__assign`` keys and
+    ``Static*`` values (both honored by ``would_assignment_narrow``). It is **not** gated
+    on any global narrowing policy: that is the caller's decision, which keeps ``merge`` a
+    pure total function.
+
+    - Against a **concrete** ``lower`` (no markers), every ``higher`` marker resolves
+      where ``lower`` has the key and is preserved where absent (combine semantics);
+      pair with ``finalize`` to drop any preserved-against-nothing marker.
+    - Against a **patch** ``lower``, unresolvable markers survive for later resolution.
+
+    Associativity (property-tested): ``finalize(merge(merge(B, X), Y)) ==
+    finalize(merge(B, merge(X, Y)))``. Pure; never raises for narrowing (only the
+    bare-plus-``__assign`` conflict, a parse error, can raise -- via ``combine_patches``).
+    """
+    assign_drops: list[AssignDrop] = []
+    merged = combine_patches(lower, higher, assign_drops=assign_drops)
+    # ``combine_patches`` collected every bare-assign-over-concrete-lower candidate;
+    # keep only those that actually narrow (``__assign`` keys were already excluded by
+    # ``combine_patches``; ``Static*`` values are excluded here via
+    # ``would_assignment_narrow``).
+    narrowings = [
+        dotted
+        for lower_value, higher_value, dotted in assign_drops
+        if would_assignment_narrow(lower_value, higher_value)
+    ]
+    return merged, narrowings
+
+
+def finalize(patch: dict[str, Any]) -> dict[str, Any]:
+    """Resolve any remaining ``__extend`` markers in ``patch`` against an empty base
+    (extend-against-nothing = assign), recursively, producing a marker-free dict.
+
+    Pure. No assertion: a leftover marker resolving to a bare assign is the correct
+    "nothing to extend against" behavior, not a bug (a genuinely-forgotten base shows
+    up as missing base keys, which ordinary tests catch). ``extend_dict`` already
+    performs exactly this recursive resolve-against-empty, so ``finalize`` is a thin
+    name for it at the top level.
+    """
+    return extend_dict({}, patch, "")

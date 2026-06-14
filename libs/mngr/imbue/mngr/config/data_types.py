@@ -26,7 +26,6 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
-from imbue.mngr.config.key_resolver_primitives import combine_patches
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -40,6 +39,9 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.overlay.markers import ScalarTuple
+from imbue.overlay.markers import is_static_marker
+from imbue.overlay.merge import combine_patches
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -85,66 +87,6 @@ def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
     return any(isinstance(item, SettingsPatchField) for item in metadata)
 
 
-class StaticTuple(tuple):
-    """Marker tuple subclass for an aggregate value that is **atomic**: replacing it
-    from a higher-precedence settings layer is a value-set, not aggregate narrowing,
-    so it is exempt from the narrowing check.
-
-    The ``Static*`` family (``StaticTuple`` / ``StaticList`` / ``StaticDict``) lets a
-    producer mark an aggregate as a coherent whole that higher layers *replace*
-    rather than *narrow*. ``ScalarTuple`` (a scalar-shaped tuple, e.g. a
-    string-derived ``cli_args`` or a replace-by-default ``allowed_ssh_cidrs``) is a
-    ``StaticTuple`` -- its long-standing exemption is the same concept.
-
-    The marker survives ``model_construct`` (which bypasses validation) but is not
-    preserved through ``model_dump`` / merges; that is enough because narrowing
-    detection always compares a freshly-parsed layer (which retains the marker)
-    against the already-merged base.
-    """
-
-
-class StaticList(list):
-    """Marker list subclass for an atomic list aggregate, exempt from narrowing.
-
-    See ``StaticTuple``: a higher-precedence layer replacing a ``StaticList`` is a
-    value-set, not aggregate narrowing.
-    """
-
-
-class StaticDict(dict):
-    """Marker dict subclass for an atomic dict aggregate, exempt from narrowing.
-
-    See ``StaticTuple``: a higher-precedence layer replacing a ``StaticDict`` is a
-    value-set, not aggregate narrowing.
-    """
-
-
-class ScalarTuple(StaticTuple):
-    """Marker tuple subclass for a tuple-typed field whose value is semantically a
-    single scalar: replacing it from a higher-precedence settings layer is scalar
-    replacement, not aggregate narrowing.
-
-    The settings-narrowing guard (``_check_narrowing`` / ``would_assignment_narrow``)
-    normally flags a higher-precedence layer that drops entries from a non-empty
-    list/tuple set by a lower layer. For some fields that additive intent never
-    applies -- the value is a coherent whole a higher layer means to *replace*.
-    Marking such a field's parsed value ``ScalarTuple`` exempts it from that check.
-
-    Two cases produce the marker: a tuple field written as a single string in TOML
-    (``StringDerivedTuple``, a subclass), and a field declared with ``ScalarStrTuple``
-    that is always replace-by-default regardless of how it is written (e.g. an AWS
-    provider's ``allowed_ssh_cidrs`` -- combining CIDRs across config layers is never
-    the intent).
-
-    The marker is applied by ``model_validate`` (via the ``ScalarStrTuple``
-    after-validator) or by the loader's string-splitting path. It survives
-    ``model_construct`` (which bypasses validation) but is intentionally not
-    preserved through ``model_dump`` / merges. That is enough because narrowing
-    detection always compares a freshly-parsed layer (which retains the marker)
-    against the already-merged base.
-    """
-
-
 class StringDerivedTuple(ScalarTuple):
     """Marker for a tuple value originally provided as a single string in user
     settings.
@@ -157,16 +99,6 @@ class StringDerivedTuple(ScalarTuple):
     the loader can mark *only* the string-shaped writes of fields that otherwise
     merge additively.
     """
-
-
-def _is_static_marker(value: Any) -> bool:
-    """Return True if ``value`` is a ``Static*`` marker (atomic aggregate).
-
-    A ``Static*`` override is a value-set, not narrowing: it replaces the whole
-    aggregate as a coherent unit. Covers ``StaticTuple`` (and its ``ScalarTuple`` /
-    ``StringDerivedTuple`` subclasses), ``StaticList``, and ``StaticDict``.
-    """
-    return isinstance(value, (StaticTuple, StaticList, StaticDict))
 
 
 def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
@@ -242,43 +174,6 @@ def _merge_container_dict(
 _CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
     {"agent_types", "providers", "plugins", "commands", "create_templates"}
 )
-
-
-def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
-    """Return True if assigning ``override_value`` over ``base_value`` would
-    drop at least one base entry (a missing list/set element, a missing dict
-    key, or an explicit empty aggregate over a non-empty base).
-
-    Mirrors the leaf-level rule used by ``detect_settings_narrowing`` so the
-    settings-layer merge guard and the template-application guard agree on what
-    counts as narrowing. Same exemptions: no-ops (override equals base) and
-    supersets (every base entry survives, e.g. the materialised result of an
-    ``__extend`` operation) return ``False``. Against a list/tuple base, a
-    ``ScalarTuple`` override is also exempt -- it represents scalar replacement
-    of the whole value (a string-shaped TOML value, or a field declared
-    replace-by-default like ``allowed_ssh_cidrs``), not aggregate narrowing.
-    Scalars and empty/non-aggregate bases never narrow.
-    """
-    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return False
-    # A ``Static*`` override replaces the whole aggregate as a coherent unit
-    # (value-set, not narrowing), regardless of the base aggregate shape.
-    if _is_static_marker(override_value):
-        return False
-    if isinstance(base_value, (list, tuple)):
-        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
-            return False
-        return True
-    if isinstance(base_value, (set, frozenset)):
-        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
-            return False
-        return True
-    # base_value is a non-empty dict
-    if not isinstance(override_value, dict):
-        return True
-    if any(key not in override_value for key in base_value):
-        return True
-    return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
 
 
 def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
@@ -396,7 +291,7 @@ def _check_narrowing(
     # A ``Static*`` override (e.g. a string-derived ``cli_args``, a replace-by-default
     # ``allowed_ssh_cidrs``, or an explicitly atomic ``StaticList`` / ``StaticDict``)
     # replaces the whole aggregate as a coherent unit -- a value-set, not narrowing.
-    if _is_static_marker(override_value):
+    if is_static_marker(override_value):
         return
     if isinstance(base_value, (list, tuple)):
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):

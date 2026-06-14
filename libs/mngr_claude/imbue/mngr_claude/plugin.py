@@ -48,9 +48,6 @@ from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.key_resolver import finalize
-from imbue.mngr.config.key_resolver import merge
-from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -110,6 +107,9 @@ from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
+from imbue.overlay.merge import finalize
+from imbue.overlay.merge import merge
+from imbue.overlay.operators import is_extend_key
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 

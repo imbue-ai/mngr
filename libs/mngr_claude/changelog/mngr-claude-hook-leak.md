@@ -15,3 +15,5 @@ Reduced-support limitation in `use_env_config_dir` mode: there is no per-agent c
 Note: this stops *new* leaks; it does not remove hooks already written into existing `settings.local.json` files by a prior mngr -- clean those up manually if present.
 
 `mngr create` no longer requires the project's `.claude/settings.local.json` to be gitignored across the board. mngr writes its own hooks to the per-agent config dir, so that requirement now applies only when the `claude_subagent_proxy` plugin (PROXY mode) actually needs to rewrite user-defined Stop hooks in `settings.local.json` -- enforced by that plugin, at the point it writes.
+
+Internal: the `settings_overrides` fold now imports the config-merge primitives (`merge`, `finalize`, `is_extend_key`) from the new standalone `overlay` library rather than from `imbue.mngr.config`. No behavior change.

@@ -21,7 +21,6 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.data_types import StaticDict
 from imbue.mngr.config.data_types import StaticList
 from imbue.mngr.config.data_types import StaticTuple
 from imbue.mngr.config.data_types import StringDerivedTuple
@@ -1332,30 +1331,6 @@ def test_string_derived_tuple_is_a_static_tuple() -> None:
     assert isinstance(ScalarTuple(("--verbose",)), StaticTuple)
 
 
-def test_would_assignment_narrow_exempts_static_list() -> None:
-    """A ``StaticList`` override that drops base entries is a value-set, not
-    narrowing; a plain list of the same shape still narrows."""
-    base: list[str] = ["a", "b"]
-    assert would_assignment_narrow(base, StaticList(["c"])) is False
-    assert would_assignment_narrow(base, ["c"]) is True
-
-
-def test_would_assignment_narrow_exempts_static_dict() -> None:
-    """A ``StaticDict`` override that drops base keys is a value-set, not narrowing;
-    a plain dict that drops the same key still narrows."""
-    base: dict[str, Any] = {"x": 1, "y": 2}
-    assert would_assignment_narrow(base, StaticDict({"x": 1})) is False
-    assert would_assignment_narrow(base, {"x": 1}) is True
-
-
-def test_would_assignment_narrow_exempts_static_tuple() -> None:
-    """A bare ``StaticTuple`` override is exempt from narrowing (the general marker
-    underlying ``ScalarTuple``)."""
-    base: tuple[str, ...] = ("a", "b")
-    assert would_assignment_narrow(base, StaticTuple(("c",))) is False
-    assert would_assignment_narrow(base, ("c",)) is True
-
-
 def test_detect_settings_narrowing_exempts_static_list_override(mngr_test_prefix: str) -> None:
     """The ``StaticList`` exemption holds through the full ``detect_settings_narrowing``
     walk; a plain-list override of the same shape still narrows."""
@@ -1373,18 +1348,6 @@ def test_detect_settings_narrowing_exempts_static_list_override(mngr_test_prefix
         agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
     )
     assert detect_settings_narrowing(base, plain_override) == ["agent_types.my_claude.cli_args"]
-
-
-def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
-    """A bare ``ScalarTuple`` override (not string-derived) is exempt from
-    narrowing too: it marks a field whose value is a coherent scalar that a
-    higher-precedence layer replaces wholesale (the ``allowed_ssh_cidrs`` case),
-    rather than a list to be merged additively. A plain tuple with the same
-    tokens still narrows, proving the marker is the discriminator.
-    """
-    base: tuple[str, ...] = ("0.0.0.0/0",)
-    assert would_assignment_narrow(base, ScalarTuple(("203.0.113.4/32",))) is False
-    assert would_assignment_narrow(base, ("203.0.113.4/32",)) is True
 
 
 def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefix: str) -> None:
