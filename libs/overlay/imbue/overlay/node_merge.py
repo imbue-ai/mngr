@@ -1,0 +1,331 @@
+"""The typed-node merge algebra: lift, combine, finalize, and the public API.
+
+This is the node-based counterpart to the string-suffix algebra in ``merge.py``.
+The operator lives in the node *type* (``Default`` / ``Assign`` / ``Extend``), so
+the algebra dispatches on type and rewrites the outermost wrapper but never unwraps
+a payload to look for an inner operator -- which is what makes stacked suffixes safe
+by construction (see ``nodes`` and the spec).
+
+Pipeline:
+
+- ``lift`` turns a suffix-keyed surface dict into a node ``Patch`` (one node per
+  field, with the within-layer "reset then add" already folded in).
+- ``lift_concrete`` wraps a plain resolved base dict as an all-``Default`` patch.
+- ``combine`` folds ``higher`` over ``lower`` (both node patches), pure/recursive,
+  collecting ``AssignDrop`` candidates for the narrowing filter.
+- ``finalize`` collapses a node patch to a plain dict.
+- ``merge`` / ``merge_narrowing_allowed`` are the public API over the private
+  ``_merge`` (combine + narrowing filter); ``merge`` raises ``NarrowingError``.
+"""
+
+from typing import Any
+
+from imbue.overlay.errors import NarrowingError
+from imbue.overlay.errors import OverlayError
+from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.nodes import Assign
+from imbue.overlay.nodes import Default
+from imbue.overlay.nodes import Extend
+from imbue.overlay.nodes import Node
+from imbue.overlay.nodes import Patch
+from imbue.overlay.nodes import is_assign_kind
+from imbue.overlay.operators import ASSIGN_SUFFIX
+from imbue.overlay.operators import assign_bare_key
+from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import is_assign_key
+from imbue.overlay.operators import is_extend_key
+
+# A candidate assign drop recorded by ``combine`` for the narrowing filter:
+# ``(lower_payload, higher_payload, dotted_path)``. ``combine`` appends one for
+# every ``Default`` that overrides a lower node; ``_merge`` then keeps only those
+# that actually narrow (via ``would_assignment_narrow`` on the finalized payloads).
+AssignDrop = tuple[Any, Any, str]
+
+# The aggregate leaf types a payload may be (besides scalars / nested patches).
+# ``Static*`` markers subclass these and so are covered.
+_AGGREGATE_LEAF_TYPES = (list, tuple, set, frozenset)
+
+
+# =============================================================================
+# lift -- surface syntax (suffix-keyed dict) -> node Patch
+# =============================================================================
+
+
+def lift(raw: dict[str, Any]) -> Patch:
+    """Turn a suffix-keyed surface dict into a node-valued ``Patch``.
+
+    For each bare field name, gather its bare / ``__assign`` / ``__extend`` forms
+    and produce exactly one node:
+
+    - bare and ``__assign`` together -> ``OverlayError`` (contradictory assigns).
+    - assign form only -> ``Default`` (bare) or ``Assign`` (``__assign``).
+    - extend form only -> ``Extend``.
+    - assign form and extend form together -> one node of the assign's kind whose
+      payload is the extend applied onto the assign payload (the within-layer
+      "reset then add", resolved here, once, up front; order-independent w.r.t.
+      source key order).
+
+    Values are payload-lifted recursively (a nested dict becomes ``lift(dict)``).
+    Only the outermost suffix is stripped, once: a stacked ``a__extend__assign``
+    lifts to field name ``a__extend`` with an ``Assign`` wrapper -- a literal name
+    that is never re-parsed downstream.
+    """
+    bare_assigns: dict[str, Any] = {}
+    explicit_assigns: dict[str, Any] = {}
+    extends: dict[str, Any] = {}
+    for key, value in raw.items():
+        payload = lift(value) if isinstance(value, dict) else value
+        if is_extend_key(key):
+            extends[bare_key(key)] = payload
+        elif is_assign_key(key):
+            explicit_assigns[assign_bare_key(key)] = payload
+        else:
+            bare_assigns[key] = payload
+
+    conflicts = sorted(set(bare_assigns) & set(explicit_assigns))
+    if conflicts:
+        names = ", ".join(conflicts)
+        raise OverlayError(
+            f"Conflicting assignment: field(s) [{names}] have both a bare key and a "
+            f"'{ASSIGN_SUFFIX}' key in the same layer. Use exactly one of bare assign or "
+            f"'{ASSIGN_SUFFIX}' (assign without the narrowing check), not both."
+        )
+
+    patch: Patch = {}
+    for field, payload in bare_assigns.items():
+        patch[field] = _fold_assign_with_extend(Default, payload, field, extends)
+    for field, payload in explicit_assigns.items():
+        patch[field] = _fold_assign_with_extend(Assign, payload, field, extends)
+    for field, payload in extends.items():
+        if field not in bare_assigns and field not in explicit_assigns:
+            patch[field] = Extend(payload)
+    return patch
+
+
+def _fold_assign_with_extend(
+    kind: type[Default] | type[Assign],
+    assign_payload: Any,
+    field: str,
+    extends: dict[str, Any],
+) -> Node:
+    """Build the assign-kind node for ``field``, folding a same-layer ``__extend``
+    payload onto the assign payload when one exists (within-layer reset-then-add)."""
+    if field not in extends:
+        return kind(assign_payload)
+    return kind(apply_extend(assign_payload, extends[field], field))
+
+
+def lift_concrete(base: dict[str, Any]) -> Patch:
+    """Lift a plain (already-resolved) base dict to an all-``Default`` ``Patch``.
+
+    Every value is wrapped as a ``Default`` (an already-set assign), recursing into
+    nested dicts. This is what "merge against a concrete base" needs: the concrete
+    base becomes the lowest layer, so a higher ``Extend`` extends a base value and a
+    higher ``Default`` replaces and is narrowing-checked. Unlike ``lift``, no suffix
+    parsing happens -- keys are taken literally (a concrete base carries no operators).
+    """
+    patch: Patch = {}
+    for key, value in base.items():
+        patch[key] = Default(lift_concrete(value)) if isinstance(value, dict) else Default(value)
+    return patch
+
+
+# =============================================================================
+# apply_extend / combine_extend_payloads -- payload-level extend
+# =============================================================================
+
+
+def apply_extend(current_payload: Any, extend_payload: Any, field_path: str) -> Any:
+    """Apply ``extend_payload`` onto ``current_payload``, returning a new payload.
+
+    Operates on payloads (a leaf or a ``Patch``). A ``Patch`` target recurses via
+    ``combine`` (so the extend's nested nodes merge onto the current patch in the
+    right precedence order); a list/tuple target concatenates; a set/frozenset
+    target unions; a scalar target is an error. Extend-against-absent
+    (``current_payload is None``) acts as assign -- the extend payload becomes the
+    value -- but the shape must still be an aggregate or a patch.
+    """
+    if current_payload is None:
+        if isinstance(extend_payload, dict):
+            return combine({}, extend_payload, path=(field_path,))
+        if not isinstance(extend_payload, _AGGREGATE_LEAF_TYPES):
+            raise OverlayError(
+                f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        return extend_payload
+    if isinstance(current_payload, dict):
+        if not isinstance(extend_payload, dict):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (dict) requires a JSON object value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        return combine(current_payload, extend_payload, path=(field_path,))
+    if isinstance(current_payload, (list, tuple)):
+        if not isinstance(extend_payload, (list, tuple)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged = list(current_payload) + list(extend_payload)
+        return tuple(merged) if isinstance(current_payload, tuple) else merged
+    if isinstance(current_payload, (set, frozenset)):
+        if not isinstance(extend_payload, (list, tuple, set, frozenset)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (set) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged_set = set(current_payload) | set(extend_payload)
+        return frozenset(merged_set) if isinstance(current_payload, frozenset) else merged_set
+    raise OverlayError(
+        f"__extend on field '{field_path}' is not valid: target field is a scalar "
+        f"({type(current_payload).__name__}); use bare assignment instead."
+    )
+
+
+def combine_extend_payloads(lower_payload: Any, higher_payload: Any, field_path: str) -> Any:
+    """Combine two ``Extend`` payloads (neither resolved against a base yet).
+
+    Both payloads come from ``Extend`` nodes for the same field. A ``Patch`` pair
+    recurses via ``combine``; list/tuple pairs concatenate; set/frozenset pairs
+    union. Incompatible shapes are an error. The result is still an unresolved
+    extend payload (stays in an ``Extend`` node).
+    """
+    if isinstance(lower_payload, dict) and isinstance(higher_payload, dict):
+        return combine(lower_payload, higher_payload, path=(field_path,))
+    if isinstance(lower_payload, (list, tuple)) and isinstance(higher_payload, (list, tuple)):
+        merged = list(lower_payload) + list(higher_payload)
+        return tuple(merged) if isinstance(lower_payload, tuple) else merged
+    if isinstance(lower_payload, (set, frozenset)) and isinstance(higher_payload, (set, frozenset, list, tuple)):
+        merged_set = set(lower_payload) | set(higher_payload)
+        return frozenset(merged_set) if isinstance(lower_payload, frozenset) else merged_set
+    raise OverlayError(
+        f"Cannot combine __extend values for field '{field_path}': incompatible shapes "
+        f"({type(lower_payload).__name__} and {type(higher_payload).__name__})."
+    )
+
+
+# =============================================================================
+# combine -- cross-layer node-patch combine (higher over lower)
+# =============================================================================
+
+
+def combine(
+    lower: Patch,
+    higher: Patch,
+    *,
+    path: tuple[str, ...] = (),
+    assign_drops: list[AssignDrop] | None = None,
+) -> Patch:
+    """Combine two node patches, ``higher`` over ``lower``, pure/recursive/associative.
+
+    Per key: a key present in only one side carries through unchanged; a key in both
+    dispatches to ``combine_nodes``. ``assign_drops`` (if provided) collects the
+    ``(lower_payload, higher_payload, dotted_path)`` candidate for every ``Default``
+    that overrides a lower node, for the later narrowing filter.
+    """
+    result: Patch = {}
+    for key, node in lower.items():
+        if key not in higher:
+            result[key] = node
+    for key, higher_node in higher.items():
+        if key in lower:
+            result[key] = combine_nodes(lower[key], higher_node, path + (key,), assign_drops)
+        else:
+            result[key] = higher_node
+    return result
+
+
+def combine_nodes(
+    lower_node: Node,
+    higher_node: Node,
+    path: tuple[str, ...],
+    assign_drops: list[AssignDrop] | None,
+) -> Node:
+    """Combine two nodes for the same field, ``higher_node`` over ``lower_node``.
+
+    - higher is assign-kind (``Default`` / ``Assign``): higher wins wholesale; lower
+      dropped. ``Default`` records an ``AssignDrop`` candidate; ``Assign`` records
+      nothing (it suppresses the narrowing check).
+    - higher is ``Extend`` over an assign-kind lower: same kind as lower, payload
+      ``apply_extend(lower_payload, higher_payload)``. Never narrows.
+    - higher is ``Extend`` over ``Extend``: ``Extend(combine_extend_payloads(...))``;
+      stays deferred (no base yet).
+    """
+    if is_assign_kind(higher_node):
+        # Narrowing is recorded only when a Default replaces a lower *assign-kind*
+        # node; a lower Extend is an increment, not a base to narrow.
+        if isinstance(higher_node, Default) and is_assign_kind(lower_node) and assign_drops is not None:
+            assign_drops.append((lower_node.payload, higher_node.payload, ".".join(path)))
+        return higher_node
+    # higher_node is Extend.
+    field_path = ".".join(path)
+    if is_assign_kind(lower_node):
+        extended = apply_extend(lower_node.payload, higher_node.payload, field_path)
+        return type(lower_node)(extended)
+    # lower_node is Extend too.
+    return Extend(combine_extend_payloads(lower_node.payload, higher_node.payload, field_path))
+
+
+# =============================================================================
+# finalize -- collapse a node patch to a plain dict
+# =============================================================================
+
+
+def finalize(patch: Patch) -> dict[str, Any]:
+    """Collapse a node patch to a plain dict: every node (``Default`` / ``Assign`` /
+    ``Extend``) becomes ``finalize_payload(payload)``.
+
+    A surviving ``Extend`` collapsing to its payload is correct (extend-against-
+    nothing = assign), so there is no assertion that no ``Extend`` remains.
+    """
+    return {key: finalize_payload(node.payload) for key, node in patch.items()}
+
+
+def finalize_payload(payload: Any) -> Any:
+    """Collapse a payload: recurse for a ``Patch``, return the leaf otherwise."""
+    if isinstance(payload, dict):
+        return finalize(payload)
+    return payload
+
+
+# =============================================================================
+# Public API: _merge / merge / merge_narrowing_allowed
+# =============================================================================
+
+
+def _merge(lower: Patch, higher: Patch) -> tuple[Patch, list[str]]:
+    """Combine ``higher`` over ``lower`` and return the patch plus narrowing paths.
+
+    Collects ``AssignDrop`` candidates during ``combine`` and keeps only those that
+    actually narrow, comparing the **finalized** payloads via ``would_assignment_narrow``
+    (so ``Static*`` and superset overrides are exempt). Never raises for narrowing
+    (only a structural ``OverlayError`` from ``combine`` can propagate).
+    """
+    assign_drops: list[AssignDrop] = []
+    merged = combine(lower, higher, assign_drops=assign_drops)
+    narrowings = [
+        dotted
+        for lower_payload, higher_payload, dotted in assign_drops
+        if would_assignment_narrow(finalize_payload(lower_payload), finalize_payload(higher_payload))
+    ]
+    return merged, narrowings
+
+
+def merge(lower: Patch, higher: Patch) -> Patch:
+    """Combine ``higher`` over ``lower``, raising ``NarrowingError`` on any narrowing.
+
+    The strict default: every narrowing path in this combine is aggregated into one
+    ``NarrowingError``. Callers that want to surface (or discard) narrowings instead
+    of raising use ``merge_narrowing_allowed``.
+    """
+    merged, narrowings = _merge(lower, higher)
+    if narrowings:
+        raise NarrowingError(narrowings)
+    return merged
+
+
+def merge_narrowing_allowed(lower: Patch, higher: Patch) -> tuple[Patch, list[str]]:
+    """Combine ``higher`` over ``lower`` without raising; return the patch and the
+    narrowing paths for the caller to surface or discard."""
+    return _merge(lower, higher)
