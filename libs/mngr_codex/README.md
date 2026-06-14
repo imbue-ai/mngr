@@ -100,17 +100,15 @@ full model entitlement).
 
 ## Waiting reason
 
-Codex surfaces *why* an agent is waiting via the `waiting_reason` listing field
-(`mngr list`), reading marker files without SSH/tmux:
+`mngr list` shows a `waiting_reason` field for each codex agent, telling you why
+it is waiting:
 
-- `PERMISSIONS` -- blocked on a tool-approval dialog. The `PermissionRequest`
-  hook touches a `permissions_waiting` marker (and `get_lifecycle_state` reports
-  WAITING rather than RUNNING while it is present); `PostToolUse` clears it once
-  the approved tool runs, and the root `Stop` clears any stranded marker.
-- `END_OF_TURN` -- idle, turn complete (the `active` marker is absent).
+- `PERMISSIONS` -- blocked on a tool-approval dialog, waiting for you to respond.
+- `END_OF_TURN` -- idle, its turn complete, waiting for your next message.
 
 This only applies in supervised mode: with `auto_allow_permissions = true`
-(`approval_policy = "never"`) codex never prompts, so the marker never appears.
+(`approval_policy = "never"`) codex never prompts for approval, so an agent never
+waits with reason `PERMISSIONS`.
 
 ## Not yet implemented
 
