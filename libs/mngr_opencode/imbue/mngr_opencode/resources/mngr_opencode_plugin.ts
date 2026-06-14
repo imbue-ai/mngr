@@ -213,6 +213,16 @@ export const MngrLifecyclePlugin: Plugin = async () => {
     refreshPermissionsMarker()
   }
 
+  // Clear any stranded permissions_waiting marker at server startup. The in-memory
+  // pendingPermissions set is the authority within a server's lifetime (the marker
+  // is derived from it), and a freshly started server has none pending -- so an
+  // on-disk marker here is stale, left by a prior server that was killed/crashed
+  // mid-prompt (a clean turn-end clears it via clearMarkersForRootIdle). Without
+  // this, after `mngr stop`/`start` a stale marker would falsely read PERMISSIONS
+  // once the next turn sets `active`. This is opencode's analog of codex clearing a
+  // stranded marker at a fresh root turn (and of claude's startup reset).
+  refreshPermissionsMarker()
+
   let rawDirEnsured = false
   const appendRaw = (line: string): void => {
     try {

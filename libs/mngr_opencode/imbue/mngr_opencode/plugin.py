@@ -515,6 +515,39 @@ def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentT
     return ("opencode", OpenCodeAgent, OpenCodeAgentConfig)
 
 
+class WaitingReason(UpperCaseStrEnum):
+    """Why an opencode agent is in the WAITING lifecycle state."""
+
+    PERMISSIONS = auto()
+    END_OF_TURN = auto()
+
+
+def _classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) -> WaitingReason | None:
+    """Classify why an opencode agent is waiting from the two marker signals, or None.
+
+    Single source of truth for the gating rule, shared by ``get_lifecycle_state``
+    (via ``_resolve_lifecycle_state_for_permission``) and the ``waiting_reason``
+    field generator so the two readers cannot drift -- they differ only in how each
+    derives ``is_active`` (the lifecycle path from the live process + ``active``
+    marker, the field generator from a cheap ``active`` marker read), not in the
+    decision made from it.
+
+    - not active -> END_OF_TURN (idle, turn complete)
+    - active and blocked on an approval prompt -> PERMISSIONS
+    - active and not blocked -> None (actively running)
+
+    PERMISSIONS is gated on ``is_active``: an approval prompt can only be open
+    during a live turn, so a *stranded* ``permissions_waiting`` marker (one that
+    outlived its turn) reports END_OF_TURN rather than PERMISSIONS. Correctness
+    therefore does not depend on a cleanup having deleted the marker.
+    """
+    if not is_active:
+        return WaitingReason.END_OF_TURN
+    if is_blocked_on_permission:
+        return WaitingReason.PERMISSIONS
+    return None
+
+
 def _resolve_lifecycle_state_for_permission(
     base_state: AgentLifecycleState, is_blocked_on_permission: bool
 ) -> AgentLifecycleState:
@@ -525,17 +558,17 @@ def _resolve_lifecycle_state_for_permission(
     RUNNING since the session stays busy). Every non-RUNNING base state passes
     through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
     promotion rule is unit-testable without standing up a live server.
+
+    Defers the gating decision to ``_classify_waiting_reason``: a RUNNING base state
+    means the ``active`` marker is present and the process is alive, so the
+    classifier's ``is_active`` gate is satisfied and a PERMISSIONS verdict is what
+    promotes RUNNING to WAITING. Sharing that one function keeps this promotion and
+    the ``waiting_reason`` field generator from drifting apart.
     """
-    if base_state == AgentLifecycleState.RUNNING and is_blocked_on_permission:
-        return AgentLifecycleState.WAITING
-    return base_state
-
-
-class WaitingReason(UpperCaseStrEnum):
-    """Why an opencode agent is in the WAITING lifecycle state."""
-
-    PERMISSIONS = auto()
-    END_OF_TURN = auto()
+    if base_state != AgentLifecycleState.RUNNING:
+        return base_state
+    reason = _classify_waiting_reason(is_active=True, is_blocked_on_permission=is_blocked_on_permission)
+    return AgentLifecycleState.WAITING if reason is WaitingReason.PERMISSIONS else base_state
 
 
 def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
@@ -551,29 +584,17 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     """Return why the agent is waiting based on marker files, or None.
 
     Reads the agent state directory's marker files directly rather than calling
-    get_lifecycle_state() (which runs tmux/ps SSH commands). The markers are
-    maintained by the in-process lifecycle plugin (mngr_opencode_plugin.ts):
-
-    - active file absent -> END_OF_TURN (idle, turn complete)
-    - active present and permissions_waiting present -> PERMISSIONS (blocked on
-      an approval prompt)
-    - otherwise -> None (agent is actively running)
-
-    The ``active`` marker is read *first* and a ``permissions_waiting`` verdict is
-    gated on it: an approval prompt can only be open during a live turn, so
-    ``permissions_waiting`` is only meaningful while ``active`` is present. Reading
-    in this order makes a *stranded* ``permissions_waiting`` marker (one that
-    outlived its turn) report END_OF_TURN rather than PERMISSIONS, so correctness
-    no longer depends on the root-idle safety net having deleted the file. This
-    mirrors get_lifecycle_state, which only consults the permission marker when the
-    base state is RUNNING (i.e. ``active`` present and the process alive).
+    get_lifecycle_state() (which runs tmux/ps SSH commands), then delegates the
+    decision to the shared ``_classify_waiting_reason`` so this and the lifecycle
+    promotion stay in lockstep. The markers are maintained by the in-process
+    lifecycle plugin (mngr_opencode_plugin.ts). ``permissions_waiting`` is only read
+    when ``active`` is present, both to short-circuit the idle case and because the
+    classifier ignores the permission signal when the agent is not in a turn.
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if not _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME):
-        return WaitingReason.END_OF_TURN
-    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
-        return WaitingReason.PERMISSIONS
-    return None
+    is_active = _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME)
+    is_blocked_on_permission = is_active and _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME)
+    return _classify_waiting_reason(is_active, is_blocked_on_permission)
 
 
 @hookimpl

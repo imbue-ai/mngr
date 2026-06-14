@@ -37,6 +37,7 @@ from imbue.mngr_opencode.plugin import OpenCodeAgent
 from imbue.mngr_opencode.plugin import OpenCodeAgentConfig
 from imbue.mngr_opencode.plugin import WaitingReason
 from imbue.mngr_opencode.plugin import _build_prompt_post_command
+from imbue.mngr_opencode.plugin import _classify_waiting_reason
 from imbue.mngr_opencode.plugin import _resolve_lifecycle_state_for_permission
 from imbue.mngr_opencode.plugin import _waiting_reason
 from imbue.mngr_opencode.plugin import agent_field_generators
@@ -475,6 +476,24 @@ def test_resolve_lifecycle_state_for_permission(
     base_state: AgentLifecycleState, is_blocked: bool, expected: AgentLifecycleState
 ) -> None:
     assert _resolve_lifecycle_state_for_permission(base_state, is_blocked) == expected
+
+
+@pytest.mark.parametrize(
+    "is_active, is_blocked, expected",
+    [
+        # Idle (turn over): END_OF_TURN regardless of a stranded permission marker.
+        (False, False, WaitingReason.END_OF_TURN),
+        (False, True, WaitingReason.END_OF_TURN),
+        # In a turn: PERMISSIONS only while genuinely blocked, else actively running.
+        (True, True, WaitingReason.PERMISSIONS),
+        (True, False, None),
+    ],
+)
+def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: WaitingReason | None) -> None:
+    """The shared gating rule used by both get_lifecycle_state and the waiting_reason
+    field generator: PERMISSIONS is gated on is_active, so a stranded marker (active
+    absent) never yields PERMISSIONS."""
+    assert _classify_waiting_reason(is_active, is_blocked) == expected
 
 
 @pytest.mark.tmux

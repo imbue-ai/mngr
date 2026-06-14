@@ -245,3 +245,21 @@ def test_root_idle_clears_stranded_waiting_marker(tmp_path: Path) -> None:
         ],
     )
     assert not _marker_present(state)
+
+
+def test_startup_clears_stranded_waiting_marker(tmp_path: Path) -> None:
+    """A marker left on disk by a prior killed/crashed server is cleared at startup.
+
+    A fresh server has no pending prompts (the in-memory set is the authority), so
+    any on-disk marker is stale -- e.g. after `mngr stop`/`start` while blocked. The
+    plugin clears it on init, before any event, so the stale marker can't falsely
+    read PERMISSIONS once the next turn sets `active`.
+    """
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    (state_dir / PERMISSIONS_WAITING_FILENAME).write_text("")
+    # _run_plugin runs the plugin factory (which clears the stale marker on init)
+    # even though we replay no events.
+    returned_state = _run_plugin(tmp_path, [])
+    assert returned_state == state_dir
+    assert not _marker_present(returned_state)
