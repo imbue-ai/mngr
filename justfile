@@ -838,6 +838,10 @@ release *args:
 # removes any existing schedule before recreating, so this is also how you
 # redeploy after editing scripts/changelog_consolidation_prompt.md or
 # scripts/changelog_deploy.sh.
+# (Re)deploy the nightly changelog-consolidation schedule from current source.
+changelog-deploy:
+    bash scripts/changelog_deploy.sh
+
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`
@@ -846,10 +850,6 @@ release *args:
 # Check that this branch has a changelog entry per project it touches.
 check-changelog:
     python -m scripts.check_changelog_entries
-
-# (Re)deploy the nightly changelog-consolidation schedule from current source.
-changelog-deploy:
-    bash scripts/changelog_deploy.sh
 
 # Opens a PR (which you can merge before re-running a blocked release) by
 # running the same agent the schedule runs nightly. Reads the provider +
