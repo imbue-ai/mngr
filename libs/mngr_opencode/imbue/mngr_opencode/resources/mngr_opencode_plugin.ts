@@ -22,14 +22,17 @@
 //
 //   1b. Permissions-waiting marker -> WAITING reason. While a tool is blocked on an
 //      approval prompt (the `ask` permission policy), opencode emits
-//      `permission.updated` (one per blocked tool, carrying the permission id) and
+//      `permission.asked` (one per blocked tool, carrying the request id) and
 //      `permission.replied` when it is answered. The plugin tracks the set of
 //      pending ids and keeps $MNGR_AGENT_STATE_DIR/permissions_waiting present iff
 //      the set is non-empty, so OpenCodeAgent.get_lifecycle_state can promote
 //      RUNNING -> WAITING and `mngr list` can report a PERMISSIONS reason. Cleared
 //      as a safety net on root idle (a prompt stranded without a reply). The marker
 //      is independent of the active recompute -- the session stays busy (active
-//      present) the whole time a prompt is open.
+//      present) the whole time a prompt is open. (The running 1.16.2 binary emits
+//      `permission.asked` with a `requestID` on the reply; the @opencode-ai/sdk
+//      type stubs disagree, naming them `permission.updated`/`permissionID`. The two
+//      handlers accept either, since opencode self-upgrades.)
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to
@@ -352,15 +355,21 @@ export const MngrLifecyclePlugin: Plugin = async () => {
         return
       }
 
-      if (type === "permission.updated") {
-        // A tool is blocked on an approval prompt; properties is the Permission.
+      // A tool is blocked on an approval prompt. The running opencode server
+      // (verified against the 1.16.2 binary) emits `permission.asked`; the
+      // `@opencode-ai/sdk` type stubs instead name it `permission.updated`. The two
+      // disagree, and opencode self-upgrades, so accept either -- both carry the
+      // request id in `properties.id`.
+      if (type === "permission.asked" || type === "permission.updated") {
         pendingPermissions.add(event.properties.id)
         refreshPermissionsMarker()
         return
       }
+      // The prompt was answered (allowed or denied). The reply references the asked
+      // request id; the running binary names it `requestID`, the sdk stubs name it
+      // `permissionID` -- accept either.
       if (type === "permission.replied") {
-        // The prompt was answered (allowed or denied); clear that pending id.
-        pendingPermissions.delete(event.properties.permissionID)
+        pendingPermissions.delete(event.properties.requestID ?? event.properties.permissionID)
         refreshPermissionsMarker()
         return
       }

@@ -169,15 +169,17 @@ def test_user_and_assistant_text_captured(tmp_path: Path) -> None:
     assert by_type["tool_result"]["is_error"] is False
 
 
-# Permission events: opencode emits `permission.updated` (a full Permission, with
-# an `id`) when a tool blocks on approval, and `permission.replied` (carrying the
-# `permissionID`) when it is answered. The plugin keeps the permissions_waiting
-# marker present iff some permission id is still pending.
-def _permission_ask(permission_id: str, session_id: str = "ses_root") -> dict[str, Any]:
+# Permission events: the running opencode server (verified against the 1.16.2
+# binary) emits `permission.asked` (carrying the request `id`) when a tool blocks on
+# approval, and `permission.replied` (carrying `requestID`) when it is answered. The
+# `@opencode-ai/sdk` type stubs disagree -- naming them `permission.updated` and
+# `permissionID` -- so the plugin accepts both; the alias is covered below. The
+# marker is present iff some request id is still pending.
+def _permission_ask(request_id: str, session_id: str = "ses_root") -> dict[str, Any]:
     return {
-        "type": "permission.updated",
+        "type": "permission.asked",
         "properties": {
-            "id": permission_id,
+            "id": request_id,
             "type": "edit",
             "sessionID": session_id,
             "messageID": "m1",
@@ -188,10 +190,10 @@ def _permission_ask(permission_id: str, session_id: str = "ses_root") -> dict[st
     }
 
 
-def _permission_reply(permission_id: str, session_id: str = "ses_root") -> dict[str, Any]:
+def _permission_reply(request_id: str, session_id: str = "ses_root") -> dict[str, Any]:
     return {
         "type": "permission.replied",
-        "properties": {"sessionID": session_id, "permissionID": permission_id, "response": "once"},
+        "properties": {"sessionID": session_id, "requestID": request_id, "reply": "once"},
     }
 
 
@@ -216,6 +218,20 @@ def test_marker_persists_while_any_permission_still_pending(tmp_path: Path) -> N
         [_permission_ask("perm_1"), _permission_ask("perm_2", "ses_child"), _permission_reply("perm_1")],
     )
     assert _marker_present(state)
+
+
+def test_sdk_stub_event_names_are_also_handled(tmp_path: Path) -> None:
+    """The `@opencode-ai/sdk` stubs name the events `permission.updated` /
+    `permissionID`; the plugin accepts those too (opencode self-upgrades and the
+    stubs and binary disagree), so a future build using them keeps working."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            {"type": "permission.updated", "properties": {"id": "perm_1", "sessionID": "ses_root"}},
+            {"type": "permission.replied", "properties": {"sessionID": "ses_root", "permissionID": "perm_1"}},
+        ],
+    )
+    assert not _marker_present(state)
 
 
 def test_root_idle_clears_stranded_waiting_marker(tmp_path: Path) -> None:

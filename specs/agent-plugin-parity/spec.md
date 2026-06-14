@@ -984,18 +984,19 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   never apply, and `END_OF_TURN` alone adds nothing over RUNNING/WAITING.
 - **opencode** -- **status: implemented (online)** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. opencode prompts interactively (its per-tool `ask` policy, e.g.
-  `"edit": "ask"`) and -- unlike agy -- exposes the signal on the event bus: `permission.updated`
-  fires when a tool blocks on approval (a full `Permission`, carrying an `id`) and
-  `permission.replied` when it is answered. The in-process extension already subscribes to that bus
-  (the `event` hook in `mngr_opencode_plugin.ts`), so it tracks the set of pending permission ids
-  and keeps a `permissions_waiting` marker present while any prompt is open -- the multi-session
-  analog of codex's single touch/remove flag (opencode is a server with concurrent subagent
-  sessions). Root-session idle clears any stranded marker as a safety net (codex uses the root
-  `Stop`). `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is
-  present, mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent.
-  (The base branch's docs guessed the events were named `permission.asked`/`permission.replied`;
-  the real ask event is `permission.updated`, confirmed against the installed `@opencode-ai/sdk`
-  type defs.) No upstream change was required.
+  `"edit": "ask"`) and -- unlike agy -- exposes the signal on the event bus: `permission.asked`
+  fires when a tool blocks on approval (carrying the request `id`) and `permission.replied` when it
+  is answered (carrying `requestID`). The in-process extension already subscribes to that bus (the
+  `event` hook in `mngr_opencode_plugin.ts`), so it tracks the set of pending request ids and keeps
+  a `permissions_waiting` marker present while any prompt is open -- the multi-session analog of
+  codex's single touch/remove flag (opencode is a server with concurrent subagent sessions).
+  Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`).
+  `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is present,
+  mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. (Caveat: the
+  `@opencode-ai/sdk` type stubs are out of sync with the shipped binary -- they name the events
+  `permission.updated`/`permissionID`, but the running 1.16.2 server emits
+  `permission.asked`/`requestID`, verified by inspecting the binary. The plugin accepts **both**
+  names since opencode self-upgrades.) No upstream change was required.
 - **codex** -- **status: implemented** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
   hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a
@@ -1011,7 +1012,7 @@ Note: core has no first-class "WAITING reason" -- WAITING is binary (marker abse
 blocked (PERMISSIONS vs END_OF_TURN). Implementing `PERMISSIONS` needs two things: (a) the CLI
 actually prompts interactively for tool approval, and (b) it exposes a signal mngr can read while
 the agent is blocked. claude, codex, and opencode have both (implemented): opencode's `ask` policy
-prompts and the event bus emits `permission.updated`/`permission.replied`. agy has (a) but not (b):
+prompts and the event bus emits `permission.asked`/`permission.replied`. agy has (a) but not (b):
 it prompts but fires no event while blocked, so it is blocked on an upstream signal. pi has neither
 -- no tool-approval gate at all -- so `PERMISSIONS` is inapplicable. In the remaining unimplemented
 cases `END_OF_TURN` alone is derivable but adds nothing over the existing RUNNING/WAITING state.

@@ -49,7 +49,7 @@ hook mechanism. mngr leans into that shape:
   subagents keeps the agent RUNNING until the whole turn finishes.
 - **`waiting_reason`** (shown by `mngr list`) reports *why* a WAITING agent is
   blocked, as the claude and codex agent types do. When a tool blocks on an
-  approval prompt (an `ask` permission policy), opencode emits `permission.updated`;
+  approval prompt (an `ask` permission policy), opencode emits `permission.asked`;
   the plugin tracks pending prompts and keeps a `permissions_waiting` marker, which
   promotes the agent to WAITING and surfaces a `PERMISSIONS` reason. An idle agent
   whose turn is complete reports `END_OF_TURN`.
