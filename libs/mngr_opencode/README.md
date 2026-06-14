@@ -115,8 +115,15 @@ Notes:
 ## Not yet implemented
 
 Carried gaps (shared with `mngr_antigravity`): session preservation on destroy,
-scheduled-deploy contributions, the live streaming snapshot, and clone carrying
-the source conversation forward.
+scheduled-deploy contributions, the `waiting_reason` listing field, the live
+streaming snapshot, and clone carrying the source conversation forward.
+
+`waiting_reason` would report *why* a WAITING agent is blocked (`mngr list`), as
+the claude and codex agent types do. It is unimplemented but doable in-process: an
+agent using an `ask` permission policy blocks on a prompt, and opencode's event bus
+emits `permission.asked` / `permission.replied`, which this plugin's extension
+already receives via its `event` hook. Maintaining a marker on those events (the
+way codex's hooks do) would surface a `PERMISSIONS` reason with no upstream change.
 
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md)
 for more details.
