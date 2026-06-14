@@ -323,6 +323,11 @@ _TMUX_BENIGN_STDERR_SUBSTRINGS: Final[tuple[str, ...]] = (
     "error connecting to",
     "lost server",
     "server exited",
+    # When destroying several agents at once, killing the last session makes the tmux
+    # server exit; a concurrent kill-session against an already-gone session/server can
+    # then fail to resolve its target and report "no current target". The session is gone
+    # either way, so this is benign (it surfaced as a spurious LOCAL_STATE_REMAINS before).
+    "no current target",
 )
 # kill(1) emits this (ESRCH) when the target process is already dead -- expected, since
 # pids routinely die between collection and the kill loop.

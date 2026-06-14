@@ -1292,6 +1292,27 @@ def test_stop_agents_classifies_real_vs_benign_stderr(
     assert [f.category for f in failures] == [CleanupFailureCategory.PROCESSES_REMAIN]
 
 
+def test_stop_agents_treats_tmux_no_current_target_as_benign(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """tmux 'no current target' on kill-session is benign, not a LOCAL_STATE_REMAINS failure.
+
+    When several agents are destroyed at once, killing the last session makes the tmux server
+    exit; a concurrent kill-session against the already-gone session then reports "no current
+    target". The session is gone either way, so this must not surface as a spurious cleanup
+    failure (it did, flakily, before "no current target" was whitelisted).
+    """
+    agent = make_test_agent_details("cleanup-no-current-target-agent")
+
+    def handle(command: str) -> CommandResult:
+        if "kill-session" in command:
+            return CommandResult(stdout="", stderr="no current target", success=False)
+        return CommandResult(stdout="", stderr="", success=True)
+
+    host, _ = _make_stop_agents_test_host(local_provider, cast(AgentInterface, agent), handle)
+    assert get_cleanup_failures(lambda: host.stop_agents([agent.id])) == []
+
+
 def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeout(
     local_host: Host,
 ) -> None:
