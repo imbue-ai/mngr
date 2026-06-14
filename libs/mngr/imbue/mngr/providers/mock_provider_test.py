@@ -45,10 +45,15 @@ class MockProviderInstance(BaseProviderInstance):
     deleted_snapshots: list[tuple[HostId, SnapshotId]] = Field(default_factory=list)
     deleted_volumes: list[VolumeId] = Field(default_factory=list)
     connection_errors_cleared: list[HostId] = Field(default_factory=list)
+    mock_unreachable_endpoints: tuple[str, ...] = Field(default=())
 
     @property
     def supports_snapshots(self) -> bool:
         return self.mock_supports_snapshots
+
+    @property
+    def unreachable_endpoints(self) -> tuple[str, ...]:
+        return self.mock_unreachable_endpoints
 
     @property
     def supports_shutdown_hosts(self) -> bool:

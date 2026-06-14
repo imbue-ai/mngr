@@ -367,6 +367,7 @@ class VpsDockerProvider(BaseProviderInstance):
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
     _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
+    _unreachable_endpoints: list[str] = PrivateAttr(default_factory=list)
 
     @property
     def supports_snapshots(self) -> bool:
@@ -390,6 +391,20 @@ class VpsDockerProvider(BaseProviderInstance):
         self._host_record_cache.clear()
         self._container_running_cache.clear()
         self._instances_cache = None
+        self._unreachable_endpoints.clear()
+
+    @property
+    def unreachable_endpoints(self) -> tuple[str, ...]:
+        """VPS IPs whose records could not be read during the last discovery.
+
+        When a VPS is unreachable its agents are absent from the discovery
+        result (the host itself may still appear, as offline, but its agent
+        list comes back empty). Exposing the endpoints lets callers such as
+        ``mngr connect`` tell "no such agent" apart from "the agent's host
+        was unreachable". Populated by ``_read_records_from_vps`` and reset at
+        the start of each ``_discover_host_records_with_agents`` sweep.
+        """
+        return tuple(self._unreachable_endpoints)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """Provider-specific listing hook: return the raw instance dicts from the API.
@@ -1611,16 +1626,30 @@ class VpsDockerProvider(BaseProviderInstance):
                 agent_data = host_store.list_persisted_agent_data()
                 return [record], {host_id: agent_data}
         except MngrError as e:
+            # Record the unreachable endpoint so callers (e.g. ``mngr connect``)
+            # can distinguish "no such agent" from "agent's host was
+            # unreachable". A plain append is safe across the parallel fan-out:
+            # CPython's GIL makes ``list.append`` atomic, and the list is reset
+            # single-threaded before the fan-out begins.
+            self._unreachable_endpoints.append(vps_ip)
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
                 logger.warning(
-                    "Failed to read records from VPS {} ({}); surfacing {} cached host record(s) as offline",
+                    "Failed to read records from VPS {} on provider {!r} ({}); surfacing {} cached host "
+                    "record(s) as offline -- their agents are missing from listings until the host is reachable again",
                     vps_ip,
+                    self.name,
                     e,
                     len(cached_records),
                 )
             else:
-                logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
+                logger.warning(
+                    "Failed to read records from VPS {} on provider {!r}: {}; any agents on this host are "
+                    "missing from listings until it is reachable again",
+                    vps_ip,
+                    self.name,
+                    e,
+                )
             return cached_records, {}
 
     def _discover_host_records_with_agents(
@@ -1638,6 +1667,9 @@ class VpsDockerProvider(BaseProviderInstance):
         time bounded by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
+        # Reset before the fan-out (single-threaded) so ``unreachable_endpoints``
+        # reflects only this sweep; the parallel workers below only append.
+        self._unreachable_endpoints.clear()
         if not vps_ips:
             return [], {}
 

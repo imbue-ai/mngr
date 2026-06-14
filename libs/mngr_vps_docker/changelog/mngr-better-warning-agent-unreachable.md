@@ -1,0 +1,1 @@
+When a VPS-backed host cannot be reached during discovery, the warning now names the provider (not just the IP) and states explicitly that any agents on that host are missing from listings until it is reachable again. The unreachable endpoints are also tracked and exposed so commands like `mngr connect` can tell "no such agent" apart from "the agent's host was unreachable".

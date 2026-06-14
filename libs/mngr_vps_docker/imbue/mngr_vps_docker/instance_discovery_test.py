@@ -440,3 +440,35 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     # Discovery still warms the cache with what it did find, so a subsequent
     # lookup for the real host short-circuits.
     assert host_other in provider._host_record_cache
+
+
+# =========================================================================
+# unreachable_endpoints -- so callers can explain a missing agent
+# =========================================================================
+
+
+def test_unreachable_endpoint_recorded_when_ssh_fails(provider: _DiscoveryTestProvider) -> None:
+    """A VPS we cannot read is recorded so a missing agent can be explained, not assumed absent."""
+    provider.per_vps_outer_errors["10.0.0.7"] = HostConnectionError("no route to host")
+
+    provider._read_records_from_vps("10.0.0.7")
+
+    assert provider.unreachable_endpoints == ("10.0.0.7",)
+
+
+def test_discover_records_unreachable_endpoints_and_resets_between_sweeps(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """Unreachable VPSes are tracked per sweep; a later clean sweep clears the prior one."""
+    good_host = HostId.generate()
+    provider.hostnames = ["10.0.0.8", "10.0.0.9"]
+    provider.per_vps_records["10.0.0.8"] = ([_make_record(good_host, "host-good", "10.0.0.8")], {})
+    provider.per_vps_outer_errors["10.0.0.9"] = HostConnectionError("connection refused")
+
+    provider._discover_host_records_with_agents()
+    assert provider.unreachable_endpoints == ("10.0.0.9",)
+
+    # A subsequent all-reachable sweep must clear the stale endpoint rather than accumulate.
+    provider.hostnames = ["10.0.0.8"]
+    provider._discover_host_records_with_agents()
+    assert provider.unreachable_endpoints == ()

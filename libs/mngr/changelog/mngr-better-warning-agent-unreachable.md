@@ -1,0 +1,1 @@
+`mngr connect` (and other agent-resolution commands) no longer report a bare "Could not find agent" when the agent's host was unreachable during discovery. The error now adds a note naming the provider and the unreachable host(s), so a transiently-unreachable host is not mistaken for a nonexistent agent.
