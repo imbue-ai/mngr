@@ -17,9 +17,12 @@ one is composed), and loud failure on a missing state dir. (`tmux wait-for` is
 
 from __future__ import annotations
 
+import importlib.resources
 import os
 import subprocess
 from pathlib import Path
+
+from imbue.mngr import resources as mngr_resources
 
 _SCRIPT_PATH = Path(__file__).parent / "statusline.sh"
 
@@ -191,11 +194,16 @@ def test_failing_user_statusline_does_not_break_side_effects(tmp_path: Path) -> 
 
 
 def _install_flush_stubs(state_dir: Path) -> Path:
-    """Install stub stream/common transcript scripts that record that they ran
-    (and whether the active marker was still present at that moment, to pin the
-    flush-before-clear ordering). Returns the sentinel path the stubs append to."""
+    """Install the real shared common-transcript lib (so statusline.sh's source
+    succeeds and mngr_common_transcript_flush is defined) plus stub stream/common
+    transcript scripts that record that they ran (and whether the active marker
+    was still present at that moment, to pin the flush-before-clear ordering).
+    Returns the sentinel path the stubs append to."""
     commands = state_dir / "commands"
     commands.mkdir(parents=True, exist_ok=True)
+    (commands / "mngr_common_transcript_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+    )
     sentinel = state_dir / "flush_sentinel"
     for name in ("stream_transcript.sh", "common_transcript.sh"):
         script = commands / name

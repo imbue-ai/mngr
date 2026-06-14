@@ -18,6 +18,7 @@ Each test sets up:
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
@@ -27,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
@@ -114,11 +116,16 @@ def _conversation_history(conv_id: str, step_index: int) -> str:
 
 @pytest.fixture
 def state_dir(tmp_path: Path, stub_mngr_log_sh: str) -> Path:
-    """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh installed."""
+    """Per-test fake $MNGR_AGENT_STATE_DIR with stub mngr_log.sh + the real
+    shared common-transcript lib installed (the converter sources it for the
+    convert lock), mirroring Host._ensure_shared_shell_libs."""
     state = tmp_path / "agent"
     (state / "commands").mkdir(parents=True)
     (state / "logs" / "antigravity_transcript").mkdir(parents=True)
     (state / "commands" / "mngr_log.sh").write_text(stub_mngr_log_sh)
+    (state / "commands" / "mngr_common_transcript_lib.sh").write_text(
+        importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+    )
     return state
 
 

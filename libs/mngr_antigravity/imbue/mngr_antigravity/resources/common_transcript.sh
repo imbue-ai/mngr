@@ -55,37 +55,11 @@ _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
 # shellcheck source=mngr_log.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 
-# Serialize the read-modify-write conversion pass so the background daemon
-# (the 5s poll loop) and an on-demand `--single-pass` flush -- e.g. the one
-# statusline.sh fires on the busy->idle edge so the WAITING signal can't race
-# ahead of the converter -- never both append the same events. Without it,
-# two passes that read the dedup set before either writes would each append
-# the new events, leaving permanent duplicates (event-id dedup only skips
-# IDs already present at read time). mkdir is atomic on POSIX filesystems,
-# so it doubles as the mutex; a lock left by a crashed pass is broken once
-# it is older than a minute. Same idiom as codex's codex_marker_lock.
-_CONVERT_LOCK_DIR="$AGENT_DATA_DIR/.common_transcript_convert.lock"
-_CONVERT_LOCK_TIMEOUT="${MNGR_CONVERT_LOCK_TIMEOUT:-30}"
-
-_acquire_convert_lock() {
-    local waited=0
-    while ! mkdir "$_CONVERT_LOCK_DIR" 2>/dev/null; do
-        if [ -n "$(find "$_CONVERT_LOCK_DIR" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-            rmdir "$_CONVERT_LOCK_DIR" 2>/dev/null || true
-            continue
-        fi
-        if [ "$waited" -ge "$_CONVERT_LOCK_TIMEOUT" ]; then
-            return 1
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    return 0
-}
-
-_release_convert_lock() {
-    rmdir "$_CONVERT_LOCK_DIR" 2>/dev/null || true
-}
+# Shared common-transcript primitives: the convert lock that serializes this
+# converter's read-modify-write against any concurrent --single-pass flush (see
+# the library header for why duplicates would result without it).
+# shellcheck source=mngr_common_transcript_lib.sh
+source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 
 convert_new_events() {
     if [ ! -f "$INPUT_FILE" ]; then
@@ -93,8 +67,8 @@ convert_new_events() {
         return
     fi
 
-    if ! _acquire_convert_lock; then
-        log_warn "could not acquire convert lock after ${_CONVERT_LOCK_TIMEOUT}s; skipping pass"
+    if ! mngr_common_transcript_acquire_lock; then
+        log_warn "could not acquire convert lock; skipping pass"
         return
     fi
 
@@ -311,7 +285,7 @@ CONVERT_SCRIPT
 
     # The read-modify-write is done; drop the lock before the (lock-free)
     # logging below so a concurrent pass can proceed immediately.
-    _release_convert_lock
+    mngr_common_transcript_release_lock
 
     if [ -s "$convert_stderr" ]; then
         # Forward the heredoc Python's stderr to both the structured log

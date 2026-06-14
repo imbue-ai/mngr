@@ -11,6 +11,7 @@ so tests are fast and deterministic.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 # -- Helpers --
@@ -122,6 +124,14 @@ class ScriptRunner:
         log_path = self.agent_state_dir / "commands" / "mngr_log.sh"
         log_path.write_text(stub_mngr_log_sh)
         log_path.chmod(0o755)
+
+        # Write the real shared common-transcript lib: the converter sources it
+        # for the convert lock, mirroring Host._ensure_shared_shell_libs.
+        lib_path = self.agent_state_dir / "commands" / "mngr_common_transcript_lib.sh"
+        lib_path.write_text(
+            importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+        )
+        lib_path.chmod(0o755)
 
         # Standard paths
         self.script_path = Path(__file__).parent / "common_transcript.sh"

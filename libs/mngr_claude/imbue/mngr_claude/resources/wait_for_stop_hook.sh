@@ -160,26 +160,23 @@ upload_autofix_issues() {
 # marker, which is the turn-end signal `mngr wait --state WAITING` reads --
 # and consumers that harvest the final assistant message from the common
 # transcript on that signal (e.g. Catalyst's mngr_runner) would otherwise
-# race the converter. Forcing one synchronous pass of each, in pipeline order
-# (raw first, then common), guarantees the common transcript reflects the
-# final message before the marker is cleared. Best-effort: gated on the
-# scripts existing (the common transcript is opt-in) and `|| true` so a flush
-# failure can never strand the turn-end signal. The converter's mkdir lock
-# keeps this pass from racing the background daemon into duplicate events.
-flush_transcripts() {
-    local cmds="$MNGR_AGENT_STATE_DIR/commands"
-    if [ -x "$cmds/stream_transcript.sh" ]; then
-        bash "$cmds/stream_transcript.sh" --single-pass >/dev/null 2>&1 || true
-    fi
-    if [ -x "$cmds/common_transcript.sh" ]; then
-        bash "$cmds/common_transcript.sh" --single-pass >/dev/null 2>&1 || true
-    fi
-}
+# race the converter. mngr_common_transcript_flush forces one synchronous pass
+# of each converter, in pipeline order, so the common transcript reflects the
+# final message before the marker is cleared (see the shared library header).
+# Sourced and called defensively: the lib is provisioned by
+# Host._ensure_shared_shell_libs, but a missing lib or flush failure must never
+# strand the turn-end signal.
+if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh" ]; then
+    # shellcheck source=../../../mngr/imbue/mngr/resources/mngr_common_transcript_lib.sh
+    source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
+fi
 
 # --- Post-completion actions (run after all other stop hooks finish) ---
 run_post_completion() {
     # Flush the transcript pipeline before mark_inactive clears the marker.
-    flush_transcripts
+    if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
+        mngr_common_transcript_flush
+    fi
 
     # Only run post-completion if the orchestrator succeeded.
     # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
