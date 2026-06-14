@@ -654,7 +654,7 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "connect": _AGENT_FILTER_FLAGS | frozenset({"--reconnect", "--session-command"}),
     # ``mngr kanpan`` and ``mngr list`` synopses enumerate the most-useful
     # filter flags; the rarely-used ``--label`` / ``--host-label`` (and for
-    # ``list``, ``--header`` / ``--stdin``-positional alias) are omitted.
+    # ``list``, ``--header``) are omitted.
     "kanpan": frozenset({"--label", "--host-label"}),
     "list": frozenset({"--label", "--host-label", "--header"}),
     # ``mngr snapshot create`` and ``mngr snapshot list`` synopses enumerate
