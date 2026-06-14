@@ -52,3 +52,14 @@ Simplified the common-transcript converter's user-message handling to match agy'
 store: it now passes through the clean typed text agy records in `CortexStepUserInput.query`,
 dropping the speculative `<USER_REQUEST>...</USER_REQUEST>` envelope stripping that existed
 only for the retired agy-1.0.0 JSONL format.
+
+Hardened the SQLite decoder against malformed/drifted protobuf so a single bad step can no
+longer take down transcript capture. A `created_at` timestamp outside the platform range now
+degrades to an empty timestamp instead of raising an uncaught error that aborted the entire
+decode pass (which, since the offset never advanced, blacked out every conversation on every
+cycle -- a likely failure mode if a future agy renumbers a field into the timestamp slot).
+Truncated fixed-width (32/64-bit) protobuf fields are now detected as truncation and retried,
+matching the existing length-delimited handling, rather than silently yielding corrupt data
+and advancing past the step. A corrupt per-conversation offset file now resets to the start
+instead of crashing. Validated end-to-end by decoding real agy 1.0.8 conversation stores
+(including the `ChatToolCall` name/args path the schema-verification test cannot reach).

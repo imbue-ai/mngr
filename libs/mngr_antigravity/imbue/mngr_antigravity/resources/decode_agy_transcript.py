@@ -148,9 +148,13 @@ def _iter_fields(blob: bytes) -> Iterator[tuple[int, int, object]]:
             yield field, wire, blob[index : index + size]
             index += size
         elif wire == _WIRE_64BIT:
+            if index + 8 > length:
+                raise _TruncatedError("64-bit field ran past end of blob")
             yield field, wire, blob[index : index + 8]
             index += 8
         elif wire == _WIRE_32BIT:
+            if index + 4 > length:
+                raise _TruncatedError("32-bit field ran past end of blob")
             yield field, wire, blob[index : index + 4]
             index += 4
         else:
@@ -200,7 +204,14 @@ def _iso_timestamp(metadata: bytes | None) -> str:
     seconds = _first_varint(created_at, _TIMESTAMP_SECONDS)
     if seconds is None:
         return ""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+    # A varint is unsigned and unbounded, but ``time.gmtime`` rejects values outside the
+    # platform's ``time_t`` range (raising OverflowError, or OSError on some libc). created_at
+    # is informational, so a garbage value -- e.g. from agy renumbering a field into this slot
+    # -- must degrade to an empty timestamp, not propagate out and abort the whole decode pass.
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: bytes) -> dict[str, object]:
@@ -213,7 +224,7 @@ def decode_step(conv_id: str, idx: int, step_type: int, status: int, payload: by
     source_value = _first_varint(metadata, _METADATA_SOURCE) if metadata is not None else None
     record: dict[str, object] = {
         "step_index": idx,
-        "source": _STEP_SOURCE_NAMES.get(source_value or 0, f"STEP_SOURCE_{source_value}"),
+        "source": _STEP_SOURCE_NAMES.get(source_value, f"STEP_SOURCE_{source_value}"),
         "type": _STEP_TYPE_NAMES.get(step_type, f"STEP_TYPE_{step_type}"),
         "status": _STEP_STATUS_NAMES.get(status, f"STEP_STATUS_{status}"),
         "created_at": _iso_timestamp(metadata),
@@ -273,7 +284,12 @@ def _read_offset(offset_dir: Path, conv_id: str) -> int:
     if not offset_file.is_file():
         return -1
     text = offset_file.read_text().strip()
-    return int(text) if text.lstrip("-").isdigit() else -1
+    # A corrupt offset file must reset to -1, not crash the pass. ``lstrip("-").isdigit()``
+    # alone is not enough (e.g. "--5" passes it but ``int`` rejects it), so parse defensively.
+    try:
+        return int(text)
+    except ValueError:
+        return -1
 
 
 def stream_conversation(db_path: Path, conv_id: str, offset: int) -> tuple[list[str], int]:

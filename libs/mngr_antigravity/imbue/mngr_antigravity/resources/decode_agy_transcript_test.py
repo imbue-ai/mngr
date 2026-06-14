@@ -181,6 +181,47 @@ def test_iso_timestamp_handles_missing_and_partial_metadata() -> None:
     assert dat._iso_timestamp(b"\x0a\x00") == ""
 
 
+def test_iso_timestamp_tolerates_out_of_range_seconds() -> None:
+    """A seconds value outside the platform time_t range degrades to "" instead of raising.
+
+    ``time.gmtime`` raises OverflowError (or OSError on some libc) for an out-of-range value;
+    created_at is informational, so a garbage timestamp -- e.g. from agy renumbering a field
+    into this slot -- must not propagate out and abort the whole pass (see
+    test_decode_step_with_garbage_timestamp_does_not_raise / the run_once resilience test).
+    """
+    # Pull the metadata sub-message (with created_at.seconds = 2**63, past time_t) back out of a
+    # built step, then render it directly -- the same value decode_step would hand _iso_timestamp.
+    metadata = dat._first_message(_user_step("x", seconds=2**63), dat._STEP_METADATA)
+    assert metadata is not None
+    assert dat._iso_timestamp(metadata) == ""
+
+
+def test_decode_step_with_garbage_timestamp_does_not_raise() -> None:
+    """decode_step keeps the step's content and emits an empty created_at for a bad timestamp."""
+    record = dat.decode_step(_CONV, 0, 14, 3, _user_step("survives", seconds=2**63))
+    assert record["content"] == "survives"
+    assert record["created_at"] == ""
+
+
+def test_run_once_garbage_timestamp_does_not_blackout_other_conversations(tmp_path: Path) -> None:
+    """One step with an out-of-range timestamp must not abort the pass for every conversation.
+
+    Before the _iso_timestamp guard, the OverflowError escaped run_once (which catches only
+    sqlite3.Error), so a single corrupt timestamp emitted nothing and -- since the offset never
+    advanced -- blacked out the whole agent's transcript on every cycle. The bad conversation
+    sorts first here, so a regression would also starve the good one.
+    """
+    bad = "aaaaaaaa-0000-0000-0000-000000000000"
+    good = "bbbbbbbb-0000-0000-0000-000000000000"
+    state_dir, app_data_dir = _setup(tmp_path, bad, [(0, 14, 3, _user_step("from bad", seconds=2**63))])
+    _make_db(app_data_dir / "conversations" / f"{good}.db", [(0, 14, 3, _user_step("from good"))])
+    (state_dir / "antigravity_conversation_ids").write_text(f"{bad}\n{good}\n")
+    assert dat.run_once(state_dir, app_data_dir) == 2
+    events = _read_events(state_dir)
+    assert {e["content"] for e in events} == {"from bad", "from good"}
+    assert all(e["created_at"] == "" for e in events if e["content"] == "from bad")
+
+
 def test_iter_fields_handles_fixed_width_and_stops_on_invalid_wire() -> None:
     # field 1 as fixed64 (wire 1, tag 0x09) then fixed32 (wire 5, tag 0x0d).
     fields = list(dat._iter_fields(b"\x09" + b"\x00" * 8 + b"\x0d" + b"\x01" * 4))
@@ -198,6 +239,22 @@ def test_read_varint_rejects_truncated_and_overlong_varints() -> None:
         list(dat._iter_fields(b"\x80" * 11))
 
 
+def test_iter_fields_rejects_truncated_fixed_width_fields() -> None:
+    """A blob ending mid fixed64/fixed32 must raise _TruncatedError, like a truncated length field.
+
+    Without the bounds check a short ``blob[i : i + 8]`` slice is yielded silently and the index
+    advances past the end, so a step truncated mid-write would be emitted with corrupt data and
+    its offset advanced -- never retried. fixed64 has tag 0x09 (field 1, wire 1); fixed32 0x0d
+    (field 1, wire 5).
+    """
+    # fixed64 claims 8 trailing bytes but only 7 are present.
+    with pytest.raises(dat._TruncatedError):
+        list(dat._iter_fields(b"\x09" + b"\x00" * 7))
+    # fixed32 claims 4 trailing bytes but only 3 are present.
+    with pytest.raises(dat._TruncatedError):
+        list(dat._iter_fields(b"\x0d" + b"\x01" * 3))
+
+
 def test_run_once_skips_a_corrupt_db_but_keeps_others(tmp_path: Path) -> None:
     state_dir, app_data_dir = _setup(tmp_path, _CONV, [(0, 14, 3, _user_step("ok"))])
     corrupt = "ffffffff-0000-0000-0000-000000000000"
@@ -206,6 +263,21 @@ def test_run_once_skips_a_corrupt_db_but_keeps_others(tmp_path: Path) -> None:
     # The corrupt db raises sqlite3.Error and is skipped; the good conversation still emits.
     assert dat.run_once(state_dir, app_data_dir) == 1
     assert [event["content"] for event in _read_events(state_dir)] == ["ok"]
+
+
+def test_read_offset_resets_on_a_corrupt_offset_file(tmp_path: Path) -> None:
+    """A malformed offset file resets to -1 rather than crashing the pass.
+
+    The offset is normally ``str(int)``, but a corrupted file must not abort the cycle. "--5"
+    is the trap: it passes a naive ``lstrip("-").isdigit()`` check yet ``int`` rejects it.
+    """
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
+    (offset_dir / _CONV).write_text("--5")
+    assert dat._read_offset(offset_dir, _CONV) == -1
+    # A normal signed offset still round-trips.
+    (offset_dir / _CONV).write_text("7")
+    assert dat._read_offset(offset_dir, _CONV) == 7
 
 
 def test_run_once_with_no_conversation_ids_file_emits_nothing(tmp_path: Path) -> None:
