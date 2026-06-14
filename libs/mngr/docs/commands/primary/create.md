@@ -244,13 +244,16 @@ Provider: docker
 Provider: gcp
   GCE-specific args (consumed by provider, not passed to docker):
     --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal
-                             the provider's configured zone; default: us-west1-a)
+                             the provider's configured zone; defaults to the config's
+                             default_zone, the active gcloud compute/zone, or us-west1-a)
     --gcp-machine-type=TYPE  GCE machine type (default: e2-small)
+    --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the
+                             config's default_source_image (a full image / family URL)
     --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).
     --git-depth=N            Shallow-clone build context to depth N before upload
 
-  The GCE VM image is taken from the provider config (default_source_image);
-  per-host image overrides are not supported via build args.
+  When --gcp-image is omitted the VM image is taken from the provider config
+  (default_source_image).
 
   All other build args are passed to 'docker build' on the GCE instance.
   Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .
