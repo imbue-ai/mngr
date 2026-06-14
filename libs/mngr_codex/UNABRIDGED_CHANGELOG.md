@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-13
+
+Stabilized the codex marker-lock concurrency smoke test (`test_concurrent_root_stop_and_last_subagent_stop_clears_marker`), which could time out under heavy CI load. The test forks roughly 32 short-lived bash subprocesses, so the suite-wide 10s timeout was too tight when a runner was busy; it now gets a generous per-test timeout (a real deadlock would still hang far longer) and is marked flaky so offload retries it. No production behavior changed.
+
 ## 2026-06-12
 
 Added real `codex` agent-type support as its own plugin (`imbue-mngr-codex`), wiring OpenAI's Codex CLI into mngr and replacing the previous in-core `BaseAgent` stub.
