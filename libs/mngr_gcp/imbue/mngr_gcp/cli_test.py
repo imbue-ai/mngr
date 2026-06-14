@@ -12,6 +12,8 @@ Splits the test surface into two layers:
   a real GCE call (``prepare`` / ``cleanup`` ``--help``; the no-credentials path).
 """
 
+import json
+
 import click
 import pluggy
 import pytest
@@ -22,12 +24,16 @@ from google.cloud import compute_v1
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_gcp.backend import GCP_BACKEND_NAME
+from imbue.mngr_gcp.cli import _output_cleanup_result
+from imbue.mngr_gcp.cli import _output_prepare_result
 from imbue.mngr_gcp.cli import _perform_cleanup
 from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
+from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
@@ -60,7 +66,9 @@ def test_prepare_logic_creates_firewall_when_missing() -> None:
     """The privileged path creates the rule when it does not yet exist."""
     firewalls = FakeFirewallsClient()
     client = _prepare_client(firewalls)
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is True
     assert len(firewalls.inserted) == 1
     assert firewalls.inserted[0].name == "mngr-gcp-ssh"
 
@@ -70,7 +78,9 @@ def test_prepare_logic_reuses_firewall_when_present() -> None:
     firewalls = FakeFirewallsClient()
     firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
     client = _prepare_client(firewalls)
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is False
     assert firewalls.inserted == []
 
 
@@ -110,6 +120,56 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
     assert "Refusing" in str(exc_info.value)
     # The firewall must NOT have been deleted while an instance still exists.
     assert firewalls.deleted == []
+
+
+# =============================================================================
+# format-aware output (prepare / cleanup respect --format)
+# =============================================================================
+
+
+def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert captured.out == "Prepared GCP firewall rule mngr-gcp-ssh (tag mngr-ssh) in project test-project\n"
+
+
+def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode emits a structured object including the created signal."""
+    result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=False)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {
+        "firewall_name": "mngr-gcp-ssh",
+        "target_tag": "mngr-ssh",
+        "project_id": "test-project",
+        "created": False,
+    }
+
+
+def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode emits a ``prepared`` event with the same fields."""
+    result = FirewallPrepareResult(target_tag="mngr-ssh", was_created=True)
+    _output_prepare_result(result, "mngr-gcp-ssh", "test-project", OutputFormat.JSONL)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "prepared"
+    assert payload["created"] is True
+    assert payload["firewall_name"] == "mngr-gcp-ssh"
+
+
+def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=True when a rule was removed."""
+    _output_cleanup_result("mngr-gcp-ssh", "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"firewall_name": "mngr-gcp-ssh", "project_id": "test-project", "deleted": True}
+
+
+def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=False on the idempotent no-op path."""
+    _output_cleanup_result(None, "mngr-gcp-ssh", "test-project", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["deleted"] is False
 
 
 def test_prepare_command_help_is_reachable() -> None:

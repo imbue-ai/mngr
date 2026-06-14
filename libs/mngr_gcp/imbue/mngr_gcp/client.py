@@ -18,6 +18,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -103,6 +104,19 @@ def _make_instance_name(label: str, tags: Mapping[str, str]) -> str:
     suffix = host_id.lower().rsplit("-", 1)[-1] if host_id else uuid4().hex
     suffix = _INVALID_NAME_CHARS_RE.sub("", suffix)
     return f"{stem}-{suffix}"[:_MAX_INSTANCE_NAME_LENGTH].rstrip("-")
+
+
+class FirewallPrepareResult(FrozenModel):
+    """Outcome of ``GcpVpsClient.ensure_firewall`` / ``mngr gcp prepare``."""
+
+    target_tag: str = Field(description="Network tag an instance must carry to receive the rule's SSH ingress")
+    was_created: bool = Field(
+        description=(
+            "True if a new firewall rule was created by this call; False if it already existed "
+            "(idempotent re-run, or a concurrent create won the race) or if no rule was needed "
+            "(empty allowed_ssh_cidrs)"
+        )
+    )
 
 
 class GcpVpsClient(VpsClientInterface):
@@ -240,13 +254,15 @@ class GcpVpsClient(VpsClientInterface):
         if "0.0.0.0/0" in self.allowed_ssh_cidrs:
             logger.warning(
                 "GCP allowed_ssh_cidrs includes 0.0.0.0/0; auto-created firewall rule {!r} will "
-                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
-                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                "permit SSH from the public internet.",
                 self.firewall_name,
             )
 
-    def ensure_firewall(self) -> str:
-        """Ensure the SSH firewall rule exists, creating it if absent. Returns the target tag.
+    def ensure_firewall(self) -> FirewallPrepareResult:
+        """Ensure the SSH firewall rule exists, creating it if absent.
+
+        Returns a ``FirewallPrepareResult`` carrying the target tag and whether
+        a rule was newly created (False on idempotent re-run or empty ingress).
 
         GCE firewalls are network-scoped and tag-targeted (not per-instance
         like an EC2 security group). One rule named ``firewall_name`` allows
@@ -270,9 +286,9 @@ class GcpVpsClient(VpsClientInterface):
         """
         self._warn_about_cidrs_if_needed()
         if not self.allowed_ssh_cidrs:
-            return self.firewall_target_tag
+            return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=False)
         if self._firewall_exists():
-            return self.firewall_target_tag
+            return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=False)
 
         firewall = compute_v1.Firewall(
             name=self.firewall_name,
@@ -283,6 +299,7 @@ class GcpVpsClient(VpsClientInterface):
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22", str(self.container_ssh_port)])],
             description="Auto-created by mngr_gcp for SSH access to managed instances",
         )
+        was_created = True
         try:
             with self._translate_gcp_errors():
                 operation = self._firewalls().insert(project=self.project_id, firewall_resource=firewall)
@@ -292,13 +309,14 @@ class GcpVpsClient(VpsClientInterface):
             # the race; the rule now exists, which is exactly what we wanted.
             if e.status_code != 409:
                 raise
+            was_created = False
         logger.info(
             "Ensured firewall rule {} (tag {}) in project {}",
             self.firewall_name,
             self.firewall_target_tag,
             self.project_id,
         )
-        return self.firewall_target_tag
+        return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=was_created)
 
     def resolve_firewall(self) -> str:
         """Look up the firewall rule without creating or modifying it. Returns the target tag.
@@ -324,9 +342,7 @@ class GcpVpsClient(VpsClientInterface):
         raise MngrError(
             f"GCP firewall rule {self.firewall_name!r} does not exist in project {self.project_id!r}. "
             f"Run `mngr gcp prepare --project {self.project_id}` once to create it "
-            "(needs compute.firewalls.create), then retry the create with your usual "
-            "instance-create-only credentials. The rule targets the configured firewall_target_tag "
-            f"({self.firewall_target_tag!r}); every instance is tagged with it."
+            "(needs compute.firewalls.create), then retry the create."
         )
 
     def delete_firewall(self) -> str | None:

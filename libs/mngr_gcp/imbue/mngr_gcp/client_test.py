@@ -279,7 +279,9 @@ def test_ensure_firewall_skips_rule_and_warns_when_no_cidrs(log_warnings: list[s
     """
     firewalls = FakeFirewallsClient()
     client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=())
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is False
     assert firewalls.inserted == []
     assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
 
@@ -288,7 +290,9 @@ def test_ensure_firewall_warns_when_open_to_internet(log_warnings: list[str]) ->
     """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
     firewalls = FakeFirewallsClient()
     client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=("0.0.0.0/0",))
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is True
     assert firewalls.inserted[0].source_ranges == ["0.0.0.0/0"]
     assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
@@ -296,8 +300,9 @@ def test_ensure_firewall_warns_when_open_to_internet(log_warnings: list[str]) ->
 def test_ensure_firewall_creates_when_missing() -> None:
     firewalls = FakeFirewallsClient()
     client = _make_client(firewalls=firewalls)
-    tag = client.ensure_firewall()
-    assert tag == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is True
     assert len(firewalls.inserted) == 1
     rule = firewalls.inserted[0]
     assert rule.target_tags == ["mngr-ssh"]
@@ -311,8 +316,9 @@ def test_ensure_firewall_reuses_existing() -> None:
     firewalls = FakeFirewallsClient()
     firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
     client = _make_client(firewalls=firewalls)
-    tag = client.ensure_firewall()
-    assert tag == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is False
     assert firewalls.inserted == []
 
 
@@ -321,7 +327,10 @@ def test_ensure_firewall_tolerates_create_race() -> None:
     firewalls.insert_error = google_api_exceptions.Conflict("already exists")
     client = _make_client(firewalls=firewalls)
     # A concurrent create wins the race -> treated as success, not an error.
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    # The rule already existed (the racing creator made it), so this call did not create it.
+    assert result.was_created is False
 
 
 def test_resolve_firewall_returns_tag_when_present() -> None:
