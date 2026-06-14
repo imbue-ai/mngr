@@ -70,6 +70,7 @@ addopts = [
   "--cov=imbue.mngr",
   "--cov=imbue.imbue_common",
   "--cov=imbue.resource_guards",
+  "--cov=imbue.overlay",
   "--cov=imbue.mngr_claude",
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
