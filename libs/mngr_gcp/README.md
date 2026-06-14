@@ -37,6 +37,17 @@ resolves the rule read-only and errors with a pointer back to `prepare` if it is
 missing. Setting `allowed_ssh_cidrs = []` opts out entirely: no rule is created
 and the instance is unreachable from outside its VPC.
 
+`prepare` and `cleanup` read their defaults from your `[providers.<name>]`
+settings.toml block, selected with `--provider` (default `gcp`), so the rule
+lands in the same project / network / zone the runtime `mngr create --provider
+<name>` path will use. CLI flags override the resolved config, which in turn
+overrides class defaults. For example, with a `[providers.gcp-eu]` block pinning
+`network = "custom-net"` and `allowed_ssh_cidrs = ["203.0.113.4/32"]`:
+
+```bash
+mngr gcp prepare --provider gcp-eu   # uses that block's network + CIDRs, no flags needed
+```
+
 ### Teardown: `mngr gcp cleanup`
 
 `mngr gcp cleanup` is the inverse of `prepare`: it deletes the `mngr-gcp-ssh`
