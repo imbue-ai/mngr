@@ -27,6 +27,7 @@ from imbue.mngr.config.key_resolver_primitives import apply_extend
 from imbue.mngr.config.key_resolver_primitives import assign_bare_key
 from imbue.mngr.config.key_resolver_primitives import bare_key
 from imbue.mngr.config.key_resolver_primitives import check_no_conflicting_assign
+from imbue.mngr.config.key_resolver_primitives import combine_patches
 from imbue.mngr.config.key_resolver_primitives import extend_dict
 from imbue.mngr.config.key_resolver_primitives import is_assign_key
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
@@ -157,72 +158,50 @@ def resolve_extends(
     return result
 
 
-def fold_settings_patch(
-    base: dict[str, Any],
-    patch: dict[str, Any],
-    *,
-    path: tuple[str, ...] = (),
-) -> tuple[dict[str, Any], list[str]]:
-    """Fold a settings ``patch`` onto a **concrete** ``base`` dict, returning the
-    merged result and the dotted paths where a bare assign narrowed the base.
+def merge(lower: dict[str, Any], higher: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Combine two settings patches, ``higher`` over ``lower``, returning the combined
+    patch and the dotted paths where a bare assign narrowed a non-empty lower aggregate.
 
-    ``base`` must carry no ``__extend`` markers (it is the provision base ``B`` or a
-    sub-dict of it). The fold applies mngr's standard per-key rules recursively:
+    The unified algebra: the value side is exactly ``combine_patches`` (the four-rule,
+    recursive, associative, marker-preserving combine), and the narrowing side records
+    -- recursively -- wherever a **bare** assign drops a non-empty aggregate entry from
+    the corresponding ``lower`` value. Narrowing is suppressed for ``__assign`` keys and
+    ``Static*`` values (both honored by the injected ``would_assignment_narrow``
+    checker). It is **not** gated on the global narrowing flag: that is the caller's
+    decision (see ``_build_settings_json``), which keeps ``merge`` a pure total
+    function.
 
-    - **bare ``key``** -> assign: ``result[key]`` becomes the value (a dict value
-      is first resolved against an empty base so its own nested markers collapse).
-      If the assignment drops a non-empty aggregate entry from ``base[key]``
-      (``would_assignment_narrow``), the dotted path is recorded -- **at any
-      depth**, including bare keys nested inside an ``__extend`` value.
-    - **``key__extend``** -> extend ``base[key]``: a dict-vs-dict extend recurses
-      (so nested bare assigns are themselves narrow-checked and their paths bubble
-      up); list concat / set union / extend-against-absent reuse ``apply_extend``.
-      ``__extend`` merges never narrow (they are supersets).
+    - Against a **concrete** ``lower`` (no markers), every ``higher`` marker resolves
+      where ``lower`` has the key and is preserved where absent (combine semantics);
+      pair with ``finalize`` to drop any preserved-against-nothing marker.
+    - Against a **patch** ``lower``, unresolvable markers survive for later resolution.
 
-    The result contains no ``__extend`` markers (every marker resolves against the
-    concrete base). Pure; the narrowing list is returned rather than raised so the
-    caller can apply the escape hatch.
+    Associativity (property-tested): ``finalize(merge(merge(B, X), Y)) ==
+    finalize(merge(B, merge(X, Y)))``. Pure; never raises for narrowing (only the
+    bare-plus-``__assign`` conflict, a parse error, can raise -- via
+    ``combine_patches``).
     """
-    check_no_conflicting_assign(patch, ".".join(path))
-    result: dict[str, Any] = dict(base)
     narrowings: list[str] = []
 
-    # First pass (assign-phase): bare and ``__assign`` keys assign (resolving their
-    # own nested markers against empty so nothing leaks). A bare key is
-    # narrow-checked against the base value; an ``__assign`` key assigns identically
-    # but suppresses the narrowing check (the explicit no-warn opt-out).
-    for key, value in patch.items():
-        if is_extend_key(key):
-            continue
-        suppress_narrowing = is_assign_key(key)
-        bare = assign_bare_key(key) if suppress_narrowing else key
-        key_path = path + (bare,)
-        dotted = ".".join(key_path)
-        if isinstance(value, Mapping):
-            assigned: Any = extend_dict({}, value, dotted)
-        else:
-            assigned = value
-        if not suppress_narrowing and would_assignment_narrow(base.get(bare), assigned):
+    def _record(lower_value: Any, higher_value: Any, dotted: str) -> None:
+        if would_assignment_narrow(lower_value, higher_value):
             narrowings.append(dotted)
-        result[bare] = assigned
 
-    # Second pass: ``key__extend`` keys extend the just-assigned bare value (if the
-    # same layer set one) or the base value.
-    for key, value in patch.items():
-        if not is_extend_key(key):
-            continue
-        bare = bare_key(key)
-        key_path = path + (bare,)
-        current = result.get(bare)
-        if isinstance(current, Mapping) and isinstance(value, Mapping):
-            # Recurse so nested bare assigns inside the extend value are
-            # narrow-checked and their paths bubble up.
-            merged_sub, sub_narrowings = fold_settings_patch(dict(current), dict(value), path=key_path)
-            result[bare] = merged_sub
-            narrowings.extend(sub_narrowings)
-        else:
-            result[bare] = apply_extend(current, value, ".".join(key_path))
-    return result, narrowings
+    merged = combine_patches(lower, higher, record_narrowing=_record)
+    return merged, narrowings
+
+
+def finalize(patch: dict[str, Any]) -> dict[str, Any]:
+    """Resolve any remaining ``__extend`` markers in ``patch`` against an empty base
+    (extend-against-nothing = assign), recursively, producing a marker-free dict.
+
+    Pure. No assertion: a leftover marker resolving to a bare assign is the correct
+    "nothing to extend against" behavior, not a bug (a genuinely-forgotten base shows
+    up as missing base keys, which ordinary tests catch). ``extend_dict`` already
+    performs exactly this recursive resolve-against-empty, so ``finalize`` is a thin
+    name for it at the top level.
+    """
+    return extend_dict({}, patch, "")
 
 
 class _ExactDepthMatcher(BaseModel):

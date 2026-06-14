@@ -29,6 +29,7 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import StaticList
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -4713,6 +4714,67 @@ def test_build_settings_json_nested_bare_inside_extend_allowed_with_escape_hatch
     content = _build_settings_json(claude_dir, config, ctx, sync_local=True, allow_narrowing=True)
     data = json.loads(content)
     assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_assign_override_suppresses_narrowing() -> None:
+    """A ``key__assign`` settings_override assigns like a bare key but suppresses the
+    narrowing guard, so a drop that a bare key would reject is permitted without the
+    global escape hatch."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__assign": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"] == {"allow": ["Bash(npm *)"]}
+    assert "__assign" not in content
+
+
+def test_build_settings_json_nested_assign_inside_extend_suppresses_narrowing() -> None:
+    """A nested ``allow__assign`` inside a ``permissions__extend`` suppresses the
+    nested narrowing that a nested bare ``allow`` would raise, while ``defaultMode``
+    still survives the outer extend."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow__assign": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
+def test_build_settings_json_static_override_suppresses_narrowing() -> None:
+    """A ``Static*`` settings_override value replaces a non-empty base aggregate as a
+    value-set, suppressing the narrowing guard -- here via a *bare* nested ``allow``
+    whose value is a ``StaticList``, so only the ``Static*`` exemption (not
+    ``__assign``) keeps it from raising."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(json.dumps({"permissions": {"allow": ["Bash(git *)", "Bash(ls)"]}}))
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": StaticList(["Bash(npm *)"])}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True)
+    data = json.loads(content)
     assert data["permissions"]["allow"] == ["Bash(npm *)"]
 
 

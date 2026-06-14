@@ -9,8 +9,10 @@ from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import StaticList
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
-from imbue.mngr.config.key_resolver import fold_settings_patch
+from imbue.mngr.config.key_resolver import finalize
+from imbue.mngr.config.key_resolver import merge
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver_primitives import ASSIGN_SUFFIX
 from imbue.mngr.config.key_resolver_primitives import EXTEND_SUFFIX
@@ -484,11 +486,12 @@ def test_combine_patches_lower_bare_dict_with_nested_marker_plus_higher_extend()
     assert combined == {"permissions": {"defaultMode": "acceptEdits", "allow__extend": ["X", "Y"]}}
 
 
-def _resolve_fold(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """The provision fold used in the associativity checks: resolve ``patch`` onto
-    the concrete ``base`` and overlay the result, returning the full merged dict
-    (matching ``_build_settings_json``'s ``{**base, **resolved}``)."""
-    return {**base, **resolve_extends(base, patch)}
+def _fold(base: dict[str, Any], patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """The provision fold expressed via the unified primitives: ``merge`` against the
+    concrete ``base`` (tracking narrowings) then ``finalize`` (resolving any marker
+    preserved against an absent key) -- matching ``_build_settings_json``."""
+    merged, narrowings = merge(base, patch)
+    return finalize(merged), narrowings
 
 
 @pytest.mark.parametrize(
@@ -525,72 +528,75 @@ def _resolve_fold(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]
             {"a": {"c__extend": {"b": "lower"}}},
             {"a__extend": {"c__extend": {"b": "higher"}}},
         ),
+        # __assign in the mix: a higher __assign over a lower extend.
+        ({"f": ["V"]}, {"f__extend": ["A"]}, {"f__assign": ["B"]}),
     ],
 )
-def test_combine_patches_is_associative_with_the_fold(
+def test_merge_is_associative_under_finalize(
     base: dict[str, Any], lower: dict[str, Any], higher: dict[str, Any]
 ) -> None:
-    """``resolve(B, combine(X, Y)) == resolve(resolve(B, X), Y)`` for the four-rule
-    table plus nested-dict recursion -- the core associativity guarantee that lets
-    per-scope patches be condensed at config-load and applied at provision."""
-    combined_then_resolved = _resolve_fold(base, combine_patches(lower, higher))
-    folded_in_order = _resolve_fold(_resolve_fold(base, lower), higher)
-    assert combined_then_resolved == folded_in_order
+    """``finalize(merge(merge(B, X), Y)) == finalize(merge(B, merge(X, Y)))`` for the
+    four-rule table plus nested-dict recursion and ``__assign`` -- the core
+    associativity guarantee that lets per-scope patches be condensed at config-load
+    and applied at provision."""
+    left = finalize(merge(merge(base, lower)[0], higher)[0])
+    right = finalize(merge(base, merge(lower, higher)[0])[0])
+    assert left == right
 
 
 # =============================================================================
-# fold_settings_patch -- threaded-narrowing provision fold
+# merge / finalize -- threaded-narrowing provision fold
 # =============================================================================
 
 
-def test_fold_settings_patch_extend_against_present_dict_preserves_siblings() -> None:
+def test_merge_extend_against_present_dict_preserves_siblings() -> None:
     """A nested ``allow__extend`` merges onto the base, preserving ``defaultMode``;
     no narrowing (extend is a superset)."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow__extend": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions__extend": {"allow__extend": ["X"]}})
     assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["old", "X"]}}
     assert narrowings == []
 
 
-def test_fold_settings_patch_top_level_bare_narrows() -> None:
+def test_merge_top_level_bare_narrows() -> None:
     """A bare key that drops a non-empty aggregate from the base is recorded."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
-    merged, narrowings = fold_settings_patch(base, {"permissions": {"allow": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions": {"allow": ["X"]}})
     assert merged == {"permissions": {"allow": ["X"]}}
     assert narrowings == ["permissions"]
 
 
-def test_fold_settings_patch_nested_bare_inside_extend_narrows() -> None:
+def test_merge_nested_bare_inside_extend_narrows() -> None:
     """The known-gap fix: a bare key nested inside an ``__extend`` value that drops a
     non-empty base aggregate is recorded at its dotted path (previously unchecked)."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions__extend": {"allow": ["X"]}})
     # defaultMode survives the outer extend; allow is replaced (dropping "old").
     assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
     assert narrowings == ["permissions.allow"]
 
 
-def test_fold_settings_patch_assigns_absent_key_without_narrowing() -> None:
+def test_merge_assigns_absent_key_without_narrowing() -> None:
     """Assigning a brand-new key (no base value) never narrows."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
-    merged, narrowings = fold_settings_patch(base, {"model": "opus"})
+    merged, narrowings = _fold(base, {"model": "opus"})
     assert merged == {"permissions": {"defaultMode": "acceptEdits"}, "model": "opus"}
     assert narrowings == []
 
 
-def test_fold_settings_patch_resolves_nested_markers_in_bare_dict() -> None:
+def test_merge_resolves_nested_markers_in_bare_dict() -> None:
     """A bare dict value carrying its own ``__extend`` resolves against empty
     (extend-against-nothing = assign), leaving no marker in the output."""
     base: dict[str, Any] = {}
-    merged, narrowings = fold_settings_patch(base, {"permissions": {"allow__extend": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions": {"allow__extend": ["X"]}})
     assert merged == {"permissions": {"allow": ["X"]}}
     assert narrowings == []
 
 
-def test_fold_settings_patch_output_has_no_markers() -> None:
+def test_finalize_output_has_no_markers() -> None:
     """Against a concrete base every marker resolves; the output has no ``__extend``."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    merged, _ = fold_settings_patch(base, {"permissions__extend": {"allow__extend": ["X"]}})
+    merged, _ = _fold(base, {"permissions__extend": {"allow__extend": ["X"]}})
 
     def _has_marker(value: Any) -> bool:
         if isinstance(value, dict):
@@ -600,6 +606,33 @@ def test_fold_settings_patch_output_has_no_markers() -> None:
         return False
 
     assert not _has_marker(merged)
+
+
+def test_merge_against_concrete_base_preserves_untouched_siblings() -> None:
+    """``merge`` carries through base keys the patch does not mention (so no separate
+    overlay is needed in ``_build_settings_json``)."""
+    base: dict[str, Any] = {"model": "opus", "permissions": {"allow": ["old"]}}
+    merged, narrowings = _fold(base, {"permissions__extend": {"allow__extend": ["X"]}})
+    assert merged == {"model": "opus", "permissions": {"allow": ["old", "X"]}}
+    assert narrowings == []
+
+
+def test_merge_static_override_does_not_narrow() -> None:
+    """A ``StaticList`` override that drops base entries is a value-set, not narrowing."""
+    base: dict[str, Any] = {"cli_args": ["--debug", "--trace"]}
+    merged, narrowings = _fold(base, {"cli_args": StaticList(["--verbose"])})
+    assert merged == {"cli_args": ["--verbose"]}
+    assert narrowings == []
+
+
+def test_merge_assign_suppresses_narrowing_but_bare_does_not() -> None:
+    """``__assign`` over a non-empty base aggregate suppresses the narrowing the same
+    bare assign would record."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    _, bare_narrowings = _fold(base, {"permissions": {"allow": ["X"]}})
+    assert bare_narrowings == ["permissions"]
+    _, assign_narrowings = _fold(base, {"permissions__assign": {"allow": ["X"]}})
+    assert assign_narrowings == []
 
 
 # =============================================================================
@@ -629,7 +662,7 @@ def test_fold_assign_key_assigns_like_bare_but_records_no_narrowing() -> None:
     """``key__assign`` replaces the base value identically to a bare key, but the
     narrowing that a bare key would record is suppressed."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    merged, narrowings = fold_settings_patch(base, {"permissions__assign": {"allow": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions__assign": {"allow": ["X"]}})
     assert merged == {"permissions": {"allow": ["X"]}}
     assert narrowings == []
 
@@ -637,7 +670,7 @@ def test_fold_assign_key_assigns_like_bare_but_records_no_narrowing() -> None:
 def test_fold_bare_key_still_narrows_when_assign_would_not() -> None:
     """Sanity contrast: the same drop via a *bare* key still records a narrowing."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    _, narrowings = fold_settings_patch(base, {"permissions": {"allow": ["X"]}})
+    _, narrowings = _fold(base, {"permissions": {"allow": ["X"]}})
     assert narrowings == ["permissions"]
 
 
@@ -645,7 +678,7 @@ def test_fold_assign_then_extend_in_same_layer_resets_without_warning_then_adds(
     """``key__assign`` (assign-phase) runs before ``key__extend`` (extend-phase):
     reset-without-warning, then add."""
     base: dict[str, Any] = {"unset_vars": ["OLD"]}
-    merged, narrowings = fold_settings_patch(base, {"unset_vars__assign": [], "unset_vars__extend": ["A"]})
+    merged, narrowings = _fold(base, {"unset_vars__assign": [], "unset_vars__extend": ["A"]})
     assert merged == {"unset_vars": ["A"]}
     assert narrowings == []
 
@@ -654,7 +687,7 @@ def test_fold_assign_nested_inside_extend_suppresses_nested_narrowing() -> None:
     """A bare key nested in an ``__extend`` narrows; switching it to ``__assign``
     suppresses that nested narrowing while keeping the same merged value."""
     base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
-    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow__assign": ["X"]}})
+    merged, narrowings = _fold(base, {"permissions__extend": {"allow__assign": ["X"]}})
     assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
     assert narrowings == []
 
@@ -663,7 +696,7 @@ def test_fold_bare_plus_assign_same_key_raises() -> None:
     """A bare key and ``key__assign`` for the same field in one layer is a
     contradictory double-assign -> ``ConfigParseError``."""
     with pytest.raises(ConfigParseError, match="Conflicting assignment"):
-        fold_settings_patch({}, {"model": "opus", "model__assign": "sonnet"})
+        _fold({}, {"model": "opus", "model__assign": "sonnet"})
 
 
 def test_resolve_extends_assign_key_assigns_like_bare() -> None:

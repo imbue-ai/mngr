@@ -48,7 +48,8 @@ from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.key_resolver import fold_settings_patch
+from imbue.mngr.config.key_resolver import finalize
+from imbue.mngr.config.key_resolver import merge
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
@@ -555,7 +556,8 @@ def _build_settings_json(
 
     - a bare key assigns (replacing the base value), and the narrowing guard
       hard-errors when the assignment would drop a non-empty aggregate sibling
-      from the base unless ``allow_narrowing`` is set;
+      from the base unless ``allow_narrowing`` is set (or the override is a
+      ``key__assign`` key or a ``Static*`` value, both of which suppress it);
     - a ``key__extend`` merges onto the base value (list concat / set union /
       recursive dict merge), with nested ``__extend`` markers merging deeper.
 
@@ -593,17 +595,21 @@ def _build_settings_json(
     # their home settings.json against an empty base (extend-against-empty =
     # assign), so ``B`` is concrete by construction. mngr's own flags/hooks carry
     # no markers, so in practice only the synced home file could contribute one.
-    data, _ = fold_settings_patch({}, data)
+    data = finalize(data)
 
-    # Fold the settings_overrides patch onto the concrete base ``B``. ``__extend``
+    # Merge the settings_overrides patch onto the concrete base ``B``. ``__extend``
     # markers merge against ``B``; bare keys assign. Narrowing is tracked inside the
-    # fold and reported at any depth (including bare keys nested in an ``__extend``).
-    data, narrowings = fold_settings_patch(data, config.settings_overrides)
+    # merge and reported at any depth (including bare keys nested in an ``__extend``);
+    # ``__assign`` keys and ``Static*`` values suppress it. ``finalize`` then resolves
+    # any marker preserved against an absent ``B`` key.
+    merged, narrowings = merge(data, config.settings_overrides)
 
     # Narrowing guard: any bare override key (at any depth) that drops a non-empty
     # aggregate from ``B`` hard-errors unless the escape hatch is set.
     if narrowings and not allow_narrowing:
         raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowings))
+
+    data = finalize(merged)
 
     leaked_markers = _find_extend_marker_paths(data)
     if leaked_markers:

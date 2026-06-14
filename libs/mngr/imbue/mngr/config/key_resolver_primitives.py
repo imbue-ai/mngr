@@ -13,10 +13,20 @@ imports ``data_types``; ``data_types`` imports only these primitives).
 import json
 from collections.abc import Mapping
 from typing import Any
+from typing import Callable
 from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigParseError
+
+# A narrowing-tracking hook injected into the combine algebra by ``merge`` (in
+# ``key_resolver``). Given the lower value, the higher (bare-assigned) value, and the
+# dotted field path, it appends any narrowing paths it finds to its own accumulator.
+# ``combine_patches`` itself passes ``None`` (no tracking); ``merge`` passes a real
+# checker so the same pure combine algebra also reports narrowings. Injection (rather
+# than importing ``data_types`` here) keeps these primitives free of the config-model
+# layer and avoids a circular import.
+NarrowingRecorder = Callable[[Any, Any, str], None]
 
 # Operator suffix on a leaf key indicating "extend the current value".
 # Lowercase form used in TOML, ``--setting`` paths, and ``mngr config`` keys.
@@ -222,11 +232,12 @@ def combine_patches(
     higher: dict[str, Any],
     *,
     path: tuple[str, ...] = (),
+    record_narrowing: NarrowingRecorder | None = None,
 ) -> dict[str, Any]:
     """Combine two settings "patches" into one, ``higher`` over ``lower``.
 
     A *patch* is a dict that may carry ``key__extend`` markers at any depth and
-    is destined to be folded (``resolve_extends`` / ``fold_settings_patch``) onto
+    is destined to be resolved (``resolve_extends`` / ``merge`` + ``finalize``) onto
     a concrete base later. ``combine_patches`` lets the per-scope (and
     per-inheritance-layer) patches be condensed into a single patch *without* a
     base, preserving / combining their markers so that resolving the combined
@@ -270,23 +281,40 @@ def combine_patches(
 
     # Apply higher assign keys (assign wins; recurse a dict value against nothing so
     # its own nested markers stay structured without merging in lower). The output
-    # key preserves any ``__assign`` suffix.
+    # key preserves any ``__assign`` suffix. A *bare* (not ``__assign``) assign that
+    # drops a non-empty aggregate from the lower value is recorded as narrowing; an
+    # ``__assign`` assign suppresses that check.
     for bare, out_key in higher_assign_keys.items():
         value = higher[out_key]
         if isinstance(value, Mapping):
-            result[out_key] = combine_patches({}, dict(value), path=path + (bare,))
+            resolved_value: Any = combine_patches({}, dict(value), path=path + (bare,))
         else:
-            result[out_key] = value
+            resolved_value = value
+        result[out_key] = resolved_value
+        if record_narrowing is not None and not is_assign_key(out_key) and bare in lower and not is_extend_key(bare):
+            record_narrowing(lower[bare], resolved_value, ".".join(path + (bare,)))
 
     # Apply higher markers.
     for key, value in higher.items():
         if not is_extend_key(key):
             continue
         bare = bare_key(key)
-        if bare in higher_bare_keys:
-            # An assign in the same higher layer already won.
-            continue
         field_path = ".".join(path + (bare,))
+        if bare in higher_bare_keys:
+            # The same higher layer also assigns ``f`` (bare or ``__assign``): this is
+            # the within-layer assign-then-extend idiom (assign-phase before
+            # extend-phase). Stack the extend onto the just-assigned value, under the
+            # same output key (preserving any ``__assign`` suffix). Extend is a
+            # superset, so it never narrows.
+            out_key = higher_assign_keys[bare]
+            assigned_value = result[out_key]
+            if isinstance(assigned_value, Mapping) and isinstance(value, Mapping):
+                result[out_key] = combine_patches(
+                    dict(assigned_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                )
+            else:
+                result[out_key] = apply_extend(assigned_value, value, field_path)
+            continue
         assign_lower_key = f"{bare}{ASSIGN_SUFFIX}"
         if bare in lower and not is_extend_key(bare):
             lower_value = lower[bare]
@@ -297,11 +325,16 @@ def combine_patches(
                 # the wrong precedence order (lower over higher) and break
                 # associativity. Recurse via ``combine_patches`` instead, which
                 # interleaves both sides' nested markers correctly; the result stays
-                # bare (lower's bare ``f`` won the slot).
-                result[bare] = combine_patches(dict(lower_value), dict(value), path=path + (bare,))
+                # bare (lower's bare ``f`` won the slot). The recorder threads through
+                # so a bare key nested in the extend value that drops a lower aggregate
+                # is recorded at its dotted path (the recursive-narrowing case).
+                result[bare] = combine_patches(
+                    dict(lower_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                )
             else:
                 # Lower has a concrete bare leaf (list/tuple/set/scalar) -> extend it;
-                # stays bare. Leaf shapes carry no nested markers.
+                # stays bare. Leaf shapes carry no nested markers. Extend is a superset
+                # so it never narrows.
                 result[bare] = apply_extend(lower_value, value, field_path)
         elif assign_lower_key in lower:
             # Lower assigned ``f`` without warning, higher extends it. Extend onto the
@@ -309,7 +342,9 @@ def combine_patches(
             # ``__assign`` suffix so the assign-without-warning intent is preserved.
             lower_value = lower[assign_lower_key]
             if isinstance(lower_value, Mapping) and isinstance(value, Mapping):
-                result[assign_lower_key] = combine_patches(dict(lower_value), dict(value), path=path + (bare,))
+                result[assign_lower_key] = combine_patches(
+                    dict(lower_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                )
             else:
                 result[assign_lower_key] = apply_extend(lower_value, value, field_path)
         elif key in lower:

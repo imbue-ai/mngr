@@ -11,7 +11,7 @@ from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import is_settings_patch_field
-from imbue.mngr.config.key_resolver_primitives import combine_patches
+from imbue.mngr.config.key_resolver import merge
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.primitives import AgentTypeName
@@ -112,8 +112,10 @@ def _apply_custom_overrides_to_parent_config(
     Exception: a field marked ``SettingsPatchField`` (e.g.
     ``ClaudeAgentConfig.settings_overrides``) is a settings *patch* that
     **accumulates** across the parent/child inheritance boundary rather than
-    assigning. Parent and child values are combined per-key via ``combine_patches``
-    (preserving / combining ``__extend`` markers, higher/child-bare-wins), so the
+    assigning. Parent and child values are combined per-key via ``merge`` (the
+    unified combine; its narrowings are discarded here -- cross-scope narrowing of
+    ``settings_overrides`` at config-load is intentionally not surfaced in this PR),
+    preserving / combining ``__extend`` markers with higher/child-bare-wins, so the
     parent's non-overlapping keys survive into the child.
     """
     explicitly_set_fields = custom_config.model_fields_set
@@ -128,9 +130,7 @@ def _apply_custom_overrides_to_parent_config(
             continue
         field_info = custom_config.__class__.model_fields.get(field_name)
         if field_info is not None and is_settings_patch_field(field_info.metadata):
-            updates.append(
-                (field_name, combine_patches(parent_values.get(field_name) or {}, custom_values[field_name]))
-            )
+            updates.append((field_name, merge(parent_values.get(field_name) or {}, custom_values[field_name])[0]))
         else:
             updates.append((field_name, custom_values[field_name]))
     if not updates:
