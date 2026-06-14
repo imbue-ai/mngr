@@ -44,7 +44,6 @@ from imbue.mngr_aws.testing import aws_credentials_available
 
 pytestmark = [
     pytest.mark.release,
-    pytest.mark.rsync,
     pytest.mark.timeout(900),
     pytest.mark.skipif(
         not (aws_credentials_available() and AWS_RELEASE_TESTS_OPT_IN),
