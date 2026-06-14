@@ -1,7 +1,6 @@
 import contextlib
 import io
 import logging
-import os
 import re
 import sys
 import threading
@@ -11,7 +10,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
-from typing import IO
 from typing import TextIO
 from typing import cast
 
@@ -22,6 +20,13 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import make_jsonl_file_sink
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.mngr.colors import BUILD_COLOR
+from imbue.mngr.colors import DEBUG_COLOR
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import TRACE_COLOR
+from imbue.mngr.colors import WARNING_COLOR
+from imbue.mngr.colors import should_use_color
 from imbue.mngr.primitives import LogLevel
 
 # Default event type and source for mngr CLI logs
@@ -107,21 +112,6 @@ class LoggingConfig(FrozenModel):
         )
 
 
-# ANSI color codes that work well on both light and dark backgrounds.
-# Using 256-color palette codes with bold for better visibility.
-# Falls back gracefully in terminals that don't support 256 colors.
-# WARNING_COLOR: Bold gold/orange (256-color code 178)
-# ERROR_COLOR: Bold red (256-color code 196)
-# BUILD_COLOR: Medium gray (256-color code 245) - visible on both black and white backgrounds
-# DEBUG_COLOR: Solid blue (256-color code 33)
-# TRACE COLOR: Purple (256-color code 99)
-WARNING_COLOR = "\x1b[1;38;5;178m"
-ERROR_COLOR = "\x1b[1;38;5;196m"
-BUILD_COLOR = "\x1b[38;5;245m"
-DEBUG_COLOR = "\x1b[38;5;33m"
-TRACE_COLOR = "\x1b[38;5;99m"
-RESET_COLOR = "\x1b[0m"
-
 # Custom loguru log level number for BUILD (between DEBUG=10 and INFO=20)
 BUILD_LEVEL_NO: Final[int] = 15
 
@@ -178,26 +168,6 @@ def _dynamic_stderr_sink(message: Any) -> None:
     """Loguru sink that always writes to the current sys.stderr."""
     sys.stderr.write(str(message))
     sys.stderr.flush()
-
-
-def should_use_color(stream: IO[Any] | None = None) -> bool:
-    """Check whether ANSI color codes should be used on the given stream.
-
-    Respects the NO_COLOR convention (https://no-color.org/) and falls back
-    to checking whether the stream is a TTY. When stream is None, defaults
-    to sys.stderr.
-
-    Public because the same policy gates the colored ``Error:`` prefix that
-    ``MngrError.show`` renders (see ``imbue.mngr.errors``), keeping CLI errors
-    consistent with the colored ``ERROR:`` prefix used for ``logger.error``.
-    """
-    if os.environ.get("NO_COLOR") is not None:
-        return False
-    target = stream if stream is not None else sys.stderr
-    try:
-        return target.isatty()
-    except (AttributeError, ValueError):
-        return False
 
 
 def _format_user_message(record: Any) -> str:

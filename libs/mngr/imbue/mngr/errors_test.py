@@ -6,6 +6,8 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
 from imbue.mngr.errors import AgentError
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
@@ -38,8 +40,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.utils.logging import ERROR_COLOR
-from imbue.mngr.utils.logging import RESET_COLOR
 from imbue.mngr.utils.testing import FakeTtyStream
 from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses

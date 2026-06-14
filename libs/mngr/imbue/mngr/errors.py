@@ -5,6 +5,9 @@ from typing import IO
 from click import ClickException
 from click import get_text_stream
 
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import should_use_color
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -15,9 +18,6 @@ from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.utils.logging import ERROR_COLOR
-from imbue.mngr.utils.logging import RESET_COLOR
-from imbue.mngr.utils.logging import should_use_color
 
 
 class MngrError(ClickException):

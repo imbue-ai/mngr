@@ -19,17 +19,17 @@ from loguru import logger
 import imbue.mngr.utils.logging as mngr_logging_module
 from imbue.imbue_common.logging import _format_arg_value
 from imbue.imbue_common.logging import log_call
+from imbue.mngr.colors import BUILD_COLOR
+from imbue.mngr.colors import DEBUG_COLOR
+from imbue.mngr.colors import ERROR_COLOR
+from imbue.mngr.colors import RESET_COLOR
+from imbue.mngr.colors import TRACE_COLOR
+from imbue.mngr.colors import WARNING_COLOR
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import LogLevel
-from imbue.mngr.utils.logging import BUILD_COLOR
 from imbue.mngr.utils.logging import BufferedMessage
-from imbue.mngr.utils.logging import DEBUG_COLOR
-from imbue.mngr.utils.logging import ERROR_COLOR
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
-from imbue.mngr.utils.logging import RESET_COLOR
-from imbue.mngr.utils.logging import TRACE_COLOR
-from imbue.mngr.utils.logging import WARNING_COLOR
 from imbue.mngr.utils.logging import _ParamikoToLoguruHandler
 from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
@@ -38,7 +38,6 @@ from imbue.mngr.utils.logging import _resolve_log_dir
 from imbue.mngr.utils.logging import _threading_excepthook
 from imbue.mngr.utils.logging import remove_console_handlers
 from imbue.mngr.utils.logging import setup_logging
-from imbue.mngr.utils.logging import should_use_color
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.testing import FakeTtyStream
 
@@ -252,29 +251,6 @@ def test_log_call_handles_kwargs() -> None:
 
     result = greet("World", greeting="Hi")
     assert result == "Hi, World!"
-
-
-# =============================================================================
-# Tests for should_use_color
-# =============================================================================
-
-
-def test_should_use_color_returns_false_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """should_use_color should return False when NO_COLOR is set."""
-    monkeypatch.setenv("NO_COLOR", "")
-    assert should_use_color(FakeTtyStream()) is False
-
-
-def test_should_use_color_returns_false_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """should_use_color should return False when the stream is not a TTY."""
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    assert should_use_color(io.StringIO()) is False
-
-
-def test_should_use_color_returns_true_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """should_use_color should return True when the stream is a TTY and NO_COLOR is not set."""
-    monkeypatch.delenv("NO_COLOR", raising=False)
-    assert should_use_color(FakeTtyStream()) is True
 
 
 # =============================================================================
