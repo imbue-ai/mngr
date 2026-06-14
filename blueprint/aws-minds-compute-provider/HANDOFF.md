@@ -55,7 +55,37 @@ Ran twice; converged. 6 MINOR fixes accepted. One **rejected** fix (re-adding `@
 
 **Likely a regression, not AWS-specific.** `AwsProvider` shares all host-store/discovery code with `OvhProvider` (overrides only create/parse/list-IPs). The `host_dir` split was introduced **2026-06-03** by `70492b4a7 "Move per-host VPS docker unified volume onto a btrfs subvolume"` (added `HOST_DIR_SUBPATH="host_dir"` + the `/mngr → <vol>/host_dir` indirection). Before it, `MNGR_HOST_DIR` was the volume root = the outer store, so in-container agents wrote straight into what discovery reads.
 
-### >>> NEXT TO INVESTIGATE (user's lead) <<<
+### >>> RESOLVED (2026-06-14): imbue_cloud is NOT broken; AWS/OVH/Vultr ALL are <<<
+Root cause is **NOT the June-3 host_dir split**. It is a **discovery-path asymmetry** between providers:
+
+- **`VpsDockerProvider.discover_hosts_and_agents`** (inherited unchanged by `AwsProvider`, `OvhProvider`, `VultrProvider` — none override it) reads agents from the **persisted outer store** `<vol>/agents/*.json` via `_discover_host_records_with_agents` → `_read_records_from_vps` → `host_store.list_persisted_agent_data()`. (instance.py:1470, 1611)
+- **`ImbueCloudProvider.discover_hosts_and_agents`** (its own implementation, extends `BaseProviderInstance`, NOT `VpsDockerProvider`) reads agents **LIVE** from the running container via `_collect_listing_raw_via_outer` → `build_outer_listing_collection_script` (which `docker exec`s `build_listing_collection_script` to read `host_dir/agents/*/data.json`). (imbue_cloud/instance.py:580-668, 695)
+
+The outer store is populated **only** by the host-side mngr's `provider_instance.persist_agent_data`, called at agent create/update (host.py:2050 `create_agent_state`, 951 `save_agent_data`). The minds **chat agent** is created by the **in-container FCT bootstrap**, whose `provider_instance` is the in-container `local` provider — so its persist never reaches the AWS/OVH/Vultr outer store. Only `system-services` (created host-side by the desktop client's `mngr create system-services@host.<provider>`) lands in the outer store.
+
+Net: `mngr message <chat-agent>` routes through `discover_hosts_and_agents`. On vps_docker providers that reads the outer store → chat agent absent → "not delivered". On imbue_cloud it reads live → chat agent present → works. `mngr list` works on ALL providers because vps_docker's `get_host_and_agent_details` does a *separate* live in-container read (instance.py:1737).
+
+**EMPIRICALLY CONFIRMED on the live AWS host (i-02945eefd16ad0b2c, 2026-06-14):**
+- Outer store `/mngr-vol/agents/`: 1 file → `system-services` only.
+- Live `/mngr-vol/host_dir/agents/`: 2 dirs → `system-services` AND `aws-1` (the chat agent onboarding targets).
+
+So: **imbue_cloud not broken** (live-read discovery; matches "worked Thursday"). **AWS, OVH, Vultr all broken** (shared outer-store discovery; structurally identical). Local `docker`/`modal`/`lima` providers are NOT affected this way (they don't use the vps_docker outer-store-only discovery — docker uses base discovery which reads live).
+
+### Fix IMPLEMENTED (Option A) — 2026-06-14
+`VpsDockerProvider` discovery now reads agents **live** from the container via `build_outer_listing_collection_script`, exactly as `ImbueCloudProvider` does (`libs/mngr_vps_docker/imbue/mngr_vps_docker/instance.py`):
+- New module helpers `_read_live_listing_from_vps` + `_extract_live_agent_data`, and a typed `_VpsDiscoveryData` result (records + live agent data + running state).
+- `_read_records_from_vps` now reads `host_state.json` (for the record) AND runs the outer listing script for live agents + container running state; `_discover_host_records_with_agents` / `discover_hosts_and_agents` consume the new structure.
+- Removed the now-redundant `_container_running_cache` + separate `docker_inspect_running` call in `discover_hosts_and_agents` (running state comes from the same live read). Net SSH round-trips per host during discovery went DOWN (was: store reads + separate inspect; now: one listing read).
+- The persisted outer store (`persist_agent_data` / `list_persisted_agent_data`) is still written and still read by offline rename/`mngr label` — only *discovery* switched to live reads.
+- Tests: updated `instance_discovery_test.py` to the new return type; added `test_read_records_from_vps_surfaces_live_in_container_agents` (the regression guard) + `_extract_live_agent_data` test. vps_docker 280 / aws+ovh+vultr 421 / imbue_cloud 176 quick tests pass; ty + ruff clean.
+- **Verified live** against the running AWS host: the new read path returns BOTH `system-services` and `aws-1` (the in-container chat agent), where the old outer-store path returned only `system-services`.
+- Changelog: `libs/mngr_vps_docker/changelog/mngr-aws-minds-provider.md`.
+
+Rejected alternatives: Option B (in-container bootstrap reflects its agent into `/mngr-vol/agents/<id>.json`) — fragile, needs minds/FCT changes, in-container `local` provider can't reach the vps outer store cleanly. Option C (read both, merge) — two sources of truth, more code.
+
+Prior (now-superseded) hypothesis is below for history.
+
+### (superseded) earlier hypothesis
 **The imbue_cloud FAST path may explain why "it worked Thursday" — and may reveal the real intended mechanism.** The user's recollection: on the imbue_cloud fast path "we end up creating our own agent on there somehow," and that may either (a) insert the agent record **locally / host-side** for discovery, or (b) place it in a location `mngr message` actually reads (the outer store). If so, imbue_cloud onboarding worked **because the fast-path adoption registers the agent host-side (outer store)** — NOT because of the in-container bootstrap chat agent. That would mean: for every mode where the chat agent is created **in-container by the bootstrap** (docker/lima/vultr/ovh/aws), `mngr message <host>` to that chat agent is structurally broken by the June-3 split, and imbue_cloud only escaped it via its different (host-side adoption) creation path.
 
 Concretely, next session should:

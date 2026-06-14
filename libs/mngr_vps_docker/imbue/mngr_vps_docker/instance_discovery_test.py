@@ -24,12 +24,14 @@ plus the SSH boundary (``_make_outer_for_vps_ip``, ``_read_records_from_vps``);
 the actual fan-out / aggregation / caching code under test runs unmodified.
 """
 
+import json
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import cast
 
@@ -47,10 +49,23 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.listing_utils import SEP_AGENT_DATA_END
+from imbue.mngr.providers.listing_utils import SEP_AGENT_DATA_START
+from imbue.mngr.providers.listing_utils import SEP_AGENT_END
+from imbue.mngr.providers.listing_utils import SEP_AGENT_START
+from imbue.mngr.providers.listing_utils import SEP_DATA_JSON_END
+from imbue.mngr.providers.listing_utils import SEP_DATA_JSON_START
+from imbue.mngr.providers.listing_utils import SEP_PS_END
+from imbue.mngr.providers.listing_utils import SEP_PS_START
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
+from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
+from imbue.mngr_vps_docker.host_store_test import _LocalFakeOuter
+from imbue.mngr_vps_docker.host_store_test import _make_local_connector
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
+from imbue.mngr_vps_docker.instance import _VpsDiscoveryData
+from imbue.mngr_vps_docker.instance import _extract_live_agent_data
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 from imbue.mngr_vps_docker.primitives import VpsSnapshotId
@@ -119,11 +134,13 @@ class _DiscoveryTestProvider(VpsDockerProvider):
 
     hostnames: list[str] = Field(default_factory=list)
     credentials_present: bool = True
-    per_vps_records: dict[str, tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]] = Field(
-        default_factory=dict
-    )
+    per_vps_records: dict[str, _VpsDiscoveryData] = Field(default_factory=dict)
     per_vps_outer_errors: dict[str, Exception] = Field(default_factory=dict)
     state_container_ready: dict[str, bool] = Field(default_factory=dict)
+    # Maps a vps_ip to a real OuterHostInterface so a test can drive the
+    # *whole* real ``_read_records_from_vps`` body (host-id probe -> host
+    # record read -> live agent listing) against a canned outer.
+    live_outer_by_ip: dict[str, OuterHostInterface] = Field(default_factory=dict)
     _list_hostnames_calls: int = PrivateAttr(default=0)
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -141,25 +158,34 @@ class _DiscoveryTestProvider(VpsDockerProvider):
     def _read_records_from_vps(
         self,
         vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
+    ) -> _VpsDiscoveryData:
         # When a test wants to drive the *real* _read_records_from_vps logic
         # (cache-fallback or state-container-not-ready paths), it sets the
         # vps_ip in per_vps_outer_errors or state_container_ready, and we
         # route through the superclass method (which will in turn use our
         # overridden _make_outer_for_vps_ip below).
         # Otherwise short-circuit with the canned per-VPS payload.
-        if vps_ip in self.per_vps_outer_errors or vps_ip in self.state_container_ready:
+        if (
+            vps_ip in self.per_vps_outer_errors
+            or vps_ip in self.state_container_ready
+            or vps_ip in self.live_outer_by_ip
+        ):
             return super()._read_records_from_vps(vps_ip)
-        return self.per_vps_records.get(vps_ip, ([], {}))
+        return self.per_vps_records.get(vps_ip, _VpsDiscoveryData())
 
     @contextmanager
     def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
         # Used by tests that opt into the real _read_records_from_vps body:
+        # live_outer_by_ip[ip] -> yield that real outer (live-listing test);
         # per_vps_outer_errors[ip] -> raise that exception (cache-fallback test);
         # state_container_ready[ip]=False -> yield a dummy outer that reports no
         # mngr container (state-container-not-ready test).
         # Tests that don't opt in never reach here -- _read_records_from_vps
         # short-circuits with canned payloads above.
+        live_outer = self.live_outer_by_ip.get(vps_ip)
+        if live_outer is not None:
+            yield live_outer
+            return
         exc = self.per_vps_outer_errors.get(vps_ip)
         if exc is not None:
             raise exc
@@ -197,6 +223,66 @@ class _DummyOuter:
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"_DummyOuter.{name} must not be accessed in discovery tests")
+
+
+class _LiveListingOuter(_LocalFakeOuter):
+    """Real ``OuterHostInterface`` that drives the live-read discovery path.
+
+    Reuses ``_LocalFakeOuter`` (which serves ``docker volume inspect`` and
+    real tmp-file reads for ``host_state.json``) and additionally answers the
+    host-id label probe and the outer listing script with canned output. The
+    listing output models the *live* container state -- including an agent that
+    is deliberately absent from any persisted outer store.
+    """
+
+    host_id_value: str = ""
+    listing_stdout: str = ""
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        if "xargs -r docker inspect" in command:
+            return CommandResult(stdout=f"{self.host_id_value}\n", stderr="", success=True)
+        if command.startswith("CID=$(docker ps -aq --filter label="):
+            return CommandResult(stdout=self.listing_stdout, stderr="", success=True)
+        return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
+
+
+def _build_listing_stdout(
+    agent_id_and_data: Sequence[tuple[str, dict[str, Any]]],
+    container_state: str,
+) -> str:
+    """Build listing-script stdout for the given agents (mirrors the real script's format)."""
+    lines = [
+        f"CONTAINER_STATE={container_state}",
+        "CONTAINER_EXIT_CODE=0",
+        SEP_DATA_JSON_START,
+        "{}",
+        SEP_DATA_JSON_END,
+        SEP_PS_START,
+        "",
+        SEP_PS_END,
+    ]
+    for agent_id, data in agent_id_and_data:
+        lines += [
+            f"{SEP_AGENT_START}{agent_id}---",
+            SEP_AGENT_DATA_START,
+            json.dumps(data),
+            SEP_AGENT_DATA_END,
+            "USER_MTIME=",
+            "AGENT_MTIME=",
+            "START_MTIME=",
+            "TMUX_INFO=",
+            "ACTIVE=false",
+            "URL=",
+            SEP_AGENT_END,
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _make_certified_data(host_id: HostId, host_name: str) -> CertifiedHostData:
@@ -253,10 +339,10 @@ def test_read_records_from_vps_falls_back_to_cache_on_host_connection_error(
     provider._host_record_cache[host_b] = cached_on_other_vps
     provider.per_vps_outer_errors["10.0.0.1"] = HostConnectionError("connection refused")
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.1")
+    result = provider._read_records_from_vps("10.0.0.1")
 
-    assert records == [cached_on_unreachable]
-    assert agent_data == {}
+    assert result.records == (cached_on_unreachable,)
+    assert result.live_agent_data_by_host_id == {}
 
 
 def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
@@ -265,10 +351,10 @@ def test_read_records_from_vps_returns_empty_when_no_cache_and_ssh_fails(
     """If a VPS is unreachable and we have no cache, return empty -- not raise."""
     provider.per_vps_outer_errors["10.0.0.3"] = HostConnectionError("no route to host")
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.3")
+    result = provider._read_records_from_vps("10.0.0.3")
 
-    assert records == []
-    assert agent_data == {}
+    assert result.records == ()
+    assert result.live_agent_data_by_host_id == {}
 
 
 def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTestProvider) -> None:
@@ -278,9 +364,9 @@ def test_read_records_from_vps_falls_back_on_mngr_error(provider: _DiscoveryTest
     provider._host_record_cache[host_c] = cached
     provider.per_vps_outer_errors["10.0.0.4"] = MngrError("docker inspect failed")
 
-    records, _agent_data = provider._read_records_from_vps("10.0.0.4")
+    result = provider._read_records_from_vps("10.0.0.4")
 
-    assert records == [cached]
+    assert result.records == (cached,)
 
 
 def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
@@ -294,10 +380,67 @@ def test_read_records_from_vps_returns_empty_when_state_container_not_ready(
     """
     provider.state_container_ready["10.0.0.6"] = False
 
-    records, agent_data = provider._read_records_from_vps("10.0.0.6")
+    result = provider._read_records_from_vps("10.0.0.6")
 
-    assert records == []
-    assert agent_data == {}
+    assert result.records == ()
+    assert result.live_agent_data_by_host_id == {}
+
+
+def test_extract_live_agent_data_returns_data_dicts_and_skips_malformed() -> None:
+    """Only well-formed ``{"data": {...}}`` entries contribute agent data."""
+    parsed_listing = {
+        "container_state": "running",
+        "agents": [
+            {"data": {"id": "a-1", "name": "system-services"}},
+            {"data": {"id": "a-2", "name": "chat-host"}},
+            {"user_activity_mtime": 123},
+        ],
+    }
+
+    assert _extract_live_agent_data(parsed_listing) == [
+        {"id": "a-1", "name": "system-services"},
+        {"id": "a-2", "name": "chat-host"},
+    ]
+
+
+def test_read_records_from_vps_surfaces_live_in_container_agents(
+    provider: _DiscoveryTestProvider,
+    tmp_path: Path,
+) -> None:
+    """Discovery must read agents from the live container, not the persisted outer store.
+
+    This is the regression that broke onboarding-message delivery: an agent
+    created *inside* the container (here ``chat-host``) is never written to the
+    outer ``agents/*.json`` store, so the old store-reading discovery missed
+    it and ``mngr message`` could not resolve it. Reading the live listing
+    surfaces it. The same call reports the container's running state.
+    """
+    device = tmp_path / "subvol"
+    device.mkdir()
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-live", vps_ip="10.0.0.9")
+    (device / "host_state.json").write_text(record.model_dump_json())
+    volume_name = host_volume_name_for(host_id)
+    listing_stdout = _build_listing_stdout(
+        [
+            ("agent-sys", {"id": "agent-sys", "name": "system-services"}),
+            ("agent-chat", {"id": "agent-chat", "name": "chat-host"}),
+        ],
+        container_state="running",
+    )
+    provider.live_outer_by_ip["10.0.0.9"] = _LiveListingOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={volume_name: device},
+        host_id_value=str(host_id),
+        listing_stdout=listing_stdout,
+    )
+
+    result = provider._read_records_from_vps("10.0.0.9")
+
+    assert [r.certified_host_data.host_id for r in result.records] == [str(host_id)]
+    assert sorted(a["name"] for a in result.live_agent_data_by_host_id[host_id]) == ["chat-host", "system-services"]
+    assert result.is_running_by_host_id[host_id] is True
 
 
 # =========================================================================
@@ -314,10 +457,10 @@ def test_discover_host_records_returns_empty_without_calling_ssh_when_no_vpses(
     override's final ``AssertionError``, so an SSH attempt here would surface
     as a test failure rather than a silent empty result.
     """
-    records, agent_data = provider._discover_host_records_with_agents()
+    result = provider._discover_host_records_with_agents()
 
-    assert records == []
-    assert agent_data == {}
+    assert result.records == ()
+    assert result.live_agent_data_by_host_id == {}
     # Confirm the no-vpses path was actually exercised (i.e. the listing
     # hook ran and reported zero hostnames).
     assert provider._list_hostnames_calls == 1
@@ -333,13 +476,13 @@ def test_discover_host_records_aggregates_records_across_multiple_vpses(
     record_c = _make_record(host_c, "host-C", vps_ip="10.0.0.2")
     provider.hostnames = ["10.0.0.1", "10.0.0.2"]
     provider.per_vps_records = {
-        "10.0.0.1": ([record_a], {}),
-        "10.0.0.2": ([record_b, record_c], {}),
+        "10.0.0.1": _VpsDiscoveryData(records=(record_a,)),
+        "10.0.0.2": _VpsDiscoveryData(records=(record_b, record_c)),
     }
 
-    records, _agent_data = provider._discover_host_records_with_agents()
+    result = provider._discover_host_records_with_agents()
 
-    assert {r.certified_host_data.host_id for r in records} == {str(host_a), str(host_b), str(host_c)}
+    assert {r.certified_host_data.host_id for r in result.records} == {str(host_a), str(host_b), str(host_c)}
 
 
 def test_discover_host_records_merges_agent_data_by_host_id(
@@ -351,13 +494,13 @@ def test_discover_host_records_merges_agent_data_by_host_id(
     agents_on_second_vps = [{"agent_id": "a-2"}, {"agent_id": "a-3"}]
     provider.hostnames = ["10.0.0.1", "10.0.0.2"]
     provider.per_vps_records = {
-        "10.0.0.1": ([], {host_id: agents_on_first_vps}),
-        "10.0.0.2": ([], {host_id: agents_on_second_vps}),
+        "10.0.0.1": _VpsDiscoveryData(live_agent_data_by_host_id={host_id: agents_on_first_vps}),
+        "10.0.0.2": _VpsDiscoveryData(live_agent_data_by_host_id={host_id: agents_on_second_vps}),
     }
 
-    _records, agent_data = provider._discover_host_records_with_agents()
+    result = provider._discover_host_records_with_agents()
 
-    assert sorted(a["agent_id"] for a in agent_data[host_id]) == ["a-1", "a-2", "a-3"]
+    assert sorted(a["agent_id"] for a in result.live_agent_data_by_host_id[host_id]) == ["a-1", "a-2", "a-3"]
 
 
 # =========================================================================
@@ -410,7 +553,7 @@ def test_find_host_record_triggers_discovery_on_cache_miss_and_populates_cache(
     host_fresh = HostId.generate()
     record = _make_record(host_fresh, "host-fresh", vps_ip="10.0.0.5")
     provider.hostnames = ["10.0.0.5"]
-    provider.per_vps_records = {"10.0.0.5": ([record], {})}
+    provider.per_vps_records = {"10.0.0.5": _VpsDiscoveryData(records=(record,))}
     assert provider._host_record_cache == {}
 
     found = provider._find_host_record(HostName("host-fresh"))
@@ -434,7 +577,7 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     host_other = HostId.generate()
     other_record = _make_record(host_other, "other-host", vps_ip="10.0.0.7")
     provider.hostnames = ["10.0.0.7"]
-    provider.per_vps_records = {"10.0.0.7": ([other_record], {})}
+    provider.per_vps_records = {"10.0.0.7": _VpsDiscoveryData(records=(other_record,))}
 
     assert provider._find_host_record(HostName("does-not-exist")) is None
     # Discovery still warms the cache with what it did find, so a subsequent
