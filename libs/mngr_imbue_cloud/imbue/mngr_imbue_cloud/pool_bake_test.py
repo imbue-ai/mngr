@@ -3,10 +3,74 @@ import json
 import pytest
 
 from imbue.mngr_imbue_cloud.pool_bake import BAKED_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.pool_bake import FCT_BAKE_TEMPLATES
 from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.pool_bake import build_pool_create_command
+from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.pool_bake import parse_baked_host
+
+
+class _ScriptedRunner:
+    """A ContainerCommandRunner that returns a scripted ``(rc, out, err)`` per step label.
+
+    Lets finalize_baked_pool_host be unit-tested without a real container: each call
+    records its (label, command) and returns the response scripted for that label
+    (default ``(0, "", "")``).
+    """
+
+    def __init__(self, responses: dict[str, tuple[int | None, str, str]]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(
+        self, baked: BakedPoolHost, label: str, command: str, timeout_seconds: float
+    ) -> tuple[int | None, str, str]:
+        self.calls.append((label, command))
+        return self.responses.get(label, (0, "", ""))
+
+
+def _baked() -> BakedPoolHost:
+    return BakedPoolHost(agent_id="a", host_id="h", host_name="slice-x", ssh_host="1.2.3.4", ssh_port=22001)
+
+
+def test_finalize_tears_down_chat_agent_when_sentinel_present() -> None:
+    # All steps succeed; the sentinel-wait returns 0, i.e. the sentinel is present.
+    runner = _ScriptedRunner({})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    labels = [label for label, _cmd in runner.calls]
+    assert labels == ["sshd-harden", "sentinel-wait", "chat-destroy", "sentinel-rm"]
+    destroy_cmd = next(cmd for label, cmd in runner.calls if label == "chat-destroy")
+    assert "uv run mngr destroy" in destroy_cmd and "slice-x" in destroy_cmd
+
+
+def test_finalize_skips_teardown_on_sentinel_timeout() -> None:
+    # timeout exit 124 => bootstrap never made a chat agent => nothing to tear down.
+    runner = _ScriptedRunner({"sentinel-wait": (124, "", "")})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    labels = [label for label, _cmd in runner.calls]
+    assert "chat-destroy" not in labels
+
+
+def test_finalize_raises_on_transport_error_during_sentinel_wait() -> None:
+    # A non-timeout failure (e.g. ssh exit 255) must NOT be silently skipped:
+    # that would ship a pool host with a stale bootstrap chat agent.
+    runner = _ScriptedRunner({"sentinel-wait": (255, "", "ssh: connect failed")})
+    with pytest.raises(PoolBakeError):
+        finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+
+
+def test_finalize_sshd_harden_failure_is_best_effort() -> None:
+    # sshd-harden is best-effort: a failure is logged, not fatal, and teardown proceeds.
+    runner = _ScriptedRunner({"sshd-harden": (1, "", "boom")})
+    finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+    assert "chat-destroy" in [label for label, _cmd in runner.calls]
+
+
+def test_finalize_raises_when_chat_destroy_fails() -> None:
+    runner = _ScriptedRunner({"chat-destroy": (1, "", "skew")})
+    with pytest.raises(PoolBakeError):
+        finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
 
 
 def test_build_pool_create_command_targets_the_given_provider_with_fct_templates() -> None:

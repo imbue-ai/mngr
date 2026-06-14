@@ -71,6 +71,8 @@ _GITIGNORE_RSYNC_FILTER: Final[str] = ":- .gitignore"
 # bootstrap may never create a chat agent (e.g. inference creds absent), in which
 # case there is nothing to tear down and the bake proceeds.
 _SENTINEL_WAIT_TIMEOUT_SECONDS: Final[int] = 480
+# Exit code GNU ``timeout`` returns when it kills the wrapped command on timeout.
+_COMMAND_TIMEOUT_EXIT_CODE: Final[int] = 124
 
 
 class PoolBakeError(RuntimeError):
@@ -348,12 +350,26 @@ def finalize_baked_pool_host(
     wait_command = (
         f"timeout {int(sentinel_timeout_seconds)} bash -c {shlex.quote(f'until test -f {sentinel}; do sleep 5; done')}"
     )
-    wait_rc, _wait_out, _wait_err = run_in_container(
+    wait_rc, _wait_out, wait_err = run_in_container(
         baked, "sentinel-wait", wait_command, float(sentinel_timeout_seconds + 60)
     )
-    if wait_rc != 0:
-        logger.warning("No initial-chat sentinel appeared for {}; skipping chat-agent teardown", host_name)
+    if wait_rc == _COMMAND_TIMEOUT_EXIT_CODE:
+        # The ``timeout`` wrapper killed the wait: the bootstrap never created a
+        # chat agent (e.g. inference creds absent), so there is nothing to tear
+        # down. This is the only non-zero code we treat as "skip".
+        logger.warning(
+            "No initial-chat sentinel appeared for {} within {}s; skipping chat-agent teardown",
+            host_name,
+            sentinel_timeout_seconds,
+        )
         return
+    if wait_rc != 0:
+        # Any other failure (e.g. the container was unreachable -- ssh exit 255)
+        # is NOT "no chat agent": silently skipping would ship a pool host with a
+        # stale bootstrap chat agent. Fail the bake so the caller can roll back.
+        raise PoolBakeError(
+            f"waiting for the initial-chat sentinel on {host_name} failed (exit {wait_rc}): {wait_err.strip()}"
+        )
 
     logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
     # Use the canonical in-container mngr invocation (uv run mngr in /mngr/code),
