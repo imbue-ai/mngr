@@ -3,3 +3,5 @@
 - The wide-open-CIDR warning is shorter: `mngr aws prepare` with `0.0.0.0/0` ingress now logs just "auto-created security group '<name>' will permit SSH from the public internet." (the trailing dev-vs-production advice sentence was dropped).
 
 - Removed the unexplained `time.sleep(20)` settle-cushion after `mngr destroy --force` in the two lifecycle release tests (`test_release_aws.py`). The sleep was the last statement of each test and masked no race -- nothing runs after it except the TTL-gated session-end leak scanner. The `time_sleep` ratchet for this project is tightened 2 -> 0 accordingly.
+
+- The AWS release tests now disable the `gcp` provider in their `settings.toml` (alongside the modal/vultr/ovh/imbue_cloud disables that were already there). Without this, once the GCP provider was added in this branch, `mngr list` inside the AWS lifecycle tests enumerated GCP and exited non-zero when GCP credentials were not resolvable in that subprocess, failing the AWS tests for a reason unrelated to AWS. The GCP release tests already disable `aws` symmetrically.

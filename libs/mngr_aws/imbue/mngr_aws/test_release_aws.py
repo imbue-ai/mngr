@@ -93,9 +93,10 @@ def _write_release_settings(settings_dir: Path) -> None:
         # test settings file is self-documenting -- the test SSH connection
         # from the developer laptop / CI runner needs ingress from any IP.
         'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
-        # Disable other remote providers so the create-host preflight
-        # doesn't trip on them looking for credentials.
+        # Disable other remote providers so the create-host preflight (and
+        # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
         "\n[providers.imbue_cloud]\nis_enabled = false\n"
