@@ -70,7 +70,14 @@ def capture(ctx: click.Context, **kwargs: Any) -> None:
     logger.debug("Capturing pane content for agent: {}", agent.name)
     content = agent.capture_pane_content(include_scrollback=opts.full, window=opts.window)
     if content is None:
-        logger.error("Failed to capture pane content for agent {}", agent.name)
+        if opts.window is None:
+            logger.error("Failed to capture pane content for agent {}", agent.name)
+        else:
+            logger.error(
+                "Failed to capture pane content for agent {} window {!r} (does it exist?)",
+                agent.name,
+                opts.window,
+            )
         ctx.exit(1)
         return
 
