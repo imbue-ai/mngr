@@ -13,20 +13,19 @@ imports ``data_types``; ``data_types`` imports only these primitives).
 import json
 from collections.abc import Mapping
 from typing import Any
-from typing import Callable
 from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import ConfigParseError
 
-# A narrowing-tracking hook injected into the combine algebra by ``merge`` (in
-# ``key_resolver``). Given the lower value, the higher (bare-assigned) value, and the
-# dotted field path, it appends any narrowing paths it finds to its own accumulator.
-# ``combine_patches`` itself passes ``None`` (no tracking); ``merge`` passes a real
-# checker so the same pure combine algebra also reports narrowings. Injection (rather
-# than importing ``data_types`` here) keeps these primitives free of the config-model
-# layer and avoids a circular import.
-NarrowingRecorder = Callable[[Any, Any, str], None]
+# A candidate bare-assign drop recorded by the combine algebra for narrowing analysis:
+# ``(lower_value, higher_value, dotted_path)``. ``combine_patches`` appends one for every
+# **bare** (not ``__assign``) assign that overrides a concrete lower value, to a list the
+# caller passes in. ``merge`` (in ``key_resolver``) then filters these through
+# ``would_assignment_narrow`` to get the real narrowing paths. Collecting raw candidates
+# here -- rather than importing ``would_assignment_narrow`` -- keeps these primitives free
+# of the config-model layer and avoids a circular import.
+AssignDrop = tuple[Any, Any, str]
 
 # Operator suffix on a leaf key indicating "extend the current value".
 # Lowercase form used in TOML, ``--setting`` paths, and ``mngr config`` keys.
@@ -232,7 +231,7 @@ def combine_patches(
     higher: dict[str, Any],
     *,
     path: tuple[str, ...] = (),
-    record_narrowing: NarrowingRecorder | None = None,
+    assign_drops: list[AssignDrop] | None = None,
 ) -> dict[str, Any]:
     """Combine two settings "patches" into one, ``higher`` over ``lower``.
 
@@ -291,8 +290,8 @@ def combine_patches(
         else:
             resolved_value = value
         result[out_key] = resolved_value
-        if record_narrowing is not None and not is_assign_key(out_key) and bare in lower and not is_extend_key(bare):
-            record_narrowing(lower[bare], resolved_value, ".".join(path + (bare,)))
+        if assign_drops is not None and not is_assign_key(out_key) and bare in lower and not is_extend_key(bare):
+            assign_drops.append((lower[bare], resolved_value, ".".join(path + (bare,))))
 
     # Apply higher markers.
     for key, value in higher.items():
@@ -310,7 +309,7 @@ def combine_patches(
             assigned_value = result[out_key]
             if isinstance(assigned_value, Mapping) and isinstance(value, Mapping):
                 result[out_key] = combine_patches(
-                    dict(assigned_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                    dict(assigned_value), dict(value), path=path + (bare,), assign_drops=assign_drops
                 )
             else:
                 result[out_key] = apply_extend(assigned_value, value, field_path)
@@ -329,7 +328,7 @@ def combine_patches(
                 # so a bare key nested in the extend value that drops a lower aggregate
                 # is recorded at its dotted path (the recursive-narrowing case).
                 result[bare] = combine_patches(
-                    dict(lower_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                    dict(lower_value), dict(value), path=path + (bare,), assign_drops=assign_drops
                 )
             else:
                 # Lower has a concrete bare leaf (list/tuple/set/scalar) -> extend it;
@@ -343,7 +342,7 @@ def combine_patches(
             lower_value = lower[assign_lower_key]
             if isinstance(lower_value, Mapping) and isinstance(value, Mapping):
                 result[assign_lower_key] = combine_patches(
-                    dict(lower_value), dict(value), path=path + (bare,), record_narrowing=record_narrowing
+                    dict(lower_value), dict(value), path=path + (bare,), assign_drops=assign_drops
                 )
             else:
                 result[assign_lower_key] = apply_extend(lower_value, value, field_path)

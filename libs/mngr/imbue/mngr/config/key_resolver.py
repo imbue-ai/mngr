@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import would_assignment_narrow
+from imbue.mngr.config.key_resolver_primitives import AssignDrop
 from imbue.mngr.config.key_resolver_primitives import apply_extend
 from imbue.mngr.config.key_resolver_primitives import assign_bare_key
 from imbue.mngr.config.key_resolver_primitives import bare_key
@@ -181,13 +182,17 @@ def merge(lower: dict[str, Any], higher: dict[str, Any]) -> tuple[dict[str, Any]
     bare-plus-``__assign`` conflict, a parse error, can raise -- via
     ``combine_patches``).
     """
-    narrowings: list[str] = []
-
-    def _record(lower_value: Any, higher_value: Any, dotted: str) -> None:
-        if would_assignment_narrow(lower_value, higher_value):
-            narrowings.append(dotted)
-
-    merged = combine_patches(lower, higher, record_narrowing=_record)
+    assign_drops: list[AssignDrop] = []
+    merged = combine_patches(lower, higher, assign_drops=assign_drops)
+    # ``combine_patches`` collected every bare-assign-over-concrete-lower candidate;
+    # keep only those that actually narrow (``__assign`` keys and ``Static*`` values
+    # were already excluded -- the former by ``combine_patches``, the latter here via
+    # ``would_assignment_narrow``).
+    narrowings = [
+        dotted
+        for lower_value, higher_value, dotted in assign_drops
+        if would_assignment_narrow(lower_value, higher_value)
+    ]
     return merged, narrowings
 
 
