@@ -12,6 +12,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver import bare_key
+from imbue.mngr.config.key_resolver import combine_patches
 from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
@@ -392,3 +393,115 @@ def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> No
     override = {"agent_types": {"my_claude": {"settings_overrides": {"hooks": {"SessionStart__extend": [{"x": 1}]}}}}}
     resolved = resolve_extends(base, override)
     assert resolved == override
+
+
+# =============================================================================
+# combine_patches -- cross-layer patch combine (four-rule table)
+# =============================================================================
+
+
+def test_combine_patches_extend_plus_extend_accumulates_marker() -> None:
+    """Row 1: ``f__extend=A`` (lower) + ``f__extend=B`` (higher) -> ``f__extend=A⊕B``.
+
+    The result is still a marker (destined for the base fold), and resolving it
+    against a base ``{f: V}`` yields ``V⊕A⊕B`` (associativity, checked below).
+    """
+    lower = {"f__extend": ["A"]}
+    higher = {"f__extend": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f__extend": ["A", "B"]}
+
+
+def test_combine_patches_lower_bare_plus_higher_extend_stays_bare() -> None:
+    """Row 2: ``f=A`` (lower bare) + ``f__extend=B`` (higher) -> bare ``f=A⊕B``.
+
+    The lower concrete value is extended in place; the key stays bare (no marker)
+    because there is a concrete value to fold onto.
+    """
+    lower = {"f": ["A"]}
+    higher = {"f__extend": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f": ["A", "B"]}
+
+
+def test_combine_patches_higher_bare_wipes_lower_extend() -> None:
+    """Row 3: ``f__extend=A`` (lower) + ``f=B`` (higher bare) -> bare ``f=B``.
+
+    A higher bare key wins outright and drops the lower marker for the same field.
+    """
+    lower = {"f__extend": ["A"]}
+    higher = {"f": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f": ["B"]}
+
+
+def test_combine_patches_higher_bare_wipes_lower_bare() -> None:
+    """Row 4: ``f=A`` (lower bare) + ``f=B`` (higher bare) -> bare ``f=B``."""
+    lower = {"f": ["A"]}
+    higher = {"f": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f": ["B"]}
+
+
+def test_combine_patches_lower_only_keys_carry_through() -> None:
+    """Keys present only in ``lower`` are preserved unchanged (bare and marker)."""
+    lower = {"a": 1, "b__extend": ["x"]}
+    higher = {"c": 2}
+    combined = combine_patches(lower, higher)
+    assert combined == {"a": 1, "b__extend": ["x"], "c": 2}
+
+
+def test_combine_patches_extend_plus_extend_recurses_into_nested_dict() -> None:
+    """Dict-valued markers combine recursively, preserving nested markers."""
+    lower = {"permissions__extend": {"allow__extend": ["X"]}}
+    higher = {"permissions__extend": {"allow__extend": ["Y"], "deny__extend": ["Z"]}}
+    combined = combine_patches(lower, higher)
+    assert combined == {"permissions__extend": {"allow__extend": ["X", "Y"], "deny__extend": ["Z"]}}
+
+
+def test_combine_patches_higher_bare_dict_strips_lower_contribution() -> None:
+    """A higher *bare* dict value wins and does not merge in the lower marker; its
+    own nested markers are kept structured (combined against nothing)."""
+    lower = {"permissions__extend": {"allow__extend": ["X"]}}
+    higher = {"permissions": {"deny__extend": ["Z"]}}
+    combined = combine_patches(lower, higher)
+    assert combined == {"permissions": {"deny__extend": ["Z"]}}
+
+
+def _resolve_fold(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """The provision fold used in the associativity checks: resolve ``patch`` onto
+    the concrete ``base`` and overlay the result, returning the full merged dict
+    (matching ``_build_settings_json``'s ``{**base, **resolved}``)."""
+    return {**base, **resolve_extends(base, patch)}
+
+
+@pytest.mark.parametrize(
+    ("base", "lower", "higher"),
+    [
+        # Row 1: extend + extend accumulate onto a present base value.
+        ({"f": ["V"]}, {"f__extend": ["A"]}, {"f__extend": ["B"]}),
+        # Row 2: lower bare + higher extend.
+        ({"f": ["V"]}, {"f": ["A"]}, {"f__extend": ["B"]}),
+        # Row 3: higher bare wipes lower extend.
+        ({"f": ["V"]}, {"f__extend": ["A"]}, {"f": ["B"]}),
+        # Row 4: higher bare wipes lower bare.
+        ({"f": ["V"]}, {"f": ["A"]}, {"f": ["B"]}),
+        # Nested dict recursion against a present base.
+        (
+            {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}},
+            {"permissions__extend": {"allow__extend": ["X"]}},
+            {"permissions__extend": {"allow__extend": ["Y"]}},
+        ),
+        # Disjoint keys across layers (no whole-dict clobber).
+        ({"p": {"k": 1}}, {"a__extend": ["x"]}, {"b__extend": ["y"]}),
+    ],
+)
+def test_combine_patches_is_associative_with_the_fold(
+    base: dict[str, Any], lower: dict[str, Any], higher: dict[str, Any]
+) -> None:
+    """``resolve(B, combine(X, Y)) == resolve(resolve(B, X), Y)`` for the four-rule
+    table plus nested-dict recursion -- the core associativity guarantee that lets
+    per-scope patches be condensed at config-load and applied at provision."""
+    combined_then_resolved = _resolve_fold(base, combine_patches(lower, higher))
+    folded_in_order = _resolve_fold(_resolve_fold(base, lower), higher)
+    assert combined_then_resolved == folded_in_order

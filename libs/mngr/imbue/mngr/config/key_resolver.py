@@ -226,6 +226,121 @@ def _extend_dict(
     return result
 
 
+def combine_patches(
+    lower: dict[str, Any],
+    higher: dict[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Combine two settings "patches" into one, ``higher`` over ``lower``.
+
+    A *patch* is a dict that may carry ``key__extend`` markers at any depth and
+    is destined to be folded (``resolve_extends``) onto a concrete base later.
+    ``combine_patches`` lets the per-scope (and per-inheritance-layer) patches be
+    condensed into a single patch *without* a base, preserving / combining their
+    markers so that resolving the combined patch against a base ``B`` yields the
+    same result as folding each patch onto ``B`` in order (associativity).
+
+    Pure, recursive, and associative. Per key, the four-rule table (with ``f`` the
+    bare key and ``f__extend`` the marker):
+
+    - ``higher`` has bare ``f``: **bare wins** -- ``result[f]`` is ``higher``'s
+      value (recursively combined against nothing so its own nested markers stay
+      structured but no lower contribution leaks in), and any ``lower[f__extend]``
+      for the same key is dropped.
+    - ``higher`` has ``f__extend``:
+        * ``lower`` has a concrete bare ``f``: ``result[f]`` (bare) =
+          ``_apply_extend(lower[f], higher_value)`` -- extend the bare value; it
+          stays bare.
+        * ``lower`` has ``f__extend``: ``result[f__extend]`` (still a marker) =
+          the two marker values combined: ``combine_patches`` for dicts, list
+          concat / set union for sequence markers.
+        * ``lower`` has neither: ``higher``'s ``f__extend`` is preserved verbatim.
+
+    Keys present only in ``lower`` carry through unchanged.
+    """
+    # ``higher`` bare keys that supersede any same-named lower marker.
+    higher_bare_keys = {key for key in higher if not is_extend_key(key)}
+
+    result: dict[str, Any] = {}
+
+    # Carry through lower keys, except those a higher bare key supersedes or that
+    # a higher marker combines into.
+    for key, value in lower.items():
+        if is_extend_key(key):
+            bare = bare_key(key)
+            if bare in higher_bare_keys:
+                # Higher bare wins -> drop the lower marker.
+                continue
+            if f"{bare}{EXTEND_SUFFIX}" in higher:
+                # Combined below from the higher side.
+                continue
+            result[key] = value
+        else:
+            if key in higher_bare_keys:
+                # Replaced by the higher bare value below.
+                continue
+            if f"{key}{EXTEND_SUFFIX}" in higher:
+                # Higher has a marker for this bare key -> handled below.
+                continue
+            result[key] = value
+
+    # Apply higher bare keys (bare wins; recurse a dict value against nothing so
+    # its own nested markers stay structured without merging in lower).
+    for key in higher_bare_keys:
+        value = higher[key]
+        if isinstance(value, Mapping):
+            result[key] = combine_patches({}, dict(value), path=path + (key,))
+        else:
+            result[key] = value
+
+    # Apply higher markers.
+    for key, value in higher.items():
+        if not is_extend_key(key):
+            continue
+        bare = bare_key(key)
+        if bare in higher_bare_keys:
+            # A bare key in the same higher layer already won.
+            continue
+        field_path = ".".join(path + (bare,))
+        if bare in lower and not is_extend_key(bare):
+            # Lower has a concrete bare value -> extend it; stays bare.
+            result[bare] = _apply_extend(lower[bare], value, field_path)
+        elif key in lower:
+            # Lower has a marker for the same field -> combine the marker values.
+            result[key] = _combine_marker_values(lower[key], value, field_path, path + (bare,))
+        else:
+            # Lower has neither -> preserve the higher marker verbatim.
+            result[key] = value
+    return result
+
+
+def _combine_marker_values(
+    lower_value: Any,
+    higher_value: Any,
+    field_path: str,
+    path: tuple[str, ...],
+) -> Any:
+    """Combine two ``__extend`` marker values (the value side of ``f__extend``).
+
+    Dict markers combine recursively via ``combine_patches`` (preserving nested
+    markers); list/tuple markers concatenate; set/frozenset markers union. The
+    result is still a marker value (no base has been applied).
+    """
+    if isinstance(lower_value, Mapping) and isinstance(higher_value, Mapping):
+        return combine_patches(dict(lower_value), dict(higher_value), path=path)
+    if isinstance(lower_value, (list, tuple)) and isinstance(higher_value, (list, tuple)):
+        merged = list(lower_value) + list(higher_value)
+        return tuple(merged) if isinstance(lower_value, tuple) else merged
+    if isinstance(lower_value, (set, frozenset)) and isinstance(higher_value, (set, frozenset, list, tuple)):
+        merged_set = set(lower_value) | set(higher_value)
+        return frozenset(merged_set) if isinstance(lower_value, frozenset) else merged_set
+    raise ConfigParseError(
+        f"Cannot combine __extend values for field '{field_path}': incompatible shapes "
+        f"({type(lower_value).__name__} and {type(higher_value).__name__})."
+    )
+
+
 def resolve_extends(
     base: Any,
     override: dict[str, Any],
