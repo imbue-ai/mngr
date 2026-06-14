@@ -1,5 +1,17 @@
 """Decode agy's SQLite conversation store into the raw-transcript record stream.
 
+NOTE -- best-effort black magic, NOT a style exemplar for the rest of the repo. This module
+(and ``scripts/extract_antigravity_proto_schema.py``) reverse-engineers an *undocumented,
+version-unstable* format: agy publishes no ``.proto`` schema and renumbers fields roughly
+weekly, so the field/enum map below is recovered empirically from the binary and can silently
+break on any agy release (see ``dev/README.md`` for the recovery process and the release-marked
+re-verification test). The decode is deliberately defensive and lossy -- it degrades or skips
+malformed, truncated, or schema-drifted input (empty timestamps, dropped steps, ``utf-8``
+``"replace"``, broad "return on anything unexpected") rather than guaranteeing a faithful
+decode, because a best-effort transcript beats a crashed capture pipeline. Treat these
+trade-offs as specific to scraping a hostile, opaque format -- do *not* cargo-cult them as
+general repo conventions.
+
 Since agy 1.0.4 (2026-06-01) the interactive conversation store is a protobuf SQLite
 ``.db`` per conversation (``$ANTIGRAVITY_APP_DATA_DIR/conversations/<conv_id>.db``); earlier
 versions wrote a per-conversation JSONL transcript that ``stream_transcript.sh`` tailed.

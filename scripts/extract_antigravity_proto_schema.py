@@ -1,5 +1,15 @@
 """Recover antigravity's embedded protobuf schema from the ``agy`` binary.
 
+NOTE -- best-effort black magic, NOT a style exemplar for the rest of the repo. This is a
+heuristic scrape of an opaque, undocumented binary: it scans for byte patterns that *look like*
+embedded ``FileDescriptorProto``s, walks them with hand-rolled varint parsing, and swallows the
+(thousands of) expected mis-hits silently. It is inherently fragile to agy's build/layout and
+recovers most -- not all -- descriptors (some legacy-gzip-registered ones are missed by design).
+Run it as a dev/verification tool, not as a model for general repo conventions; the patterns
+here (bare-ish parse guards, ``while True`` byte walks, broad probing) are specific to reverse-
+engineering a hostile format. See ``dev/README.md`` and the companion decoder
+(``libs/mngr_antigravity/imbue/mngr_antigravity/resources/decode_agy_transcript.py``).
+
 Why this exists
 ---------------
 antigravity (``agy``) stores each conversation as a SQLite ``.db`` (one file per conversation
