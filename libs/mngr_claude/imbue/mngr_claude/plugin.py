@@ -48,8 +48,7 @@ from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import SettingsPatchField
-from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver import fold_settings_patch
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
@@ -594,24 +593,17 @@ def _build_settings_json(
     # their home settings.json against an empty base (extend-against-empty =
     # assign), so ``B`` is concrete by construction. mngr's own flags/hooks carry
     # no markers, so in practice only the synced home file could contribute one.
-    data = resolve_extends({}, data)
+    data, _ = fold_settings_patch({}, data)
 
     # Fold the settings_overrides patch onto the concrete base ``B``. ``__extend``
-    # markers merge against ``B``; bare keys assign (resolved here too).
-    resolved = resolve_extends(data, config.settings_overrides)
+    # markers merge against ``B``; bare keys assign. Narrowing is tracked inside the
+    # fold and reported at any depth (including bare keys nested in an ``__extend``).
+    data, narrowings = fold_settings_patch(data, config.settings_overrides)
 
-    # Narrowing guard: a bare top-level override key that drops a non-empty
+    # Narrowing guard: any bare override key (at any depth) that drops a non-empty
     # aggregate from ``B`` hard-errors unless the escape hatch is set.
-    if not allow_narrowing:
-        narrowing_keys = [
-            key
-            for key in config.settings_overrides
-            if not is_extend_key(key) and would_assignment_narrow(data.get(key), resolved.get(key))
-        ]
-        if narrowing_keys:
-            raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowing_keys))
-
-    data = {**data, **resolved}
+    if narrowings and not allow_narrowing:
+        raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowings))
 
     leaked_markers = _find_extend_marker_paths(data)
     if leaked_markers:

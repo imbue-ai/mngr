@@ -22,7 +22,9 @@ from pydantic import BaseModel
 
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.key_resolver_primitives import _apply_extend
+from imbue.mngr.config.key_resolver_primitives import _extend_dict
 from imbue.mngr.config.key_resolver_primitives import bare_key
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import InvalidKeyPathError
@@ -145,6 +147,69 @@ def resolve_extends(
             continue
         result[bare] = _apply_extend(current, value, field_path)
     return result
+
+
+def fold_settings_patch(
+    base: dict[str, Any],
+    patch: dict[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> tuple[dict[str, Any], list[str]]:
+    """Fold a settings ``patch`` onto a **concrete** ``base`` dict, returning the
+    merged result and the dotted paths where a bare assign narrowed the base.
+
+    ``base`` must carry no ``__extend`` markers (it is the provision base ``B`` or a
+    sub-dict of it). The fold applies mngr's standard per-key rules recursively:
+
+    - **bare ``key``** -> assign: ``result[key]`` becomes the value (a dict value
+      is first resolved against an empty base so its own nested markers collapse).
+      If the assignment drops a non-empty aggregate entry from ``base[key]``
+      (``would_assignment_narrow``), the dotted path is recorded -- **at any
+      depth**, including bare keys nested inside an ``__extend`` value.
+    - **``key__extend``** -> extend ``base[key]``: a dict-vs-dict extend recurses
+      (so nested bare assigns are themselves narrow-checked and their paths bubble
+      up); list concat / set union / extend-against-absent reuse ``_apply_extend``.
+      ``__extend`` merges never narrow (they are supersets).
+
+    The result contains no ``__extend`` markers (every marker resolves against the
+    concrete base). Pure; the narrowing list is returned rather than raised so the
+    caller can apply the escape hatch.
+    """
+    result: dict[str, Any] = dict(base)
+    narrowings: list[str] = []
+
+    # First pass: bare keys assign (resolving their own nested markers against
+    # empty so nothing leaks), narrow-checked against the base value.
+    for key, value in patch.items():
+        if is_extend_key(key):
+            continue
+        key_path = path + (key,)
+        dotted = ".".join(key_path)
+        if isinstance(value, Mapping):
+            assigned: Any = _extend_dict({}, value, dotted)
+        else:
+            assigned = value
+        if would_assignment_narrow(base.get(key), assigned):
+            narrowings.append(dotted)
+        result[key] = assigned
+
+    # Second pass: ``key__extend`` keys extend the just-assigned bare value (if the
+    # same layer set one) or the base value.
+    for key, value in patch.items():
+        if not is_extend_key(key):
+            continue
+        bare = bare_key(key)
+        key_path = path + (bare,)
+        current = result.get(bare)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            # Recurse so nested bare assigns inside the extend value are
+            # narrow-checked and their paths bubble up.
+            merged_sub, sub_narrowings = fold_settings_patch(dict(current), dict(value), path=key_path)
+            result[bare] = merged_sub
+            narrowings.extend(sub_narrowings)
+        else:
+            result[bare] = _apply_extend(current, value, ".".join(key_path))
+    return result, narrowings
 
 
 class _ExactDepthMatcher(BaseModel):

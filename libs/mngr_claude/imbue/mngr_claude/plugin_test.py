@@ -4670,6 +4670,52 @@ def test_build_settings_json_output_has_no_extend_markers() -> None:
     assert "__extend" not in content
 
 
+def test_build_settings_json_nested_bare_inside_extend_narrows_raises() -> None:
+    """The known-gap fix: a *bare* key nested inside an ``__extend`` value that
+    drops a non-empty aggregate from the base raises the narrowing error.
+
+    Base ``permissions = {defaultMode, allow:[X]}``; override
+    ``permissions__extend = {allow: [Y]}`` -- the outer ``permissions__extend``
+    merges (preserving ``defaultMode``), but the *nested bare* ``allow`` replaces
+    the non-empty base ``allow:[X]``, dropping ``X``. The recursive fold now
+    catches this nested bare drop (the old top-level-only check missed it).
+    """
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": ["Bash(npm *)"]}},
+    )
+    with pytest.raises(ConfigParseError, match="permissions.allow"):
+        _build_settings_json(claude_dir, config, ctx, sync_local=True)
+
+
+def test_build_settings_json_nested_bare_inside_extend_allowed_with_escape_hatch() -> None:
+    """With the escape hatch, the nested-bare drop is permitted: ``defaultMode``
+    (untouched by the nested patch) survives the outer extend while ``allow`` is
+    replaced wholesale."""
+    claude_dir = Path.home() / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"permissions": {"defaultMode": "acceptEdits", "allow": ["Bash(git *)"]}})
+    )
+
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"permissions__extend": {"allow": ["Bash(npm *)"]}},
+    )
+    content = _build_settings_json(claude_dir, config, ctx, sync_local=True, allow_narrowing=True)
+    data = json.loads(content)
+    assert data["permissions"]["defaultMode"] == "acceptEdits"
+    assert data["permissions"]["allow"] == ["Bash(npm *)"]
+
+
 # =============================================================================
 # Volume-based session preservation tests
 # =============================================================================

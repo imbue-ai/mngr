@@ -10,6 +10,7 @@ from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
+from imbue.mngr.config.key_resolver import fold_settings_patch
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver_primitives import EXTEND_SUFFIX
 from imbue.mngr.config.key_resolver_primitives import bare_key
@@ -505,3 +506,67 @@ def test_combine_patches_is_associative_with_the_fold(
     combined_then_resolved = _resolve_fold(base, combine_patches(lower, higher))
     folded_in_order = _resolve_fold(_resolve_fold(base, lower), higher)
     assert combined_then_resolved == folded_in_order
+
+
+# =============================================================================
+# fold_settings_patch -- threaded-narrowing provision fold
+# =============================================================================
+
+
+def test_fold_settings_patch_extend_against_present_dict_preserves_siblings() -> None:
+    """A nested ``allow__extend`` merges onto the base, preserving ``defaultMode``;
+    no narrowing (extend is a superset)."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow__extend": ["X"]}})
+    assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["old", "X"]}}
+    assert narrowings == []
+
+
+def test_fold_settings_patch_top_level_bare_narrows() -> None:
+    """A bare key that drops a non-empty aggregate from the base is recorded."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
+    merged, narrowings = fold_settings_patch(base, {"permissions": {"allow": ["X"]}})
+    assert merged == {"permissions": {"allow": ["X"]}}
+    assert narrowings == ["permissions"]
+
+
+def test_fold_settings_patch_nested_bare_inside_extend_narrows() -> None:
+    """The known-gap fix: a bare key nested inside an ``__extend`` value that drops a
+    non-empty base aggregate is recorded at its dotted path (previously unchecked)."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow": ["X"]}})
+    # defaultMode survives the outer extend; allow is replaced (dropping "old").
+    assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
+    assert narrowings == ["permissions.allow"]
+
+
+def test_fold_settings_patch_assigns_absent_key_without_narrowing() -> None:
+    """Assigning a brand-new key (no base value) never narrows."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits"}}
+    merged, narrowings = fold_settings_patch(base, {"model": "opus"})
+    assert merged == {"permissions": {"defaultMode": "acceptEdits"}, "model": "opus"}
+    assert narrowings == []
+
+
+def test_fold_settings_patch_resolves_nested_markers_in_bare_dict() -> None:
+    """A bare dict value carrying its own ``__extend`` resolves against empty
+    (extend-against-nothing = assign), leaving no marker in the output."""
+    base: dict[str, Any] = {}
+    merged, narrowings = fold_settings_patch(base, {"permissions": {"allow__extend": ["X"]}})
+    assert merged == {"permissions": {"allow": ["X"]}}
+    assert narrowings == []
+
+
+def test_fold_settings_patch_output_has_no_markers() -> None:
+    """Against a concrete base every marker resolves; the output has no ``__extend``."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    merged, _ = fold_settings_patch(base, {"permissions__extend": {"allow__extend": ["X"]}})
+
+    def _has_marker(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(is_extend_key(k) for k in value) or any(_has_marker(v) for v in value.values())
+        if isinstance(value, list):
+            return any(_has_marker(v) for v in value)
+        return False
+
+    assert not _has_marker(merged)
