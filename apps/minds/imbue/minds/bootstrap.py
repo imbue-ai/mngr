@@ -187,6 +187,7 @@ def _write_aws_provider_blocks(providers_section: Table, desired_names: tuple[st
         block = tomlkit.table()
         block["backend"] = _AWS_BACKEND_NAME
         block["default_region"] = region
+        block["default_instance_type"] = _AWS_DEFAULT_INSTANCE_TYPE
         block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
         block["docker_runtime"] = _AWS_DOCKER_RUNTIME
         providers_section[name] = block
@@ -527,6 +528,11 @@ _AWS_BACKEND_NAME: Final[str] = "aws"
 _AWS_DOCKER_RUNTIME: Final[str] = "runsc"
 _AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
+# EC2 instance size for minds AWS workspaces. The mngr_aws default (t3.small,
+# 2 GB) is too small for the full forever-claude-template build (uv sync + npm
+# ci/build OOMs/thrashes on 2 GB); t3.medium (4 GB) matches what the vultr
+# template provisions.
+_AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.medium"
 
 
 class BootstrapError(ValueError):

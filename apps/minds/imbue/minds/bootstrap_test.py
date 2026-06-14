@@ -406,6 +406,7 @@ def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
         assert block == {
             "backend": "aws",
             "default_region": region,
+            "default_instance_type": "t3.medium",
             "install_gvisor_runtime": True,
             "docker_runtime": "runsc",
         }
