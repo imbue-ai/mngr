@@ -16,6 +16,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.primitives import ActivitySource
@@ -348,6 +349,56 @@ def test_tmux_target_uses_exact_match_window_zero(
     assert target.session_name == test_agent.session_name
     assert target.window == 0
     assert target.as_shell_arg() == f"={test_agent.session_name}:0"
+
+
+@pytest.mark.tmux
+def test_capture_pane_content_targets_requested_window(
+    test_agent: BaseAgent,
+) -> None:
+    """capture_pane_content(window=...) should read the requested window, not window 0.
+
+    The agent runs in window 0, but sessions can hold extra windows (watchers,
+    ttyd, manually-opened terminals). Passing an explicit window must capture that
+    window's pane rather than the agent's primary one.
+    """
+    session_name = test_agent.session_name
+    window_zero_marker = "WINDOW_ZERO_MARKER"
+    window_one_marker = "WINDOW_ONE_MARKER"
+
+    test_agent.host.execute_idempotent_command(
+        f"tmux new-session -d -s '{session_name}' -x 200 -y 24 'echo {window_zero_marker}; sleep 493827'",
+        timeout_seconds=5.0,
+    )
+    try:
+        session_target = TmuxSessionTarget(session_name=session_name)
+        test_agent.host.execute_idempotent_command(
+            f"tmux new-window -t {session_target.as_shell_arg()} -d 'echo {window_one_marker}; sleep 493827'",
+            timeout_seconds=5.0,
+        )
+
+        def _default_capture_shows_window_zero() -> bool:
+            content = test_agent.capture_pane_content() or ""
+            return window_zero_marker in content
+
+        wait_for(
+            _default_capture_shows_window_zero,
+            error_message=f"Expected default capture to contain {window_zero_marker!r}",
+        )
+
+        def _window_one_capture_shows_window_one() -> bool:
+            content = test_agent.capture_pane_content(window=1) or ""
+            return window_one_marker in content
+
+        wait_for(
+            _window_one_capture_shows_window_one,
+            error_message=f"Expected window-1 capture to contain {window_one_marker!r}",
+        )
+
+        # Cross-check: window 1's content is distinct from the default (window 0) content.
+        assert window_zero_marker not in (test_agent.capture_pane_content(window=1) or "")
+        assert window_one_marker not in (test_agent.capture_pane_content() or "")
+    finally:
+        cleanup_tmux_session(session_name)
 
 
 @pytest.mark.tmux
