@@ -92,6 +92,34 @@ layer set." Two ways that can be wrong:
 "written," across set-to-None, set-to-default, and unset cases. Only build the pipeline once
 those pass. This is the make-or-break item.
 
+### Spike result (resolved favorably)
+
+A read-only spike settled this. Empirically:
+
+- **Top-level `MngrConfig` over-reports completely.** Setting only `prefix` yields
+  `model_fields_set` of **all 24 fields** and an `exclude_unset` dump of all 24 (the rest `None`).
+  Cause: `parse_config` does `raw.pop(field, None)` for every field and passes them all to
+  `model_construct`.
+- **Sub-models are already faithful.** An `agent_type` block with two fields set dumps exactly
+  `{parent_type, cli_args}`.
+
+But this is **not a blocker** -- it is a removable construction choice, for two reasons:
+
+1. **The padding exists only to feed the current None-based merge** (`_assign_scalar`). Construct
+   the top-level config *sparse* (only present keys -- what the sub-parsers already do) and the
+   over-reporting vanishes. Defaults are **not** lost: they are applied by the **final**
+   `MngrConfig.model_validate(config_dict)` at the end of load, not by the padding.
+2. **The None-vs-unset ambiguity dissolves: TOML has no null.** A user can never write `None`, so
+   `None` only ever means the loader's padding sentinel. With sparse construction "absent = unset"
+   is unambiguous; there is no legitimate user-set-`None` to preserve. (The padding also produces
+   invalid intermediate states -- e.g. a `Path` field holding `None`, visible as a serializer
+   warning -- which sparse construction removes.)
+
+**The one coupling:** sparse construction and overlay-merge (absent = unset) must flip **together**
+-- the padding and the None-based `merge_with` are a matched pair. So this is a localized, coupled
+change, not a semantic dead-end. The riskiest axis is therefore **green**; the remaining work is
+verification (the property-test harness below) and surface area, not feasibility.
+
 ## Other uncertainties
 
 - **Subclass / `parent_type` reconstruction.** `_apply_custom_overrides_to_parent_config` builds
