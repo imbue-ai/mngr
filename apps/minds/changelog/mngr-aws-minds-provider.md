@@ -9,3 +9,5 @@ Added **AWS** as a compute-provider option in the workspace create form, alongsi
 - AWS hosts are long-lived: they never idle-shut-down and have no max-lifetime timer.
 
 - minds writes one per-region AWS provider block into its mngr settings at startup (only when AWS credentials are present) and ensures the region's security group exists before each create.
+
+- minds now suppresses the default region-less `aws` provider in its mngr settings (the same way it already suppresses the default `imbue_cloud` provider), so `mngr list` no longer logs a spurious "credentials not configured" discovery warning every cycle. The usable AWS providers remain the per-region `aws-<region>` blocks.

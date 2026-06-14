@@ -251,16 +251,19 @@ def _ensure_mngr_settings(root_name: str) -> None:
         plugins = existing.get("plugins", {})
         recursive_plugin = plugins.get("recursive", {})
         default_imbue_cloud = providers.get(_IMBUE_CLOUD_BACKEND_NAME, {})
+        default_aws = providers.get(_AWS_BACKEND_NAME, {})
         if (
             recursive_plugin.get("enabled") is False
             and "ssh" not in providers
             and default_imbue_cloud.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
             and default_imbue_cloud.get("is_enabled") is False
+            and default_aws.get("backend") == _AWS_BACKEND_NAME
+            and default_aws.get("is_enabled") is False
             and _existing_aws_provider_names(providers) == set(desired_aws_names)
         ):
             # Already in the desired shape -- recursive disabled, no stale
-            # ssh provider section, default imbue_cloud instance suppressed --
-            # no need to rewrite + fsync.
+            # ssh provider section, default imbue_cloud + aws instances
+            # suppressed -- no need to rewrite + fsync.
             _cleanup_legacy_dynamic_hosts(root_name)
             return
         doc = tomlkit.loads(settings_path.read_text())
@@ -284,6 +287,18 @@ def _ensure_mngr_settings(root_name: str) -> None:
     default_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
     default_block["is_enabled"] = False
     providers_section[_IMBUE_CLOUD_BACKEND_NAME] = default_block
+
+    # Suppress the default ``[providers.aws]`` instance for the same reason: the
+    # registered ``aws`` backend would otherwise auto-create a region-less
+    # provider whose discovery fails every ``mngr list`` cycle ("credentials not
+    # configured" -- it has no default_region), logging a spurious warning. The
+    # usable providers are the per-region ``aws-<region>`` blocks below. This is
+    # written unconditionally (even with no AWS credentials), since the no-creds
+    # case is exactly when the region-less default would log on every cycle.
+    default_aws_block = tomlkit.table()
+    default_aws_block["backend"] = _AWS_BACKEND_NAME
+    default_aws_block["is_enabled"] = False
+    providers_section[_AWS_BACKEND_NAME] = default_aws_block
 
     # Write one ``[providers.aws-<region>]`` block per configured region (when
     # AWS credentials are present), so ``mngr create @host.aws-<region>`` and
