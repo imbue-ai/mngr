@@ -1,0 +1,1 @@
+README: add a "Filtering by event age" section documenting `--since` as the way to bound the per-session cost aggregation by event age, and clarifying that `--max-age` is a stale-warning threshold, not a filter.
