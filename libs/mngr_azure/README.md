@@ -64,6 +64,18 @@ mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
 
 Idempotent — re-running is a no-op when everything already exists.
 
+`prepare` and `cleanup` read their defaults from your `[providers.<name>]`
+settings.toml block, selected with `--provider` (default `azure`), so the
+resource group / vnet / subnet / NSG land with the same names the runtime `mngr
+create --provider <name>` path will resolve. CLI flags override the resolved
+config, which in turn overrides class defaults. For example, with a
+`[providers.azure-west]` block pinning `default_region = "westus"`,
+`resource_group = "mngr-westus"`, and `allowed_ssh_cidrs = ["203.0.113.4/32"]`:
+
+```bash
+mngr azure prepare --provider azure-west   # uses that block's region / RG / CIDRs, no flags needed
+```
+
 ### Teardown: `mngr azure cleanup`
 
 The safe inverse of `prepare`. Deletes the mngr-owned resource group (cascading
@@ -106,7 +118,7 @@ allowed_ssh_cidrs = ["203.0.113.4/32"]
 ```
 
 ```bash
-mngr azure prepare --region westus --resource-group mngr-westus --allowed-ssh-cidr 203.0.113.4/32
+mngr azure prepare --provider azure-west   # reads region / RG / CIDRs from [providers.azure-west]
 mngr create my-west-agent --provider azure-west
 ```
 

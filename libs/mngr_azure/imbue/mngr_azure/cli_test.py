@@ -2,11 +2,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import click
+import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.imbue_common.model_update import to_update
+from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.local.config import LocalProviderConfig
+from imbue.mngr_azure.backend import AZURE_BACKEND_NAME
 from imbue.mngr_azure.cli import _perform_cleanup
+from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
+from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
@@ -54,6 +63,7 @@ def test_cleanup_logic_noop_when_rg_missing() -> None:
 def test_prepare_command_help_is_reachable() -> None:
     result = CliRunner().invoke(azure_cli_group, ["prepare", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--allowed-ssh-cidr" in result.output
     assert "--resource-group" in result.output
 
@@ -61,15 +71,127 @@ def test_prepare_command_help_is_reachable() -> None:
 def test_cleanup_command_help_is_reachable() -> None:
     result = CliRunner().invoke(azure_cli_group, ["cleanup", "--help"])
     assert result.exit_code == 0
+    assert "--provider" in result.output
     assert "--resource-group" in result.output
 
 
-def test_prepare_command_fails_clearly_without_subscription(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_prepare_command_fails_clearly_without_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """When no subscription resolves, the click command surfaces a clean error.
+
+    Passes ``obj=plugin_manager`` because ``prepare`` now runs through
+    ``setup_command_context`` (so it can read ``[providers.NAME]`` from
+    settings.toml as defaults), and ``setup_command_context`` reads the plugin
+    manager off ``ctx.obj``.
+    """
     monkeypatch.delenv("AZURE_SUBSCRIPTION_ID", raising=False)
     # Isolate AZURE_CONFIG_DIR (the conftest autouse fixture pins it at the real
     # ~/.azure) so no az-default subscription resolves -- otherwise prepare would
     # proceed and make real Azure calls in a unit test.
     monkeypatch.setenv("AZURE_CONFIG_DIR", str(tmp_path))
-    result = CliRunner().invoke(azure_cli_group, ["prepare", "--allowed-ssh-cidr", "0.0.0.0/0"])
+    result = cli_runner.invoke(
+        azure_cli_group,
+        ["prepare", "--allowed-ssh-cidr", "0.0.0.0/0"],
+        obj=plugin_manager,
+    )
     assert result.exit_code != 0
     assert "subscription" in result.output.lower()
+
+
+# =============================================================================
+# Provider-config resolution (the bug-fix surface for `mngr azure prepare`)
+# =============================================================================
+#
+# Earlier versions of ``_build_operator_client`` built ``AzureProviderConfig``
+# with only ``subscription_id``, using class defaults for the resource group /
+# vnet / subnet / NSG names and region, so a user with non-default values in
+# ``[providers.azure]`` running ``mngr azure prepare`` without the matching CLI
+# flag would create infrastructure with different names than the runtime create
+# path later resolved. ``_resolve_provider_config`` fixes this by reading the
+# user's resolved provider config off the ``MngrContext``; these tests pin that
+# behavior. Mirrors the AWS and GCP providers' identical fix.
+
+
+def _temp_mngr_ctx_with_provider(temp_mngr_ctx: MngrContext, name: str, config: ProviderInstanceConfig) -> MngrContext:
+    """Return ``temp_mngr_ctx`` with ``config`` registered under ``name`` in ``providers``."""
+    provider_name = ProviderInstanceName(name)
+    new_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, {provider_name: config})
+    )
+    return temp_mngr_ctx.model_copy_update(to_update(temp_mngr_ctx.field_ref().config, new_config))
+
+
+def test_resolve_provider_config_uses_user_provider_block(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """The happy path returns the configured ``AzureProviderConfig`` verbatim, silently.
+
+    Pins the third leg of the three-case contract: configured Azure block ->
+    return as-is, no warning. The two sibling tests cover the missing-block and
+    non-Azure-block fallbacks (silent and warning respectively); pinning silence
+    here too closes the {Azure / non-Azure / missing} x {warn / silent} matrix so
+    a future regression that always-warns can't slip through.
+    """
+    user_config = AzureProviderConfig(
+        backend=AZURE_BACKEND_NAME,
+        subscription_id="sub-abc",
+        default_region="eastus",
+        resource_group="my-rg",
+        vnet_name="my-vnet",
+        nsg_name="my-nsg",
+    )
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "azure-prod", user_config)
+
+    resolved = _resolve_provider_config(ctx_with_provider, "azure-prod")
+
+    assert resolved.subscription_id == "sub-abc"
+    assert resolved.default_region == "eastus"
+    assert resolved.resource_group == "my-rg"
+    assert resolved.vnet_name == "my-vnet"
+    assert resolved.nsg_name == "my-nsg"
+    assert log_warnings == [], f"happy path must be silent, got {log_warnings!r}"
+
+
+def test_resolve_provider_config_falls_back_to_class_defaults_when_missing(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """When the named provider block doesn't exist, class defaults are used silently.
+
+    Operator commands must work for first-run users who haven't yet pinned a
+    ``[providers.azure]`` block, so the fallback is a feature not a bug -- and no
+    warning is emitted because this is the expected shape (distinct from the
+    wrong-type case, which does warn).
+    """
+    resolved = _resolve_provider_config(temp_mngr_ctx, "azure-does-not-exist")
+
+    assert resolved == AzureProviderConfig()
+    assert log_warnings == [], f"missing-block fallback must be silent, got {log_warnings!r}"
+
+
+def test_resolve_provider_config_falls_back_when_named_block_is_non_azure(
+    temp_mngr_ctx: MngrContext,
+    log_warnings: list[str],
+) -> None:
+    """If the user pointed ``[providers.azure]`` at a non-Azure backend, fall back and warn.
+
+    The operator CLI still works against the class defaults plus whatever the
+    user passes on the command line; refusing here would block a legitimate
+    out-of-band run. But the user's ``--provider`` selection did not have the
+    intended effect, so a warning is emitted to make the silent-fallback visible
+    (distinct from the missing-block case, which is silent because it is the
+    expected first-run shape).
+    """
+    ctx_with_provider = _temp_mngr_ctx_with_provider(temp_mngr_ctx, "azure", LocalProviderConfig())
+
+    resolved = _resolve_provider_config(ctx_with_provider, "azure")
+
+    assert resolved == AzureProviderConfig()
+    assert len(log_warnings) == 1, f"expected exactly one warning, got {log_warnings!r}"
+    assert "'azure'" in log_warnings[0]
+    assert "LocalProviderConfig" in log_warnings[0]
