@@ -113,6 +113,12 @@ flag and `__assign` coexist per "Coexistence" above.
 
 ## Future direction: typed node wrappers instead of string suffixes
 
+**Now designed** in [overlay-typed-nodes.md](./overlay-typed-nodes.md) (approved in
+principle): `Default` / `Assign` / `Extend` typed wrappers replace the string-suffix
+*internal* representation, with a single lift pass at the config-load boundary and the
+explicit `merge` (raises aggregated `NarrowingError`) / `merge_narrowing_allowed` API. The
+original sketch below is retained for context.
+
 Idea (captured, not yet designed): rather than encoding operators as key-string suffixes
 (`key__extend` / `key__assign`) parsed at merge time, represent them as **typed wrapper
 objects** around node values -- e.g. `Extend(value)`, `Assign(value)`, `Default(value)` (and
