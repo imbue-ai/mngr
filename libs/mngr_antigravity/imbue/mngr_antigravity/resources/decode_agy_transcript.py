@@ -4,7 +4,7 @@ NOTE -- best-effort black magic, NOT a style exemplar for the rest of the repo. 
 (and ``scripts/extract_antigravity_proto_schema.py``) reverse-engineers an *undocumented,
 version-unstable* format: agy publishes no ``.proto`` schema and renumbers fields roughly
 weekly, so the field/enum map below is recovered empirically from the binary and can silently
-break on any agy release (see ``dev/README.md`` for the recovery process and the release-marked
+break on any agy release (see ``libs/mngr_antigravity/dev/README.md`` for the recovery process and the release-marked
 re-verification test). The decode is deliberately defensive and lossy -- it degrades or skips
 malformed, truncated, or schema-drifted input (empty timestamps, dropped steps, ``utf-8``
 ``"replace"``, broad "return on anything unexpected") rather than guaranteeing a faithful

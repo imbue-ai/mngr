@@ -7,7 +7,7 @@ embedded ``FileDescriptorProto``s, walks them with hand-rolled varint parsing, a
 recovers most -- not all -- descriptors (some legacy-gzip-registered ones are missed by design).
 Run it as a dev/verification tool, not as a model for general repo conventions; the patterns
 here (bare-ish parse guards, ``while True`` byte walks, broad probing) are specific to reverse-
-engineering a hostile format. See ``dev/README.md`` and the companion decoder
+engineering a hostile format. See ``libs/mngr_antigravity/dev/README.md`` and the companion decoder
 (``libs/mngr_antigravity/imbue/mngr_antigravity/resources/decode_agy_transcript.py``).
 
 Why this exists
