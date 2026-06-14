@@ -6,6 +6,7 @@ from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from typing import assert_never
 
 from loguru import logger
 from pydantic import Field
@@ -217,7 +218,8 @@ def compute_section(fields: dict[str, FieldValue]) -> BoardSection:
             if pr.is_draft:
                 return BoardSection.PR_DRAFT
             return BoardSection.PR_BEING_REVIEWED
-    raise AssertionError(f"Unhandled PR state: {pr.state}")
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def toggle_agent_mute(mngr_ctx: MngrContext, agent_name: AgentName) -> bool:
@@ -273,8 +275,13 @@ def save_field_cache(
             json.dump(serialized, f)
         Path(tmp_path).rename(cache_path)
         tmp_path = None
-    except Exception as e:
-        logger.debug("Failed to save field cache: {}", e)
+    except OSError as e:
+        # Persisting the field cache is best-effort: a filesystem failure (e.g.
+        # a read-only profile dir) must not crash the refresh. We deliberately
+        # catch only OSError -- model_dump(mode="json") of typed FieldValues
+        # cannot raise OSError, so a serialization bug propagates loudly instead
+        # of being silently swallowed here.
+        logger.warning("Failed to save field cache: {}", e)
     finally:
         if tmp_path is not None:
             Path(tmp_path).unlink(missing_ok=True)
@@ -315,9 +322,12 @@ def load_field_cache(
         # Tolerate any read/parse/decode failure and behave as the docstring
         # promises ("returns empty dict if the cache file doesn't exist or
         # is corrupt"). The broad catch is intentional and covers
-        # UnicodeDecodeError from partial-write corruption alongside the
-        # narrower OSError / json.JSONDecodeError cases.
-        logger.debug("Failed to load field cache: {}", e)
+        # UnicodeDecodeError from partial-write corruption, the AttributeError
+        # from a non-dict top-level JSON value, and the InvalidName raised by
+        # AgentName(...) on a hand-edited key, alongside the narrower OSError /
+        # json.JSONDecodeError cases. Logged at warning (not debug) because a
+        # silently-reset corrupt cache should be visible per the style guide.
+        logger.warning("Failed to load field cache: {}", e)
         return {}
 
 

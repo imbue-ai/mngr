@@ -65,6 +65,20 @@ def test_parse_non_github_url() -> None:
     assert _parse_github_repo_path("https://gitlab.com/org/repo.git") is None
 
 
+def test_parse_ssh_url_without_owner_returns_none() -> None:
+    # A degenerate SSH remote with no owner/repo (no "/") is not a usable repo
+    # path, so it must be treated as "absent" rather than yielding a malformed value.
+    assert _parse_github_repo_path("git@github.com:repo.git") is None
+
+
+def test_parse_https_url_without_owner_returns_none() -> None:
+    assert _parse_github_repo_path("https://github.com/repo") is None
+
+
+def test_parse_https_url_bare_host_returns_none() -> None:
+    assert _parse_github_repo_path("https://github.com/") is None
+
+
 def test_repo_path_from_labels_with_remote() -> None:
     assert repo_path_from_labels({"remote": "git@github.com:org/repo.git"}) == "org/repo"
 

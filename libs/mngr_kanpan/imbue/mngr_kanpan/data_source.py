@@ -219,5 +219,10 @@ def deserialize_fields(
         try:
             result[key] = adapter.validate_python(value)
         except ValidationError as e:
+            # Logged at debug (not warning) on purpose: this path is dominated by
+            # the expected one-time migration of legacy cache entries that predate
+            # the now-required `created` field, where a missing/invalid field is
+            # expected rather than alarming and warning-level noise on every load
+            # would be undesirable. Revisit once that migration window has passed.
             logger.debug("deserialize_fields: validation failed for key {!r}: {}", key, e)
     return result

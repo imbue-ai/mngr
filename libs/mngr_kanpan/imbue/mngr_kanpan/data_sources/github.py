@@ -495,6 +495,12 @@ def _parse_pr_node(node: dict[str, Any], unresolved_ignore_user: str | None) -> 
 @pure
 def _parse_pr_state(state_str: str) -> PrState:
     """Convert the GraphQL `PullRequestState` enum to `PrState`."""
+    # `PullRequestState` is a three-valued GraphQL enum (OPEN/CLOSED/MERGED). The
+    # final `return` is the genuine OPEN case; it also doubles as the safe default
+    # for any unexpected value (a future GitHub-side enum addition, a malformed
+    # response). OPEN is deliberately chosen as that default because it keeps the
+    # agent visible in review rather than mis-hiding it under Done/Cancelled --
+    # the same intentional-fallback stance as `CiStatus.from_rollup_state`.
     upper = state_str.upper()
     if upper == "MERGED":
         return PrState.MERGED

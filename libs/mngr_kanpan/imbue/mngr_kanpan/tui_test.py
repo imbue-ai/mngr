@@ -1180,6 +1180,19 @@ def test_load_user_commands_rejects_builtin_kind_in_raw_dict() -> None:
         _load_user_commands(ctx)
 
 
+def test_load_user_commands_skips_malformed_non_dict_value() -> None:
+    # A config entry that is neither a CustomCommand nor a raw dict (e.g. a bare
+    # string from a malformed TOML config reaching us via model_construct) must be
+    # skipped, not silently coerced and not crash the whole command load.
+    config = KanpanPluginConfig.model_construct(
+        commands={"good": CustomCommand(name="ok", command="echo hi"), "bad": "not-a-command"},
+    )
+    ctx = make_mngr_ctx_with_config(config)
+    result = _load_user_commands(ctx)
+    assert "bad" not in result
+    assert result["good"].name == "ok"
+
+
 def test_build_command_map_includes_builtins() -> None:
     config = KanpanPluginConfig()
     ctx = make_mngr_ctx_with_config(config)
