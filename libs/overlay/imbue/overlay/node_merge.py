@@ -135,7 +135,12 @@ def lift_concrete(base: dict[str, Any]) -> Patch:
 # =============================================================================
 
 
-def apply_extend(current_payload: Any, extend_payload: Any, field_path: str) -> Any:
+def apply_extend(
+    current_payload: Any,
+    extend_payload: Any,
+    field_path: str,
+    assign_drops: list[AssignDrop] | None = None,
+) -> Any:
     """Apply ``extend_payload`` onto ``current_payload``, returning a new payload.
 
     Operates on payloads (a leaf or a ``Patch``). A ``Patch`` target recurses via
@@ -144,10 +149,15 @@ def apply_extend(current_payload: Any, extend_payload: Any, field_path: str) -> 
     target unions; a scalar target is an error. Extend-against-absent
     (``current_payload is None``) acts as assign -- the extend payload becomes the
     value -- but the shape must still be an aggregate or a patch.
+
+    ``assign_drops`` threads into the recursive ``combine`` so a bare (``Default``)
+    assign nested *inside* this extend payload that drops a lower aggregate is still
+    recorded for the narrowing filter (the recursive-narrowing case): an extend never
+    narrows at its own level, but a nested assign within it can.
     """
     if current_payload is None:
         if isinstance(extend_payload, dict):
-            return combine({}, extend_payload, path=(field_path,))
+            return combine({}, extend_payload, path=(field_path,), assign_drops=assign_drops)
         if not isinstance(extend_payload, _AGGREGATE_LEAF_TYPES):
             raise OverlayError(
                 f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
@@ -160,7 +170,7 @@ def apply_extend(current_payload: Any, extend_payload: Any, field_path: str) -> 
                 f"__extend on field '{field_path}' (dict) requires a JSON object value; "
                 f"got: {type(extend_payload).__name__}"
             )
-        return combine(current_payload, extend_payload, path=(field_path,))
+        return combine(current_payload, extend_payload, path=(field_path,), assign_drops=assign_drops)
     if isinstance(current_payload, (list, tuple)):
         if not isinstance(extend_payload, (list, tuple)):
             raise OverlayError(
@@ -183,16 +193,22 @@ def apply_extend(current_payload: Any, extend_payload: Any, field_path: str) -> 
     )
 
 
-def combine_extend_payloads(lower_payload: Any, higher_payload: Any, field_path: str) -> Any:
+def combine_extend_payloads(
+    lower_payload: Any,
+    higher_payload: Any,
+    field_path: str,
+    assign_drops: list[AssignDrop] | None = None,
+) -> Any:
     """Combine two ``Extend`` payloads (neither resolved against a base yet).
 
     Both payloads come from ``Extend`` nodes for the same field. A ``Patch`` pair
-    recurses via ``combine``; list/tuple pairs concatenate; set/frozenset pairs
-    union. Incompatible shapes are an error. The result is still an unresolved
-    extend payload (stays in an ``Extend`` node).
+    recurses via ``combine`` (threading ``assign_drops`` so a nested assign that
+    drops a lower aggregate is still recorded); list/tuple pairs concatenate;
+    set/frozenset pairs union. Incompatible shapes are an error. The result is still
+    an unresolved extend payload (stays in an ``Extend`` node).
     """
     if isinstance(lower_payload, dict) and isinstance(higher_payload, dict):
-        return combine(lower_payload, higher_payload, path=(field_path,))
+        return combine(lower_payload, higher_payload, path=(field_path,), assign_drops=assign_drops)
     if isinstance(lower_payload, (list, tuple)) and isinstance(higher_payload, (list, tuple)):
         merged = list(lower_payload) + list(higher_payload)
         return tuple(merged) if isinstance(lower_payload, tuple) else merged
@@ -261,10 +277,10 @@ def combine_nodes(
     # higher_node is Extend.
     field_path = ".".join(path)
     if is_assign_kind(lower_node):
-        extended = apply_extend(lower_node.payload, higher_node.payload, field_path)
+        extended = apply_extend(lower_node.payload, higher_node.payload, field_path, assign_drops)
         return type(lower_node)(extended)
     # lower_node is Extend too.
-    return Extend(combine_extend_payloads(lower_node.payload, higher_node.payload, field_path))
+    return Extend(combine_extend_payloads(lower_node.payload, higher_node.payload, field_path, assign_drops))
 
 
 # =============================================================================

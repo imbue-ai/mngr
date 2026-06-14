@@ -397,6 +397,48 @@ def test_merge_assigns_absent_key_without_narrowing() -> None:
     assert narrowings == []
 
 
+def test_merge_nested_bare_drop_inside_extend_is_recorded() -> None:
+    """The recursive-narrowing case: an ``__extend`` never narrows at its own level,
+    but a bare (``Default``) assign nested inside the extend payload that drops a lower
+    aggregate is still recorded at its deep dotted path. ``assign_drops`` must thread
+    through ``apply_extend``'s internal ``combine`` for this to be caught."""
+    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    higher = lift({"foo__extend": {"bar": ["X"]}})
+    merged, narrowings = merge_narrowing_allowed(base, higher)
+    assert narrowings == ["foo.bar"]
+    assert finalize(merged) == {"foo": {"bar": ["X"]}}
+
+
+def test_merge_nested_add_inside_extend_does_not_narrow() -> None:
+    """A sibling key added inside an ``__extend`` is a pure addition: it preserves the
+    untouched sibling and records no narrowing."""
+    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    higher = lift({"foo__extend": {"baz": ["W"]}})
+    merged, narrowings = merge_narrowing_allowed(base, higher)
+    assert narrowings == []
+    assert finalize(merged) == {"foo": {"bar": ["Y", "Z"], "baz": ["W"]}}
+
+
+def test_merge_nested_extend_inside_extend_does_not_narrow() -> None:
+    """A nested ``__extend`` inside an ``__extend`` is a superset at every level and
+    never narrows."""
+    base = lift_concrete({"foo": {"bar": ["Y", "Z"]}})
+    higher = lift({"foo__extend": {"bar__extend": ["X"]}})
+    merged, narrowings = merge_narrowing_allowed(base, higher)
+    assert narrowings == []
+    assert finalize(merged) == {"foo": {"bar": ["Y", "Z", "X"]}}
+
+
+def test_merge_nested_drop_when_combining_two_extends_is_recorded() -> None:
+    """Combining two deferred ``Extend`` patches threads ``assign_drops`` too: a higher
+    bare assign nested in the upper extend that drops the lower extend's value narrows."""
+    lower = lift({"foo__extend": {"bar": ["Y", "Z"]}})
+    higher = lift({"foo__extend": {"bar": ["X"]}})
+    merged, narrowings = merge_narrowing_allowed(lower, higher)
+    assert narrowings == ["foo.bar"]
+    assert finalize(merged) == {"foo": {"bar": ["X"]}}
+
+
 # =============================================================================
 # merge against a concrete base -- round-trips
 # =============================================================================
