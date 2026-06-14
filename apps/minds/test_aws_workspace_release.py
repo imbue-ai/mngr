@@ -165,11 +165,6 @@ def _run_mngr(env: dict[str, str], cwd: Path, *args: str, timeout: int = 600) ->
     return subprocess.CompletedProcess(args=list(args), returncode=returncode, stdout=log_path.read_text(), stderr="")
 
 
-# ``mngr create`` for a VPS-Docker provider (AWS) uploads the source/build
-# context to the EC2 outer host via rsync, which the subprocess reaches through
-# the resource-guard wrapper inherited on PATH; declare the mark so the guard
-# authorizes it (matching the AWS lifecycle tests in ``test_release_aws.py``).
-@pytest.mark.rsync
 def test_aws_workspace_runs_in_runsc_container_on_ec2(aws_release_env: dict[str, str], temp_git_repo: Path) -> None:
     """A minds ``aws-<region>`` provider lands a runsc-hardened container on a real EC2 outer host."""
     host_name = f"test-aws-mind-{uuid.uuid4().hex}"
