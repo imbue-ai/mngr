@@ -111,7 +111,6 @@ from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lift_concrete
 from imbue.overlay.node_merge import merge_narrowing_allowed
-from imbue.overlay.operators import is_extend_key
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
 
@@ -516,31 +515,6 @@ def _rewrite_installed_plugins_paths(content: str, source_claude_dir: Path, targ
     return json.dumps(data, indent=2) + "\n"
 
 
-def _find_extend_marker_paths(data: Any, path: tuple[str, ...] = ()) -> list[str]:
-    """Return dotted paths of any ``__extend``-suffixed keys anywhere in ``data``.
-
-    Used by ``_build_settings_json`` to assert that the provision-time fold
-    consumed every deferred marker. The list is empty for a fully-resolved
-    settings dict; a non-empty result indicates a fold bug, not a user typo
-    (every marker resolves against the concrete base ``B``).
-    """
-    markers: list[str] = []
-    if isinstance(data, Mapping):
-        for key, value in data.items():
-            key_path = path + (str(key),)
-            if isinstance(key, str) and is_extend_key(key):
-                markers.append(".".join(key_path))
-            markers.extend(_find_extend_marker_paths(value, key_path))
-    elif isinstance(data, (list, tuple)):
-        for index, item in enumerate(data):
-            markers.extend(_find_extend_marker_paths(item, path + (str(index),)))
-    else:
-        # Scalar leaf (str/int/bool/None): cannot hold an __extend marker, so
-        # there is nothing to collect here.
-        pass
-    return markers
-
-
 def _build_settings_json(
     source_claude_dir: Path,
     config: ClaudeAgentConfig,
@@ -567,9 +541,9 @@ def _build_settings_json(
     reads from ``$CLAUDE_CONFIG_DIR``) rather than a managed ``--settings`` file,
     so a user's own ``--settings`` passes through and Claude layers it natively.
 
-    After the fold the result is asserted to contain no ``__extend`` key anywhere
-    (every deferred marker is consumed against the concrete base) -- a survivor
-    indicates a fold bug.
+    The fold runs on the typed-node algebra, whose ``finalize`` is total -- it
+    collapses every node into a plain value, so no marker can survive the fold by
+    construction (no post-hoc marker assertion is needed).
     """
     source = source_claude_dir / "settings.json"
     if sync_local and source.exists():
@@ -614,15 +588,6 @@ def _build_settings_json(
         raise ConfigParseError(_build_settings_overrides_narrowing_message(narrowings))
 
     data = finalize(merged)
-
-    leaked_markers = _find_extend_marker_paths(data)
-    if leaked_markers:
-        raise PluginMngrError(
-            "Internal error building Claude settings.json: unresolved __extend marker(s) "
-            f"survived the provision fold at: {', '.join(leaked_markers)}. "
-            "Every deferred settings marker must resolve against the concrete base; "
-            "this indicates a bug in the settings fold."
-        )
     return json.dumps(data, indent=2) + "\n"
 
 

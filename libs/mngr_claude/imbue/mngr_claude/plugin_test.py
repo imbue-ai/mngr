@@ -4630,6 +4630,23 @@ def test_build_settings_json_normalizes_extend_marker_in_home_base() -> None:
     assert "__extend" not in content
 
 
+def test_build_settings_json_stacked_suffix_override_does_not_raise() -> None:
+    """A malformed stacked-suffix override key is handled gracefully: the node lift
+    strips only the outermost suffix, so ``foo__extend__extend`` becomes a literal
+    ``foo__extend`` field and is finalized into a plain key, with no spurious internal
+    error. (The node ``finalize`` is total -- no marker can survive the fold -- so
+    there is no leaked-marker assertion to false-fire on the literal key.)
+    """
+    ctx = ProvisioningContext(is_unattended=False)
+    config = ClaudeAgentConfig(
+        check_installation=False,
+        settings_overrides={"foo__extend__extend": ["x"]},
+    )
+    content = _build_settings_json(Path.home() / ".claude", config, ctx, sync_local=False)
+    data = json.loads(content)
+    assert data["foo__extend"] == ["x"]
+
+
 def test_build_settings_json_extend_hooks_concatenates_session_start() -> None:
     """A ``hooks__extend.SessionStart__extend`` override concatenates onto mngr's
     own readiness ``SessionStart`` group instead of replacing it -- both groups
