@@ -215,8 +215,25 @@ untouched. The harder top-level concerns all resolved:
   today only because the merge's left operand is always the loader's defaulted accumulator (never
   a raw `parse_config` layer, which defaults them to `None`). Worth fixing defensively regardless.
 
-Both the representative subclass-bearing model (`AgentTypeConfig`) and the full container-bearing
-top-level (`MngrConfig`) reproduce faithfully. The value-merge axis of the integration is proven.
+### parent_type inheritance (class-switching) -- also proven
+
+A third additive prototype (`config/overlay_merge_parent_type_prototype.py` + 30-case test)
+reproduces `_apply_custom_overrides_to_parent_config` (the `parent_type` path), **30/30
+`old == new`**, config + mngr_claude suites green. It is the same pipeline plus three deltas:
+drop `_METADATA_FIELDS` (`parent_type`/`plugin`) from the child's sparse dump (reproduces the
+function's skip and its empty-override early return); the settings-patch combine is
+`merge(...)[0]` (value-identical to `combine_patches`, same `__extend` marking); and the output
+class follows the parent (reparse into `type(parent)`), so a base-class child folded onto a
+`ClaudeAgentConfig` parent yields a `ClaudeAgentConfig` with subclass fields intact. No divergences.
+
+### The entire merge surface is proven
+
+All three merge axes -- cross-scope `AgentTypeConfig.merge_with`, cross-scope `MngrConfig.merge_with`
+(containers + None-padding + defaults), and `parent_type` inheritance with class-switching -- now
+reproduce their production counterparts through the single overlay pipeline (68 + 30 property cases).
+The value-merge axis of the integration is fully de-risked. What remains is production wiring (the
+coupled sparse-construction flip at the top level), the narrowing-routing axis (where enabler (b)
+returns), and folding each family in one at a time -- engineering, not feasibility.
 
 ## Honest assessment / recommended phasing
 
