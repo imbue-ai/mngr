@@ -848,7 +848,7 @@ def _apply_template_extend(
     """Apply a single template's ``<key>__extend = ...`` against the existing
     parameter value.
 
-    Mirrors the leaf semantics of ``_apply_extend`` in the key resolver -- list/
+    Mirrors the leaf semantics of ``apply_extend`` in the key resolver -- list/
     tuple/set/dict shape rules are the same -- but operates against in-flight
     click param values rather than against parsed pydantic models, so the
     coercion bias is toward the click-native tuple shape.
@@ -859,7 +859,7 @@ def _apply_template_extend(
             f"{field_path} requires a list, tuple, dict, set, or frozenset value; got: {type(extend_value).__name__}"
         )
     if existing_value is None:
-        # Field unset in base. Extend acts like assign, matching ``_apply_extend``.
+        # Field unset in base. Extend acts like assign, matching ``apply_extend``.
         return extend_value
     if isinstance(existing_value, (list, tuple)):
         if not isinstance(extend_value, (list, tuple)):
