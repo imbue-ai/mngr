@@ -29,10 +29,6 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_VM_DISK_GIB
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_VM_MEMORY_MIB
 from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
@@ -45,7 +41,9 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 # region/plan are meaningless for a locally-carved lima VM, but the shared
 # VpsDockerProvider finalize path persists them, so use stable placeholders.
-_SLICE_REGION: str = "lima"
+# Region falls back to this only if the owning bare-metal server's region is
+# unknown; ``allocate-slice`` always passes the real region via ``slice_region``.
+_FALLBACK_SLICE_REGION: str = "lima"
 _SLICE_PLAN: str = "slice"
 
 
@@ -65,11 +63,21 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
             "Set by the bake (``admin server allocate-slice``) from POOL_SSH_PRIVATE_KEY."
         ),
     )
-    slice_vcpus: int = Field(default=2, description="vCPUs per slice VM")
-    slice_memory_mib: int = Field(default=SLICE_VM_MEMORY_MIB, description="RAM per slice VM in MiB")
-    slice_disk_gib: int = Field(default=SLICE_VM_DISK_GIB, description="btrfs data-disk size per slice VM in GiB")
-    slice_port_range_start: int = Field(default=DEFAULT_SLICE_PORT_RANGE_START)
-    slice_port_range_end: int = Field(default=DEFAULT_SLICE_PORT_RANGE_END)
+    slice_region: str | None = Field(
+        default=None,
+        description="Region recorded on the slice's host record (the owning bare-metal server's region).",
+    )
+    # Carving knobs: deliberately have NO defaults (None). They vary per box (a
+    # function of its RAM/cores/disk + the chosen per-slice RAM and overcommit) and
+    # are computed by ``admin server allocate-slice`` and passed in per bake via
+    # ``-S`` overrides. ``provision_slice_vm`` raises if any is unset when carving.
+    slice_vcpus: int | None = Field(default=None, description="vCPUs per slice VM (no default; set per box)")
+    slice_memory_mib: int | None = Field(default=None, description="RAM per slice VM in MiB (no default; set per box)")
+    slice_disk_gib: int | None = Field(
+        default=None, description="btrfs data-disk size per slice VM in GiB (no default; set per box)"
+    )
+    slice_port_range_start: int | None = Field(default=None, description="Box host-port range start (no default)")
+    slice_port_range_end: int | None = Field(default=None, description="Box host-port range end (no default)")
 
 
 class SliceVpsDockerProvider(VpsDockerProvider):
@@ -120,11 +128,14 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         self._current_outer_port = outer_port
         self._current_container_port = container_port
 
+    def _resolved_region(self) -> str:
+        """The owning bare-metal server's region, or a fallback if unknown."""
+        return self.slice_config.slice_region or _FALLBACK_SLICE_REGION
+
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this
         # mirrors MinimalVpsDockerProvider: extract git-depth, pass the rest
-        # through as docker build args, and use empty region/plan sentinels
-        # (the real values are passed explicitly to create_host_on_existing_vps).
+        # through as docker build args. Region is the owning server's region.
         args = list(build_args or ())
         git_depth, args = extract_git_depth(args)
         docker_build_args: list[str] = []
@@ -132,7 +143,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
             raise_if_vps_migration_arg(arg)
             docker_build_args.append(arg)
         return ParsedVpsBuildOptions(
-            region=_SLICE_REGION,
+            region=self._resolved_region(),
             plan=_SLICE_PLAN,
             git_depth=git_depth,
             docker_build_args=tuple(docker_build_args),
@@ -145,17 +156,19 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         baked slices don't collide) and delegates the choice to the pure
         ``allocate_slice_ports``.
         """
+        range_start = self.slice_config.slice_port_range_start
+        range_end = self.slice_config.slice_port_range_end
+        if range_start is None or range_end is None:
+            raise MngrError("slice_port_range_start/end must be set to carve a slice")
         used: set[int] = set()
-        for port in range(self.slice_config.slice_port_range_start, self.slice_config.slice_port_range_end):
+        for port in range(range_start, range_end):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 try:
                     probe.bind(("0.0.0.0", port))
                 except OSError:
                     used.add(port)
-        return allocate_slice_ports(
-            used, self.slice_config.slice_port_range_start, self.slice_config.slice_port_range_end
-        )
+        return allocate_slice_ports(used, range_start, range_end)
 
     def create_host(
         self,
@@ -190,6 +203,16 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair()
 
         instance_id = VpsInstanceId(slice_lima_instance_name(host_id))
+        # Carving knobs have no defaults; they must have been set (per box) via -S.
+        vcpus = self.slice_config.slice_vcpus
+        memory_mib = self.slice_config.slice_memory_mib
+        disk_gib = self.slice_config.slice_disk_gib
+        if vcpus is None or memory_mib is None or disk_gib is None:
+            raise MngrError(
+                "slice_vcpus / slice_memory_mib / slice_disk_gib must all be set to carve a slice "
+                "(they are computed per box by `admin server allocate-slice`)"
+            )
+        region = self._resolved_region()
         # The pool management key (when configured) is authorized on both the VM
         # root and the inner container so the connector can inject the leasing
         # user's key at lease time and reach the VM at release time.
@@ -202,9 +225,9 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         try:
             self.lima_client.provision_slice_vm(
                 host_id=host_id,
-                vcpus=self.slice_config.slice_vcpus,
-                memory_mib=self.slice_config.slice_memory_mib,
-                disk_gib=self.slice_config.slice_disk_gib,
+                vcpus=vcpus,
+                memory_mib=memory_mib,
+                disk_gib=disk_gib,
                 host_dir=str(self.config.btrfs_mount_path),
                 root_authorized_public_key=vps_public_key,
                 host_private_key_pem=vps_host_key_path.read_text(),
@@ -231,7 +254,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
                     vps_instance_id=instance_id,
                     vps_ssh_key_id="",
                     vps_host_public_key=vps_host_public_key,
-                    region=_SLICE_REGION,
+                    region=region,
                     plan=_SLICE_PLAN,
                     image=image,
                     tags=tags,

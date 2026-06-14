@@ -16,27 +16,20 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 
-# Every slice advertises 8GB of RAM, but each VM is allocated slightly less so the
-# host OS + per-VM QEMU overhead fits without RAM overcommit. A box yields
-# floor(RAM_GB / 8) slices, and 8GB - 7.5GB per slice leaves the remainder for the host.
-SLICE_ADVERTISED_RAM_GB: Final[int] = 8
-SLICE_VM_MEMORY_MIB: Final[int] = 7680
-SLICE_VM_DISK_GIB: Final[int] = 80
+# Per-slice RAM (MiB) held back from the VM for host + per-VM QEMU overhead: each
+# slice advertises ``memory_per_slice_gb`` but is allocated that minus this, so a
+# box's slices fit without RAM overcommit (the held-back total is the host's share).
+PER_SLICE_MEMORY_OVERHEAD_MIB: Final[int] = 512
 
-# Mild CPU overcommit: vCPUs per slice = floor(threads * ratio / slots). RAM is
-# never overcommitted; CPU is, mildly, depending on the box's thread count.
-DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 1.5
-
-# Fallback thread count when a server's cpu_threads is unknown (NULL/0), so the
-# vCPU computation has a sane positive value instead of dividing by missing data.
-# A ready box in production always has cpu_threads populated; this only guards the
-# pre-ready / not-yet-detected case.
-DEFAULT_SLICE_FALLBACK_CPU_THREADS: Final[int] = 8
+# Disk (GiB) held back on each box for the OS + lima/management before the rest of
+# the usable disk is divided evenly among the box's slices.
+DISK_RESERVE_GB: Final[int] = 20
 
 # Range of host ports on each box reserved for slice port-forwards. Each slice
-# claims two: one -> the VM's root sshd (22), one -> the inner container sshd (2222).
+# claims two: one -> the VM's root sshd, one -> the inner container sshd. Wide
+# enough (~10k ports) for large boxes carved into many slices.
 DEFAULT_SLICE_PORT_RANGE_START: Final[int] = 22000
-DEFAULT_SLICE_PORT_RANGE_END: Final[int] = 23000
+DEFAULT_SLICE_PORT_RANGE_END: Final[int] = 32000
 
 _RAID_MIRROR: Final[str] = "RAID1"
 _RAID_STRIPED_MIRROR: Final[str] = "RAID10"
@@ -51,11 +44,41 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SERVER_STATUS_READY, SERV
 
 
 @pure
-def compute_slot_count(ram_gb: int) -> int:
-    """Return how many 8GB slices a box with ``ram_gb`` total RAM can hold."""
+def compute_slot_count(ram_gb: int, memory_per_slice_gb: int) -> int:
+    """Return how many slices of ``memory_per_slice_gb`` a box with ``ram_gb`` total RAM holds."""
     if ram_gb < 0:
         raise BareMetalConfigError(f"ram_gb must be non-negative, got {ram_gb}")
-    return ram_gb // SLICE_ADVERTISED_RAM_GB
+    if memory_per_slice_gb <= 0:
+        raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
+    return ram_gb // memory_per_slice_gb
+
+
+@pure
+def compute_slice_memory_mib(memory_per_slice_gb: int) -> int:
+    """Return the MiB to allocate each slice VM: the advertised RAM minus host/QEMU overhead."""
+    if memory_per_slice_gb <= 0:
+        raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
+    memory_mib = memory_per_slice_gb * 1024 - PER_SLICE_MEMORY_OVERHEAD_MIB
+    if memory_mib <= 0:
+        raise BareMetalConfigError(
+            f"memory_per_slice_gb={memory_per_slice_gb} is too small for the "
+            f"{PER_SLICE_MEMORY_OVERHEAD_MIB}MiB per-slice overhead"
+        )
+    return memory_mib
+
+
+@pure
+def compute_slice_disk_gib(disk_gb: int, slot_count: int) -> int:
+    """Return the per-slice btrfs data-disk size: usable disk (minus reserve) split across slots."""
+    if slot_count <= 0:
+        raise BareMetalConfigError(f"slot_count must be positive, got {slot_count}")
+    usable_disk_gb = disk_gb - DISK_RESERVE_GB
+    per_slice_disk_gib = usable_disk_gb // slot_count
+    if per_slice_disk_gib <= 0:
+        raise BareMetalConfigError(
+            f"disk_gb={disk_gb} minus {DISK_RESERVE_GB}GB reserve cannot be split across {slot_count} slot(s)"
+        )
+    return per_slice_disk_gib
 
 
 @pure
@@ -164,37 +187,3 @@ def choose_server_for_new_slice(capacities: Sequence[BareMetalServerCapacity]) -
     if not eligible:
         raise SliceCapacityError("no ready bare-metal server has free slots; order or install more capacity")
     return max(eligible, key=lambda capacity: capacity.free_slots)
-
-
-@pure
-def plan_slice_placements(
-    capacities: Sequence[BareMetalServerCapacity],
-    slice_count: int,
-) -> list[BareMetalServerCapacity]:
-    """Choose which ready server each of ``slice_count`` new slices should bake onto.
-
-    Greedily assigns each slice to the ready server with the most remaining free
-    slots, decrementing as it goes so a single box is not over-subscribed.
-    Returns a list of length ``slice_count`` (a server's capacity may repeat).
-    Raises ``SliceCapacityError`` if the ready fleet has fewer than
-    ``slice_count`` total free slots.
-    """
-    if slice_count <= 0:
-        raise BareMetalConfigError(f"slice_count must be positive, got {slice_count}")
-    capacity_by_id = {capacity.server.id: capacity for capacity in capacities}
-    remaining_by_id = {
-        capacity.server.id: capacity.free_slots
-        for capacity in capacities
-        if str(capacity.server.status) == SERVER_STATUS_READY and capacity.free_slots > 0
-    }
-    placements: list[BareMetalServerCapacity] = []
-    for _ in range(slice_count):
-        candidates = [(server_id, free) for server_id, free in remaining_by_id.items() if free > 0]
-        if not candidates:
-            raise SliceCapacityError(
-                f"ready fleet has only {len(placements)} free slot(s); cannot place {slice_count} slice(s)"
-            )
-        chosen_id = max(candidates, key=lambda item: item[1])[0]
-        placements.append(capacity_by_id[chosen_id])
-        remaining_by_id[chosen_id] -= 1
-    return placements

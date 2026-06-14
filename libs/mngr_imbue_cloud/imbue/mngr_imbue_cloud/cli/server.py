@@ -31,12 +31,13 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
 from imbue.mngr.primitives import HostId
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_FALLBACK_CPU_THREADS
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_ADVERTISED_RAM_GB
+from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
+from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
+from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
+from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_gib
+from imbue.mngr_imbue_cloud.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
-from imbue.mngr_imbue_cloud.bare_metal import plan_slice_placements
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.bare_metal_db import build_slice_pool_host_insert_values
@@ -193,9 +194,22 @@ def list_servers(database_url: str | None) -> None:
 @click.option("--plan-code", required=True, help="Catalog planCode the box was ordered as.")
 @click.option("--region", required=True, help="OVH datacenter code (e.g. vin).")
 @click.option("--public-address", required=True, help="SSH-reachable public address of the box.")
-@click.option("--ram-gb", type=int, required=True, help="Total RAM in GB (drives slot count).")
+@click.option("--ram-gb", type=int, required=True, help="Total RAM in GB.")
 @click.option("--cpu-cores", type=int, required=True, help="Physical CPU cores.")
 @click.option("--cpu-threads", type=int, required=True, help="CPU threads.")
+@click.option("--disk-gb", type=int, required=True, help="Usable disk in GB for slice data (split across slices).")
+@click.option(
+    "--memory-per-slice-gb",
+    type=int,
+    required=True,
+    help="RAM (GB) each slice on this box advertises; sets slot count + per-slice sizing.",
+)
+@click.option(
+    "--cpu-overcommit",
+    type=float,
+    required=True,
+    help="CPU overcommit factor for sizing each slice's vCPUs (e.g. 1.5).",
+)
 @click.option("--raid-level", default=None, help="RAID level configured at install (e.g. RAID1).")
 @click.option("--lima-service-user", default="limahost", help="Non-root OS user that owns the box's lima VMs.")
 @click.option("--ovh-order-id", default=None, help="OVH order id, if known.")
@@ -209,6 +223,9 @@ def register_server(
     ram_gb: int,
     cpu_cores: int,
     cpu_threads: int,
+    disk_gb: int,
+    memory_per_slice_gb: int,
+    cpu_overcommit: float,
     raid_level: str | None,
     lima_service_user: str,
     ovh_order_id: str | None,
@@ -224,6 +241,9 @@ def register_server(
         ram_gb=ram_gb,
         cpu_cores=cpu_cores,
         cpu_threads=cpu_threads,
+        disk_gb=disk_gb,
+        memory_per_slice_gb=memory_per_slice_gb,
+        cpu_overcommit_ratio=cpu_overcommit,
         raid_level=raid_level,
         lima_service_user=lima_service_user,
         ovh_order_id=ovh_order_id,
@@ -252,12 +272,15 @@ def build_registered_server(
     ram_gb: int,
     cpu_cores: int,
     cpu_threads: int,
+    disk_gb: int,
+    memory_per_slice_gb: int,
+    cpu_overcommit_ratio: float,
     raid_level: str | None,
     lima_service_user: str,
     ovh_order_id: str | None,
     status: str,
 ) -> BareMetalServer:
-    """Build a BareMetalServer from register-command inputs (slot count derived from RAM)."""
+    """Build a BareMetalServer from register inputs (slot count = floor(ram_gb / memory_per_slice_gb))."""
     now = datetime.now(timezone.utc)
     return BareMetalServer(
         id=BareMetalServerDbId(str(uuid4())),
@@ -269,7 +292,10 @@ def build_registered_server(
         cpu_cores=cpu_cores,
         cpu_threads=cpu_threads,
         ram_gb=ram_gb,
-        slot_count=compute_slot_count(ram_gb),
+        disk_gb=disk_gb,
+        memory_per_slice_gb=memory_per_slice_gb,
+        cpu_overcommit_ratio=cpu_overcommit_ratio,
+        slot_count=compute_slot_count(ram_gb, memory_per_slice_gb),
         raid_level=raid_level,
         lima_service_user=lima_service_user,
         status=BareMetalServerStatus(status),
@@ -278,19 +304,36 @@ def build_registered_server(
     )
 
 
-def plan_next_slice_attributes(capacity: BareMetalServerCapacity, overcommit_ratio: float) -> dict[str, Any]:
-    """Compute the lease attributes a new slice on ``capacity``'s server advertises.
+def compute_server_slice_sizing(server: BareMetalServer) -> dict[str, int]:
+    """Compute the per-slice VM sizing for ``server`` from its stored inputs + specs.
 
-    Every slice advertises 8 GB and a vCPU count derived from the server's threads
-    with mild overcommit, so a lease matches a slice or a VPS identically.
+    Returns ``{vcpus, memory_mib, disk_gib, advertised_memory_gb}`` -- identical for
+    every slice on this box (so a single ``allocate-slice`` batch is one server).
+    Raises ``BareMetalProvisioningError`` if the server is missing the inputs a
+    pre-sizing registration would have set (re-register it first).
     """
-    server = capacity.server
-    threads = server.cpu_threads or DEFAULT_SLICE_FALLBACK_CPU_THREADS
-    slot_count = server.slot_count or 1
+    if (
+        server.memory_per_slice_gb is None
+        or server.cpu_overcommit_ratio is None
+        or server.cpu_threads is None
+        or server.disk_gb is None
+        or server.slot_count <= 0
+    ):
+        raise BareMetalProvisioningError(
+            f"server {server.id} is missing sizing inputs (memory_per_slice_gb / cpu_overcommit_ratio / "
+            f"cpu_threads / disk_gb / slot_count); re-register it with the slice-sizing options"
+        )
     return {
-        "memory_gb": SLICE_ADVERTISED_RAM_GB,
-        "cpus": compute_slice_vcpus(threads, slot_count, overcommit_ratio),
+        "advertised_memory_gb": server.memory_per_slice_gb,
+        "vcpus": compute_slice_vcpus(server.cpu_threads, server.slot_count, server.cpu_overcommit_ratio),
+        "memory_mib": compute_slice_memory_mib(server.memory_per_slice_gb),
+        "disk_gib": compute_slice_disk_gib(server.disk_gb, server.slot_count),
     }
+
+
+def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
+    """The lease attributes a slice advertises (so a lease matches a slice or a VPS identically)."""
+    return {"memory_gb": sizing["advertised_memory_gb"], "cpus": sizing["vcpus"]}
 
 
 # Default on-box layout the bake assumes (created by the sync step).
@@ -506,8 +549,8 @@ def _wait_for_container_sentinel(
 
 def _bake_into_outcomes(
     *,
-    capacity: BareMetalServerCapacity,
-    overcommit_ratio: float,
+    server: BareMetalServer,
+    sizing: dict[str, int],
     private_key_path: Path,
     pool_public_key: str,
     database_url: str,
@@ -516,8 +559,8 @@ def _bake_into_outcomes(
 ) -> None:
     """Thread target: bake one slice and append its outcome under the lock."""
     outcome = _bake_and_record_one_slice(
-        capacity=capacity,
-        overcommit_ratio=overcommit_ratio,
+        server=server,
+        sizing=sizing,
         private_key_path=private_key_path,
         pool_public_key=pool_public_key,
         database_url=database_url,
@@ -528,18 +571,17 @@ def _bake_into_outcomes(
 
 def _bake_and_record_one_slice(
     *,
-    capacity: BareMetalServerCapacity,
-    overcommit_ratio: float,
+    server: BareMetalServer,
+    sizing: dict[str, int],
     private_key_path: Path,
     pool_public_key: str,
     database_url: str,
 ) -> dict[str, Any]:
     """Bake one slice on its box and insert its pool_hosts row. Returns an outcome dict (never raises)."""
-    server = capacity.server
     address = server.public_address
     ssh_user = server.lima_service_user or "root"
     host_name = f"slice-{uuid4().hex}"
-    attributes = plan_next_slice_attributes(capacity, overcommit_ratio)
+    attributes = slice_advertised_attributes(sizing)
     attributes_json = json.dumps(attributes)
     try:
         if not address:
@@ -552,8 +594,13 @@ def _bake_and_record_one_slice(
             attributes_json=attributes_json,
             box_public_address=address,
             pool_public_key=pool_public_key,
-            # Give the VM the vCPU count the slice advertises so actual == attributes.
-            slice_vcpus=int(attributes["cpus"]),
+            region=server.region,
+            # The VM gets exactly the per-box-computed sizing (so actual == advertised).
+            slice_vcpus=sizing["vcpus"],
+            slice_memory_mib=sizing["memory_mib"],
+            slice_disk_gib=sizing["disk_gib"],
+            port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
+            port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
         )
         logger.info("Baking slice {} on {} ({})", host_name, server.id, address)
         bake_result = _run_remote(
@@ -648,8 +695,7 @@ def _bake_and_record_one_slice(
 
 
 @server.command(name="allocate-slice")
-@click.option("--count", type=int, default=1, help="Number of slices to bake (placed across ready servers).")
-@click.option("--overcommit-ratio", type=float, default=DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO)
+@click.option("--count", type=int, default=1, help="Number of slices to bake on the chosen server.")
 @click.option(
     "--workspace-dir",
     type=click.Path(exists=True),
@@ -662,23 +708,25 @@ def _bake_and_record_one_slice(
     default=None,
     help="mngr monorepo root to sync onto the box (default: this checkout).",
 )
-@click.option("--dry-run", is_flag=True, default=False, help="Report placement + slice attributes; do not bake.")
+@click.option("--dry-run", is_flag=True, default=False, help="Report placement + slice sizing; do not bake.")
 @click.option("--database-url", default=None)
 def allocate_slice(
     count: int,
-    overcommit_ratio: float,
     workspace_dir: str | None,
     mngr_source: str | None,
     dry_run: bool,
     database_url: str | None,
 ) -> None:
-    """Bake one or more slices onto the ready bare-metal fleet and insert their pool rows.
+    """Bake ``--count`` slices onto a single ready bare-metal server and insert their pool rows.
 
-    Picks the ready server(s) with the most free slots, syncs this branch's mngr +
-    the FCT workspace onto each chosen box once, then bakes the slices in parallel:
-    each carves a lima VM, bakes the shared vps_docker container + FCT workspace,
-    authorizes the pool key, tears down the bootstrap chat agent, and inserts an
-    ``available`` slice ``pool_hosts`` row. ``--dry-run`` only reports placement.
+    Picks the ready server with the most free slots (one server per invocation: a
+    server's per-slice vCPU/RAM/disk are fixed by its registration, so a batch is
+    homogeneous), syncs this branch's mngr + the FCT workspace onto it once, then
+    bakes the slices in parallel -- each carves a lima VM, bakes the shared
+    vps_docker container + FCT workspace, authorizes the pool key, tears down the
+    bootstrap chat agent, and inserts an ``available`` slice ``pool_hosts`` row.
+    The per-slice sizing is computed from the server's stored memory-per-slice +
+    CPU overcommit + disk. ``--dry-run`` only reports placement + sizing.
     """
     if count <= 0:
         raise click.UsageError("--count must be positive")
@@ -688,21 +736,28 @@ def allocate_slice(
         capacities = fetch_server_capacities(conn)
     finally:
         conn.close()
-    placements = plan_slice_placements(capacities, count)
+    # One server per batch (homogeneous sizing): pick the ready box with the most
+    # free slots and require it to hold the whole batch.
+    chosen = choose_server_for_new_slice(capacities)
+    server = chosen.server
+    if chosen.free_slots < count:
+        raise click.UsageError(
+            f"server {server.id} has only {chosen.free_slots} free slot(s); cannot bake {count} "
+            "(allocate on one server per invocation -- run again to use another server)"
+        )
+    sizing = compute_server_slice_sizing(server)
 
     if dry_run:
         emit_json(
             {
                 "dry_run": True,
-                "placements": [
-                    {
-                        "server_id": str(capacity.server.id),
-                        "public_address": capacity.server.public_address,
-                        "region": capacity.server.region,
-                        "attributes": plan_next_slice_attributes(capacity, overcommit_ratio),
-                    }
-                    for capacity in placements
-                ],
+                "server_id": str(server.id),
+                "public_address": server.public_address,
+                "region": server.region,
+                "count": count,
+                "free_slots": chosen.free_slots,
+                "per_slice_sizing": sizing,
+                "attributes": slice_advertised_attributes(sizing),
             }
         )
         return
@@ -718,22 +773,20 @@ def allocate_slice(
         raise click.UsageError(
             f"FCT workspace not found at {resolved_workspace_dir}; pass --workspace-dir explicitly."
         )
+    if not server.public_address:
+        raise click.UsageError(f"server {server.id} has no public_address; cannot sync")
 
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
-        # Sync each chosen box once (serial) before the parallel bakes, so
+        # Sync the chosen box once (serial) before the parallel bakes, so the
         # concurrent bakes don't race on the rsync / uv sync.
-        unique_servers = {capacity.server.id: capacity.server for capacity in placements}
-        for server in unique_servers.values():
-            if not server.public_address:
-                raise click.UsageError(f"server {server.id} has no public_address; cannot sync")
-            _sync_repos_to_box(
-                mngr_source=resolved_mngr_source,
-                workspace_dir=resolved_workspace_dir,
-                address=server.public_address,
-                ssh_user=server.lima_service_user or "root",
-                private_key_path=private_key_path,
-            )
+        _sync_repos_to_box(
+            mngr_source=resolved_mngr_source,
+            workspace_dir=resolved_workspace_dir,
+            address=server.public_address,
+            ssh_user=server.lima_service_user or "root",
+            private_key_path=private_key_path,
+        )
 
         # Bake all slices in parallel (one thread each); the per-slice port probe
         # keeps concurrent bakes on the same box from colliding.
@@ -743,8 +796,8 @@ def allocate_slice(
             ObservableThread(
                 target=_bake_into_outcomes,
                 kwargs=dict(
-                    capacity=capacity,
-                    overcommit_ratio=overcommit_ratio,
+                    server=server,
+                    sizing=sizing,
                     private_key_path=private_key_path,
                     pool_public_key=pool_public_key,
                     database_url=resolved_database_url,
@@ -753,7 +806,7 @@ def allocate_slice(
                 ),
                 name=f"bake-{idx}",
             )
-            for idx, capacity in enumerate(placements)
+            for idx in range(count)
         ]
         for thread in threads:
             thread.start()

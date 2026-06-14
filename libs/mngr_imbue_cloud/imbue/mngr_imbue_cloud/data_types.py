@@ -325,7 +325,14 @@ class BareMetalServer(FrozenModel):
     cpu_cores: int | None = Field(default=None, description="Physical CPU cores (detected during install)")
     cpu_threads: int | None = Field(default=None, description="CPU threads (detected during install)")
     ram_gb: int | None = Field(default=None, description="Total RAM in GB (detected during install)")
-    slot_count: int = Field(description="Number of 8GB slices this box can hold (floor(ram_gb / 8))")
+    disk_gb: int | None = Field(default=None, description="Usable disk in GB for slice data (detected/provided)")
+    memory_per_slice_gb: int | None = Field(
+        default=None, description="RAM (GB) each slice on this box advertises; sets slot_count and per-slice sizing"
+    )
+    cpu_overcommit_ratio: float | None = Field(
+        default=None, description="CPU overcommit factor used to size each slice's vCPUs on this box"
+    )
+    slot_count: int = Field(description="Number of slices this box holds (floor(ram_gb / memory_per_slice_gb))")
     raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
     lima_service_user: str | None = Field(default=None, description="Non-root OS user that owns the box's lima VMs")
     status: BareMetalServerStatus = Field(description="Lifecycle state: ordered/delivered/installing/ready/failed")

@@ -18,8 +18,9 @@ from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 _INSERT_BARE_METAL_SERVER_SQL: Final[str] = (
     "INSERT INTO bare_metal_servers "
     "(id, ovh_order_id, ovh_service_name, plan_code, region, public_address, "
-    "cpu_cores, cpu_threads, ram_gb, slot_count, raid_level, lima_service_user, status, created_at, updated_at) "
-    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())"
+    "cpu_cores, cpu_threads, ram_gb, disk_gb, memory_per_slice_gb, cpu_overcommit_ratio, "
+    "slot_count, raid_level, lima_service_user, status, created_at, updated_at) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())"
 )
 
 # A slice is an ordinary pool_hosts row with backend_kind='slice' + the lima
@@ -36,7 +37,8 @@ _INSERT_SLICE_POOL_HOST_SQL: Final[str] = (
 
 _SELECT_SERVERS_SQL: Final[str] = (
     "SELECT id, ovh_order_id, ovh_service_name, plan_code, region, public_address, "
-    "cpu_cores, cpu_threads, ram_gb, slot_count, raid_level, lima_service_user, status, "
+    "cpu_cores, cpu_threads, ram_gb, disk_gb, memory_per_slice_gb, cpu_overcommit_ratio, "
+    "slot_count, raid_level, lima_service_user, status, "
     "created_at, updated_at FROM bare_metal_servers ORDER BY created_at ASC"
 )
 
@@ -60,6 +62,9 @@ def build_bare_metal_server_insert_values(server: BareMetalServer) -> tuple[Any,
         server.cpu_cores,
         server.cpu_threads,
         server.ram_gb,
+        server.disk_gb,
+        server.memory_per_slice_gb,
+        server.cpu_overcommit_ratio,
         server.slot_count,
         server.raid_level,
         server.lima_service_user,
@@ -125,12 +130,15 @@ def _server_from_row(row: tuple[Any, ...]) -> BareMetalServer:
         cpu_cores=row[6],
         cpu_threads=row[7],
         ram_gb=row[8],
-        slot_count=int(row[9]) if row[9] is not None else 0,
-        raid_level=row[10],
-        lima_service_user=row[11],
-        status=BareMetalServerStatus(str(row[12])),
-        created_at=_as_datetime(row[13]),
-        updated_at=_as_datetime(row[14]),
+        disk_gb=row[9],
+        memory_per_slice_gb=row[10],
+        cpu_overcommit_ratio=float(row[11]) if row[11] is not None else None,
+        slot_count=int(row[12]) if row[12] is not None else 0,
+        raid_level=row[13],
+        lima_service_user=row[14],
+        status=BareMetalServerStatus(str(row[15])),
+        created_at=_as_datetime(row[16]),
+        updated_at=_as_datetime(row[17]),
     )
 
 

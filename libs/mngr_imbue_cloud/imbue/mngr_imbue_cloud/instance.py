@@ -1382,9 +1382,16 @@ class ImbueCloudProvider(BaseProviderInstance):
         delegated_provider: VpsDockerProvider = (
             self._build_slice_rebuild_provider(lease_result) if is_slice else self._build_delegated_vps_provider()
         )
-        # The VPS root host key (port 22) feeds the rebuilt host's record; best
-        # effort -- it is bookkeeping the imbue_cloud paths do not read back.
+        # The VPS root host key (port 22 for OVH; the box-forwarded VM-root port
+        # for a slice) feeds the rebuilt host's record AND is pinned in the
+        # delegated provider's own known_hosts, so its outer connections -- e.g.
+        # the certified-data sync callback -- pass strict host-key checking
+        # instead of failing on a missing entry.
         vps_host_public_key = _scan_ssh_host_key(lease_result.vps_address, lease_result.ssh_port) or ""
+        if vps_host_public_key:
+            delegated_provider.record_outer_host_key(
+                lease_result.vps_address, lease_result.ssh_port, vps_host_public_key
+            )
         combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
         with self._outer_for_leased_vps(host_id, lease_result) as outer:
             delegated_provider.teardown_container_on_existing_vps(outer, host_id)
