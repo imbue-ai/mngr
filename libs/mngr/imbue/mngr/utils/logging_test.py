@@ -35,10 +35,10 @@ from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
 from imbue.mngr.utils.logging import _patched_transport_log
 from imbue.mngr.utils.logging import _resolve_log_dir
-from imbue.mngr.utils.logging import _should_use_color
 from imbue.mngr.utils.logging import _threading_excepthook
 from imbue.mngr.utils.logging import remove_console_handlers
 from imbue.mngr.utils.logging import setup_logging
+from imbue.mngr.utils.logging import should_use_color
 from imbue.mngr.utils.logging import suppress_warnings
 
 
@@ -254,7 +254,7 @@ def test_log_call_handles_kwargs() -> None:
 
 
 # =============================================================================
-# Tests for _should_use_color
+# Tests for should_use_color
 # =============================================================================
 
 
@@ -266,27 +266,27 @@ class _FakeTtyStream(io.StringIO):
 
 
 def test_should_use_color_returns_false_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return False when NO_COLOR is set."""
+    """should_use_color should return False when NO_COLOR is set."""
     monkeypatch.setenv("NO_COLOR", "")
-    assert _should_use_color(_FakeTtyStream()) is False
+    assert should_use_color(_FakeTtyStream()) is False
 
 
 def test_should_use_color_returns_false_when_not_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return False when the stream is not a TTY."""
+    """should_use_color should return False when the stream is not a TTY."""
     monkeypatch.delenv("NO_COLOR", raising=False)
-    assert _should_use_color(io.StringIO()) is False
+    assert should_use_color(io.StringIO()) is False
 
 
 def test_should_use_color_returns_true_when_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_should_use_color should return True when the stream is a TTY and NO_COLOR is not set."""
+    """should_use_color should return True when the stream is a TTY and NO_COLOR is not set."""
     monkeypatch.delenv("NO_COLOR", raising=False)
-    assert _should_use_color(_FakeTtyStream()) is True
+    assert should_use_color(_FakeTtyStream()) is True
 
 
 # =============================================================================
 # Tests for _format_user_message
 #
-# _format_user_message calls _should_use_color() which checks sys.stderr.
+# _format_user_message calls should_use_color() which checks sys.stderr.
 # In test environments, stderr is not a TTY, so by default no colors are used.
 # To test the colored path, we temporarily replace sys.stderr with a
 # _FakeTtyStream via try/finally to ensure cleanup.

@@ -1,6 +1,9 @@
 from pathlib import Path
+from typing import Any
+from typing import IO
 
 from click import ClickException
+from click import get_text_stream
 
 from imbue.mngr.plugin_catalog import get_plugin_install_hint
 from imbue.mngr.primitives import AgentId
@@ -12,6 +15,9 @@ from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import PluginKind
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
+from imbue.mngr.utils.logging import ERROR_COLOR
+from imbue.mngr.utils.logging import RESET_COLOR
+from imbue.mngr.utils.logging import should_use_color
 
 
 class MngrError(ClickException):
@@ -28,6 +34,28 @@ class MngrError(ClickException):
         if self.user_help_text:
             return str(self) + "  [" + self.user_help_text + "]"
         return str(self)
+
+    def show(self, file: IO[Any] | None = None) -> None:
+        """Render the error with a bold-red ``Error:`` prefix on a color-capable terminal.
+
+        Click's default ``ClickException.show`` emits an uncolored ``Error: ...``
+        line, which is indistinguishable from normal output -- so an actionable
+        failure (e.g. "run ``mngr gcp prepare`` first") reads as ordinary text.
+        Wrapping the line in the shared ``ERROR_COLOR`` makes it visually distinct
+        without changing exit semantics (this is still a clean exit-1, not a
+        traceback). Gated on ``should_use_color`` so piped or ``NO_COLOR`` output
+        stays plain, mirroring the colored ``ERROR:`` prefix that ``logger.error``
+        already uses.
+        """
+        if file is None:
+            file = get_text_stream("stderr")
+        message = f"Error: {self.format_message()}"
+        if should_use_color(file):
+            message = f"{ERROR_COLOR}{message}{RESET_COLOR}"
+        # Write straight to the stream (the PREVENT_CLICK_ECHO ratchet forbids the
+        # click helper here); this matches how the loguru stderr sink writes.
+        file.write(message + "\n")
+        file.flush()
 
 
 class UserInputError(MngrError):

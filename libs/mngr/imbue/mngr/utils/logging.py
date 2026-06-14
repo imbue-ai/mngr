@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import IO
 from typing import TextIO
 from typing import cast
 
@@ -179,12 +180,16 @@ def _dynamic_stderr_sink(message: Any) -> None:
     sys.stderr.flush()
 
 
-def _should_use_color(stream: TextIO | None = None) -> bool:
+def should_use_color(stream: IO[Any] | None = None) -> bool:
     """Check whether ANSI color codes should be used on the given stream.
 
     Respects the NO_COLOR convention (https://no-color.org/) and falls back
     to checking whether the stream is a TTY. When stream is None, defaults
     to sys.stderr.
+
+    Public because the same policy gates the colored ``Error:`` prefix that
+    ``MngrError.show`` renders (see ``imbue.mngr.errors``), keeping CLI errors
+    consistent with the colored ``ERROR:`` prefix used for ``logger.error``.
     """
     if os.environ.get("NO_COLOR") is not None:
         return False
@@ -206,7 +211,7 @@ def _format_user_message(record: Any) -> str:
     in type stubs so we use Any here.
     """
     level_name = record["level"].name
-    use_color = _should_use_color()
+    use_color = should_use_color()
     if level_name == "WARNING":
         if use_color:
             return f"{WARNING_COLOR}WARNING: {{message}}{RESET_COLOR}\n"
