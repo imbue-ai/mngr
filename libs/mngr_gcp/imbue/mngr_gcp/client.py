@@ -130,12 +130,13 @@ class GcpVpsClient(VpsClientInterface):
     network: str = Field(default="default", description="VPC network name")
     subnetwork: str | None = Field(default=None, description="Subnetwork name, or None to let GCE pick")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "firewall rule. Empty by default (fail-closed): ensure_firewall raises rather than creating "
-            "a wide-open rule. Set to e.g. ('203.0.113.4/32',) to restrict to your own IP, or "
-            "('0.0.0.0/0',) to expose to the public internet (NOT recommended for production)."
+            "firewall rule. Default ('0.0.0.0/0',) allows any IP; set to e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or () for no ingress (no firewall rule is created and the "
+            "instance is unreachable from outside its VPC). A warning is logged when the effective "
+            "range is 0.0.0.0/0 or empty."
         ),
     )
     firewall_name: str = Field(default="mngr-gcp-ssh", description="Name of the auto-created SSH firewall rule")
@@ -219,6 +220,31 @@ class GcpVpsClient(VpsClientInterface):
             raise
         return True
 
+    def _warn_about_cidrs_if_needed(self) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (no firewall rule is created, so the instance is unreachable from
+        outside its VPC), whereas 0.0.0.0/0 means "open to the internet"
+        (default but worth flagging). Anything else is silent. Mirrors
+        ``AwsVpsClient._warn_about_cidrs_if_needed``.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.warning(
+                "GCP allowed_ssh_cidrs is empty; no SSH firewall rule will be created and instances "
+                "tagged {!r} will be unreachable from outside the VPC unless another rule grants "
+                "ingress. Set allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                self.firewall_target_tag,
+            )
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "GCP allowed_ssh_cidrs includes 0.0.0.0/0; auto-created firewall rule {!r} will "
+                "permit SSH from the public internet. Acceptable for ephemeral dev hosts (key-only "
+                "auth); tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                self.firewall_name,
+            )
+
     def ensure_firewall(self) -> str:
         """Ensure the SSH firewall rule exists, creating it if absent. Returns the target tag.
 
@@ -227,22 +253,24 @@ class GcpVpsClient(VpsClientInterface):
         tcp/22 + tcp/``container_ssh_port`` from every CIDR in
         ``allowed_ssh_cidrs`` to instances carrying ``firewall_target_tag``.
 
-        Fails closed if ``allowed_ssh_cidrs`` is empty: rather than create a
-        wide-open rule, raise so the caller makes an explicit decision. A
-        pre-existing rule is reused as-is (ingress is not re-patched); delete it
-        manually to change the allowed CIDRs.
+        Fails open (mirrors ``AwsVpsClient.ensure_security_group``): the default
+        ``allowed_ssh_cidrs`` of ('0.0.0.0/0',) is created and logged as a
+        warning. An empty ``allowed_ssh_cidrs`` creates no rule at all -- GCE
+        rejects an INGRESS rule with no ``source_ranges``, so the analog of
+        AWS's zero-ingress security group is simply the absence of a rule; this
+        is warned and the target tag returned, leaving instances unreachable
+        until some rule grants ingress. A pre-existing rule is reused as-is
+        (ingress is not re-patched); delete it manually to change the allowed
+        CIDRs.
 
         This is the privileged write path, used by ``mngr gcp prepare`` (one-time
         admin setup). The hot path in ``create_instance`` uses
         ``resolve_firewall`` instead, which is lookup-only and needs only
         instance-create permissions (no ``compute.firewalls.create``).
         """
+        self._warn_about_cidrs_if_needed()
         if not self.allowed_ssh_cidrs:
-            raise MngrError(
-                "Cannot auto-create a GCP firewall rule: allowed_ssh_cidrs is empty. "
-                "Set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) for your "
-                "own IP), or pre-create the firewall rule targeting the configured firewall_target_tag."
-            )
+            return self.firewall_target_tag
         if self._firewall_exists():
             return self.firewall_target_tag
 
@@ -281,7 +309,16 @@ class GcpVpsClient(VpsClientInterface):
         ``mngr gcp prepare`` so a user with restricted IAM gets a clear next
         step rather than an opaque permission denial when the instance later
         proves unreachable.
+
+        Empty ``allowed_ssh_cidrs`` short-circuits to the target tag without a
+        lookup: ``ensure_firewall`` / ``mngr gcp prepare`` creates no rule in
+        that case (GCE rejects an empty-source INGRESS rule), so there is
+        nothing to resolve and pointing the user at ``prepare`` would be wrong.
+        The instance launches intentionally unreachable, matching the
+        fail-open AWS behavior.
         """
+        if not self.allowed_ssh_cidrs:
+            return self.firewall_target_tag
         if self._firewall_exists():
             return self.firewall_target_tag
         raise MngrError(

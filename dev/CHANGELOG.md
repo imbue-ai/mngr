@@ -23,6 +23,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Added: `just minds-test-electron` recipe (wraps the Electron acceptance test in `xvfb-run`; the `test-docker` job now installs Node / pnpm / xvfb) and `just test-sdk-live` (runs the `sdk_live`-marked live Claude Agent SDK tests).
 - Added: Twice-daily `minds launch-to-first-message` schedule that builds and verifies current mngr `main` against FCT `main` with the full slack flow, surfacing drift before each workday.
 - Added: Updated `.minds/template/cloudflare.sh` to document that `CLOUDFLARE_API_TOKEN` must now be an account-owned token with R2 storage permissions.
+- Added: Design plan under `blueprint/host-backup-snapshot-rotation/` for fixing empty gVisor host backups -- unique time-named btrfs snapshots, keep-newest-N retention, and exit-code-only backup failure signaling.
 
 ### Changed
 

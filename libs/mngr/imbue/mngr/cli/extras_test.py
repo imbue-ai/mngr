@@ -366,6 +366,10 @@ def test_print_extras_status_runs_without_error() -> None:
     _print_extras_status()
 
 
+# Probes plugin / shell-completion / claude-plugin status, which can stall on a
+# contended CI sandbox and trip the global 10s pytest-timeout even though it runs
+# in well under a second locally. Bump the per-test timeout for headroom.
+@pytest.mark.timeout(30)
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
     """Running 'mngr extras' with no flags shows status."""
     result = cli_runner.invoke(extras, [])

@@ -29,10 +29,13 @@ mngr gcp prepare --project my-gcp-project --allowed-ssh-cidr 203.0.113.4/32
 
 This creates a network-scoped, tag-targeted rule (`mngr-gcp-ssh` by default)
 opening tcp/22 and the container SSH port to the given CIDRs for instances
-tagged `mngr-ssh`. It is idempotent (a no-op when the rule already exists) and
-fail-closed (refuses to run without at least one `--allowed-ssh-cidr`). After
-this, `mngr create --provider gcp` resolves the rule read-only and errors with a
-pointer back to `prepare` if it is missing.
+tagged `mngr-ssh`. It is idempotent (a no-op when the rule already exists). Like
+AWS, it is fail-open: with no `--allowed-ssh-cidr`, it falls back to the provider
+config's `allowed_ssh_cidrs` (default `0.0.0.0/0`, open to the internet) and logs
+a warning prompting you to tighten it. After this, `mngr create --provider gcp`
+resolves the rule read-only and errors with a pointer back to `prepare` if it is
+missing. Setting `allowed_ssh_cidrs = []` opts out entirely: no rule is created
+and the instance is unreachable from outside its VPC.
 
 ### Teardown: `mngr gcp cleanup`
 
@@ -64,10 +67,11 @@ default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
 # default_source_image (the GCE VM image) defaults to the global Ubuntu 22.04 LTS family; override only if needed:
 # default_source_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
 
-# Required (fail-closed): every CIDR allowed inbound on tcp/22 and the
-# container SSH port of the auto-created firewall rule. Empty default
-# refuses to auto-create the rule -- you must opt in to either a tight
-# range like ['203.0.113.4/32'] or the wide-open '0.0.0.0/0'.
+# Every CIDR allowed inbound on tcp/22 and the container SSH port of the
+# auto-created firewall rule. Defaults to the wide-open '0.0.0.0/0' (fail-open,
+# matching the AWS provider; a warning is logged -- tighten for production).
+# Use a tight range like ['203.0.113.4/32'], or [] for no ingress at all (no
+# rule is created and the instance is unreachable from outside its VPC).
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional boot-disk sizing
@@ -130,7 +134,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `boot_disk_type` | `pd-balanced` | Boot disk type (`pd-balanced`, `pd-ssd`, `pd-standard`). |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs). |
-| `allowed_ssh_cidrs` | `()` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Empty (fail-closed): the auto-firewall path raises unless you list a CIDR or pre-create the rule. |
+| `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Defaults open to the internet (fail-open, like AWS); warned at prepare/create time. Set `()` for no ingress (no rule created; instance unreachable). |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the auto-created firewall rule; every instance is tagged with it. |
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. |
 | `service_account_email` | `None` | Optional service account attached to launched instances. |

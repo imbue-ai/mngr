@@ -122,7 +122,10 @@ class GcpProvider(VpsDockerProvider):
            uploads the SSH key or creates the instance -- means a first-time
            user who hasn't run ``prepare`` gets the clean "run mngr gcp prepare"
            message immediately, instead of it surfacing mid-create under a
-           "Host creation failed, attempting cleanup..." line.
+           "Host creation failed, attempting cleanup..." line. With an empty
+           ``allowed_ssh_cidrs`` (no ingress requested) ``resolve_firewall``
+           short-circuits and this check is a no-op: no rule is expected, so the
+           instance launches intentionally unreachable.
         """
         if not self.gcp_config.project_id:
             logger.info(

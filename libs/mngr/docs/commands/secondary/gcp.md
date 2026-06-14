@@ -28,7 +28,7 @@ mngr gcp prepare [OPTIONS]
 | `--firewall-name` | text | Firewall rule name to create / reuse. Defaults to 'mngr-gcp-ssh'. | None |
 | `--firewall-target-tag` | text | Network tag the rule targets (every instance is tagged with it). Defaults to 'mngr-ssh'. | None |
 | `--network` | text | VPC network the rule applies to. Defaults to 'default'. | None |
-| `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Required (fail-closed): with none supplied, prepare refuses to create a wide-open rule. | None |
+| `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
 
 ## mngr gcp cleanup
 

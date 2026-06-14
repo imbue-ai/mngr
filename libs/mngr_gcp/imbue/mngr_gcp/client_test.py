@@ -269,10 +269,28 @@ def test_create_instance_raises_clear_error_for_unknown_ssh_key() -> None:
 # =============================================================================
 
 
-def test_ensure_firewall_fails_closed_without_cidrs() -> None:
-    client = _make_client(allowed_ssh_cidrs=())
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_firewall()
+def test_ensure_firewall_skips_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
+    """Empty allowed_ssh_cidrs creates no rule and warns (fail-open, mirrors AWS).
+
+    GCE rejects an INGRESS rule with no source_ranges, so the analog of AWS's
+    zero-ingress security group is simply the absence of a rule: ensure_firewall
+    returns the target tag without inserting anything and logs a warning. The
+    empty case is an "I'll wire my own ingress later" signal, not a fail-closed gate.
+    """
+    firewalls = FakeFirewallsClient()
+    client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=())
+    assert client.ensure_firewall() == "mngr-ssh"
+    assert firewalls.inserted == []
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
+
+
+def test_ensure_firewall_warns_when_open_to_internet(log_warnings: list[str]) -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
+    firewalls = FakeFirewallsClient()
+    client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=("0.0.0.0/0",))
+    assert client.ensure_firewall() == "mngr-ssh"
+    assert firewalls.inserted[0].source_ranges == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_firewall_creates_when_missing() -> None:
@@ -316,6 +334,17 @@ def test_resolve_firewall_raises_prepare_hint_when_missing() -> None:
     client = _make_client(firewalls=FakeFirewallsClient())
     with pytest.raises(MngrError, match="mngr gcp prepare"):
         client.resolve_firewall()
+
+
+def test_resolve_firewall_returns_tag_when_cidrs_empty() -> None:
+    """Empty cidrs means no rule is expected, so resolve short-circuits to the tag.
+
+    ensure_firewall / `mngr gcp prepare` creates no rule when cidrs is empty, so
+    there is nothing to look up and pointing the user at prepare would be wrong.
+    The lookup is skipped entirely (no rule present, yet no raise).
+    """
+    client = _make_client(firewalls=FakeFirewallsClient(), allowed_ssh_cidrs=())
+    assert client.resolve_firewall() == "mngr-ssh"
 
 
 def test_delete_firewall_deletes_when_present() -> None:

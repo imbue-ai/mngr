@@ -17,7 +17,6 @@ from google.auth import exceptions as google_auth_exceptions
 from loguru import logger
 
 from imbue.mngr.cli.output_helpers import write_human_line
-from imbue.mngr.errors import MngrError
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
 
@@ -121,7 +120,7 @@ def gcp_cli_group() -> None:
     multiple=True,
     help=(
         "Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. "
-        "Required (fail-closed): with none supplied, prepare refuses to create a wide-open rule."
+        "Defaults to the provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
 def prepare(
@@ -139,10 +138,12 @@ def prepare(
     ``mngr create --provider gcp`` only needs instance create/get/list
     permissions (no firewall-management permissions).
     """
+    # Empty tuple => no --allowed-ssh-cidr flags passed: fall back to the
+    # provider config's default ('0.0.0.0/0'). Non-empty tuple => caller
+    # supplied explicit values, use them verbatim. Mirrors ``mngr aws prepare``.
+    effective_cidrs = allowed_ssh_cidrs or GcpProviderConfig().allowed_ssh_cidrs
     try:
-        client = _build_operator_client(
-            project_id, zone, firewall_name, firewall_target_tag, network, allowed_ssh_cidrs
-        )
+        client = _build_operator_client(project_id, zone, firewall_name, firewall_target_tag, network, effective_cidrs)
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
         # ``ValueError`` covers the no-ADC / no-project cases raised by
         # ``GcpProviderConfig`` (``GcpCredentialsError`` / ``GcpProjectError``,
@@ -157,12 +158,7 @@ def prepare(
             "environment variable, or run 'gcloud config set project <your-project>' (the active "
             "gcloud project is used automatically when Application Default Credentials are present)."
         )
-    try:
-        target_tag = client.ensure_firewall()
-    except MngrError as e:
-        # Fail-closed: ensure_firewall raises when no --allowed-ssh-cidr was
-        # supplied. Surface it as a clean CLI error rather than a traceback.
-        raise click.ClickException(str(e)) from e
+    target_tag = client.ensure_firewall()
     logger.info(
         "Prepared GCP firewall rule {} (tag {}) in project {}", client.firewall_name, target_tag, client.project_id
     )

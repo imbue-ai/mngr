@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.2] - 2026-06-13
+
 ### Changed
 
 - Changed: **Breaking** -- per-host build args renamed: `--vps-datacenter=` is now `--ovh-datacenter=` (`--ovh-region=` accepted as an alias) and `--vps-plan=` is now `--ovh-plan=`. The old `--vps-*` prefix raises a migration error. `--git-depth=` stays shared.
