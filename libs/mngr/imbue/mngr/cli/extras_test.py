@@ -360,6 +360,11 @@ def test_plugins_status_returns_string() -> None:
     assert len(status) > 0
 
 
+# Exercises plugin / shell-completion / claude-plugin status, which can stall on
+# a contended CI sandbox and trip the global 10s pytest-timeout even though it
+# runs in well under a second locally (same reason as test_extras_no_args_shows_status
+# below). Bump the per-test timeout for headroom.
+@pytest.mark.timeout(30)
 def test_print_extras_status_runs_without_error() -> None:
     """_print_extras_status completes without error."""
     # Exercises plugin status, completion status, and claude plugin status code paths
