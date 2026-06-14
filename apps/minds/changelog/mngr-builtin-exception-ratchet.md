@@ -1,1 +1,0 @@
-Replaced direct ValueError/RuntimeError raises in deploy-lifecycle config validation, the forward-CLI envelope stream consumer, and Telegram credential extraction with dedicated custom exception types.
