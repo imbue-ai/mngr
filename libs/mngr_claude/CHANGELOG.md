@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.13] - 2026-06-13
+
 ### Added
 
 - Added: `claude_process_started` marker file (touched by the `SessionStart` hook) whose mtime gives consumers a restart boundary — any transcript event older than it belongs to a turn the current process did not run.

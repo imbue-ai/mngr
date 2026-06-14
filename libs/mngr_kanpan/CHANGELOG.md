@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.13] - 2026-06-13
+
 ### Added
 
 - Added: `mngr kanpan --format json` now prints a single board snapshot instead of launching the TUI — the JSON has ordered columns, agents grouped into sections with human labels, and any fetch errors; each agent carries both the pre-rendered cells and the structured field values (PR number, CI status, commits-ahead count, etc.). `--format jsonl` emits one agent record per line in board order, followed by error lines. Previously `--format json` was accepted but silently ignored.
