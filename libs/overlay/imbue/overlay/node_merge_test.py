@@ -16,6 +16,7 @@ from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import finalize_payload
 from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lift_concrete
+from imbue.overlay.node_merge import lower
 from imbue.overlay.node_merge import merge
 from imbue.overlay.node_merge import merge_narrowing_allowed
 from imbue.overlay.nodes import Assign
@@ -145,6 +146,39 @@ def test_lift_concrete_recurses_into_dicts() -> None:
 def test_lift_concrete_takes_suffixed_keys_literally() -> None:
     """A concrete base carries no operators; ``__extend`` in a key is a literal name."""
     assert lift_concrete({"a__extend": [1]}) == {"a__extend": Default([1])}
+
+
+# =============================================================================
+# lower -- node Patch -> suffix-keyed surface dict (inverse of lift)
+# =============================================================================
+
+
+def test_lower_emits_suffix_per_node_kind() -> None:
+    patch: Patch = {"a": Default(1), "b": Assign(2), "c": Extend([3])}
+    assert lower(patch) == {"a": 1, "b__assign": 2, "c__extend": [3]}
+
+
+def test_lower_recurses_into_nested_patch() -> None:
+    patch: Patch = {"p": Extend({"allow": Default(["x"]), "deny": Extend(["y"])})}
+    assert lower(patch) == {"p__extend": {"allow": ["x"], "deny__extend": ["y"]}}
+
+
+def test_lift_lower_round_trips_a_combined_patch() -> None:
+    """``lift(lower(patch))`` reproduces a combined patch, so a consumer can store an
+    unresolved patch as suffix-keyed data and re-lift it later without drift."""
+    source = {"keep": "v", "add__extend": ["x"], "force__assign": {"k": "v"}}
+    patch = lift(source)
+    assert lift(lower(patch)) == patch
+
+
+def test_lower_then_relift_does_not_reactivate_stacked_suffix() -> None:
+    """A stacked suffix lifts to a literal field name under a single wrapper; lowering
+    re-emits that wrapper's own suffix, so re-lifting reproduces the same node rather
+    than peeling the inner suffix into a second operator."""
+    patch = lift({"a__extend__assign": [1, 2]})
+    assert patch == {"a__extend": Assign([1, 2])}
+    assert lower(patch) == {"a__extend__assign": [1, 2]}
+    assert lift(lower(patch)) == patch
 
 
 # =============================================================================

@@ -30,6 +30,7 @@ from imbue.overlay.nodes import Node
 from imbue.overlay.nodes import Patch
 from imbue.overlay.nodes import is_assign_kind
 from imbue.overlay.operators import ASSIGN_SUFFIX
+from imbue.overlay.operators import EXTEND_SUFFIX
 from imbue.overlay.operators import assign_bare_key
 from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import is_assign_key
@@ -113,6 +114,31 @@ def _fold_assign_with_extend(
     if field not in extends:
         return kind(assign_payload)
     return kind(apply_extend(assign_payload, extends[field], field))
+
+
+def lower(patch: Patch) -> dict[str, Any]:
+    """Lower a node ``Patch`` back to a suffix-keyed surface dict (the inverse of
+    ``lift``): ``Default`` -> bare key, ``Assign`` -> ``key__assign``, ``Extend`` ->
+    ``key__extend``, recursing into nested ``Patch`` payloads.
+
+    Used at the boundary where a consumer stores or carries an unresolved patch as
+    plain suffix-keyed data (e.g. mngr keeps deferred ``settings_overrides`` /
+    ``create_templates`` markers as JSON-able suffix strings rather than node
+    objects). ``lift(lower(patch))`` round-trips a combined patch faithfully -- a
+    ``Default`` never carries an operator-suffixed field name (``lift`` could not
+    have produced one), and ``Assign`` / ``Extend`` re-emit their own suffix, so a
+    re-``lift`` reproduces the same nodes and never reactivates a stray suffix.
+    """
+    result: dict[str, Any] = {}
+    for field, node in patch.items():
+        lowered = lower(node.payload) if isinstance(node.payload, dict) else node.payload
+        if isinstance(node, Extend):
+            result[f"{field}{EXTEND_SUFFIX}"] = lowered
+        elif isinstance(node, Assign):
+            result[f"{field}{ASSIGN_SUFFIX}"] = lowered
+        else:
+            result[field] = lowered
+    return result
 
 
 def lift_concrete(base: dict[str, Any]) -> Patch:
