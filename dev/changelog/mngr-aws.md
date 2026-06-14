@@ -1,7 +1,0 @@
-## AWS provider support: root-level changes
-
-- `mngr create` CLI markdown docs regenerated to include the new AWS provider's build-args help (removes the dropped Vultr/OVH `--vps-os=` line at the same time). The per-provider prefix rename (`--aws-region=`, `--aws-instance-type=`, `--vultr-region=`, `--vultr-plan=`, `--ovh-datacenter=`, `--ovh-plan=`) lands in the regenerated text too.
-- `scripts/make_cli_docs.py` SECONDARY_COMMANDS gains `"aws"` so the new `mngr aws prepare` / `mngr aws ami` command group renders a generated `libs/mngr/docs/commands/secondary/aws.md` page.
-- Top-level coverage configuration adds `--cov=imbue.mngr_aws` so the new package contributes coverage data.
-- `uv.lock` reverted to match `main` except for the new AWS additions (`imbue-mngr-aws`, `boto3-stubs`, `botocore-stubs`, `mypy-boto3-ec2`, `types-awscrt`, `types-s3transfer`). An earlier full re-lock had floated ~100 unrelated packages to latest, including `ty` 0.0.24 -> 0.0.39, whose stricter checks surfaced 52 pre-existing type errors repo-wide and failed CI.
-- On merging `main`, the `uv.lock` conflict was re-resolved the same way (lock matches `main` plus only the six AWS additions). The four boto3/botocore type-stub packages (`boto3-stubs`, `botocore-stubs`, `mypy-boto3-ec2`, `types-awscrt`) are pinned to the latest versions published before 2026-05-10 so they satisfy the two-week supply-chain cooldown (these stubs release ~daily, so the newest always falls inside the window).

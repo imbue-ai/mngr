@@ -1,5 +1,0 @@
-The plugin's provisioning artifacts now live under a `mngr-proxy/` subdirectory and are guarded against dirtying a tracked worktree:
-
-- The PROXY-mode agent definition moved from `.claude/agents/mngr-proxy.md` to `.claude/agents/mngr-proxy/proxy.md`, and the DENY-mode skill moved from `.claude/skills/mngr-subagents/SKILL.md` to `.claude/skills/mngr-proxy/SKILL.md` (the DENY skill is correspondingly renamed from `mngr-subagents` to `mngr-proxy`). A single `.claude/agents/mngr-proxy/` or `.claude/skills/mngr-proxy/` line in `.gitignore` now covers each artifact. Discovery is unaffected: Claude Code identifies the subagent by its frontmatter `name:` field.
-
-- At provisioning the plugin now refuses to write either artifact into a git-tracked worktree where the path is not gitignored, raising a clear error instead of silently leaving an untracked file. The error tells you to either gitignore the path or disable the plugin for the repository (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).

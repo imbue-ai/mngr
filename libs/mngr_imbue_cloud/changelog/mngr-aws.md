@@ -1,7 +1,0 @@
-## AWS provider support: ProviderBackendInterface refactor
-
-`is_for_host_creation` was removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d in every other backend). Replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method on the interface that Modal overrides. The imbue-cloud backend's now-unused `del`-of-`is_for_host_creation` is removed. No behavior change.
-
-`mngr imbue_cloud admin pool create` now passes `--ovh-datacenter=` instead of `--vps-datacenter=` to the inner `mngr create --provider ovh` command. The OVH provider's `--vps-*` build-arg prefix was retired in this branch and now raises a migration error; the call site here is updated to the new per-provider prefix so pool creation continues to work.
-
-`_build_delegated_vps_provider` now returns a `MinimalVpsDockerProvider` (moved into `mngr_vps_docker` itself, since it's a generally useful role for any externally-managed-VPS host-setup path -- not imbue_cloud-specific). The base `VpsDockerProvider._parse_build_args` was made abstract in this branch (each concrete provider binds its own `--<provider>-*` prefix); `MinimalVpsDockerProvider`'s override extracts `--git-depth=N` and forwards everything else to docker, which is the correct behavior for the no-provisioning path that pairs with `ExternallyManagedVpsClient`. Without this, every slow-path container rebuild would raise before any docker work happened. The corresponding parser unit tests moved alongside.
