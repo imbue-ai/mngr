@@ -41,11 +41,6 @@ class MngrError(ClickException):
         Gated on ``should_use_color`` so piped or ``NO_COLOR`` output stays plain,
         mirroring the colored ``ERROR:`` prefix that ``logger.error`` already uses.
         """
-        # Click's standalone-mode handler calls ``e.show()`` with no argument, so
-        # ``file`` must default. Resolve stderr lazily here rather than as a default
-        # value because the repo swaps ``sys.stderr`` at runtime (see
-        # ``BufferingStreamWrapper`` in utils/logging.py); a def-time default would
-        # bind a stale stream.
         if file is None:
             file = get_text_stream("stderr")
         message = f"Error: {self.format_message()}"
