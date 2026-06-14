@@ -181,6 +181,7 @@ def render_landing_page(
     agent_accents: dict[str, str] | None = None,
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
+    agent_providers: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -231,6 +232,7 @@ def render_landing_page(
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
         shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
         mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
+        agent_providers=agent_providers or {},
     )
 
 

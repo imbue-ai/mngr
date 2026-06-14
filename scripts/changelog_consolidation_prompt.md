@@ -33,21 +33,25 @@ the right project's consolidated files.
    drifted from the assumption above; emit a `failed` JSON object with
    `pwd` + branch state in `notes`.
 
-2. Run `python3 scripts/consolidate_changelog.py`. Capture stdout. If
+2. Run `python3 scripts/changelog_consolidate.py`. Capture stdout. If
    stdout contains the literal string "No changelog entries", emit
    `{"status": "skipped-no-entries"}` and stop.
-   Otherwise stdout contains one or more `SECTION <project> <YYYY-MM-DD>`
-   lines — each one is a `## YYYY-MM-DD` section the
-   consolidator just inserted at the top of
-   `<project_dir>/UNABRIDGED_CHANGELOG.md`, where `<project_dir>` is
-   `libs/<project>` for libs, `apps/<project>` for apps, and `dev/` for
-   the synthetic dev bucket (the same directory that holds the project's
-   `changelog/` entries dir).
+   Otherwise stdout contains one `SECTION <project> <YYYY-MM-DD>
+   [<YYYY-MM-DD> ...]` line per project the consolidator just touched. The
+   dates (newest first) are the `## YYYY-MM-DD` sections it just inserted
+   at the top of that project's `<project_dir>/UNABRIDGED_CHANGELOG.md`,
+   where `<project_dir>` is `libs/<project>` for libs, `apps/<project>`
+   for apps, and `dev/` for the synthetic dev bucket (the same directory
+   that holds the project's `changelog/` entries dir).
 
-3. For each `SECTION <project> <date>` line: read that section's bullets
-   from the project's `UNABRIDGED_CHANGELOG.md` (the section sits
-   between `## <date>` and the next `## ` line) and generate a few
-   concise, human-friendly bullets for that project's `CHANGELOG.md`.
+3. For each `SECTION` line (one per project), read the bullets from *all*
+   of that project's listed date sections in its
+   `UNABRIDGED_CHANGELOG.md` (each section sits between its `## <date>`
+   heading and the next `## ` line), pool them, and from that pooled set
+   generate a few concise, human-friendly bullets for that project's
+   `CHANGELOG.md`. Summarizing a project's whole pool together lets a
+   single user-visible change become one bullet even when several entries
+   (possibly across different days) touched it.
    Each bullet MUST start with one of these Keep-a-Changelog categories
    followed by `: ` and the description, e.g.:
 
@@ -60,8 +64,6 @@ the right project's consolidated files.
    The allowed categories are exactly: `Added`, `Changed`, `Deprecated`,
    `Removed`, `Fixed`, `Security`. Use `Changed` as the catch-all for
    internal refactors or doc edits that don't fit the other categories.
-   Merge near-duplicate bullets (within the same project) if they
-   describe the same user-visible effect.
 
    `CHANGELOG.md` is a notable-only summary: if a change isn't notable,
    omit it from `CHANGELOG.md` entirely rather than forcing a bullet for
@@ -92,23 +94,37 @@ the right project's consolidated files.
    broken for that project; emit a `failed` JSON object with "missing
    [Unreleased] heading in <project_dir>/CHANGELOG.md" in `notes` and stop.
 
-   Group the bullets you generated in step 3 for that project (across
-   all dates for that project) by category and merge them into the
-   `[Unreleased]` section under `### <Category>` subheadings, in the
-   canonical order: Added, Changed, Deprecated, Removed, Fixed,
-   Security. Append to any existing bullets under each subheading; do
-   not delete or rewrite pre-existing bullets. (`scripts/release.py`
-   renames `[Unreleased]` to `[vX.Y.Z] - YYYY-MM-DD` at release time
-   and inserts a fresh empty `[Unreleased]` above it, so each
-   project's section accumulates across consolidation runs within a
-   release window.)
+   Group the bullets you generated in step 3 for that project by
+   category and merge them into the `[Unreleased]` section under
+   `### <Category>` subheadings, in the canonical order: Added, Changed,
+   Deprecated, Removed, Fixed, Security. Append to any existing bullets
+   under each subheading; do not delete or rewrite pre-existing bullets.
+   (`scripts/release.py` renames `[Unreleased]` to `[vX.Y.Z] -
+   YYYY-MM-DD` at release time and inserts a fresh empty `[Unreleased]`
+   above it, so each project's section accumulates across consolidation
+   runs within a release window.)
 
-5. Refinement pass: re-read just the `[Unreleased]` section of each
-   `CHANGELOG.md` you touched. Tighten any wordy bullets (cut filler
-   words; keep names of changed APIs/files); merge bullets that
-   describe the same user-visible change within that project; confirm
-   every bullet has a category prefix in the exact `- <Category>:
-   <description>` format.
+   Apply special scrutiny to the `Fixed` category: only keep a `Fixed`
+   bullet if it seems to fix a bug that existed in a *prior* release. A
+   bug that was both introduced and fixed within the current release
+   window (i.e. since the last `[vX.Y.Z]` section) never reached a
+   released version, so a `Fixed` entry for it is noise to the changelog
+   reader -- drop it rather than listing it under `Fixed`. Use the
+   project's `UNABRIDGED_CHANGELOG.md` and per-PR entries together with
+   the code to judge whether the bug predates this release.
+
+5. Concision pass: re-read just the `[Unreleased]` section of each
+   `CHANGELOG.md` you touched and step back to think critically about
+   what actually matters to a reader of *this* project's changelog. For
+   each bullet, decide which part of the change is genuinely important
+   for that audience to see -- re-applying the notable-only test from
+   step 3 -- then drop any bullet that isn't notable and cut the
+   secondary detail from the ones that stay, so each bullet conveys only
+   what matters about the change. If two bullets still describe the same
+   user-visible change, merge them. Finally, phrase every surviving
+   bullet as concisely as you can: cut filler words, keep the names of
+   changed APIs/files, and confirm each bullet is in the exact
+   `- <Category>: <description>` format with a valid category prefix.
 
 6. Configure git: `git config user.email "bot@imbue.com"`,
    `git config user.name "Changelog Bot"`, `gh auth setup-git`.

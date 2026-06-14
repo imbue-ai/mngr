@@ -71,6 +71,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -284,6 +285,56 @@ def _read_host_id_label_from_vps(outer: OuterHostInterface) -> HostId | None:
     return None
 
 
+def _read_live_listing_from_vps(
+    outer: OuterHostInterface,
+    host_id: HostId,
+    host_dir: str,
+    prefix: str,
+) -> dict[str, Any]:
+    """Run the outer listing script on the VPS and return the parsed live listing.
+
+    Reads agent state directly from the running container's live ``host_dir``
+    (or, for a stopped container, from a ``docker cp``-extracted copy), so
+    agents created *inside* the container -- which are never written to the
+    persisted outer store -- are discovered. This mirrors the read path
+    ``ImbueCloudProvider`` already uses.
+    """
+    script = build_outer_listing_collection_script(str(host_id), host_dir, prefix, host_id_label=LABEL_HOST_ID)
+    result = outer.execute_idempotent_command(script, timeout_seconds=60.0)
+    if not result.success:
+        raise MngrError(
+            f"Outer listing script failed on VPS for host {host_id}: "
+            f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+        )
+    return parse_listing_collection_output(result.stdout)
+
+
+def _extract_live_agent_data(parsed_listing: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Pull each agent's ``data.json`` dict out of a parsed listing."""
+    agent_data: list[dict[str, Any]] = []
+    for agent_raw in parsed_listing.get("agents", []):
+        data = agent_raw.get("data")
+        if isinstance(data, dict):
+            agent_data.append(data)
+    return agent_data
+
+
+class _VpsDiscoveryData(FrozenModel):
+    """Host records, live agent data, and container running state gathered during discovery.
+
+    Used both for a single VPS read and for the aggregate across all of a
+    provider's VPSes; the shapes are identical, so combining is a per-field merge.
+    """
+
+    records: tuple[VpsDockerHostRecord, ...] = Field(default=(), description="Discovered host records")
+    live_agent_data_by_host_id: dict[HostId, list[dict[str, Any]]] = Field(
+        default_factory=dict, description="Live in-container agent data.json dicts keyed by host id"
+    )
+    is_running_by_host_id: dict[HostId, bool] = Field(
+        default_factory=dict, description="Container running state keyed by host id"
+    )
+
+
 def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> dict[str, str]:
     """Compose the tag mapping passed to the VPS create call.
 
@@ -366,7 +417,6 @@ class VpsDockerProvider(BaseProviderInstance):
     vps_client: VpsClientInterface = Field(frozen=True, description="VPS provider API client")
 
     _host_record_cache: dict[HostId, VpsDockerHostRecord] = PrivateAttr(default_factory=dict)
-    _container_running_cache: dict[str, bool] = PrivateAttr(default_factory=dict)
     _instances_cache: list[dict[str, Any]] | None = PrivateAttr(default=None)
 
     @property
@@ -389,7 +439,6 @@ class VpsDockerProvider(BaseProviderInstance):
         for host_id in list(self._host_by_id_cache):
             self._evict_cached_host(host_id)
         self._host_record_cache.clear()
-        self._container_running_cache.clear()
         self._instances_cache = None
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
@@ -1019,8 +1068,9 @@ class VpsDockerProvider(BaseProviderInstance):
                     # above; host_backup writes request.json / reads result.json).
                     f"{snapshot_trigger_volume_name}:{SNAPSHOT_TRIGGER_MOUNT_PATH}:rw",
                     # Read-only view of the outer's <btrfs-mount>/snapshots/
-                    # directory so restic-in-container can read the snapshot
-                    # the outer helper produced at <btrfs-mount>/snapshots/current.
+                    # directory so restic-in-container can read the per-request
+                    # snapshots the outer helper produces at
+                    # <btrfs-mount>/snapshots/<name>.
                     f"{snapshots_dir_on_outer}:{SNAPSHOT_READ_MOUNT_PATH}:ro",
                 ],
                 labels=labels,
@@ -1464,48 +1514,32 @@ class VpsDockerProvider(BaseProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        """Load hosts and agent references from each VPS's unified host volume.
+        """Load hosts and agent references from each VPS, reading agents live.
 
-        For each VPS, reads the host record and any persisted agent data
-        directly from the docker volume's bind-source path (the per-host
-        btrfs subvolume the volume's ``Options.device`` points at), then
-        determines container running status. Avoids the default
-        implementation's per-host SSH calls into containers for agent
-        discovery.
+        For each VPS, reads the host record directly from the docker volume's
+        bind-source path (the per-host btrfs subvolume the volume's
+        ``Options.device`` points at) and reads agent data **live** from the
+        container (so in-container-created agents are discovered). The same
+        live read reports the container's running state, so no separate
+        inspect round-trip is needed.
         """
         with log_span("VPS Docker discover_hosts_and_agents for provider={}", self.name):
-            all_records, agent_data_by_host_id = self._discover_host_records_with_agents()
+            discovery = self._discover_host_records_with_agents()
+        agent_data_by_host_id = discovery.live_agent_data_by_host_id
 
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-        for record in all_records:
+        for record in discovery.records:
             host_id = HostId(record.certified_host_data.host_id)
             host_name = HostName(record.certified_host_data.host_name)
 
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Determine host state from container running status. If the VPS
-            # is unreachable, we trust the offline-state derivation rather
-            # than crashing the listing -- one bad VPS must not drop the
-            # other VPSes' hosts.
-            is_running = False
-            if record.vps_ip is not None and record.config is not None:
-                container_name = record.config.container_name
-                if container_name not in self._container_running_cache:
-                    try:
-                        with self._make_outer_for_vps_ip(record.vps_ip) as outer:
-                            self._container_running_cache[container_name] = docker_inspect_running(
-                                outer, container_name
-                            )
-                    except MngrError as exc:
-                        logger.warning(
-                            "Failed to inspect container status for host {} on VPS {}: {}",
-                            host_id,
-                            record.vps_ip,
-                            exc,
-                        )
-                        self._container_running_cache[container_name] = False
-                is_running = self._container_running_cache[container_name]
+            # Running status came from the same live listing read. A VPS that
+            # was unreachable during discovery has no entry here, so it falls
+            # through to the offline-state derivation rather than crashing the
+            # listing -- one bad VPS must not drop the other VPSes' hosts.
+            is_running = discovery.is_running_by_host_id.get(host_id, False)
 
             has_snapshots = len(record.certified_host_data.snapshots) > 0
             is_failed = record.certified_host_data.failure_reason is not None
@@ -1532,7 +1566,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 host_state=host_state,
             )
 
-            # Build agent refs from persisted agent data
+            # Build agent refs from live agent data
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in agent_data_by_host_id.get(host_id, []):
                 ref = validate_and_create_discovered_agent(agent_data, host_id, self.name)
@@ -1587,36 +1621,68 @@ class VpsDockerProvider(BaseProviderInstance):
     def _read_records_from_vps(
         self,
         vps_ip: str,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Read the (single) host record + agent data from one VPS.
+    ) -> _VpsDiscoveryData:
+        """Read the (single) host record + live agent data from one VPS.
 
         Each VPS hosts exactly one mngr container (1:1 invariant). We find
         that container by its host-id label, derive its unified volume name,
-        and read host_state.json + agents/*.json from the volume's
-        bind-source path (the per-host btrfs subvolume the volume's
-        ``Options.device`` points at, resolved via
-        ``docker volume inspect --format '{{.Options.device}}'``; the
-        docker-managed ``Mountpoint`` placeholder is never consulted). If
-        the container does not exist yet (e.g., the VPS is still being set
-        up by a concurrent ``mngr create``), returns empty results. If
-        outer SSH to the VPS fails, fall back to any in-process cached
-        records for that VPS so the hosts still appear in the listing
-        (with an offline state) instead of disappearing entirely; one bad
-        VPS must not silently drop its hosts.
+        and read host_state.json from the volume's bind-source path (the
+        per-host btrfs subvolume the volume's ``Options.device`` points at,
+        resolved via ``docker volume inspect --format '{{.Options.device}}'``;
+        the docker-managed ``Mountpoint`` placeholder is never consulted).
+
+        Agent data is read **live** from the container's ``host_dir`` via the
+        outer listing script -- not from the persisted ``agents/*.json`` outer
+        store. The outer store is only written by the host-side mngr at
+        agent-create time, so it misses agents created *inside* the container
+        (e.g. by an in-container ``mngr create``); reading live ensures those
+        agents are discoverable by ``mngr message`` and friends. The same call
+        reports the container's running state, avoiding a separate inspect.
+
+        If the container does not exist yet (e.g., the VPS is still being set
+        up by a concurrent ``mngr create``), returns empty results. If outer
+        SSH to the VPS fails, fall back to any in-process cached records for
+        that VPS so the hosts still appear in the listing (with an offline
+        state) instead of disappearing entirely; one bad VPS must not silently
+        drop its hosts.
         """
         try:
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 host_id = _read_host_id_label_from_vps(outer)
                 if host_id is None:
                     logger.debug("No mngr container on VPS {} yet, skipping", vps_ip)
-                    return [], {}
+                    return _VpsDiscoveryData()
                 host_store = open_host_store(outer, host_volume_name_for(host_id))
                 record = host_store.read_host_record()
                 if record is None:
                     logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
-                    return [], {}
-                agent_data = host_store.list_persisted_agent_data()
-                return [record], {host_id: agent_data}
+                    return _VpsDiscoveryData()
+                # The host record read above succeeded, so the host exists and
+                # must appear in the listing. A failure of the *live-listing*
+                # read alone (e.g. ``docker exec`` racing a container restart)
+                # must not drop the host -- degrade to no live agents and an
+                # offline (not-running) state instead. Genuine VPS-unreachable
+                # failures fail earlier (host-id probe / record read) and are
+                # handled by the outer cache-fallback branch.
+                try:
+                    parsed_listing = _read_live_listing_from_vps(
+                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                    )
+                except MngrError as listing_exc:
+                    logger.warning(
+                        "Live listing read failed for host {} on VPS {}; surfacing host as offline: {}",
+                        host_id,
+                        vps_ip,
+                        listing_exc,
+                    )
+                    return _VpsDiscoveryData(records=(record,))
+                live_agent_data = _extract_live_agent_data(parsed_listing)
+                is_running = parsed_listing.get("container_state") == "running"
+                return _VpsDiscoveryData(
+                    records=(record,),
+                    live_agent_data_by_host_id={host_id: live_agent_data},
+                    is_running_by_host_id={host_id: is_running},
+                )
         except MngrError as e:
             cached_records = [r for r in self._host_record_cache.values() if r.vps_ip == vps_ip]
             if cached_records:
@@ -1628,28 +1694,25 @@ class VpsDockerProvider(BaseProviderInstance):
                 )
             else:
                 logger.warning("Failed to read records from VPS {}: {}", vps_ip, e)
-            return cached_records, {}
+            return _VpsDiscoveryData(records=tuple(cached_records))
 
-    def _discover_host_records_with_agents(
-        self,
-    ) -> tuple[list[VpsDockerHostRecord], dict[HostId, list[dict[str, Any]]]]:
-        """Discover host records and agent data from all VPSes for this provider.
+    def _discover_host_records_with_agents(self) -> _VpsDiscoveryData:
+        """Discover host records and live agent data from all VPSes for this provider.
 
         Calls ``_list_provider_vps_hostnames`` to enumerate VPSes
         (provider-specific), then SSHes to each in parallel. Within each
-        VPS, ``_read_records_from_vps`` issues a small sequence of SSH
-        commands (find the mngr container by host-id label, resolve the
-        unified volume's bind-source path via ``docker volume inspect
-        --format '{{.Options.device}}'``, read ``host_state.json``, list
-        ``agents/*.json``); the parallel fan-out across VPSes keeps wall
-        time bounded by the slowest VPS rather than the sum.
+        VPS, ``_read_records_from_vps`` finds the mngr container by host-id
+        label, reads ``host_state.json``, and reads live agent data from the
+        container; the parallel fan-out across VPSes keeps wall time bounded
+        by the slowest VPS rather than the sum.
         """
         vps_ips = self._list_provider_vps_hostnames()
         if not vps_ips:
-            return [], {}
+            return _VpsDiscoveryData()
 
         all_records: list[VpsDockerHostRecord] = []
         all_agent_data: dict[HostId, list[dict[str, Any]]] = {}
+        all_running: dict[HostId, bool] = {}
 
         cg_name = f"{type(self).__name__}-discover"
         with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
@@ -1663,17 +1726,21 @@ class VpsDockerProvider(BaseProviderInstance):
                     futures = [executor.submit(self._read_records_from_vps, ip) for ip in vps_ips]
 
                 for future in futures:
-                    records, agent_data = future.result()
-                    all_records.extend(records)
-                    for host_id, agents in agent_data.items():
+                    vps_data = future.result()
+                    all_records.extend(vps_data.records)
+                    for host_id, agents in vps_data.live_agent_data_by_host_id.items():
                         all_agent_data.setdefault(host_id, []).extend(agents)
+                    all_running.update(vps_data.is_running_by_host_id)
 
-        return all_records, all_agent_data
+        return _VpsDiscoveryData(
+            records=tuple(all_records),
+            live_agent_data_by_host_id=all_agent_data,
+            is_running_by_host_id=all_running,
+        )
 
     def _discover_host_records(self) -> list[VpsDockerHostRecord]:
         """Discover host records by enumerating this provider's VPSes."""
-        records, _agent_data = self._discover_host_records_with_agents()
-        return records
+        return list(self._discover_host_records_with_agents().records)
 
     def _find_host_record(self, host: HostId | HostName) -> VpsDockerHostRecord | None:
         """Find a host record by ID or name, using cache first."""

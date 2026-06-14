@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-file"
-version = "0.1.9"
+version = "0.1.10"
 description = "File command plugin for mngr - read, write, and list files on agents and hosts"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.12",
+    "imbue-mngr==0.2.13",
     "click-option-group>=0.5.6",
     "tabulate>=0.9.0",
 ]

@@ -38,6 +38,7 @@ from imbue.mngr_schedule.implementations.modal.deploy import package_directory_a
 from imbue.mngr_schedule.implementations.modal.deploy import package_repo_at_commit
 from imbue.mngr_schedule.implementations.modal.deploy import parse_upload_spec
 from imbue.mngr_schedule.implementations.modal.deploy import resolve_commit_hash_for_deploy
+from imbue.mngr_schedule.implementations.modal.deploy import resolve_cron_timezone
 from imbue.mngr_schedule.implementations.modal.deploy import resolve_mngr_install_mode
 from imbue.mngr_schedule.implementations.modal.deploy import stage_deploy_files
 from imbue.mngr_schedule.implementations.modal.deploy import try_get_repo_root
@@ -77,6 +78,23 @@ def test_detect_local_timezone_returns_string() -> None:
     result = detect_local_timezone()
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+def test_resolve_cron_timezone_returns_explicit_valid_zone() -> None:
+    """An explicit, valid IANA zone is used verbatim (independent of the deploy machine)."""
+    assert resolve_cron_timezone("America/Los_Angeles") == "America/Los_Angeles"
+    assert resolve_cron_timezone("UTC") == "UTC"
+
+
+def test_resolve_cron_timezone_falls_back_to_local_when_none() -> None:
+    """With no explicit zone, it falls back to the deploy machine's local timezone."""
+    assert resolve_cron_timezone(None) == detect_local_timezone()
+
+
+def test_resolve_cron_timezone_rejects_unknown_zone() -> None:
+    """A non-IANA timezone name raises rather than silently deploying a bad schedule."""
+    with pytest.raises(ScheduleDeployError, match="not a known IANA timezone"):
+        resolve_cron_timezone("Pacific/Nowhere")
 
 
 def test_get_repo_root_returns_path_in_git_repo(

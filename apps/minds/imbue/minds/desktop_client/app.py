@@ -85,9 +85,11 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
+from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -95,6 +97,7 @@ from imbue.minds.desktop_client.region_preference import default_region_for_prov
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
 from imbue.minds.desktop_client.region_preference import resolve_default_region
 from imbue.minds.desktop_client.region_preference import start_geo_detection
+from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestInbox
 from imbue.minds.desktop_client.request_events import RequestType
 from imbue.minds.desktop_client.request_events import parse_request_event
@@ -490,14 +493,18 @@ def _handle_landing_page(
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
+        agent_providers: dict[str, str] = {}
         for aid in all_agent_ids:
+            info = backend_resolver.get_agent_display_info(aid)
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
                 agent_names[str(aid)] = ws_name
             else:
-                info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
             agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
+            # Collapse the per-region / per-account provider instance name to a
+            # single friendly compute-provider label (e.g. aws-us-west-2 -> AWS).
+            agent_providers[str(aid)] = friendly_provider_label(info.provider_name if info else None)
         shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
         mind_liveness_by_agent_id = {
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
@@ -511,6 +518,7 @@ def _handle_landing_page(
             agent_accents=agent_accents,
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
+            agent_providers=agent_providers,
         )
         return HTMLResponse(content=html)
 
@@ -572,13 +580,15 @@ def _handle_post_login_redirect(
 def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
-    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    Only ``IMBUE_CLOUD``, ``VULTR``, and ``AWS`` place a host in a chosen
+    region; ``DOCKER`` / ``LIMA`` run locally and have no region.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
-    if launch_mode is LaunchMode.CLOUD:
+    if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
+    if launch_mode is LaunchMode.AWS:
+        return AWS_PROVIDER_KEY
     return None
 
 
@@ -603,14 +613,16 @@ def _build_region_form_context(
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Build the per-launch-mode region options + pre-selected default for the create form.
 
-    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``CLOUD``) so the form JS
-    can look options up directly by the compute-provider dropdown's value.
+    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``VULTR`` / ``AWS``) so
+    the form JS can look options up directly by the compute-provider dropdown's
+    value.
     """
     options_by_launch_mode: dict[str, list[str]] = {}
     selected_by_launch_mode: dict[str, str] = {}
     for launch_mode, provider_key in (
         (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
-        (LaunchMode.CLOUD, VULTR_PROVIDER_KEY),
+        (LaunchMode.VULTR, VULTR_PROVIDER_KEY),
+        (LaunchMode.AWS, AWS_PROVIDER_KEY),
     ):
         options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
         selected_by_launch_mode[launch_mode.value] = _default_region_for_provider_with_config(
@@ -2095,6 +2107,18 @@ def _handle_dev_styleguide() -> Response:
     return HTMLResponse(content=render_dev_styleguide_page())
 
 
+# How often the chrome-events stream re-asserts the current non-HEALTHY
+# system-interface statuses, on top of the one-shot connect-time snapshot and
+# the per-transition pushes. This is a self-healing backstop: a chrome renderer
+# that lost its in-memory health state (e.g. a reloaded webview whose one-shot
+# ``system_interface_status`` was never replayed) re-learns a still-stuck
+# workspace within this interval and can finally redirect to the recovery page,
+# even though the tracker emitted no fresh transition. Re-asserting ``stuck`` is
+# idempotent client-side (the recovery-redirect lock prevents re-navigation), so
+# the only cost is one tiny event per non-healthy agent per interval.
+_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS: Final[float] = 15.0
+
+
 async def _handle_chrome_events(
     request: Request,
     auth_store: AuthStoreDep,
@@ -2166,7 +2190,7 @@ async def _handle_chrome_events(
             last_providers_data = _build_providers_state_payload(backend_resolver)
             yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **last_providers_data}))
             inbox: RequestInbox | None = request.app.state.request_inbox
-            last_requests_payload = _build_requests_payload(inbox)
+            last_requests_payload = _build_requests_payload(inbox, backend_resolver)
             # ``auto_open`` is bundled with the requests payload (rather than
             # its own SSE event) so the Electron shell sees both atomically
             # when deciding whether to auto-open the panel.
@@ -2181,6 +2205,9 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(
                         json.dumps(_system_interface_status_payload(tracker, str(aid), status))
                     )
+            # Anchor the periodic re-assert clock to the connect-time snapshot
+            # just sent, so the first backstop re-assert is a full interval out.
+            last_status_reassert = time.monotonic()
 
             # Wait for changes and push updates until client disconnects.
             #
@@ -2201,15 +2228,23 @@ async def _handle_chrome_events(
             #
             # Clearing at the bottom of the loop instead would lose the
             # wakeup for any producer that fires between the drain and the
-            # bottom-of-loop clear, leaving the queued item idle for up to
-            # 30s -- a UX regression for health-state transitions like
-            # RESTARTING -> HEALTHY.
+            # bottom-of-loop clear, leaving the queued item idle until the
+            # next idle-wake timeout -- a UX regression for health-state
+            # transitions like RESTARTING -> HEALTHY.
             shutdown_event: threading.Event = request.app.state.shutdown_event
             connected = not await request.is_disconnected()
             while connected and not shutdown_event.is_set():
-                # Wait for a change signal or timeout (timeout for disconnect checks).
+                # Wait for a change signal or timeout. The timeout bounds both
+                # disconnect-detection latency and -- since the periodic status
+                # backstop below only runs on a loop wake -- the worst-case
+                # re-assert cadence on an otherwise-idle connection. Cap it at
+                # the re-assert interval so a steadily-stuck workspace really is
+                # re-asserted on that cadence rather than being stretched to a
+                # longer idle-wake period.
                 try:
-                    await asyncio.wait_for(change_event.wait(), timeout=30.0)
+                    await asyncio.wait_for(
+                        change_event.wait(), timeout=_SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                    )
                 except TimeoutError:
                     pass
                 # Clear BEFORE draining so any producer firing between drain
@@ -2232,6 +2267,25 @@ async def _handle_chrome_events(
                 while not health_queue.empty():
                     aid_str, status = health_queue.get_nowait()
                     yield "data: {}\n\n".format(json.dumps(_system_interface_status_payload(tracker, aid_str, status)))
+
+                # Periodic backstop: re-assert the current non-HEALTHY statuses
+                # even when no transition fired this tick. The tracker only
+                # *transitions* on edges (HEALTHY <-> STUCK/RESTARTING/...), so a
+                # workspace that is steadily STUCK emits nothing after its one
+                # initial edge. A renderer that lost that one-shot event (e.g. a
+                # reloaded chrome webview) would otherwise never re-learn it and
+                # never redirect to the recovery page. Re-asserting is idempotent
+                # client-side (the recovery-redirect lock prevents re-navigation).
+                now = time.monotonic()
+                if (
+                    tracker is not None
+                    and now - last_status_reassert >= _SYSTEM_INTERFACE_STATUS_REASSERT_INTERVAL_SECONDS
+                ):
+                    last_status_reassert = now
+                    for aid, status in tracker.snapshot_all().items():
+                        yield "data: {}\n\n".format(
+                            json.dumps(_system_interface_status_payload(tracker, str(aid), status))
+                        )
 
                 # Each workspace entry carries its mind liveness (derived from
                 # discovery host state + any optimistic override), so a liveness
@@ -2258,7 +2312,7 @@ async def _handle_chrome_events(
                     yield "data: {}\n\n".format(json.dumps({"type": "providers_state", **current_providers_data}))
 
                 inbox = request.app.state.request_inbox
-                current_requests_payload = _build_requests_payload(inbox)
+                current_requests_payload = _build_requests_payload(inbox, backend_resolver)
                 # Diff the full payload (count + ordered pending ids), not just
                 # the count, so a change to the pending *set* at constant size
                 # still pushes an update and the panel refreshes.
@@ -2446,7 +2500,31 @@ def _build_workspace_list(
     return workspaces
 
 
-def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
+def _displayable_pending_requests(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> list[RequestEvent]:
+    """Pending requests whose originating agent's host is currently resolvable.
+
+    A permission request filed by an agent on a since-stopped workspace
+    lingers in the inbox after that workspace disappears from discovery
+    (the request file survives on the gateway). With no live agent to
+    resolve, the inbox can only fall back to raw agent ids, which render
+    as meaningless 16-char hex in the UI. Rather than show those, we hide
+    a request whenever ``get_agent_display_info`` can't resolve its agent
+    -- the same signal every other display path uses to map an agent to a
+    host/workspace. The request itself is untouched on the gateway, so it
+    reappears if the workspace comes back (or once a freshly-arrived
+    request's host is discovered).
+    """
+    pending = inbox.get_pending_requests() if inbox else []
+    return [req for req in pending if backend_resolver.get_agent_display_info(AgentId(req.agent_id)) is not None]
+
+
+def _build_requests_payload(
+    inbox: RequestInbox | None,
+    backend_resolver: BackendResolverInterface,
+) -> dict[str, Any]:
     """Build the content-based requests payload pushed over the chrome SSE.
 
     The chrome's live request UI (badge, panel refresh, auto-open) must react
@@ -2459,8 +2537,12 @@ def _build_requests_payload(inbox: RequestInbox | None) -> dict[str, Any]:
     ids (in a deterministic order) alongside the count. Consumers diff
     ``request_ids`` to decide whether to refresh the panel and which ids are
     newly arrived (for auto-open); the count remains for the badge.
+
+    Requests whose host can't be resolved are excluded (see
+    :func:`_displayable_pending_requests`) so the badge count and the
+    rendered cards stay in agreement.
     """
-    pending = inbox.get_pending_requests() if inbox else []
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     request_ids = [str(req.event_id) for req in pending]
     return {"count": len(request_ids), "request_ids": request_ids}
 
@@ -3478,8 +3560,8 @@ def _build_inbox_cards(request: Request) -> list[Mapping[str, str]]:
     most-recent-first.
     """
     inbox: RequestInbox | None = request.app.state.request_inbox
-    pending = inbox.get_pending_requests() if inbox else []
     backend_resolver: BackendResolverInterface = request.app.state.backend_resolver
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
     # Map ws_name -> "homepage agent id" so the card accent matches the
     # color the homepage tile and the titlebar use for that workspace
@@ -3554,14 +3636,19 @@ def _resolve_inbox_selection(
     inbox: RequestInbox | None = request.app.state.request_inbox
     if inbox is None:
         return "", ""
-    pending = inbox.get_pending_requests()
+    pending = _displayable_pending_requests(inbox, backend_resolver)
     if not pending:
         return "", ""
 
     handlers: tuple[RequestEventHandler, ...] = request.app.state.request_event_handlers
+    # Only requests in the displayable set are selectable: a request whose
+    # host can't be resolved is hidden from the list, so honoring a stale
+    # ``selected_id`` that points at one would render the same
+    # agent-id-only detail we're hiding the card to avoid.
+    displayable_by_id = {str(req.event_id): req for req in pending}
     target = None
     if selected_id:
-        candidate = inbox.get_request_by_id(selected_id)
+        candidate = displayable_by_id.get(selected_id)
         if candidate is not None and not inbox.is_request_resolved(selected_id):
             target = candidate
     if target is None and selected_id:

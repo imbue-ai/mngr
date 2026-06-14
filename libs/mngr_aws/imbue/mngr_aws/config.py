@@ -6,6 +6,8 @@ import boto3
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.data_types import ScalarStrTuple
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -122,8 +124,8 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
+    allowed_ssh_cidrs: ScalarStrTuple = Field(
+        default=ScalarTuple(("0.0.0.0/0",)),
         description=(
             "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
             "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
