@@ -1649,9 +1649,25 @@ class VpsDockerProvider(BaseProviderInstance):
                 if record is None:
                     logger.debug("No host record on VPS {} volume yet, skipping", vps_ip)
                     return _VpsDiscoveryData()
-                parsed_listing = _read_live_listing_from_vps(
-                    outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
-                )
+                # The host record read above succeeded, so the host exists and
+                # must appear in the listing. A failure of the *live-listing*
+                # read alone (e.g. ``docker exec`` racing a container restart)
+                # must not drop the host -- degrade to no live agents and an
+                # offline (not-running) state instead. Genuine VPS-unreachable
+                # failures fail earlier (host-id probe / record read) and are
+                # handled by the outer cache-fallback branch.
+                try:
+                    parsed_listing = _read_live_listing_from_vps(
+                        outer, host_id, str(self.host_dir), self.mngr_ctx.config.prefix
+                    )
+                except MngrError as listing_exc:
+                    logger.warning(
+                        "Live listing read failed for host {} on VPS {}; surfacing host as offline: {}",
+                        host_id,
+                        vps_ip,
+                        listing_exc,
+                    )
+                    return _VpsDiscoveryData(records=(record,))
                 live_agent_data = _extract_live_agent_data(parsed_listing)
                 is_running = parsed_listing.get("container_state") == "running"
                 return _VpsDiscoveryData(

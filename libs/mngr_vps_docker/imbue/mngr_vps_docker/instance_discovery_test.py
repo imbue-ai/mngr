@@ -237,6 +237,9 @@ class _LiveListingOuter(_LocalFakeOuter):
 
     host_id_value: str = ""
     listing_stdout: str = ""
+    # When True, the outer listing script command exits non-zero, modeling a
+    # live-listing-only failure (host-id probe + host-record read still work).
+    listing_fails: bool = False
 
     def execute_idempotent_command(
         self,
@@ -249,6 +252,8 @@ class _LiveListingOuter(_LocalFakeOuter):
         if "xargs -r docker inspect" in command:
             return CommandResult(stdout=f"{self.host_id_value}\n", stderr="", success=True)
         if command.startswith("CID=$(docker ps -aq --filter label="):
+            if self.listing_fails:
+                return CommandResult(stdout="", stderr="docker exec failed", success=False)
             return CommandResult(stdout=self.listing_stdout, stderr="", success=True)
         return super().execute_idempotent_command(command, user, cwd, env, timeout_seconds)
 
@@ -441,6 +446,71 @@ def test_read_records_from_vps_surfaces_live_in_container_agents(
     assert [r.certified_host_data.host_id for r in result.records] == [str(host_id)]
     assert sorted(a["name"] for a in result.live_agent_data_by_host_id[host_id]) == ["chat-host", "system-services"]
     assert result.is_running_by_host_id[host_id] is True
+
+
+def test_read_records_from_vps_surfaces_host_offline_when_only_live_listing_fails(
+    provider: _DiscoveryTestProvider,
+    tmp_path: Path,
+) -> None:
+    """A live-listing-only failure must surface the freshly-read host as offline, not drop it.
+
+    The host-id probe and host-record read succeed, so the host exists and was
+    already read; only the live listing read fails (e.g. ``docker exec`` racing
+    a container restart). Discovery must still return that host record -- with
+    no live agents and a not-running state -- rather than falling through to the
+    cache-fallback branch and dropping a host that was successfully read.
+    """
+    device = tmp_path / "subvol"
+    device.mkdir()
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-live", vps_ip="10.0.0.10")
+    (device / "host_state.json").write_text(record.model_dump_json())
+    volume_name = host_volume_name_for(host_id)
+    provider.live_outer_by_ip["10.0.0.10"] = _LiveListingOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={volume_name: device},
+        host_id_value=str(host_id),
+        listing_fails=True,
+    )
+
+    result = provider._read_records_from_vps("10.0.0.10")
+
+    assert [r.certified_host_data.host_id for r in result.records] == [str(host_id)]
+    assert result.live_agent_data_by_host_id == {}
+    assert result.is_running_by_host_id == {}
+
+
+def test_read_records_from_vps_keeps_host_when_live_listing_fails(
+    provider: _DiscoveryTestProvider,
+    tmp_path: Path,
+) -> None:
+    """A live-listing-only failure must surface the host as offline, not drop it.
+
+    The host-id probe and host-record read succeed (so the host exists), but the
+    live-listing script exits non-zero. Discovery must still return the host
+    record (with no live agents and not-running), rather than letting the
+    listing failure drop a known host from the listing.
+    """
+    device = tmp_path / "subvol"
+    device.mkdir()
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-live", vps_ip="10.0.0.10")
+    (device / "host_state.json").write_text(record.model_dump_json())
+    volume_name = host_volume_name_for(host_id)
+    provider.live_outer_by_ip["10.0.0.10"] = _LiveListingOuter(
+        id=HostId.generate(),
+        connector=_make_local_connector(),
+        device_by_volume={volume_name: device},
+        host_id_value=str(host_id),
+        listing_fails=True,
+    )
+
+    result = provider._read_records_from_vps("10.0.0.10")
+
+    assert [r.certified_host_data.host_id for r in result.records] == [str(host_id)]
+    assert result.live_agent_data_by_host_id == {}
+    assert result.is_running_by_host_id == {}
 
 
 # =========================================================================
