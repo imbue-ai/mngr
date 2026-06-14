@@ -110,6 +110,7 @@ def _run_mngr(settings_dir: Path, cwd: Path, *args: str, timeout: int = 1500) ->
     creds = boto3.Session().get_credentials()
     assert creds is not None, "AWS credentials must resolve (release-test skipif guards this)"
     frozen = creds.get_frozen_credentials()
+    assert frozen.access_key and frozen.secret_key, "frozen AWS credentials must not be empty"
     env["AWS_ACCESS_KEY_ID"] = frozen.access_key
     env["AWS_SECRET_ACCESS_KEY"] = frozen.secret_key
     if frozen.token:
