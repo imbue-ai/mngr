@@ -82,6 +82,14 @@ if [ ! -e "$CODEX_MARKER_FILE" ]; then
     # same "marker absent" check as the root-session capture, so a nested codex
     # (whose prompt fires while the marker is present) never clears the root's
     # dialog state.
+    #
+    # Limitation: this only fires at a FRESH root turn (marker absent). Cancelling
+    # a dialog (Esc) interrupts the turn and codex 0.139.0 fires no Stop for it
+    # (verified live), so the `active` marker is also stranded -- the next prompt
+    # then finds the marker PRESENT and skips this block, leaving permissions_waiting
+    # until the next turn's Stop clears both. The lifecycle state stays WAITING
+    # throughout (correct); only the waiting_reason sub-field is briefly off. See
+    # the README "Known limitation" note.
     rm -f "$CODEX_PERMISSIONS_WAITING_FILE"
 fi
 
