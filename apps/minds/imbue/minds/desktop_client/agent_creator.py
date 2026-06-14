@@ -1063,8 +1063,9 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # to pick the right pool generation.
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
-        # ``region`` is honored by both IMBUE_CLOUD (-b region=) and CLOUD/vultr
-        # (-b --vultr-region=); the command builder ignores it for DOCKER/LIMA.
+        # ``region`` is honored by IMBUE_CLOUD (-b region=), VULTR
+        # (-b --vultr-region=), and AWS (-b --aws-region=); the command builder
+        # ignores it for DOCKER/LIMA.
         region=(params.region or None),
         anthropic_api_key=params.anthropic_api_key,
         anthropic_base_url=params.anthropic_base_url,
