@@ -14,7 +14,6 @@ Splits the test surface into two layers:
 
 import json
 
-import click
 import pluggy
 import pytest
 from click.testing import CliRunner
@@ -35,17 +34,19 @@ from imbue.mngr_gcp.cli import _resolve_provider_config
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 
 
 def _prepare_client(firewalls: FakeFirewallsClient) -> _StubbedGcpVpsClient:
+    # No ``image``: the operator commands never create instances, so the client
+    # is built image-less (mirrors ``_build_operator_client``).
     return _StubbedGcpVpsClient(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone="us-west1-a",
-        image="projects/debian-cloud/global/images/family/debian-12",
         allowed_ssh_cidrs=("0.0.0.0/0",),
         stubbed_firewalls_client=firewalls,
     )
@@ -56,7 +57,6 @@ def _cleanup_client(instances: FakeInstancesClient, firewalls: FakeFirewallsClie
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone="us-west1-a",
-        image="projects/debian-cloud/global/images/family/debian-12",
         stubbed_instances_client=instances,
         stubbed_firewalls_client=firewalls,
     )
@@ -113,7 +113,7 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
         )
     ]
     client = _cleanup_client(instances, firewalls)
-    with pytest.raises(click.ClickException) as exc_info:
+    with pytest.raises(GcpError) as exc_info:
         _perform_cleanup(client)
     # The refusal must name the blocking instance so the operator knows what to destroy.
     assert "mngr-host-1" in str(exc_info.value)

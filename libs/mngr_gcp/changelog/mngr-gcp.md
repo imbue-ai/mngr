@@ -26,3 +26,13 @@
 - `mngr gcp prepare` and `mngr gcp cleanup` now respect `--format`. Previously they ignored it: success was logged to stderr and the bare firewall-rule name was echoed to stdout regardless of format. They now emit a single result line in `human` mode, a structured object in `json` mode (`{firewall_name, target_tag, project_id, created}` for prepare; `{firewall_name, project_id, deleted}` for cleanup), and a `prepared` / `cleaned_up` event in `jsonl` mode. The `created` / `deleted` booleans let a caller distinguish a first-run create from an idempotent no-op. The redundant bare-name stdout line in human mode is gone.
 
 - The wide-open-CIDR warning is shorter: `mngr gcp prepare` with `0.0.0.0/0` ingress now logs just "auto-created firewall rule '<name>' will permit SSH from the public internet." (the trailing dev-vs-production advice sentence was dropped).
+
+- Internal hardening from review: GCE label values and instance names are now modeled as validated `NonEmptyStr` subtypes (`GceLabelValue` / `GceInstanceName`) rather than bare `str`, so the coercion output is re-asserted valid at its point of use (matching the codebase's `SnapshotId` / `SafeName` identifier-typing convention) and a pathological empty/invalid coercion fails fast instead of shipping an invalid identifier to GCE.
+
+- The `GcpVpsClient.image` field is now optional (`None` default): the `mngr gcp prepare` / `cleanup` operator commands build the client image-less (they only touch firewall rules and never launch an instance), instead of passing a misleading placeholder image. `create_instance` raises a clear error if asked to create without an image.
+
+- `mngr gcp prepare` / `cleanup` now resolve and validate the target project *before* constructing the client (raising `GcpProjectError` when none resolves), so the client always holds a real project rather than an empty-string placeholder threaded through every API call.
+
+- The operator CLI now raises the provider's domain error types (`GcpError` / `GcpProjectError` / `GcpCredentialsError`) instead of bare `click.ClickException`, consistent with the rest of the GCP code (these are all `MngrError` subclasses, so the rendered CLI message is unchanged).
+
+- Doc/test cleanups: firewall-rule descriptions no longer call the rule "auto-created" (it is created by `mngr gcp prepare`, not mid-create); dropped a change-detector config-defaults test and a redundant `resolve_project_id` test.

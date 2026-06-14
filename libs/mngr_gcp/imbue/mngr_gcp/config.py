@@ -85,7 +85,7 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     network: str = Field(
         default="default",
-        description="VPC network name for the instance NIC and the auto-created firewall rule.",
+        description="VPC network name for the instance NIC and the firewall rule `mngr gcp prepare` creates.",
     )
     subnetwork: str | None = Field(
         default=None,
@@ -94,8 +94,8 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     allowed_ssh_cidrs: tuple[str, ...] = Field(
         default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the auto-created "
-            "firewall rule. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
+            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the firewall rule "
+            "`mngr gcp prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
             "restrict to your own IP, or [] for no ingress (no firewall rule is created and the "
             "instance is unreachable from outside its VPC). A warning is logged when the effective "
             "range is 0.0.0.0/0 or empty."
@@ -103,12 +103,12 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     firewall_name: str = Field(
         default="mngr-gcp-ssh",
-        description="Name of the network-scoped firewall rule auto-created to allow SSH ingress.",
+        description="Name of the network-scoped firewall rule `mngr gcp prepare` creates to allow SSH ingress.",
     )
     firewall_target_tag: str = Field(
         default="mngr-ssh",
         description=(
-            "Network tag bound to the auto-created firewall rule. Every instance is tagged with it so "
+            "Network tag bound to the firewall rule `mngr gcp prepare` creates. Every instance is tagged with it so "
             "the rule targets only mngr-managed VMs (GCE firewalls are network-scoped + tag-targeted, "
             "not per-instance like an EC2 security group)."
         ),

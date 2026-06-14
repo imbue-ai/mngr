@@ -116,7 +116,7 @@ def _gcp_release_test_firewall_prepared(
 ) -> None:
     """Run ``mngr gcp prepare`` once per test session before any lifecycle test.
 
-    ``create_instance`` no longer auto-creates the firewall on the hot path (so
+    ``create_instance`` only resolves the firewall read-only on the hot path (so
     users with restricted IAM can run mngr create); the privileged
     firewall-creation step lives in ``mngr gcp prepare``. The release tests need
     to run prepare once so subsequent creates can resolve the rule. ``0.0.0.0/0``

@@ -16,8 +16,12 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import compute_v1
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_gcp.client import GceInstanceName
+from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
+from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import FakeSnapshotsClient
@@ -82,6 +86,43 @@ def test_to_gce_label_value_lowercases_and_replaces() -> None:
 
 def test_to_gce_label_value_truncates_to_63() -> None:
     assert len(to_gce_label_value("a" * 100)) == 63
+
+
+def test_to_gce_label_value_returns_validated_type() -> None:
+    """The coercion output is a GceLabelValue, not a bare str, so its validity is type-asserted."""
+    assert isinstance(to_gce_label_value("MyProvider"), GceLabelValue)
+
+
+def test_gce_label_value_rejects_empty_and_invalid() -> None:
+    """Constructing the type directly fails fast on empty or out-of-charset input.
+
+    Guards the latent edge where an all-invalid or empty coercion input would
+    otherwise yield an invalid empty label silently shipped to GCE.
+    """
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("has space")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("a" * 64)
+
+
+def test_make_instance_name_is_valid_and_typed() -> None:
+    """_make_instance_name yields a well-formed, RFC1035-valid GceInstanceName."""
+    name = _make_instance_name("My Agent!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, GceInstanceName)
+    assert name[0].isalpha()
+    assert len(name) <= 63
+
+
+def test_gce_instance_name_rejects_invalid() -> None:
+    """The instance-name type rejects strings that violate RFC1035."""
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("1-starts-with-digit")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("ends-with-dash-")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("Has-Upper")
 
 
 # =============================================================================
