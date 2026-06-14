@@ -59,11 +59,33 @@ from imbue.mngr_gcp.testing import get_default_project
 pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(900),
+    # Skip only when the user did not opt in. Opting in but lacking credentials is
+    # a misconfiguration, handled by ``_fail_if_opted_in_without_credentials``
+    # below: it fails loudly rather than skipping, so a release-test run that the
+    # user explicitly requested but that cannot reach GCP is visible instead of
+    # silently reported as "skipped".
     pytest.mark.skipif(
-        not (gcp_credentials_available() and GCP_RELEASE_TESTS_OPT_IN),
-        reason="GCP ADC or MNGR_GCP_RELEASE_TESTS=1 not set",
+        not GCP_RELEASE_TESTS_OPT_IN,
+        reason="MNGR_GCP_RELEASE_TESTS=1 not set",
     ),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _fail_if_opted_in_without_credentials() -> None:
+    """Fail (not skip) when release tests were opted into but ADC is unresolvable.
+
+    The ``skipif`` above has already excluded the not-opted-in case, so reaching
+    here means ``MNGR_GCP_RELEASE_TESTS=1`` is set. If credentials cannot be
+    resolved the run is misconfigured -- fail explicitly rather than let the test
+    pass as skipped, which would hide that the requested run never executed.
+    """
+    if not gcp_credentials_available():
+        pytest.fail(
+            "MNGR_GCP_RELEASE_TESTS=1 is set but GCP Application Default Credentials could not be "
+            "resolved, so the release tests cannot run. Run 'gcloud auth application-default login' "
+            "(or set GOOGLE_APPLICATION_CREDENTIALS), or unset MNGR_GCP_RELEASE_TESTS to skip them."
+        )
 
 
 @pytest.fixture(scope="session")
@@ -116,7 +138,7 @@ def _gcp_release_test_firewall_prepared(
 ) -> None:
     """Run ``mngr gcp prepare`` once per test session before any lifecycle test.
 
-    ``create_instance`` no longer auto-creates the firewall on the hot path (so
+    ``create_instance`` only resolves the firewall read-only on the hot path (so
     users with restricted IAM can run mngr create); the privileged
     firewall-creation step lives in ``mngr gcp prepare``. The release tests need
     to run prepare once so subsequent creates can resolve the rule. ``0.0.0.0/0``
@@ -275,7 +297,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         # --force skips the destroy confirmation. Result intentionally not
         # checked: best-effort cleanup.
         _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -318,7 +339,6 @@ def test_provider_lifecycle_create_stop_start_destroy(
         assert "alive-after-restart" in result.stdout
     finally:
         _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 # =============================================================================

@@ -2177,6 +2177,7 @@ name = "imbue-mngr-gcp"
 version = "0.1.0"
 source = { editable = "libs/mngr_gcp" }
 dependencies = [
+    { name = "concurrency-group" },
     { name = "google-auth" },
     { name = "google-cloud-compute" },
     { name = "imbue-mngr" },
@@ -2185,6 +2186,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
     { name = "google-auth", specifier = ">=2.28" },
     { name = "google-cloud-compute", specifier = ">=1.19" },
     { name = "imbue-mngr", editable = "libs/mngr" },

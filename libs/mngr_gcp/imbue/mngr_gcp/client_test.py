@@ -16,8 +16,12 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import compute_v1
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_gcp.client import GceInstanceName
+from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
+from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import FakeSnapshotsClient
@@ -43,6 +47,7 @@ def _make_client(
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_seconds: int | None = None,
+    image: str | None = "projects/debian-cloud/global/images/family/debian-12",
 ) -> GcpVpsClient:
     # Default to a prepared (existing) firewall so create-path tests don't each
     # have to wire one up; firewall-specific tests pass their own.
@@ -50,7 +55,7 @@ def _make_client(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone="us-west1-a",
-        image="projects/debian-cloud/global/images/family/debian-12",
+        image=image,
         machine_type="e2-small",
         allowed_ssh_cidrs=allowed_ssh_cidrs,
         auto_shutdown_seconds=auto_shutdown_seconds,
@@ -82,6 +87,43 @@ def test_to_gce_label_value_lowercases_and_replaces() -> None:
 
 def test_to_gce_label_value_truncates_to_63() -> None:
     assert len(to_gce_label_value("a" * 100)) == 63
+
+
+def test_to_gce_label_value_returns_validated_type() -> None:
+    """The coercion output is a GceLabelValue, not a bare str, so its validity is type-asserted."""
+    assert isinstance(to_gce_label_value("MyProvider"), GceLabelValue)
+
+
+def test_gce_label_value_rejects_empty_and_invalid() -> None:
+    """Constructing the type directly fails fast on empty or out-of-charset input.
+
+    Guards the latent edge where an all-invalid or empty coercion input would
+    otherwise yield an invalid empty label silently shipped to GCE.
+    """
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("has space")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("a" * 64)
+
+
+def test_make_instance_name_is_valid_and_typed() -> None:
+    """_make_instance_name yields a well-formed, RFC1035-valid GceInstanceName."""
+    name = _make_instance_name("My Agent!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, GceInstanceName)
+    assert name[0].isalpha()
+    assert len(name) <= 63
+
+
+def test_gce_instance_name_rejects_invalid() -> None:
+    """The instance-name type rejects strings that violate RFC1035."""
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("1-starts-with-digit")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("ends-with-dash-")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("Has-Upper")
 
 
 # =============================================================================
@@ -213,6 +255,63 @@ def test_create_instance_spot_composes_with_auto_shutdown() -> None:
     assert scheduling.provisioning_model == "SPOT"
     assert scheduling.max_run_duration.seconds == 3600
     assert scheduling.instance_termination_action == "DELETE"
+
+
+def test_create_instance_uses_configured_image_by_default() -> None:
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+    )
+    # With no override the boot disk uses the client's configured image.
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image
+        == "projects/debian-cloud/global/images/family/debian-12"
+    )
+
+
+def test_create_instance_image_override_wins_over_configured() -> None:
+    """The per-host ``--gcp-image`` override boots from the given image, not the client default."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
+
+
+def test_create_instance_image_override_works_without_configured_image() -> None:
+    """An override lets an image-less client (e.g. operator-style) still create a VM."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances, image=None)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
 
 
 def test_create_instance_cross_zone_raises() -> None:

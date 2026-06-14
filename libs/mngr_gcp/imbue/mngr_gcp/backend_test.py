@@ -28,6 +28,11 @@ class _StubAdcConfig(GcpProviderConfig):
 
     stub_has_credentials: bool = True
     stub_resolved_project: str | None = None
+    # Pin a zone so build_provider_instance takes the explicit-config branch and
+    # never shells out to 'gcloud config get compute/zone', keeping these tests
+    # hermetic (the gcloud probe and the unset-zone fallback are covered directly
+    # in config_test.py).
+    default_zone: str | None = "us-west1-a"
 
     def get_credentials_and_resolved_project(self) -> tuple[Credentials, str | None]:
         if not self.stub_has_credentials:
@@ -50,8 +55,9 @@ def test_backend_build_args_help_mentions_gcp_specific_args() -> None:
     assert "--gcp-zone=ZONE" in help_text
     assert "--gcp-machine-type=TYPE" in help_text
     assert "zonal" in help_text
-    # Document the per-host-image escape hatch is intentionally absent.
-    assert "image" in help_text and "default_source_image" in help_text
+    # The per-host image override and its config-default source are both documented.
+    assert "--gcp-image=IMAGE" in help_text
+    assert "default_source_image" in help_text
 
 
 def test_build_provider_instance_raises_provider_unavailable_without_credentials(
@@ -148,7 +154,7 @@ def _build_provider(
     client = _FirewallStubClient(
         credentials=AnonymousCredentials(),
         project_id="test-project",
-        zone=config.default_zone,
+        zone=config.resolve_zone_and_region(None)[0],
         image=config.default_source_image,
         auto_shutdown_seconds=auto_shutdown_seconds,
         stub_firewall_missing=firewall_missing,
@@ -211,6 +217,7 @@ def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) ->
     assert parsed.region == "us-west1-a"
     assert parsed.plan == "e2-small"
     assert parsed.spot is False
+    assert parsed.image is None
     assert parsed.git_depth is None
     assert parsed.docker_build_args == ()
 
@@ -221,6 +228,7 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
         [
             "--gcp-zone=us-west1-b",
             "--gcp-machine-type=e2-medium",
+            "--gcp-image=projects/my-proj/global/images/family/custom",
             "--gcp-spot",
             "--git-depth=1",
             "--file=Dockerfile",
@@ -231,6 +239,7 @@ def test_parse_build_args_extracts_gcp_knobs_plus_docker_passthrough(temp_mngr_c
     assert parsed.region == "us-west1-b"
     assert parsed.plan == "e2-medium"
     assert parsed.spot is True
+    assert parsed.image == "projects/my-proj/global/images/family/custom"
     assert parsed.git_depth == 1
     assert parsed.docker_build_args == ("--file=Dockerfile", ".")
 

@@ -28,3 +28,14 @@ class GcpZoneRegionMismatchError(GcpError, ValueError):
     Inherits ``ValueError`` for the same backend-catch reason as
     ``GcpCredentialsError``.
     """
+
+
+class InvalidGceIdentifierError(GcpError, ValueError):
+    """A coerced GCE label value or instance name failed its validity check.
+
+    Raised by the ``GceLabelValue`` / ``GceInstanceName`` constructors when the
+    string handed to them does not satisfy GCE's identifier rules. In normal
+    operation the coercion helpers always produce valid strings, so this firing
+    signals a regression in that coercion rather than bad user input. Inherits
+    ``ValueError`` for the same backend-catch reason as ``GcpCredentialsError``.
+    """
