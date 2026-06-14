@@ -61,6 +61,17 @@ def parse_listening_ports(ss_output: str) -> set[int]:
     return ports
 
 
+def _is_already_absent_error(stderr: str) -> bool:
+    """True if a limactl delete failure stderr indicates the target was already gone.
+
+    Used to make teardown idempotent: a slice carve can fail after the data disk
+    was created but before the VM was registered, so both the instance and the
+    disk deletes must tolerate the target already being absent.
+    """
+    stderr_lower = stderr.lower()
+    return "not found" in stderr_lower or "does not exist" in stderr_lower
+
+
 class SliceProvisionResult(FrozenModel):
     """What a slice provision produced: the lima instance/disk and the two host ports."""
 
@@ -247,15 +258,20 @@ class LimaSliceVpsClient(VpsClientInterface):
             delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="delete"
         )
         if delete_rc != 0:
-            raise LimaCommandError("delete", delete_rc or 1, delete_err)
+            # Tolerate the instance already being absent: a carve can fail after the
+            # data disk was created but before `limactl start` registered the
+            # instance, so we must still fall through to the disk delete below --
+            # otherwise the orphaned disk leaks and permanently holds the box slot.
+            if not _is_already_absent_error(delete_err):
+                raise LimaCommandError("delete", delete_rc or 1, delete_err)
+            logger.debug("Lima instance {} already absent, skipping", instance_name)
         disk_delete_command = f"limactl disk delete --force {shlex.quote(disk_name)}"
         disk_rc, _disk_out, disk_err = self._run_on_box(
             disk_delete_command, timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="disk-delete"
         )
         if disk_rc != 0:
-            stderr_lower = disk_err.lower()
             # Tolerate the disk already being absent (e.g. a partial prior teardown).
-            if "not found" not in stderr_lower and "does not exist" not in stderr_lower:
+            if not _is_already_absent_error(disk_err):
                 raise LimaCommandError("disk delete", disk_rc or 1, disk_err)
             logger.debug("Lima disk {} already absent, skipping", disk_name)
         logger.info("Destroyed slice VM {} (disk {}) on {}", instance_name, disk_name, self.box_address)
