@@ -124,6 +124,7 @@ def _write_release_settings(settings_dir: Path, project: str) -> None:
         # Disable other remote providers so the create-host preflight doesn't
         # trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
         "\n[providers.aws]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
