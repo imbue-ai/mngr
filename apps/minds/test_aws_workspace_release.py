@@ -42,6 +42,14 @@ from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
 from imbue.mngr_aws.testing import AWS_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS
 from imbue.mngr_aws.testing import aws_credentials_available
 
+# NOTE: deliberately NOT marked @pytest.mark.rsync. ``mngr create`` for a
+# VPS-Docker provider only rsyncs the source when the source is a plain
+# directory; here the source is a *git repo* (``temp_git_repo``), so the
+# transfer resolves to GIT_MIRROR (git push), not rsync. The pytest rsync
+# resource-guard's superfluous-mark check then fails a test that carries the
+# mark but never invokes rsync. Verified empirically against real EC2: with the
+# mark the run fails at teardown ("marked rsync but never invoked rsync");
+# without it the run passes. Do not add the mark back.
 pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(900),
