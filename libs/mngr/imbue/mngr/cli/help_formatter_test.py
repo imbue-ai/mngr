@@ -561,6 +561,28 @@ def test_commands_with_aliases_have_aliases_in_synopsis() -> None:
 # capture existing omissions so the test can run green while still catching
 # *new* drift. Promoting them to the synopsis (and removing them here) is a
 # fine follow-up.
+# The standard agent-filter flags injected by
+# ``imbue.mngr.cli.filter_opts.add_agent_filter_options``. Every command that
+# uses that decorator inherits this set under the "Filtering" optgroup; their
+# synopses don't enumerate them (the convention across the codebase) so they
+# go in opt-outs.
+_AGENT_FILTER_FLAGS: frozenset[str] = frozenset(
+    {
+        "--active",
+        "--archived",
+        "--exclude",
+        "--host-label",
+        "--include",
+        "--label",
+        "--local",
+        "--project",
+        "--remote",
+        "--running",
+        "--stopped",
+    }
+)
+
+
 _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
     "create": frozenset(
         {
@@ -619,27 +641,56 @@ _SYNOPSIS_OPTOUT_FLAGS: dict[str, frozenset[str]] = {
             "--uncommitted-changes",
         }
     ),
-    # ``mngr usage wait``'s synopsis enumerates the wait-specific predicate and
-    # wait-control options (--until / --timeout / --interval). The standard
-    # agent-filter flags (--include / --exclude / --local / ... / --provider)
-    # are inherited via ``add_agent_filter_options`` and listed in the OPTIONS
-    # section of help/docs; keeping them out of the synopsis keeps it readable.
-    "usage.wait": frozenset(
+    # ``mngr usage`` and ``mngr usage wait`` synopses enumerate the
+    # usage-specific options; the inherited agent-filter set (and --provider)
+    # is left out of the synopsis for readability and captured here.
+    "usage": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
+    "usage.wait": _AGENT_FILTER_FLAGS | frozenset({"--provider"}),
+    # Pre-existing commands whose synopses are placeholder-only ("[OPTIONS]")
+    # at the time this stricter ratchet landed. Captured as the baseline per
+    # the header comment above; promoting any of these to an enumerated
+    # synopsis (and removing them here) is a fine follow-up.
+    "connect": _AGENT_FILTER_FLAGS
+    | frozenset(
         {
-            "--active",
-            "--archived",
-            "--exclude",
-            "--host-label",
-            "--include",
-            "--label",
-            "--local",
-            "--project",
-            "--provider",
-            "--remote",
-            "--running",
-            "--stopped",
+            "--agent",
+            "--allow-unknown-host",
+            "--connect-command",
+            "--reconnect",
+            "--session-command",
+            "--start",
         }
     ),
+    "gc": frozenset({"--all-providers", "--dry-run", "--on-error", "--provider"}),
+    "kanpan": _AGENT_FILTER_FLAGS,
+    "list": _AGENT_FILTER_FLAGS
+    | frozenset(
+        {
+            "--addrs",
+            "--fields",
+            "--header",
+            "--ids",
+            "--limit",
+            "--on-error",
+            "--provider",
+            "--schema",
+            "--sort",
+            "--stdin",
+        }
+    ),
+    "snapshot.create": frozenset(
+        {
+            "--description",
+            "--name",
+            "--on-error",
+            "--pause-during",
+            "--restart-if-larger-than",
+            "--tag",
+            "--wait",
+        }
+    ),
+    "snapshot.list": frozenset({"--after", "--before", "--limit"}),
+    "snapshot.destroy": frozenset({"--all-snapshots", "--dry-run", "--force", "--snapshot"}),
 }
 
 
@@ -702,17 +753,14 @@ def _resolve_help_key_to_command(key: str) -> click.Command | None:
     return current
 
 
-def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMetadata, click.Command]]:
-    """Find every command whose synopsis enumerates at least one flag.
+def _resolvable_commands_with_metadata() -> list[tuple[str, CommandHelpMetadata, click.Command]]:
+    """Find every help-registry entry whose key resolves to a click command.
 
-    Synopses like `mngr foo [OPTIONS] [ARGS]` aren't worth ratcheting -- they
-    don't make a per-flag commitment. We only ratchet commands whose authors
-    chose to enumerate specific flags in the synopsis line.
+    Plugin-only commands not registered on the root cli in this test environment
+    are skipped, since we can't introspect their params here.
     """
     result: list[tuple[str, CommandHelpMetadata, click.Command]] = []
     for key, metadata in get_all_help_metadata().items():
-        if not _flags_in_synopsis(metadata.synopsis):
-            continue
         command = _resolve_help_key_to_command(key)
         if command is None:
             continue
@@ -720,7 +768,7 @@ def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMet
     return result
 
 
-_RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
+_RATCHETED_COMMANDS = _resolvable_commands_with_metadata()
 
 
 @pytest.mark.parametrize(
@@ -729,15 +777,19 @@ _RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
     ids=[entry[0] for entry in _RATCHETED_COMMANDS],
 )
 def test_synopsis_lists_all_non_optout_flags(key: str, metadata: CommandHelpMetadata, command: click.Command) -> None:
-    """Every non-Common flag on a flag-enumerating synopsis must appear or be opted out.
+    """Every non-Common flag on a command must appear in the synopsis or be opted out.
 
-    Catches both forgotten additions (new flag added without updating the
-    synopsis) and silent renames (synopsis still showing the old name -- the
-    old form is no longer a click param so the new name shows up as missing).
+    Catches three kinds of drift:
+    - Forgotten additions: a new flag added without updating the synopsis.
+    - Silent renames: synopsis still shows the old name; the old form is no
+      longer a click param so the new name shows up as missing.
+    - Placeholder synopses: a synopsis like `mngr foo [OPTIONS]` whose command
+      actually has custom non-Common flags. Every such flag is reported as
+      missing -- a generic placeholder is treated as enumerating nothing.
 
-    Only runs against commands whose synopsis enumerates specific flags.
-    Generic synopses like `[OPTIONS]` are skipped, since they don't make a
-    per-flag commitment to ratchet against.
+    A command with no custom non-Common flags (e.g. a group whose work is done
+    by subcommands) passes regardless of synopsis content, since there's
+    nothing the synopsis would need to enumerate.
     """
     synopsis_flags = _flags_in_synopsis(metadata.synopsis)
     # Plugins only inject options into top-level commands (see
