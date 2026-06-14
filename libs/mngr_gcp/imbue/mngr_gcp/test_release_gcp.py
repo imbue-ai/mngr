@@ -297,7 +297,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         # --force skips the destroy confirmation. Result intentionally not
         # checked: best-effort cleanup.
         _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -340,7 +339,6 @@ def test_provider_lifecycle_create_stop_start_destroy(
         assert "alive-after-restart" in result.stdout
     finally:
         _run_mngr(gcp_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 # =============================================================================

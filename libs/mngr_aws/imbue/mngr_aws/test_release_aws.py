@@ -283,7 +283,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -328,7 +327,6 @@ def test_provider_lifecycle_create_stop_start_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
 
 
 # =============================================================================
