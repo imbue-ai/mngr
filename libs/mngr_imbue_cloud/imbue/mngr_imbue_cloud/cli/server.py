@@ -674,16 +674,20 @@ def _bake_and_record_one_slice(
             raise BareMetalProvisioningError(
                 f"bake of {host_name} on {address} failed (exit {bake_result.returncode}): {bake_result.stderr.strip()}"
             )
+        # ``host_id`` is the one field parse_create_json_from_output guarantees, and
+        # it is the rollback key (the lima instance/disk names derive from it). The
+        # VM definitely exists on the box now, so any failure past this point must
+        # destroy it -- otherwise it leaks its box slot + forwarded ports (no
+        # pool_hosts row will reference it, so capacity accounting can't see it).
+        # The remaining create-JSON fields are extracted INSIDE the protected block
+        # below so a missing/invalid key (KeyError/ValueError) also tears down the VM.
         created = parse_create_json_from_output(bake_result.stdout)
         host_id = str(created["host_id"])
-        agent_id = str(created["agent_id"])
-        container_ssh_port = int(created["ssh_port"])
-        vm_ssh_port = int(created["outer_ssh_port"])
-        # The VM definitely exists on the box now, so any failure past this point
-        # must destroy it -- otherwise it leaks its box slot + forwarded ports
-        # (no pool_hosts row will reference it, so capacity accounting can't see it).
         host_id_obj = HostId(host_id)
         try:
+            agent_id = str(created["agent_id"])
+            container_ssh_port = int(created["ssh_port"])
+            vm_ssh_port = int(created["outer_ssh_port"])
             # Tear down the bootstrap-created chat agent + sentinel so the user's
             # first lease re-creates the chat agent under their own workspace name.
             is_sentinel_present = _wait_for_container_sentinel(
