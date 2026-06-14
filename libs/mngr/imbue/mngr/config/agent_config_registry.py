@@ -8,7 +8,7 @@ from imbue.mngr.config.agent_class_registry import is_agent_class_registered
 from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import _settings_patch_field_names
+from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UnknownAgentTypeError
@@ -129,7 +129,7 @@ def _apply_custom_overrides_to_parent_config(
     ``serialize_as_any`` keeps subclass-only fields through the dump. See
     ``specs/whole-config-overlay-integration.md``.
     """
-    settings_patch_field_names = _settings_patch_field_names(type(parent_config))
+    settings_patch_field_names = get_settings_patch_field_names(type(parent_config))
     return merge_models_via_overlay(
         parent_config,
         custom_config,

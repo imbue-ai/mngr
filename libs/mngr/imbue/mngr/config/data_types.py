@@ -88,7 +88,7 @@ def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
     return any(isinstance(item, SettingsPatchField) for item in metadata)
 
 
-def _settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[str]:
+def get_settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[str]:
     """Return the ``SettingsPatchField``-marked field names of a model class.
 
     Read off the pydantic field metadata so the overlay merge pipeline marks exactly
@@ -445,7 +445,7 @@ class AgentTypeConfig(FrozenModel):
         # branch), and the result re-parses into ``type(self)`` so a subclass stays
         # its concrete class. See ``overlay_merge.merge_models_via_overlay`` and
         # ``specs/whole-config-overlay-integration.md``.
-        settings_patch_field_names = _settings_patch_field_names(type(override))
+        settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
 
 
@@ -828,7 +828,7 @@ class MngrConfig(FrozenModel):
         ``merge_with`` delegates here and discards the paths for callers that only need
         the merged value.
         """
-        settings_patch_field_names = _settings_patch_field_names(type(override))
+        settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay_with_narrowings(
             self,
             override,
@@ -836,7 +836,7 @@ class MngrConfig(FrozenModel):
             serialize_as_any=True,
             container_dict_field_names=_CONTAINER_DICT_FIELDS,
             drop_none_values=True,
-            settings_patch_field_names_for_class=_settings_patch_field_names,
+            settings_patch_field_names_for_class=get_settings_patch_field_names,
         )
 
 
