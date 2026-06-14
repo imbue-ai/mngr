@@ -18,6 +18,7 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.overlay.errors import OverlayError
 
@@ -174,16 +175,16 @@ def test_apply_extend_nested_bare_dict_resolves_markers_against_empty() -> None:
 
 
 def test_resolve_extends_rejects_extend_on_scalar() -> None:
-    """__extend on a scalar field raises OverlayError with a clear message."""
+    """__extend on a scalar field raises ConfigParseError with a clear message."""
     base = MngrConfig(prefix="base-")
-    with pytest.raises(OverlayError, match="__extend on field 'prefix'"):
+    with pytest.raises(ConfigParseError, match="__extend on field 'prefix'"):
         resolve_extends(base, {"prefix__extend": "oops"})
 
 
 def test_resolve_extends_rejects_shape_mismatch_dict_on_list() -> None:
-    """An object value used to extend a list field raises OverlayError."""
+    """An object value used to extend a list field raises ConfigParseError."""
     base = MngrConfig(unset_vars=["BASE"])
-    with pytest.raises(OverlayError, match="requires a JSON array value"):
+    with pytest.raises(ConfigParseError, match="requires a JSON array value"):
         resolve_extends(base, {"unset_vars__extend": {"not": "a list"}})
 
 
@@ -191,11 +192,34 @@ def test_resolve_extends_rejects_scalar_for_unset_list_field() -> None:
     """__extend with a scalar value on an unset field still raises (must be aggregate).
 
     Use a raw dict base where the target path is absent so that the resolver
-    reaches the ``current_value is None`` branch in _apply_extend.
+    reaches the ``current_value is None`` branch in apply_extend.
     """
     base: dict[str, Any] = {}
-    with pytest.raises(OverlayError, match="requires a list, tuple, dict, or set value"):
+    with pytest.raises(ConfigParseError, match="requires a list, tuple, dict, or set value"):
         resolve_extends(base, {"new_field__extend": "not-a-list"})
+
+
+def test_resolve_extends_rejects_bare_plus_assign_conflict() -> None:
+    """A field with both a bare key and its ``__assign`` twin in the same layer
+    raises ConfigParseError (translated from the overlay conflict check)."""
+    base = MngrConfig(prefix="base-")
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        resolve_extends(base, {"prefix": "a", "prefix__assign": "b"})
+
+
+def test_resolve_extends_translates_overlay_error_to_config_parse_error() -> None:
+    """A structural error from the overlay algebra surfaces as ``ConfigParseError``,
+    not a bare ``OverlayError``.
+
+    ``ConfigParseError`` is a ``ClickException`` (via ``MngrError``), so the top-level
+    CLI handler renders it as a clean ``Error: ...`` message; a bare ``OverlayError``
+    would escape as an unexpected-error traceback. ``ConfigParseError`` is also an
+    ``OverlayError`` subclass, so ``except OverlayError`` handlers still catch it.
+    """
+    base = MngrConfig(prefix="base-")
+    with pytest.raises(ConfigParseError) as exc_info:
+        resolve_extends(base, {"prefix__extend": "oops"})
+    assert isinstance(exc_info.value, OverlayError)
 
 
 # =============================================================================

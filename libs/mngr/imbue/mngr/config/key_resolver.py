@@ -22,7 +22,9 @@ from pydantic import BaseModel
 
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import InvalidKeyPathError
+from imbue.overlay.errors import OverlayError
 from imbue.overlay.merge import apply_extend
 from imbue.overlay.operators import assign_bare_key
 from imbue.overlay.operators import bare_key
@@ -100,6 +102,33 @@ def resolve_extends(
     *,
     path: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    """Resolve ``__extend``-suffixed leaf keys in ``override`` against ``base``.
+
+    Thin boundary wrapper over ``_resolve_extends`` that translates the raw
+    ``OverlayError`` the overlay algebra raises for structurally-malformed patches
+    (a ``__extend`` on a scalar, a shape-mismatched ``__extend`` value, an
+    incompatible marker combination, a bare-plus-``__assign`` conflict) into a
+    ``ConfigParseError``. Without this, those errors would escape the config-load /
+    ``--setting`` paths as a bare ``OverlayError`` -- not a ``ClickException`` -- and
+    surface to the user as an unexpected-error traceback instead of a clean
+    ``Error: ...`` message. ``ConfigParseError`` is itself an ``OverlayError``, so a
+    nested ``ConfigParseError`` is re-raised unchanged (no double-wrapping) and the
+    ``except OverlayError`` handlers in ``mngr config set`` still catch it.
+    """
+    try:
+        return _resolve_extends(base, override, path=path)
+    except ConfigParseError:
+        raise
+    except OverlayError as e:
+        raise ConfigParseError(str(e)) from e
+
+
+def _resolve_extends(
+    base: Any,
+    override: dict[str, Any],
+    *,
+    path: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Walk ``override`` and resolve any ``__extend``-suffixed leaf keys
     against ``base``, returning a new dict where every key is a plain
     assignment.
@@ -138,7 +167,7 @@ def resolve_extends(
             result[key] = value
             continue
         if isinstance(value, dict):
-            result[bare] = resolve_extends(base, value, path=path + (bare,))
+            result[bare] = _resolve_extends(base, value, path=path + (bare,))
         else:
             result[bare] = value
     # Second pass (extend-phase): apply ``__extend`` keys against either the
