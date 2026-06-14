@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.20] - 2026-06-13
+
 ### Changed
 
 - Changed: Constrained `primitives` types and the `RegexPattern` validator now raise dedicated `InvalidPrimitiveValueError` / `InvalidRegexPatternError` instead of `ValueError`.

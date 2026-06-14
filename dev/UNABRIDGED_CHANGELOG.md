@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-13
+
+Added a design plan under `blueprint/host-backup-snapshot-rotation/` for fixing empty gVisor host backups: unique time-named btrfs snapshots, keep-newest-N retention, and exit-code-only backup failure signaling.
+
 ## 2026-06-12
 
 Added `specs/agent-plugin-parity/spec.md`, a developer reference mapping every feature the
