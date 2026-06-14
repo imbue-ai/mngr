@@ -27,6 +27,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -812,8 +813,23 @@ class MngrConfig(FrozenModel):
         ``overlay_merge.merge_models_via_overlay`` and
         ``specs/whole-config-overlay-integration.md``.
         """
+        merged, _narrowings = self.merge_with_narrowings(override)
+        return merged
+
+    def merge_with_narrowings(self, override: Self) -> tuple[Self, list[str]]:
+        """Like ``merge_with``, but also return the ``SettingsPatchField`` narrowing
+        paths surfaced by the overlay merge.
+
+        These are the cross-scope ``settings_overrides`` bare-drops that
+        ``detect_settings_narrowing`` deliberately exempts (a ``SettingsPatchField``
+        accumulates, so the narrowing only shows up inside the patch). The loader
+        routes them into its flag-gated narrowing aggregation. Paths are rooted at the
+        offending settings field, e.g. ``agent_types.<name>.settings_overrides.<key>...``.
+        ``merge_with`` delegates here and discards the paths for callers that only need
+        the merged value.
+        """
         settings_patch_field_names = _settings_patch_field_names(type(override))
-        return merge_models_via_overlay(
+        return merge_models_via_overlay_with_narrowings(
             self,
             override,
             settings_patch_field_names=settings_patch_field_names,

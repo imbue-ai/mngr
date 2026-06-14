@@ -38,9 +38,14 @@ overlay ``combine`` -> ``model_validate``:
    ``__extend`` (so a key present in both layers ``combine``\\s the two entry patches
    field-by-field -- which *is* the entry's own ``merge_with``). Every other key
    stays bare, which the algebra lifts to a ``Default`` (assign-by-default).
-3. **Merge.** ``lift`` both pre-processed dicts and ``combine`` higher (override)
-   over lower (base). ``combine`` (not ``merge_narrowing_allowed``) because this
-   reproduces only the merged *value*; the old merge performs no narrowing.
+3. **Merge.** ``lift`` both pre-processed dicts and ``merge_narrowing_allowed`` higher
+   (override) over lower (base), which returns the merged patch *and* the narrowing
+   paths. The merged *value* is behavior-identical to the old field-by-field merge;
+   the narrowing paths are filtered to the ones rooted at a ``SettingsPatchField``
+   field and returned by ``merge_models_via_overlay_with_narrowings`` so the loader can
+   route them into its flag-gated aggregation (the cross-scope ``settings_overrides``
+   narrowing that ``detect_settings_narrowing`` deliberately exempts). The value-only
+   ``merge_models_via_overlay`` discards them.
 4. **Lower + re-parse.** ``lower`` (not ``finalize``) the combined patch -- ``lower``
    preserves the accumulated inner ``__extend`` markers in the settings patch, just
    as the old merge stores the ``combine_patches`` output verbatim; ``finalize``
@@ -57,9 +62,9 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from imbue.overlay.node_merge import combine
 from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lower
+from imbue.overlay.node_merge import merge_narrowing_allowed
 from imbue.overlay.operators import EXTEND_SUFFIX
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -259,6 +264,42 @@ def _reparse_container_entries(
         merged_dict[field_name] = reparsed
 
 
+def _is_settings_patch_narrowing(
+    dotted_path: str,
+    settings_patch_field_names: frozenset[str],
+    container_dict_field_names: frozenset[str],
+    entry_classes_by_field: dict[str, dict[Any, type[BaseModel]]],
+    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
+) -> bool:
+    """Return True if ``dotted_path`` is rooted at a ``SettingsPatchField`` field.
+
+    The overlay narrowing paths come back with bare (un-suffixed) segment names
+    because ``lift`` strips the ``__extend`` markers when building the patch. Two
+    rooting shapes count as a settings-patch narrowing:
+
+    - ``<settings_field>...`` -- the merged model's own ``SettingsPatchField`` field
+      (the ``AgentTypeConfig`` case, where ``settings_overrides`` is top-level).
+    - ``<container>.<entry>.<settings_field>...`` -- a ``SettingsPatchField`` field of
+      a container entry's concrete class (the ``MngrConfig`` case, where the patch
+      lives inside an ``agent_types`` entry).
+
+    Every other narrowing path is a non-settings field, which the loader's
+    ``detect_settings_narrowing`` already handles (and which exempts settings fields),
+    so surfacing it here would double-count -- those are filtered out.
+    """
+    segments = dotted_path.split(".")
+    if segments[0] in settings_patch_field_names:
+        return True
+    if (
+        len(segments) >= 3
+        and segments[0] in container_dict_field_names
+        and segments[1] in entry_classes_by_field.get(segments[0], {})
+    ):
+        entry_class = entry_classes_by_field[segments[0]][segments[1]]
+        return segments[2] in settings_patch_field_names_for_class(entry_class)
+    return False
+
+
 def merge_models_via_overlay(
     base: ModelT,
     override: BaseModel,
@@ -271,6 +312,36 @@ def merge_models_via_overlay(
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
 ) -> ModelT:
     """Merge ``override`` onto ``base`` via the overlay node algebra (see module docstring).
+
+    The value-only entry point: delegates to
+    ``merge_models_via_overlay_with_narrowings`` and discards the narrowing paths.
+    Used by callers that only need the merged value (e.g. ``AgentTypeConfig.merge_with``)."""
+    merged, _narrowings = merge_models_via_overlay_with_narrowings(
+        base,
+        override,
+        settings_patch_field_names=settings_patch_field_names,
+        drop_field_names=drop_field_names,
+        serialize_as_any=serialize_as_any,
+        container_dict_field_names=container_dict_field_names,
+        drop_none_values=drop_none_values,
+        settings_patch_field_names_for_class=settings_patch_field_names_for_class,
+    )
+    return merged
+
+
+def merge_models_via_overlay_with_narrowings(
+    base: ModelT,
+    override: BaseModel,
+    *,
+    settings_patch_field_names: frozenset[str],
+    drop_field_names: frozenset[str] = frozenset(),
+    serialize_as_any: bool = False,
+    container_dict_field_names: frozenset[str] = frozenset(),
+    drop_none_values: bool = False,
+    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
+) -> tuple[ModelT, list[str]]:
+    """Merge ``override`` onto ``base`` and also return the ``SettingsPatchField``
+    narrowing paths (see module docstring for the merge mechanics).
 
     ``settings_patch_field_names`` are the ``SettingsPatchField``-marked field names
     on the *model itself* (accumulate via ``__extend`` rather than assign-by-default).
@@ -286,8 +357,15 @@ def merge_models_via_overlay(
     ``SettingsPatchField`` names of a *container entry* class; required whenever
     ``container_dict_field_names`` is non-empty.
 
-    Returns a ``type(base)`` instance, so a subclass (``ClaudeAgentConfig``) stays its
-    concrete class with subclass-only fields intact.
+    Returns ``(merged, narrowings)``: ``merged`` is a ``type(base)`` instance (so a
+    subclass like ``ClaudeAgentConfig`` keeps its concrete class and subclass-only
+    fields), and ``narrowings`` is the list of dotted paths where a higher-precedence
+    bare assign drops a non-empty aggregate that a lower scope set *inside a*
+    ``SettingsPatchField`` field. The narrowings are filtered to settings-patch fields
+    only (see ``_is_settings_patch_narrowing``): non-settings narrowings are left for
+    the loader's ``detect_settings_narrowing`` (which exempts settings fields), so
+    surfacing them here would double-count and would mis-narrow scalar fields whose
+    ``Static*`` markers do not survive the ``model_dump``.
     """
     config_class = type(base)
 
@@ -345,7 +423,22 @@ def merge_models_via_overlay(
             drop_none_values=drop_none_values,
         )
     )
-    merged_patch = combine(lower_patch, higher_patch)
+    # ``merge_narrowing_allowed`` (not ``combine``) so the merge also returns the
+    # narrowing paths without raising. Only the ``SettingsPatchField``-rooted ones are
+    # surfaced; the rest are the responsibility of the loader's
+    # ``detect_settings_narrowing`` (which exempts settings fields).
+    merged_patch, all_narrowings = merge_narrowing_allowed(lower_patch, higher_patch)
+    settings_narrowings = [
+        dotted_path
+        for dotted_path in all_narrowings
+        if _is_settings_patch_narrowing(
+            dotted_path,
+            settings_patch_field_names,
+            container_dict_field_names,
+            merged_classes,
+            entry_patch_fn,
+        )
+    ]
 
     merged_dict = _from_operator_dict(
         lower(merged_patch),
@@ -355,4 +448,4 @@ def merge_models_via_overlay(
         entry_patch_fn,
     )
     _reparse_container_entries(merged_dict, container_dict_field_names, base_classes, override_classes)
-    return config_class.model_validate(merged_dict)
+    return config_class.model_validate(merged_dict), settings_narrowings

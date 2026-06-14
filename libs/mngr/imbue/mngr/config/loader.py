@@ -230,7 +230,10 @@ def load_config(
             silent=silent_unknown_fields,
         )
         narrowing_violations.extend(_collect_layer_narrowing(config, parsed_layer, file_source, processed_sources))
-        config = config.merge_with(parsed_layer)
+        config, settings_narrowing_paths = config.merge_with_narrowings(parsed_layer)
+        narrowing_violations.extend(
+            _collect_settings_patch_narrowing(settings_narrowing_paths, parsed_layer, file_source, processed_sources)
+        )
         processed_sources.append((file_source, parsed_layer))
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
@@ -249,7 +252,12 @@ def load_config(
             silent=silent_unknown_fields,
         )
         narrowing_violations.extend(_collect_layer_narrowing(config, parsed_env_layer, env_source, processed_sources))
-        config = config.merge_with(parsed_env_layer)
+        config, env_settings_narrowing_paths = config.merge_with_narrowings(parsed_env_layer)
+        narrowing_violations.extend(
+            _collect_settings_patch_narrowing(
+                env_settings_narrowing_paths, parsed_env_layer, env_source, processed_sources
+            )
+        )
         processed_sources.append((env_source, parsed_env_layer))
 
     # Raise on collected narrowing assignments unless the user has opted in.
@@ -395,6 +403,41 @@ def _collect_layer_narrowing(
     ]
     violations: list[_NarrowingViolation] = []
     for key_path in violation_paths:
+        dropped_from = next(
+            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
+            None,
+        )
+        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
+    return violations
+
+
+def _collect_settings_patch_narrowing(
+    settings_narrowing_paths: Sequence[str],
+    parsed_layer: MngrConfig,
+    source: _SettingsSource,
+    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
+) -> list["_NarrowingViolation"]:
+    """Build narrowing violations for the cross-scope ``settings_overrides`` bare-drops
+    that the overlay merge surfaced, attributing each side.
+
+    ``settings_narrowing_paths`` is what ``MngrConfig.merge_with_narrowings`` returned
+    for merging ``parsed_layer`` onto the accumulated config; these are exactly the
+    ``SettingsPatchField`` narrowings that ``detect_settings_narrowing`` exempts (so
+    ``_collect_layer_narrowing`` cannot see them). ``source`` is the layer doing the
+    assignment; ``dropped_from`` is attributed the same way as in
+    ``_collect_layer_narrowing`` -- by re-running the narrowing-producing merge of
+    ``parsed_layer`` against each already-merged layer (highest precedence first) and
+    finding the highest-precedence prior layer that ``parsed_layer`` narrows at the
+    given path. ``dropped_from`` is ``None`` only if no contributing layer is found.
+    """
+    if not settings_narrowing_paths:
+        return []
+    narrowed_paths_by_prior_source = [
+        (prior_source, set(prior_layer.merge_with_narrowings(parsed_layer)[1]))
+        for prior_source, prior_layer in reversed(processed_sources)
+    ]
+    violations: list[_NarrowingViolation] = []
+    for key_path in settings_narrowing_paths:
         dropped_from = next(
             (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
             None,
