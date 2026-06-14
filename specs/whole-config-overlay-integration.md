@@ -183,8 +183,40 @@ Findings:
   is harmless.
 - **Mode: python.** Matches what `merge_with` dumps; no json-mode coercion surface needed here.
 
-So the approach is proven on the representative slice. The remaining risk is **`MngrConfig`**, not
-`AgentTypeConfig`.
+So the approach is proven on the representative slice. The remaining risk was **`MngrConfig`**.
+
+### MngrConfig (top-level) -- also proven end-to-end
+
+A second additive prototype (`config/overlay_merge_mngr_prototype.py` + 38-case property test)
+reproduces `MngrConfig.merge_with`: **38/38 `old == new`, 503 config tests green**, production
+untouched. The harder top-level concerns all resolved:
+
+- **None-padding = `_assign_scalar`.** Dropping every `None`-valued top-level scalar from the
+  override dump reproduces "override iff not None, else base" exactly (TOML has no null, so `None`
+  is always the padding sentinel). Uniformly handles scalars, assign-by-default aggregates, and
+  the `retry`/`logging` sub-models.
+- **Container-additive needs *two* levels of `__extend`, not one.** Marking only the container
+  field made a shared entry key do assign-wins (dropping the entry's base-only fields). The fix:
+  mark the container field **and each entry key** `__extend`, so an entry present in both layers
+  is `combine`d field-by-field (assign-by-set leaves + accumulate its `settings_overrides`) --
+  which *is* the entry's `merge_with`. Reproduces `_merge_container_dict` exactly; empty `{}`
+  containers are a no-op extend.
+- **Subclass entries need `serialize_as_any=True`.** A top-level `model_dump` serializes container
+  entries through the *declared* type (`AgentTypeConfig`), silently dropping subclass fields;
+  `serialize_as_any=True` (still honoring `exclude_unset`) keeps them, and entries re-parse into
+  their concrete class.
+- **Defaults timing reconciled faithfully.** `merge_with` leaves unset scalars `None`; defaults
+  are applied only by the loader's final `model_validate`. A `finalize_like_loader` helper applies
+  that same tail to *both* sides before comparison (drop padded `None`, re-validate to fill
+  defaults). An adversarial check confirmed it still catches a corrupted value -- it fills defaults
+  only for fields neither side set, it doesn't mask divergence.
+- **Latent production bug surfaced (independent of this work):** `MngrConfig.merge_with` raises
+  `AttributeError` when `self.retry`/`self.logging` is `None` and the override sets it. Masked
+  today only because the merge's left operand is always the loader's defaulted accumulator (never
+  a raw `parse_config` layer, which defaults them to `None`). Worth fixing defensively regardless.
+
+Both the representative subclass-bearing model (`AgentTypeConfig`) and the full container-bearing
+top-level (`MngrConfig`) reproduce faithfully. The value-merge axis of the integration is proven.
 
 ## Honest assessment / recommended phasing
 
