@@ -64,7 +64,7 @@ class _RecordingClient(LimaSliceVpsClient):
     scripted_responses: dict[str, tuple[int | None, str, str]] = {}
     recorded_commands: list[str] = []
 
-    def _run_on_box(  # type: ignore[override]
+    def _run_on_box(
         self, remote_command: str, *, timeout: float, label: str, is_streaming: bool = False
     ) -> tuple[int | None, str, str]:
         self.recorded_commands.append(remote_command)
