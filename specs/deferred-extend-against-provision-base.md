@@ -78,24 +78,79 @@ an `__extend` inside an `__extend` value**:
 
 So no existing, meaningful config changes behavior. (A test pins this invariant.)
 
+## `settings_overrides` is merged in multiple places -- all must `combine`, not assign
+
+`settings_overrides` is combined across **three** layer boundaries, and the result is a single
+left fold. All three must use the accumulating `combine` (the four-rule table), not the
+default assign-by-default, or a lower/parent layer's contribution is dropped wholesale (even
+for non-overlapping keys -- assign replaces the *entire* dict):
+
+1. **Config-file scopes** (user < project < local) -- `merge_with` at config-load.
+2. **Agent-type inheritance** (`parent_type`: a `claude` parent's `settings_overrides` +
+   a `coder` child's) -- `_apply_custom_overrides_to_parent_config` in
+   `agent_config_registry.py`, at provision/resolve time, *before* B.
+3. **Against B** (home settings + flags + hooks) -- the provision fold in `_build_settings_json`.
+
+Boundaries 1 and 2 are patch-vs-patch combines (no concrete base; markers preserved/combined
+per the four rules -- B is not needed). Boundary 3 is the resolve against concrete B.
+Associativity guarantees `combine`-then-resolve equals the full left fold.
+
+### Marking the field (plugin-agnostic)
+
+`merge_with` and `_apply_custom_overrides_to_parent_config` are generic. To make them
+`combine` `settings_overrides` (a *plugin* field on `ClaudeAgentConfig`) without core knowing
+its name, mark the field: `settings_overrides: Annotated[dict[str, Any], SettingsPatchField]`,
+where `SettingsPatchField` is a marker defined in `libs/mngr` core. Both merge functions read
+the marker off `model_fields[name].metadata`: a marked field uses `combine_patches`; every
+other field stays assign-by-default. (Subclass fields flow through the base-class merge
+generically, so the base `merge_with` honors the plugin's marked field with no name coupling.)
+
 ## Where each phase lives
 
 - **`resolve_extends` (config-load):** does **not** resolve `__extend` inside a deferred-path
-  subtree (`settings_overrides`); it leaves those markers intact for the provision fold.
-  (Generalize `_is_create_template_option_path` into an `is_deferred_extend_path` predicate
-  backed by a small registry: exact-depth for `create_templates` options, **prefix** for
-  `agent_types.<name>.settings_overrides`.) Markers on non-deferred fields resolve as today.
-- **`merge_with` (config-load):** for a deferred-path dict field (`settings_overrides`),
-  **combine** the patches across scopes via `fold`'s combine mode instead of assign-by-default.
-  This is the only field-merge behavior change, and only for deferred-path fields.
-- **provision (`_build_settings_json`, mngr_claude):** build `B` (home/defaults + flags +
-  mngr hooks), then `data = fold(B, agent_config.settings_overrides)` -- resolve all markers
-  against `B`, applying the narrowing guard for bare keys. Replaces `deep_merge_settings`.
-- **`create_templates`:** keeps deferring, now via the shared registry; de-dup
-  `_apply_template_extend` into the shared recursive `fold`/`_apply_extend`.
+  subtree (`settings_overrides`); it leaves those markers intact. (Generalize
+  `_is_create_template_option_path` into `is_deferred_extend_path` + registry: exact-depth for
+  `create_templates`, **prefix** for `agent_types.<name>.settings_overrides`.) Markers on
+  non-deferred fields resolve as today. **DONE** (implemented).
+- **`merge_with` + `_apply_custom_overrides_to_parent_config`:** for a `SettingsPatchField`-
+  marked field, `combine_patches(lower, higher)` (four-rule, recursive) instead of assign.
+- **provision (`_build_settings_json`):** `data, narrowings = fold_settings_patch(B, combined)`
+  (see below). `B` normalized via `fold_settings_patch({}, B_raw)`. Replaces `deep_merge_settings`.
+  **DONE for the single-source path** (currently `resolve_extends`-based + top-level narrowing);
+  this spec upgrades it to the threaded-narrowing `fold_settings_patch` and feeds it the
+  `combine`d patch.
+- **`create_templates`:** defers via the shared registry. **DONE.**
 
-## Narrowing guard at provision
+## `combine_patches(lower, higher)` -- the cross-layer combine
 
+Pure, recursive, associative. Per key (the four-rule table, recursing for nested dicts):
+`f__extend`+`f__extend` -> `f__extend` of combined values; `f`(bare)+`f__extend` -> bare
+`f`=extended; `*`+`f`(bare) -> bare `f` (higher bare wins, drops any lower marker). Output is a
+patch (may carry markers) destined for boundary 3 (resolve against B). Used at boundaries 1
+and 2. (cf. the four-case associativity table above -- these become tests.)
+
+## Narrowing -- threaded into the provision fold (recursive)
+
+Replace the separate post-hoc check with narrowing **tracked inside** the fold:
+`fold_settings_patch(base, patch) -> (merged, narrowing_paths)`. As the fold walks, it records
+a dotted path wherever a **bare** assign drops a non-empty aggregate entry from `base` -- **at
+any depth**, including bare keys nested inside an `__extend` value (this fixes the gap where
+the post-hoc check only saw top-level bare keys). `__extend` merges never narrow (supersets).
+At provision: `merged, narrowings = fold_settings_patch(B, combined_so)`; if `narrowings` and
+not `allow_settings_key_assignment_narrowing` -> raise the standard narrowing error. This is
+cleaner than today's compare-walk (`detect_settings_narrowing`) and is recursive by
+construction.
+
+Note: cross-*layer* narrowing (a higher scope/child dropping a lower/parent entry) is now
+expressed by `combine_patches`' "higher bare wins" rule; the existing config-layer
+`detect_settings_narrowing` still runs for non-`settings_overrides` fields. Because
+`settings_overrides` now *accumulates* (combine, not assign), a higher layer that merely
+*adds* keys is a superset and never narrows; a higher *bare* key that intentionally replaces a
+lower value is the user's explicit choice (and, if it reaches B and drops a B entry, the
+provision fold narrows it there). Confirm `detect_settings_narrowing` does not double-flag a
+`combine`d settings_overrides during implementation.
+
+(Original provision-narrowing prose, now superseded by the threaded fold:)
 The guard currently runs in the loader across config layers. Add a call in the provision
 fold: when a bare `settings_overrides` key assigns over a non-empty `B[key]` aggregate and
 drops an entry, `would_assignment_narrow(B[key], value)` -> raise the standard narrowing
