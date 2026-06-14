@@ -110,3 +110,17 @@ reverses (keep the signal, opt out per key). When approved, that change is isola
 flag, make `merge`'s callers raise on the spot (the flag is the only reason aggregation
 exists), update the few configs/tests/e2e that set the flag to use `__assign`. Until then the
 flag and `__assign` coexist per "Coexistence" above.
+
+## Future direction: typed node wrappers instead of string suffixes
+
+Idea (captured, not yet designed): rather than encoding operators as key-string suffixes
+(`key__extend` / `key__assign`) parsed at merge time, represent them as **typed wrapper
+objects** around node values -- e.g. `Extend(value)`, `Assign(value)`, `Default(value)` (and
+the `Static*` markers already are this shape). The merge algebra would dispatch on the wrapper
+TYPE, not parse strings. Benefits: no string parsing, no `__`-suffix collision rules, operators
+are first-class/typed, and the `Static*` markers unify with the operators under one "tagged
+node" model. The string-suffix form stays as the TOML/env/`--setting` surface syntax (users
+still type `key__extend`); a thin parse step lifts those into the typed wrappers at the
+config-load boundary, and everything downstream (combine/merge/finalize/narrowing) works on
+typed nodes. Worth designing when the `overlay` library is extracted -- the lib's core would
+be the typed-node algebra; the suffix parsing becomes a consumer-side (or helper) adapter.
