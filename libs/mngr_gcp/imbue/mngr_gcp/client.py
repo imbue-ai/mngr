@@ -351,7 +351,7 @@ class GcpVpsClient(VpsClientInterface):
             source_ranges=list(self.allowed_ssh_cidrs),
             target_tags=[self.firewall_target_tag],
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22", str(self.container_ssh_port)])],
-            description="Auto-created by mngr_gcp for SSH access to managed instances",
+            description="Created by mngr gcp prepare for SSH access to mngr-managed instances",
         )
         was_created = True
         try:

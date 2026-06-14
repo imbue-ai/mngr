@@ -79,7 +79,7 @@ default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
 # default_source_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
 
 # Every CIDR allowed inbound on tcp/22 and the container SSH port of the
-# auto-created firewall rule. Defaults to the wide-open '0.0.0.0/0' (fail-open,
+# firewall rule `mngr gcp prepare` creates. Defaults to the wide-open '0.0.0.0/0' (fail-open,
 # matching the AWS provider; a warning is logged -- tighten for production).
 # Use a tight range like ['203.0.113.4/32'], or [] for no ingress at all (no
 # rule is created and the instance is unreachable from outside its VPC).
@@ -146,7 +146,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
 | `subnetwork` | `None` | Optional explicit subnetwork (required for custom-mode VPCs). |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Defaults open to the internet (fail-open, like AWS); warned at prepare/create time. Set `()` for no ingress (no rule created; instance unreachable). |
-| `firewall_target_tag` | `mngr-ssh` | Network tag bound to the auto-created firewall rule; every instance is tagged with it. |
+| `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule `mngr gcp prepare` creates; every instance is tagged with it. |
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. |
 | `service_account_email` | `None` | Optional service account attached to launched instances. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
