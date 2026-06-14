@@ -1,6 +1,7 @@
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
+from typing import assert_never
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -42,17 +43,22 @@ class CleanupFailedGroup(ExceptionGroup[CleanupFailedError]):
     def failures(self) -> tuple[CleanupFailure, ...]:
         """The structured failures carried by this group's leaves, in order.
 
-        ``ExceptionGroup.exceptions`` is typed as possibly holding nested groups; in practice
-        ``from_failures`` only ever builds a flat group of ``CleanupFailedError`` leaves, but we
-        recurse into any nested ``CleanupFailedGroup`` so no failure is dropped.
+        ``from_failures`` only ever builds a flat group of ``CleanupFailedError`` leaves, but
+        ``ExceptionGroup.exceptions`` is typed as possibly holding nested groups, so we recurse
+        into any nested group too -- that way no failure can be dropped regardless of shape.
         """
-        collected: list[CleanupFailure] = []
-        for leaf in self.exceptions:
-            if isinstance(leaf, CleanupFailedError):
-                collected.append(leaf.failure)
-            elif isinstance(leaf, CleanupFailedGroup):
-                collected.extend(leaf.failures)
-        return tuple(collected)
+        return tuple(_iter_cleanup_failures(self))
+
+
+def _iter_cleanup_failures(group: BaseExceptionGroup[CleanupFailedError]) -> Iterator[CleanupFailure]:
+    """Yield every leaf's structured ``CleanupFailure``, recursing through nested groups."""
+    for leaf in group.exceptions:
+        if isinstance(leaf, CleanupFailedError):
+            yield leaf.failure
+        elif isinstance(leaf, BaseExceptionGroup):
+            yield from _iter_cleanup_failures(leaf)
+        else:
+            assert_never(leaf)
 
 
 @contextmanager
