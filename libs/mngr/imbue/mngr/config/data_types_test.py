@@ -477,7 +477,7 @@ def test_mngr_config_merge_with_none_base_retry_takes_override() -> None:
     whose ``retry``/``logging`` is ``None`` (as a ``model_construct``'d layer can be)
     merged with an override that sets them takes the override outright, instead of
     raising ``AttributeError`` on ``None.merge_with``."""
-    base = MngrConfig().model_copy(update={"retry": None, "logging": None})
+    base = MngrConfig().model_copy_update(("retry", None), ("logging", None))
     assert base.retry is None and base.logging is None
     override = MngrConfig(retry=RetryConfig(connect_retry_times=7))
     merged = base.merge_with(override)
@@ -487,7 +487,7 @@ def test_mngr_config_merge_with_none_base_retry_takes_override() -> None:
 def test_mngr_config_merge_with_none_override_retry_keeps_base() -> None:
     """When the override's ``retry``/``logging`` is ``None``, the base value is kept."""
     base = MngrConfig(retry=RetryConfig(connect_retry_times=9))
-    override = MngrConfig().model_copy(update={"retry": None, "logging": None})
+    override = MngrConfig().model_copy_update(("retry", None), ("logging", None))
     merged = base.merge_with(override)
     assert merged.retry == RetryConfig(connect_retry_times=9)
 
