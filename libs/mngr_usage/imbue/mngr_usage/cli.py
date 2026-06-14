@@ -677,22 +677,6 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
 
 
 @click.group(name="usage", invoke_without_command=True)
-@optgroup.group("Aggregation")
-@optgroup.option(
-    "--since",
-    default=None,
-    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
-    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
-    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
-)
-@optgroup.option(
-    "--preserved/--no-preserved",
-    default=True,
-    show_default=True,
-    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
-    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
-    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
-)
 @optgroup.group("Display")
 @optgroup.option(
     "--max-age",
@@ -713,6 +697,21 @@ def _reject_group_options_when_subcommand_invoked(ctx: click.Context) -> None:
     "--provider",
     multiple=True,
     help="Show only agents from the given provider(s) (repeatable, e.g. --provider local)",
+)
+@optgroup.option(
+    "--since",
+    default=None,
+    help="Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose "
+    "last event is older are dropped from `sessions[]` and from the per-mode aggregates "
+    "(`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h).",
+)
+@optgroup.option(
+    "--preserved/--no-preserved",
+    default=True,
+    show_default=True,
+    help="Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). "
+    "On by default so destroyed agents' spend still counts; pass --no-preserved to show only "
+    "live agents. Preserved agents honor the same --provider/--project/--local/label filters.",
 )
 @add_common_options
 @click.pass_context
