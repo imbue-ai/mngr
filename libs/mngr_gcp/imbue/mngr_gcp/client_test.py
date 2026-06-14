@@ -7,9 +7,6 @@ Each fake records the requests it received and returns canned responses, so the
 tests exercise request-building and response-handling without real API calls.
 """
 
-from datetime import datetime
-from datetime import timezone
-
 import pytest
 from google.api_core import exceptions as google_api_exceptions
 from google.auth.credentials import AnonymousCredentials
@@ -24,9 +21,9 @@ from imbue.mngr_gcp.client import to_gce_label_value
 from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
-from imbue.mngr_gcp.testing import FakeSnapshotsClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -43,7 +40,6 @@ def _present_firewalls() -> FakeFirewallsClient:
 def _make_client(
     instances: FakeInstancesClient | None = None,
     firewalls: FakeFirewallsClient | None = None,
-    snapshots: FakeSnapshotsClient | None = None,
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_seconds: int | None = None,
@@ -61,7 +57,6 @@ def _make_client(
         auto_shutdown_seconds=auto_shutdown_seconds,
         stubbed_instances_client=instances or FakeInstancesClient(),
         stubbed_firewalls_client=firewalls if firewalls is not None else _present_firewalls(),
-        stubbed_snapshots_client=snapshots or FakeSnapshotsClient(),
     )
 
 
@@ -639,38 +634,20 @@ def test_ssh_key_lifecycle_in_memory() -> None:
 # =============================================================================
 
 
-def test_create_snapshot() -> None:
-    instances = FakeInstancesClient()
-    instances.get_result = compute_v1.Instance(
-        name="i",
-        disks=[compute_v1.AttachedDisk(boot=True, source="projects/p/zones/us-west1-a/disks/i")],
-    )
-    snapshots = FakeSnapshotsClient()
-    client = _make_client(instances, snapshots=snapshots)
-    snapshot_id = client.create_snapshot(VpsInstanceId("i"), "my snapshot")
-    assert len(snapshots.inserted) == 1
-    assert snapshots.inserted[0].source_disk == "projects/p/zones/us-west1-a/disks/i"
-    assert str(snapshot_id) == snapshots.inserted[0].name
+def test_create_snapshot_raises_unavailable() -> None:
+    """Disk snapshot support is intentionally unwired; any caller fails loudly."""
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
+        client.create_snapshot(VpsInstanceId("i"), "irrelevant")
 
 
-def test_delete_snapshot() -> None:
-    snapshots = FakeSnapshotsClient()
-    client = _make_client(snapshots=snapshots)
-    client.delete_snapshot(VpsSnapshotId("mngr-snap-1"))
-    assert snapshots.deleted == ["mngr-snap-1"]
+def test_delete_snapshot_raises_unavailable() -> None:
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
+        client.delete_snapshot(VpsSnapshotId("mngr-snap-1"))
 
 
-def test_list_snapshots() -> None:
-    snapshots = FakeSnapshotsClient()
-    snapshots.list_result = [
-        compute_v1.Snapshot(
-            name="mngr-snap-1",
-            description="test snapshot",
-            creation_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(),
-        )
-    ]
-    client = _make_client(snapshots=snapshots)
-    result = client.list_snapshots()
-    assert len(result) == 1
-    assert result[0].id == VpsSnapshotId("mngr-snap-1")
-    assert result[0].description == "test snapshot"
+def test_list_snapshots_raises_unavailable() -> None:
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="disk snapshot support is not implemented"):
+        client.list_snapshots()
