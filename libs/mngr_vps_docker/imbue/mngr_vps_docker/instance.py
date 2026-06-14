@@ -687,6 +687,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 vps_host_key_path=vps_host_key_path,
                 vps_host_public_key=vps_host_public_key,
                 vps_ssh_key_id=vps_ssh_key_id,
+                vps_public_key=vps_public_key,
             )
 
             with self._make_outer_for_vps_ip(vps_ip) as outer:
@@ -884,22 +885,25 @@ class VpsDockerProvider(BaseProviderInstance):
         vps_host_key_path: Path,
         vps_host_public_key: str,
         vps_ssh_key_id: str,
+        vps_public_key: str,
     ) -> tuple[VpsInstanceId, str]:
         """Provision a VPS, wait for it to boot, and wait for Docker to install.
 
         Returns (vps_instance_id, vps_ip).
+
+        ``vps_public_key`` is the provider SSH public key already loaded by
+        ``create_host`` (the sole caller); it is threaded in rather than re-read
+        from disk here. It is injected straight into root via cloud-init (in
+        addition to the copy-from-default-user step), which removes any reliance
+        on a cloud image's default-user key landing in root -- notably on GCE,
+        where the google guest agent provisions the key asynchronously and races
+        the runcmd copy.
 
         Provider-specific pre-create checks (``_validate_provider_args_for_create``)
         already ran in ``create_host`` before the first provider write, so by the
         time we get here the create preconditions are known to hold.
         """
         vps_host_private_key = vps_host_key_path.read_text()
-        # Inject the provider SSH key straight into root via cloud-init (in
-        # addition to the copy-from-default-user step). This removes any reliance
-        # on a cloud image's default-user key landing in root -- notably on GCE,
-        # where the google guest agent provisions the key asynchronously and
-        # races the runcmd copy.
-        _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         user_data = generate_cloud_init_user_data(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
