@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,12 +10,16 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_azure.backend import AZURE_BACKEND_NAME
+from imbue.mngr_azure.cli import _output_cleanup_result
+from imbue.mngr_azure.cli import _output_prepare_result
 from imbue.mngr_azure.cli import _perform_cleanup
 from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
+from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
@@ -73,6 +78,56 @@ def test_cleanup_command_help_is_reachable() -> None:
     assert result.exit_code == 0
     assert "--provider" in result.output
     assert "--resource-group" in result.output
+
+
+# =============================================================================
+# Format-aware prepare / cleanup output (the --format surface)
+# =============================================================================
+
+
+def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
+    _output_prepare_result(result, OutputFormat.HUMAN)
+    assert capsys.readouterr().out == "Prepared Azure resource group mngr in region westus\n"
+
+
+def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode emits a structured object including the created signal."""
+    result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=False)
+    _output_prepare_result(result, OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"resource_group": "mngr", "region": "westus", "created": False}
+
+
+def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode emits a ``prepared`` event with the same fields."""
+    result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
+    _output_prepare_result(result, OutputFormat.JSONL)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "prepared"
+    assert payload["created"] is True
+    assert payload["resource_group"] == "mngr"
+
+
+def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=True when a resource group was removed."""
+    _output_cleanup_result("mngr", "sub-123", "westus", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {
+        "resource_group": "mngr",
+        "subscription_id": "sub-123",
+        "region": "westus",
+        "deleted": True,
+    }
+
+
+def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=False on the idempotent no-op path."""
+    _output_cleanup_result(None, "sub-123", "westus", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["deleted"] is False
+    assert payload["resource_group"] is None
 
 
 def test_prepare_command_fails_clearly_without_subscription(

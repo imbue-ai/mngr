@@ -280,6 +280,12 @@ class FakeResourceGroupsOperations:
         self.deleted: list[str] = []
         self.get_result: Any = None
         self.get_error: Exception | None = None
+        # Whether ``check_existence`` reports the RG as already present (drives the
+        # ``was_created`` signal ensure_network returns). Default False: a fresh RG.
+        self.exists: bool = False
+
+    def check_existence(self, resource_group: str) -> bool:
+        return self.exists
 
     def create_or_update(self, resource_group: str, parameters: Any) -> Any:
         self.created.append((resource_group, parameters))

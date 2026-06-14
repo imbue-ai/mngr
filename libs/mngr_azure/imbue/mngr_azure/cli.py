@@ -19,6 +19,7 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
+from typing import assert_never
 
 import click
 from azure.core.exceptions import AzureError
@@ -26,11 +27,15 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 
@@ -150,6 +155,63 @@ def _perform_cleanup(client: AzureVpsClient) -> str | None:
     return client.delete_managed_resource_group()
 
 
+def _output_prepare_result(result: AzureNetworkPrepareResult, output_format: OutputFormat) -> None:
+    """Emit the result of ``mngr azure prepare`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` so a caller can
+    tell a first-run create from an idempotent no-op. Mirrors ``mngr gcp prepare``.
+    """
+    data = {
+        "resource_group": result.resource_group,
+        "region": result.region,
+        "created": result.was_created,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("prepared", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line("Prepared Azure resource group {} in region {}", result.resource_group, result.region)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _output_cleanup_result(
+    deleted_resource_group: str | None,
+    subscription_id: str,
+    region: str,
+    output_format: OutputFormat,
+) -> None:
+    """Emit the result of ``mngr azure cleanup`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``cleaned_up`` event. ``deleted`` is False when the resource group was
+    already absent (idempotent no-op). Mirrors ``mngr gcp cleanup``.
+    """
+    data = {
+        "resource_group": deleted_resource_group,
+        "subscription_id": subscription_id,
+        "region": region,
+        "deleted": deleted_resource_group is not None,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("cleaned_up", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            if deleted_resource_group is None:
+                write_human_line(
+                    "Nothing to clean up: no mngr-owned resource group in subscription {}.", subscription_id
+                )
+            else:
+                write_human_line("Cleaned up Azure resource group {} in region {}", deleted_resource_group, region)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @click.group(name="azure")
 def azure_cli_group() -> None:
     """Azure-provider operator commands (one-time setup, teardown)."""
@@ -205,7 +267,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     already exists. After this succeeds, ``mngr create --provider azure`` only
     needs VM/NIC/IP-create permissions (no network-management permissions).
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="azure prepare",
         command_class=_AzurePrepareCliOptions,
@@ -223,7 +285,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # credential / SDK environment failures.
         raise click.ClickException(str(e)) from e
     try:
-        resource_group_name = client.ensure_network()
+        result = client.ensure_network()
     except MngrError as e:
         # ensure_network's network writes go through _translate_azure_errors,
         # which raises VpsApiError (a MngrError) on Azure API failures (quota,
@@ -231,8 +293,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # than a traceback. (allowed_ssh_cidrs is now fail-open, so an empty list
         # no longer raises here -- it creates a no-ingress NSG with a warning.)
         raise click.ClickException(str(e)) from e
-    logger.info("Prepared Azure resource group {} in region {}", resource_group_name, client.region)
-    write_human_line(resource_group_name)
+    _output_prepare_result(result, output_opts.output_format)
 
 
 @azure_cli_group.command(name="cleanup")
@@ -277,7 +338,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     when it is tagged `managed-by=mngr` (created by prepare). Idempotent: a no-op
     (exit 0) when the group is already gone.
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="azure cleanup",
         command_class=_AzureOperatorCliOptions,
@@ -294,10 +355,4 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # delete_managed_resource_group raises when the group lacks the
         # managed-by=mngr tag. Surface as a clean CLI error.
         raise click.ClickException(str(e)) from e
-    if deleted_resource_group is None:
-        write_human_line(
-            f"Nothing to clean up: no mngr-owned resource group in subscription {client.subscription_id}."
-        )
-    else:
-        logger.info("Cleaned up Azure resource group {} in region {}", deleted_resource_group, client.region)
-        write_human_line(deleted_resource_group)
+    _output_cleanup_result(deleted_resource_group, client.subscription_id, client.region, output_opts.output_format)

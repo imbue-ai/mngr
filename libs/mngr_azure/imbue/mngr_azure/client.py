@@ -25,6 +25,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
@@ -111,6 +112,20 @@ def _computer_name(vm_name: str) -> str:
     the value is always a valid hostname even after truncation.
     """
     return vm_name[:63].rstrip("-")
+
+
+class AzureNetworkPrepareResult(FrozenModel):
+    """Outcome of ``AzureVpsClient.ensure_network`` / ``mngr azure prepare``."""
+
+    resource_group: str = Field(description="Name of the mngr-owned resource group holding the prepared network")
+    region: str = Field(description="Azure region the resource group / network was prepared in")
+    was_created: bool = Field(
+        description=(
+            "True if the resource group did not exist before this call (a first-run create); False on an "
+            "idempotent re-run where it already existed. Tracked at the resource-group (top-level "
+            "container) granularity -- the NSG / vnet / subnet are create_or_update'd within it regardless."
+        )
+    )
 
 
 class AzureVpsClient(VpsClientInterface):
@@ -248,8 +263,8 @@ class AzureVpsClient(VpsClientInterface):
             f"`az provider register --namespace {namespace}` and retry `mngr azure prepare`."
         )
 
-    def ensure_network(self) -> str:
-        """Create the mngr resource group + vnet/subnet/NSG if absent. Returns the RG name.
+    def ensure_network(self) -> AzureNetworkPrepareResult:
+        """Create the mngr resource group + vnet/subnet/NSG if absent. Returns a prepare result.
 
         Idempotent (``create_or_update`` throughout). Registers the required
         resource providers first, then creates the resource group (tagged
@@ -270,6 +285,10 @@ class AzureVpsClient(VpsClientInterface):
         self._warn_about_cidrs_if_needed()
         self._register_resource_providers()
         with self._translate_azure_errors():
+            # Check existence before the (idempotent) create so the CLI can
+            # report a first-run create vs an idempotent re-run. One cheap GET on
+            # the one-time prepare path.
+            already_existed = self._resource().resource_groups.check_existence(self.resource_group)
             self._resource().resource_groups.create_or_update(
                 self.resource_group,
                 ResourceGroup(location=self.region, tags=self._base_tags()),
@@ -284,7 +303,9 @@ class AzureVpsClient(VpsClientInterface):
             self.nsg_name,
             self.region,
         )
-        return self.resource_group
+        return AzureNetworkPrepareResult(
+            resource_group=self.resource_group, region=self.region, was_created=not already_existed
+        )
 
     def _warn_about_cidrs_if_needed(self) -> None:
         """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
@@ -306,9 +327,7 @@ class AzureVpsClient(VpsClientInterface):
             return
         if "0.0.0.0/0" in self.allowed_ssh_cidrs:
             logger.warning(
-                "Azure allowed_ssh_cidrs includes 0.0.0.0/0; NSG {!r} will permit SSH from the public "
-                "internet. Acceptable for ephemeral dev hosts (key-only auth -- passwords are disabled); "
-                "tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                "Azure allowed_ssh_cidrs includes 0.0.0.0/0; NSG {!r} will permit SSH from the public internet.",
                 self.nsg_name,
             )
 
@@ -383,8 +402,7 @@ class AzureVpsClient(VpsClientInterface):
                 raise MngrError(
                     f"Azure subnet {self.subnet_name!r} (vnet {self.vnet_name!r}, resource group "
                     f"{self.resource_group!r}) does not exist in region {self.region!r}. "
-                    f"Run `mngr azure prepare` once to create the resource group / vnet / subnet / NSG, "
-                    "then retry the create."
+                    "Run `mngr azure prepare` once to create it, then retry the create."
                 ) from e
             raise
         return subnet.id

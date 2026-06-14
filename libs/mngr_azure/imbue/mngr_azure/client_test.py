@@ -296,7 +296,7 @@ def test_ensure_network_skips_ssh_rule_and_warns_when_no_cidrs(log_warnings: lis
     fail-closed gate. Mirrors the AWS / GCP providers.
     """
     client = _make_client(allowed_ssh_cidrs=())
-    assert client.ensure_network() == "mngr"
+    assert client.ensure_network().resource_group == "mngr"
     nsg = client.stubbed_network_client.network_security_groups.created[0][1]
     assert nsg.security_rules == []
     assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
@@ -305,7 +305,7 @@ def test_ensure_network_skips_ssh_rule_and_warns_when_no_cidrs(log_warnings: lis
 def test_ensure_network_warns_when_open_to_internet(log_warnings: list[str]) -> None:
     """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
     client = _make_client(allowed_ssh_cidrs=("0.0.0.0/0",))
-    assert client.ensure_network() == "mngr"
+    assert client.ensure_network().resource_group == "mngr"
     nsg = client.stubbed_network_client.network_security_groups.created[0][1]
     assert nsg.security_rules[0].source_address_prefixes == ["0.0.0.0/0"]
     assert any("0.0.0.0/0" in msg for msg in log_warnings)
@@ -316,7 +316,10 @@ def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
     resource.providers.registration_state = "NotRegistered"
     client = _make_client(resource=resource)
     returned = client.ensure_network()
-    assert returned == "mngr"
+    assert returned.resource_group == "mngr"
+    assert returned.region == _REGION
+    # The fake reports the RG as absent by default, so this is a first-run create.
+    assert returned.was_created is True
     # Resource providers registered.
     assert set(resource.providers.registered) == {"Microsoft.Compute", "Microsoft.Network", "Microsoft.Storage"}
     # RG created with the managed-by tag.
@@ -330,6 +333,18 @@ def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
     assert len(network.virtual_networks.created) == 1
     subnet = network.virtual_networks.created[0][1].subnets[0]
     assert subnet.network_security_group.id == "/nsg/mngr-nsg"
+
+
+def test_ensure_network_reports_not_created_when_rg_already_exists() -> None:
+    """An idempotent re-run (RG already present) reports was_created=False.
+
+    The resource group / NSG / vnet are still create_or_update'd (idempotent), but
+    the create-vs-reuse signal lets the CLI distinguish a first run from a no-op.
+    """
+    resource = FakeResourceClient()
+    resource.resource_groups.exists = True
+    client = _make_client(resource=resource)
+    assert client.ensure_network().was_created is False
 
 
 def test_resolve_subnet_id_returns_id_when_present() -> None:

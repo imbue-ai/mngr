@@ -29,8 +29,7 @@ class _SubnetStubClient(AzureVpsClient):
             raise MngrError(
                 f"Azure subnet {self.subnet_name!r} (vnet {self.vnet_name!r}, resource group "
                 f"{self.resource_group!r}) does not exist in region {self.region!r}. "
-                "Run `mngr azure prepare` once to create the resource group / vnet / subnet / NSG, "
-                "then retry the create."
+                "Run `mngr azure prepare` once to create it, then retry the create."
             )
         return f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}/subnets/{self.subnet_name}"
 
