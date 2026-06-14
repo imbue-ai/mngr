@@ -108,8 +108,15 @@ def test_prevent_pandas_import() -> None:
     rc.check_pandas_import(_DIR, snapshot(0))
 
 
+# The 1 here is the ``from dataclasses import dataclass`` in nodes.py. The ratchet's
+# stock remedy ("use pydantic models instead") does not apply: ``overlay`` is a
+# strictly dependency-free library (stdlib only -- see README and pyproject
+# ``dependencies = []``), so pydantic is not an option. The typed-node model
+# (Default/Assign/Extend) needs lightweight frozen immutable value wrappers, which
+# frozen dataclasses provide from the stdlib; this is the design pinned in
+# specs/overlay-typed-nodes.md. A justified, isolated exception, not an evasion.
 def test_prevent_dataclasses_import() -> None:
-    rc.check_dataclasses_import(_DIR, snapshot(0))
+    rc.check_dataclasses_import(_DIR, snapshot(1))
 
 
 def test_prevent_namedtuple() -> None:
