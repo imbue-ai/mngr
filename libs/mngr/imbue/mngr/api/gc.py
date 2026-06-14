@@ -468,9 +468,7 @@ def _gc_single_host(
             else CleanupFailureCategory.OTHER
         )
         with results_lock:
-            result.failures.append(
-                CleanupFailure(category=category, message=error_msg, host_id=host_ref.host_id)
-            )
+            result.failures.append(CleanupFailure(category=category, message=error_msg, host_id=host_ref.host_id))
         _handle_error(error_msg, error_behavior, exc=e)
 
 

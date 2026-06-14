@@ -253,7 +253,9 @@ def test_gc_exits_non_zero_when_explicit_provider_is_unavailable(
     assert "unavailable" in result.output
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="Root bypasses the read-only-dir permission check used to force the failure")
+@pytest.mark.skipif(
+    os.geteuid() == 0, reason="Root bypasses the read-only-dir permission check used to force the failure"
+)
 @pytest.mark.allow_warnings(match=r"Failed to clean")
 def test_gc_exits_with_cause_specific_code_when_work_dir_cleanup_fails(
     cli_runner: CliRunner,
