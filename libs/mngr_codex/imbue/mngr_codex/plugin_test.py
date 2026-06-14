@@ -683,14 +683,25 @@ def test_agent_field_generators_exposes_codex_waiting_reason() -> None:
     assert callable(generators["waiting_reason"])
 
 
-def test_waiting_reason_returns_permissions_even_when_active(codex_agent: CodexAgent) -> None:
-    """permissions_waiting takes priority: an approval dialog is open even though the
-    active marker (set at turn start) is still present."""
+def test_waiting_reason_returns_permissions_when_active_and_blocked(codex_agent: CodexAgent) -> None:
+    """A real open dialog: the active marker (set at turn start) is present *and*
+    permissions_waiting is present, so the agent is blocked on an approval dialog."""
     agent_dir = codex_agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
     assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.PERMISSIONS
+
+
+def test_waiting_reason_ignores_stranded_permissions_marker_after_turn(codex_agent: CodexAgent) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS. The PERMISSIONS verdict is gated on the active
+    marker, so correctness does not depend on the Stop/UserPromptSubmit safety nets
+    having deleted the file."""
+    agent_dir = codex_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert _waiting_reason(codex_agent, codex_agent.host) == WaitingReason.END_OF_TURN
 
 
 def test_waiting_reason_returns_end_of_turn_when_idle(codex_agent: CodexAgent) -> None:

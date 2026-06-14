@@ -2546,15 +2546,22 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     Checks the agent state directory for marker files rather than calling
     get_lifecycle_state() (which involves tmux/ps SSH commands).
 
-    - permissions_waiting exists -> PERMISSIONS (blocked on permission dialog)
     - active file absent -> END_OF_TURN (idle, turn complete)
+    - active present and permissions_waiting present -> PERMISSIONS (blocked on
+      permission dialog)
     - otherwise -> None (agent is actively running)
+
+    The ``active`` marker is read *first* and a ``permissions_waiting`` verdict is
+    gated on it: a permission dialog is only meaningful during a live turn, so a
+    stranded ``permissions_waiting`` marker (one that outlived its turn) reports
+    END_OF_TURN rather than PERMISSIONS. This mirrors get_lifecycle_state, which
+    only consults the permission marker when the base state is RUNNING.
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if _host_file_exists(host, agent_dir / "permissions_waiting"):
-        return WaitingReason.PERMISSIONS
     if not _host_file_exists(host, agent_dir / "active"):
         return WaitingReason.END_OF_TURN
+    if _host_file_exists(host, agent_dir / "permissions_waiting"):
+        return WaitingReason.PERMISSIONS
     return None
 
 
