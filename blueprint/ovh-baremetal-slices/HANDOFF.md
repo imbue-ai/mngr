@@ -151,3 +151,10 @@ uv run mngr imbue_cloud admin server list --database-url "$DSN"
 export VAULT_ADDR=https://vault-cluster-public-vault-df29b16f.9b573ab7.z1.hashicorp.cloud:8200 VAULT_NAMESPACE=admin
 export POOL_SSH_PRIVATE_KEY="$(vault kv get -format=json -mount=secrets minds/dev/pool-ssh | python3 -c 'import sys,json;print(json.load(sys.stdin)["data"]["data"]["POOL_SSH_PRIVATE_KEY"])')"
 ```
+
+### Post-review hardening (2026-06-14) — all validated live on the box
+- Per-slice sizing is computed per server (memory-per-slice + CPU-overcommit + usable disk stored at `register`); no hardcoded vCPU/RAM/disk defaults. `allocate-slice` is one server per invocation. `--cpu-overcommit` defaults to 2.0.
+- Disk no longer overcommits: each slice VM = a fixed 32 GiB boot disk (OS + Docker) + a btrfs data disk, summing to the per-slice budget `(usable_disk - 20) / slots`. (Previously the lima boot disk defaulted to 100 GiB, unaccounted.) Verified on the box: `disk: 32GiB` + data `23GiB` = 55 = budget for the RISE-2 (467 GiB / 8 slots).
+- Slices record the box's real region; the slow-path rebuild pins the outer host key (no certified-data warning) and is slice-aware (forwarded ports).
+- autofix found + fixed 3 MAJOR bugs: orphaned-VM rollback when a post-bake step or the create-JSON parse fails, and disjoint per-bake port windows so concurrent `--count N` bakes don't collide.
+- Connector release endpoint still needs a redeploy of the dev-josh-1 connector to exercise the slice-release fork live (the deployed connector predates it); teardown commands themselves are verified on the box.
