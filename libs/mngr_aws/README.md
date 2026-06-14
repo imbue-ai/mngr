@@ -109,11 +109,13 @@ mngr aws prepare --region us-east-1
 mngr aws prepare --region us-east-1 --allowed-ssh-cidr 203.0.113.4/32
 ```
 
-`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port. It needs:
+`prepare` creates (or reuses) the `mngr-aws` security group in the given region and authorizes the configured CIDRs on tcp/22 and the container SSH port.
 
-- `ec2:DescribeSecurityGroups`
-- `ec2:CreateSecurityGroup`
-- `ec2:AuthorizeSecurityGroupIngress`
+It is **read-only-first**: it issues a `DescribeSecurityGroups` call, and when the security group already exists with the required SSH ingress, it returns without any write call. This means a re-run on an already-prepared region succeeds even with a key that only has `ec2:DescribeSecurityGroups` (so callers -- e.g. minds' auto-prepare -- can safely run it before every create regardless of the key's privileges). The write permissions are needed only when something is actually missing:
+
+- `ec2:DescribeSecurityGroups` (always)
+- `ec2:CreateSecurityGroup` (only when the group does not exist)
+- `ec2:AuthorizeSecurityGroupIngress` (only when a required ingress rule is missing)
 
 After `prepare` succeeds, the per-host `mngr create` path only needs the regular RunInstances-style permissions (see the next section); no SG-mutating permissions. This split lets you give devs restricted creds while keeping the privileged setup behind an admin one-shot.
 

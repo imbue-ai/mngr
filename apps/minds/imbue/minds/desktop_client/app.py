@@ -85,9 +85,11 @@ from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.onboarding import OnboardingAnswers
 from imbue.minds.desktop_client.onboarding import OnboardingApplier
+from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.recovery_probe import HostHealthResponse
 from imbue.minds.desktop_client.recovery_probe import build_host_health_response
 from imbue.minds.desktop_client.recovery_probe import build_probe_argv
+from imbue.minds.desktop_client.region_preference import AWS_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
@@ -491,14 +493,18 @@ def _handle_landing_page(
             telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
         agent_names: dict[str, str] = {}
         agent_accents: dict[str, str] = {}
+        agent_providers: dict[str, str] = {}
         for aid in all_agent_ids:
+            info = backend_resolver.get_agent_display_info(aid)
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
                 agent_names[str(aid)] = ws_name
             else:
-                info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
             agent_accents[str(aid)] = _resolved_workspace_color(backend_resolver, aid)
+            # Collapse the per-region / per-account provider instance name to a
+            # single friendly compute-provider label (e.g. aws-us-west-2 -> AWS).
+            agent_providers[str(aid)] = friendly_provider_label(info.provider_name if info else None)
         shutdown_capable_agent_ids = get_shutdown_capable_workspace_agent_ids(backend_resolver)
         mind_liveness_by_agent_id = {
             aid: state.value for aid, state in compute_mind_liveness_by_agent_id(backend_resolver).items()
@@ -512,6 +518,7 @@ def _handle_landing_page(
             agent_accents=agent_accents,
             shutdown_capable_agent_ids=shutdown_capable_agent_ids,
             mind_liveness_by_agent_id=mind_liveness_by_agent_id,
+            agent_providers=agent_providers,
         )
         return HTMLResponse(content=html)
 
@@ -573,13 +580,15 @@ def _handle_post_login_redirect(
 def _region_provider_key_for_launch_mode(launch_mode: LaunchMode) -> str | None:
     """Map a compute launch mode to its region-config provider key, or None if region-less.
 
-    Only ``IMBUE_CLOUD`` and ``CLOUD`` (Vultr) place a host in a chosen region;
-    ``DOCKER`` / ``LIMA`` run locally and have no region.
+    Only ``IMBUE_CLOUD``, ``VULTR``, and ``AWS`` place a host in a chosen
+    region; ``DOCKER`` / ``LIMA`` run locally and have no region.
     """
     if launch_mode is LaunchMode.IMBUE_CLOUD:
         return IMBUE_CLOUD_PROVIDER_KEY
-    if launch_mode is LaunchMode.CLOUD:
+    if launch_mode is LaunchMode.VULTR:
         return VULTR_PROVIDER_KEY
+    if launch_mode is LaunchMode.AWS:
+        return AWS_PROVIDER_KEY
     return None
 
 
@@ -604,14 +613,16 @@ def _build_region_form_context(
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Build the per-launch-mode region options + pre-selected default for the create form.
 
-    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``CLOUD``) so the form JS
-    can look options up directly by the compute-provider dropdown's value.
+    Keyed by ``LaunchMode`` *value* (``IMBUE_CLOUD`` / ``VULTR`` / ``AWS``) so
+    the form JS can look options up directly by the compute-provider dropdown's
+    value.
     """
     options_by_launch_mode: dict[str, list[str]] = {}
     selected_by_launch_mode: dict[str, str] = {}
     for launch_mode, provider_key in (
         (LaunchMode.IMBUE_CLOUD, IMBUE_CLOUD_PROVIDER_KEY),
-        (LaunchMode.CLOUD, VULTR_PROVIDER_KEY),
+        (LaunchMode.VULTR, VULTR_PROVIDER_KEY),
+        (LaunchMode.AWS, AWS_PROVIDER_KEY),
     ):
         options_by_launch_mode[launch_mode.value] = list(known_regions_for_provider(provider_key))
         selected_by_launch_mode[launch_mode.value] = _default_region_for_provider_with_config(

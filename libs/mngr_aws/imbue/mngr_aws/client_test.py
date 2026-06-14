@@ -619,6 +619,89 @@ def test_ensure_security_group_reuses_existing_sg_when_found(
     assert client.ensure_security_group() == "sg-existing"
 
 
+def test_ensure_security_group_skips_authorize_when_ingress_already_present(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """Read-only-first: when the SG already permits the required ingress, no write call is issued.
+
+    This is the path minds' auto-prepare relies on with a describe-only AWS key:
+    an already-prepared region must succeed without ``AuthorizeSecurityGroupIngress``.
+    The absence of any authorize stub below is the assertion -- the Stubber raises
+    on any unexpected API call. The describe response carries both required ports
+    (tcp/22 and tcp/2222) already open to the configured CIDR.
+    """
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-ready",
+                    "GroupName": "mngr-aws-test",
+                    "IpPermissions": [
+                        {
+                            "IpProtocol": "tcp",
+                            "FromPort": 22,
+                            "ToPort": 22,
+                            "IpRanges": [{"CidrIp": "203.0.113.4/32"}],
+                        },
+                        {
+                            "IpProtocol": "tcp",
+                            "FromPort": 2222,
+                            "ToPort": 2222,
+                            "IpRanges": [{"CidrIp": "203.0.113.4/32"}],
+                        },
+                    ],
+                }
+            ]
+        },
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    assert client.ensure_security_group() == "sg-ready"
+
+
+def test_ensure_security_group_authorizes_when_one_port_missing(
+    auto_sg_client: tuple[AwsVpsClient, Stubber],
+) -> None:
+    """When the SG exists but a required port is not yet open, fall through to authorize.
+
+    tcp/22 is already present; tcp/2222 is missing, so the read-only-first check
+    must NOT short-circuit -- both ports get re-authorized idempotently.
+    """
+    client, stubber = auto_sg_client
+    stubber.add_response(
+        "describe_security_groups",
+        {
+            "SecurityGroups": [
+                {
+                    "GroupId": "sg-partial",
+                    "GroupName": "mngr-aws-test",
+                    "IpPermissions": [
+                        {
+                            "IpProtocol": "tcp",
+                            "FromPort": 22,
+                            "ToPort": 22,
+                            "IpRanges": [{"CidrIp": "203.0.113.4/32"}],
+                        },
+                    ],
+                }
+            ]
+        },
+        expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
+    )
+    stubber.add_response(
+        "authorize_security_group_ingress",
+        {},
+        expected_params={"GroupId": "sg-partial", "IpPermissions": ANY},
+    )
+    stubber.add_response(
+        "authorize_security_group_ingress",
+        {},
+        expected_params={"GroupId": "sg-partial", "IpPermissions": ANY},
+    )
+    assert client.ensure_security_group() == "sg-partial"
+
+
 def test_ensure_security_group_creates_sg_when_missing(
     auto_sg_client: tuple[AwsVpsClient, Stubber],
 ) -> None:
