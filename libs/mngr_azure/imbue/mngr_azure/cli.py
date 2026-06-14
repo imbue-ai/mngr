@@ -32,12 +32,12 @@ from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.errors import AzureProviderError
 
 
 class _AzureOperatorCliOptions(CommonCliOptions):
@@ -115,9 +115,9 @@ def _build_operator_client(
     ``subscription_id`` precedence is explicit ``--subscription-id`` > the
     resolved config's ``subscription_id`` > the ``AZURE_SUBSCRIPTION_ID`` env var
     > the active ``az`` subscription (the latter three resolved by
-    ``base.get_subscription_id``). Raises ``AzureSubscriptionError`` (a
-    ``ValueError``) when none resolves; the callbacks turn that into a clean
-    ``click.ClickException``.
+    ``base.get_subscription_id``). Raises ``AzureSubscriptionError`` (an
+    ``AzureProviderError`` / ``MngrError``) when none resolves; it propagates from
+    the callbacks with its specific type and renders as a clean CLI message.
     """
     effective_subscription = subscription_id or base.get_subscription_id()
     return AzureVpsClient(
@@ -139,15 +139,16 @@ def _perform_cleanup(client: AzureVpsClient) -> str | None:
     """Core of ``mngr azure cleanup``: refuse if VMs exist, else delete the RG.
 
     Returns the deleted resource group name, or ``None`` when there was nothing
-    to delete. Raises ``click.ClickException`` when any mngr-managed VM still
-    exists, so cleanup never strands a running agent. Split from the click
-    callback so the refuse/delete decision is unit-testable against a stubbed
-    client, without the click runtime or real credentials.
+    to delete. Raises ``AzureProviderError`` (an ``MngrError``, so it renders as a
+    clean CLI message) when any mngr-managed VM still exists, so cleanup never
+    strands a running agent. Split from the click callback so the refuse/delete
+    decision is unit-testable against a stubbed client, without the click runtime
+    or real credentials.
     """
     vms = client.list_mngr_managed_vms()
     if vms:
         summary = ", ".join(str(vm["id"]) for vm in vms)
-        raise click.ClickException(
+        raise AzureProviderError(
             f"Refusing to clean up resource group {client.resource_group}: {len(vms)} mngr-managed "
             f"VM(s) still exist: {summary}. Destroy them first with `mngr destroy <agent>`, then "
             "re-run `mngr azure cleanup`."
@@ -279,20 +280,20 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     effective_cidrs = opts.allowed_ssh_cidrs or base.allowed_ssh_cidrs
     try:
         client = _build_operator_client(base, opts.subscription_id, opts.region, opts.resource_group, effective_cidrs)
-    except (ValueError, AzureError) as e:
-        # ``ValueError`` covers the no-subscription case raised by
-        # ``AzureProviderConfig.get_subscription_id``; ``AzureError`` covers
-        # credential / SDK environment failures.
-        raise click.ClickException(str(e)) from e
-    try:
-        result = client.ensure_network()
-    except MngrError as e:
-        # ensure_network's network writes go through _translate_azure_errors,
-        # which raises VpsApiError (a MngrError) on Azure API failures (quota,
-        # auth, conflicting NSG, etc.). Surface those as a clean CLI error rather
-        # than a traceback. (allowed_ssh_cidrs is now fail-open, so an empty list
-        # no longer raises here -- it creates a no-ingress NSG with a warning.)
-        raise click.ClickException(str(e)) from e
+    except AzureError as e:
+        # ``AzureError`` (the azure SDK base) is not an ``MngrError``, so wrap it
+        # into one for a clean CLI message. The no-subscription case raised by
+        # ``_build_operator_client`` (``AzureSubscriptionError``) is already an
+        # ``AzureProviderError`` (``MngrError``) subclass, so it renders cleanly
+        # and is left to propagate with its specific type intact rather than being
+        # flattened.
+        raise AzureProviderError(str(e)) from e
+    # ensure_network's network writes go through _translate_azure_errors, which
+    # raises VpsApiError (a MngrError, so a clean CLI message) on Azure API
+    # failures (quota, auth, conflicting NSG, etc.); let it propagate with its
+    # specific type. (allowed_ssh_cidrs is fail-open, so an empty list no longer
+    # raises here -- it creates a no-ingress NSG with a warning.)
+    result = client.ensure_network()
     _output_prepare_result(result, output_opts.output_format)
 
 
@@ -346,13 +347,14 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     base = _resolve_provider_config(mngr_ctx, opts.provider)
     try:
         client = _build_operator_client(base, opts.subscription_id, opts.region, opts.resource_group, ())
-    except (ValueError, AzureError) as e:
-        raise click.ClickException(str(e)) from e
+    except AzureError as e:
+        # Same credential wrapping as the prepare path; the AzureSubscriptionError
+        # (an MngrError) propagates with its specific type.
+        raise AzureProviderError(str(e)) from e
 
-    try:
-        deleted_resource_group = _perform_cleanup(client)
-    except MngrError as e:
-        # delete_managed_resource_group raises when the group lacks the
-        # managed-by=mngr tag. Surface as a clean CLI error.
-        raise click.ClickException(str(e)) from e
+    # _perform_cleanup raises AzureProviderError when a VM still exists, and
+    # delete_managed_resource_group raises VpsApiError when the group lacks the
+    # managed-by=mngr tag. Both are MngrErrors, so they render as clean CLI
+    # messages; let them propagate with their specific type.
+    deleted_resource_group = _perform_cleanup(client)
     _output_cleanup_result(deleted_resource_group, client.subscription_id, client.region, output_opts.output_format)

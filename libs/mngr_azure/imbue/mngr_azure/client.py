@@ -11,6 +11,7 @@ from datetime import timedelta
 from datetime import timezone
 from typing import Any
 from typing import Final
+from typing import Self
 from uuid import uuid4
 
 from azure.core.exceptions import HttpResponseError
@@ -26,9 +27,11 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
+from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -72,6 +75,33 @@ _POWER_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 _MAX_VM_NAME_LENGTH: Final[int] = 64
 _INVALID_NAME_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9-]")
 _VM_NAME_STEM_LENGTH: Final[int] = _MAX_VM_NAME_LENGTH - 33
+# The shape ``_make_vm_name`` produces: lowercase alphanumerics and dashes, not
+# starting or ending with a dash, 1-64 chars. A subset of what Azure accepts for
+# a Linux VM resource name, but the only shape the coercion ever emits.
+_AZURE_VM_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+
+
+class AzureVmName(NonEmptyStr):
+    """An Azure VM resource name: non-empty, ``[a-z0-9-]``, no leading/trailing dash, at most 64 chars.
+
+    The codebase models identifier strings as ``NonEmptyStr`` subtypes
+    (``SnapshotId``, ``ProviderInstanceName``, ...); this is the Azure-VM-name
+    analog (mirrors ``mngr_gcp``'s ``GceInstanceName``). ``_make_vm_name``
+    produces it, and the constructor re-asserts the coercion output is valid --
+    so a future regression in that coercion fails fast here rather than at the
+    Azure API. Azure has no per-VM label-value restriction (tags accept nearly
+    any string), so there is no ``GceLabelValue`` analog.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        candidate = value.strip()
+        if not _AZURE_VM_NAME_RE.match(candidate) or len(candidate) > _MAX_VM_NAME_LENGTH:
+            raise InvalidAzureIdentifierError(
+                f"{candidate!r} is not a valid Azure VM name "
+                f"([a-z0-9-], no leading/trailing dash, at most {_MAX_VM_NAME_LENGTH} chars)"
+            )
+        return super().__new__(cls, candidate)
+
 
 # How long to wait for a resource-provider registration to flip to "Registered".
 _PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
@@ -86,7 +116,7 @@ _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
 _ORPHAN_RECLAIM_MIN_AGE_SECONDS: Final[float] = 240.0
 
 
-def _make_vm_name(label: str, tags: Mapping[str, str]) -> str:
+def _make_vm_name(label: str, tags: Mapping[str, str]) -> AzureVmName:
     """Build a unique, Azure-valid VM resource name from the label and tags.
 
     Azure identifies a VM by name within its resource group (used for every
@@ -102,7 +132,7 @@ def _make_vm_name(label: str, tags: Mapping[str, str]) -> str:
     host_id = tags.get("mngr-host-id", "")
     suffix = host_id.lower().rsplit("-", 1)[-1] if host_id else uuid4().hex
     suffix = _INVALID_NAME_CHARS_RE.sub("", suffix)
-    return f"{stem}-{suffix}"[:_MAX_VM_NAME_LENGTH].rstrip("-")
+    return AzureVmName(f"{stem}-{suffix}"[:_MAX_VM_NAME_LENGTH].rstrip("-"))
 
 
 def _computer_name(vm_name: str) -> str:

@@ -13,17 +13,19 @@ from typing import Final
 
 from azure.core.exceptions import AzureError
 from azure.core.exceptions import HttpResponseError
-from azure.identity import DefaultAzureCredential
 from pydantic import Field
 
 from imbue.mngr_azure.client import AzureVpsClient
+from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.errors import AzureSubscriptionError
 
 # Optional prefix release tests use for their agent names so leaked VMs (should
-# the scanner ever fail) are still visually identifiable as test-owned. Cleanup
-# logic does NOT depend on this -- ``AzureVpsClient.create_instance`` tags
-# pytest-launched VMs with ``mngr-pytest-launched=true`` and the conftest scanner
-# filters on that tag.
-AZURE_TEST_NAME_PREFIX: Final[str] = "test-azure-"
+# the scanner ever fail) are still visually identifiable as mngr-created test
+# VMs. No "azure" in the prefix: a leaked VM is already in an Azure subscription,
+# so naming it "azure" would be redundant. Cleanup logic does NOT depend on this
+# -- ``AzureVpsClient.create_instance`` tags pytest-launched VMs with
+# ``mngr-pytest-launched=true`` and the conftest scanner filters on that tag.
+AZURE_TEST_NAME_PREFIX: Final[str] = "mngr-test-"
 
 # Region used by the Azure release tests and the session-end leak scan. Tests can
 # override via ``MNGR_AZURE_REGION``; defaults to ``westus``. Read once at import
@@ -59,26 +61,37 @@ AZURE_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 def azure_credentials_available() -> bool:
     """Return True iff ``DefaultAzureCredential`` can mint an ARM token.
 
-    Used to gate release tests (skipif) and the session-end cleanup hook (no-op
-    when credentials are absent). Makes one token request for the ARM scope; this
-    only runs behind the ``MNGR_AZURE_RELEASE_TESTS`` opt-in, so the network call
-    never fires in an ordinary unit-test run.
+    Used to gate release tests and the session-end cleanup hook (no-op when
+    credentials are absent). Mints an ARM-scoped token through the same
+    ``AzureProviderConfig.get_credential`` the provider uses at construction time,
+    so the gate and production code agree on what counts as "available". This only
+    runs behind the ``MNGR_AZURE_RELEASE_TESTS`` opt-in, so the network call never
+    fires in an ordinary unit-test run.
     """
     try:
-        DefaultAzureCredential().get_token("https://management.azure.com/.default")
+        AzureProviderConfig().get_credential().get_token("https://management.azure.com/.default")
     except (AzureError, ValueError):
         return False
     return True
 
 
 def get_default_subscription_id() -> str | None:
-    """Return the subscription for release tests / the scanner, or None.
+    """Return the resolved Azure subscription for release tests / the scanner, or None.
 
-    Prefers an explicit ``MNGR_AZURE_SUBSCRIPTION_ID`` override; otherwise falls
-    back to ``AZURE_SUBSCRIPTION_ID``. Returns None when neither is set so
-    callers can skip cleanly.
+    Routes through the exact resolution the provider uses on the normal create
+    path: the ``MNGR_AZURE_SUBSCRIPTION_ID`` env override is mapped onto the
+    config's ``subscription_id`` (so the configured value wins), and resolution
+    otherwise falls back to ``AZURE_SUBSCRIPTION_ID`` and then the Azure CLI's
+    active subscription -- via ``AzureProviderConfig.get_subscription_id``, the
+    same code production runs. The production path raises ``AzureSubscriptionError``
+    when nothing resolves; here we translate that to ``None`` so the release tests
+    and the session-end scanner can skip cleanly instead of erroring.
     """
-    return os.environ.get("MNGR_AZURE_SUBSCRIPTION_ID") or os.environ.get("AZURE_SUBSCRIPTION_ID")
+    config = AzureProviderConfig(subscription_id=os.environ.get("MNGR_AZURE_SUBSCRIPTION_ID", ""))
+    try:
+        return config.get_subscription_id()
+    except AzureSubscriptionError:
+        return None
 
 
 def make_azure_http_error(status_code: int, message: str) -> HttpResponseError:

@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_azure.client import AzureVmName
+from imbue.mngr_azure.client import _make_vm_name
+from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
@@ -51,6 +54,41 @@ def _created_vm(client: _StubbedAzureVpsClient) -> Any:
     compute = client.stubbed_compute_client
     assert len(compute.virtual_machines.created) == 1
     return compute.virtual_machines.created[0][1]
+
+
+# =========================================================================
+# VM naming
+# =========================================================================
+
+
+def test_make_vm_name_is_valid_and_typed() -> None:
+    """_make_vm_name yields a well-formed, Azure-valid AzureVmName from a messy label."""
+    name = _make_vm_name("My Agent!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, AzureVmName)
+    assert name[0].isalnum()
+    assert not name.endswith("-")
+    assert len(name) <= 64
+
+
+def test_make_vm_name_falls_back_to_mngr_stem_for_empty_label() -> None:
+    """An all-invalid label still produces a valid name (the 'mngr' stem fallback)."""
+    name = _make_vm_name("!!!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, AzureVmName)
+    assert name.startswith("mngr-")
+
+
+def test_azure_vm_name_rejects_invalid() -> None:
+    """The VM-name type rejects strings that violate Azure's resource-name shape."""
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("ends-with-dash-")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("Has-Upper")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("has space")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("a" * 65)
 
 
 # =========================================================================

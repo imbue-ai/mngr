@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import click
 import pluggy
 import pytest
 from click.testing import CliRunner
@@ -21,6 +20,7 @@ from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.errors import AzureProviderError
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
@@ -55,7 +55,7 @@ def test_cleanup_logic_refuses_when_vms_exist() -> None:
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"})]
     client = _operator_client(compute=compute)
-    with pytest.raises(click.ClickException, match="Refusing to clean up"):
+    with pytest.raises(AzureProviderError, match="Refusing to clean up"):
         _perform_cleanup(client)
 
 
