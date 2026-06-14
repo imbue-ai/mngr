@@ -65,6 +65,7 @@ from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
@@ -163,12 +164,21 @@ def _run_root_script_over_ssh(server_address: str, ssh_user: str, private_key_pa
 @click.option("--ssh-user", default="debian", help="Bootstrap SSH user (the OS image's default cloud user).")
 @click.option("--lima-service-user", default="limahost", help="Dedicated non-root user to create for the lima VMs.")
 @click.option("--lima-version", default=DEFAULT_LIMA_VERSION, help="Lima release to install on the box.")
-def prep_box(server_address: str, ssh_user: str, lima_service_user: str, lima_version: str) -> None:
-    """Install QEMU + lima + tooling on a delivered box and create the lima service user.
+@click.option(
+    "--slice-base-image-url",
+    default=DEFAULT_IMAGE_URL_X86_64,
+    show_default=True,
+    help="Guest OS image to stage on the box once (slices boot from this via file://, never the mirror).",
+)
+def prep_box(
+    server_address: str, ssh_user: str, lima_service_user: str, lima_version: str, slice_base_image_url: str
+) -> None:
+    """Install QEMU + lima + tooling on a delivered box, create the lima user, stage the OS image.
 
     Idempotent. Authorizes the pool management key (POOL_SSH_PRIVATE_KEY) for the
     service user so the admin CLI can bake slices and the connector can tear them
-    down. Run after the OS install, before ``allocate-slice``.
+    down, and stages the slice guest OS image once so bakes never depend on the
+    Debian mirror. Run after the OS install, before ``allocate-slice``.
     """
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
@@ -176,12 +186,13 @@ def prep_box(server_address: str, ssh_user: str, lima_service_user: str, lima_ve
             pool_public_key=pool_public_key,
             lima_service_user=lima_service_user,
             lima_version=lima_version,
+            slice_base_image_url=slice_base_image_url,
         )
         logger.info(
             "Prepping box {} as {} (lima user {}, lima {})", server_address, ssh_user, lima_service_user, lima_version
         )
         _run_root_script_over_ssh(server_address, ssh_user, private_key_path, script)
-    logger.info("Box {} prepped: qemu+lima installed, {} ready", server_address, lima_service_user)
+    logger.info("Box {} prepped: qemu+lima installed, {} ready, OS image staged", server_address, lima_service_user)
 
 
 @server.command(name="list")

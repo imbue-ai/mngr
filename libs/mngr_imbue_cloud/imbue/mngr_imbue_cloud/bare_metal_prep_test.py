@@ -1,10 +1,29 @@
 from imbue.mngr_imbue_cloud.bare_metal_prep import build_box_prep_script
 
 _POOL_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTpoolkey mngr-pool"
+_IMAGE_URL = (
+    "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
+)
 
 
 def _script() -> str:
-    return build_box_prep_script(pool_public_key=_POOL_PUB, lima_service_user="limahost", lima_version="2.1.2")
+    return build_box_prep_script(
+        pool_public_key=_POOL_PUB,
+        lima_service_user="limahost",
+        lima_version="2.1.2",
+        slice_base_image_url=_IMAGE_URL,
+    )
+
+
+def test_prep_script_stages_base_image_under_lima_user_via_file_path() -> None:
+    script = _script()
+    # The OS image is fetched once, validated as a real qcow2, and atomically moved
+    # into place under the lima user's home (so the bake can boot it via file://
+    # with no Debian-mirror dependency). Idempotent: skips if already present.
+    assert _IMAGE_URL in script
+    assert "/home/limahost/.cache/mngr-slice-base/debian-base.qcow2" in script
+    assert "qemu-img info" in script
+    assert 'if [ ! -f "$img" ]; then' in script
 
 
 def test_prep_script_installs_qemu_and_lima() -> None:

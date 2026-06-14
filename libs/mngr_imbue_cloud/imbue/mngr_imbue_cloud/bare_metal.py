@@ -44,6 +44,26 @@ DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 2.0
 DEFAULT_SLICE_PORT_RANGE_START: Final[int] = 22000
 DEFAULT_SLICE_PORT_RANGE_END: Final[int] = 32000
 
+# The slice guest OS image is staged once on each box (at prep) and referenced by
+# the slice bake via ``file://`` so VM boots never depend on the Debian mirror
+# (lima otherwise does a per-boot last-modified HEAD to cloud.debian.org for a
+# digest-less image, which fatally fails when the mirror is flaky). Stored under
+# the lima service user's home so prep can write it without root, and read by
+# limactl (which runs as that user). Path is shared by the prep script and the
+# slice provider so they always agree.
+_SLICE_BASE_IMAGE_RELPATH: Final[str] = ".cache/mngr-slice-base/debian-base.qcow2"
+
+
+def slice_base_image_path(lima_service_user: str) -> str:
+    """Absolute path of the box-staged slice guest OS image for ``lima_service_user``."""
+    return f"/home/{lima_service_user}/{_SLICE_BASE_IMAGE_RELPATH}"
+
+
+def slice_base_image_file_url(lima_service_user: str) -> str:
+    """``file://`` URL the slice lima YAML uses for the box-staged guest OS image."""
+    return f"file://{slice_base_image_path(lima_service_user)}"
+
+
 _RAID_MIRROR: Final[str] = "RAID1"
 _RAID_STRIPED_MIRROR: Final[str] = "RAID10"
 

@@ -30,6 +30,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
+from imbue.mngr_imbue_cloud.bare_metal import slice_base_image_file_url
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -64,6 +65,14 @@ class SliceVpsDockerProviderConfig(VpsDockerProviderConfig):
         description=(
             "Path (on the machine running the bake) to the pool management private key used to SSH the box "
             "for the limactl carve. Set by ``admin server allocate-slice`` from POOL_SSH_PRIVATE_KEY."
+        ),
+    )
+    slice_base_image_url: str | None = Field(
+        default=None,
+        description=(
+            "Guest OS image the slice VM boots from. Defaults to the box-staged image "
+            "(``file://`` under the lima user's home, placed there once at ``server prep``) so bakes never "
+            "depend on the Debian mirror. Set to None only to fall back to mngr_lima's default (mirror) image."
         ),
     )
     pool_authorized_public_key: str | None = Field(
@@ -397,10 +406,14 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         if not isinstance(config, SliceVpsDockerProviderConfig):
             raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
+        # Slices boot from the box-staged guest image (file://) by default so a bake
+        # never hits the Debian mirror; an explicit slice_base_image_url overrides it.
+        base_image_url = config.slice_base_image_url or slice_base_image_file_url(config.box_ssh_user)
         lima_client = LimaSliceVpsClient(
             box_address=config.box_public_address,
             box_ssh_user=config.box_ssh_user,
             private_key_path=config.pool_private_key_path,
+            vm_image_url=base_image_url,
         )
         return SliceVpsDockerProvider(
             name=name,
