@@ -12,9 +12,9 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
-from imbue.mngr_imbue_cloud.lima_slice import build_slice_lima_yaml
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_vps_docker.primitives import VpsInstanceId

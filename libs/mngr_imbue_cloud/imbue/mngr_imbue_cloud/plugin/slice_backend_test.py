@@ -1,10 +1,10 @@
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr_imbue_cloud.slice_plugin import register_provider_backend
-from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProvider
-from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProviderBackend
-from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProviderConfig
+from imbue.mngr_imbue_cloud.plugin.backends import SliceVpsDockerProviderBackend
+from imbue.mngr_imbue_cloud.plugin.slice_entrypoints import register_provider_backend
+from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
+from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 
 
 def test_backend_name_and_config_class() -> None:

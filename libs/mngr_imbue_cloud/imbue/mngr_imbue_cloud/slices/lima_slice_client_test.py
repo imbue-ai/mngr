@@ -1,7 +1,7 @@
 import pytest
 
-from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_imbue_cloud.lima_slice_client import parse_listening_ports
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import parse_listening_ports
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 

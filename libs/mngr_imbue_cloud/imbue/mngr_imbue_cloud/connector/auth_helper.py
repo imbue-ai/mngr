@@ -13,13 +13,13 @@ from pathlib import Path
 
 from pydantic import SecretStr
 
-from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
+from imbue.mngr_imbue_cloud.connector.session_store import _decode_jwt_exp
 from imbue.mngr_imbue_cloud.data_types import AuthSession
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
-from imbue.mngr_imbue_cloud.session_store import _decode_jwt_exp
 
 
 def _refresh_lock_path(sessions_dir: Path, user_id: SuperTokensUserId) -> Path:

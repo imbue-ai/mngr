@@ -1,15 +1,15 @@
 from datetime import datetime
 from datetime import timezone
 
-from imbue.mngr_imbue_cloud.bare_metal_db import _INSERT_BARE_METAL_SERVER_SQL
-from imbue.mngr_imbue_cloud.bare_metal_db import _INSERT_SLICE_POOL_HOST_SQL
-from imbue.mngr_imbue_cloud.bare_metal_db import _server_from_row
-from imbue.mngr_imbue_cloud.bare_metal_db import build_bare_metal_server_insert_values
-from imbue.mngr_imbue_cloud.bare_metal_db import build_slice_pool_host_insert_values
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_BARE_METAL_SERVER_SQL
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _INSERT_SLICE_POOL_HOST_SQL
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import _server_from_row
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_bare_metal_server_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
 
 
 def _ready_server() -> BareMetalServer:

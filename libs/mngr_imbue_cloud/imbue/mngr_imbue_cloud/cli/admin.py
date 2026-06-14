@@ -33,15 +33,15 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
+from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
+from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import run_mngr_command
+from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
-from imbue.mngr_imbue_cloud.pool_bake import BAKED_SERVICES_AGENT_NAME
-from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
-from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
-from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
-from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
-from imbue.mngr_imbue_cloud.pool_bake import run_mngr_command
-from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -339,7 +339,7 @@ def _ovh_run_in_container(
 ) -> tuple[int | None, str, str]:
     """Run a shell command inside an OVH pool host's container via ``mngr exec`` (login shell).
 
-    The :class:`~imbue.mngr_imbue_cloud.pool_bake.ContainerCommandRunner` for OVH:
+    The :class:`~imbue.mngr_imbue_cloud.bake.pool_bake.ContainerCommandRunner` for OVH:
     the agent is resolvable in the operator's mngr state, so ``mngr exec`` reaches
     the container; wrapping in ``bash -lc`` puts ``uv``/``mngr`` on PATH in the FCT
     image. Returns ``(returncode, stdout, stderr)``.

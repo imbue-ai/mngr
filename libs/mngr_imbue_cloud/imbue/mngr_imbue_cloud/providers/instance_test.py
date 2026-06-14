@@ -15,12 +15,12 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
-from imbue.mngr_imbue_cloud.instance import ImbueCloudProvider
-from imbue.mngr_imbue_cloud.instance import _build_delegated_vps_config
-from imbue.mngr_imbue_cloud.instance import _map_docker_status_to_host_state
-from imbue.mngr_imbue_cloud.instance import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
+from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.providers.instance import _build_delegated_vps_config
+from imbue.mngr_imbue_cloud.providers.instance import _map_docker_status_to_host_state
+from imbue.mngr_imbue_cloud.providers.instance import build_pool_host_wipe_script
 
 
 @pytest.mark.parametrize(

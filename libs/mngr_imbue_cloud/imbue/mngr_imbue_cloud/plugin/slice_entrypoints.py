@@ -1,8 +1,8 @@
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
 from imbue.mngr_imbue_cloud import hookimpl
-from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProviderBackend
-from imbue.mngr_imbue_cloud.slice_provider import SliceVpsDockerProviderConfig
+from imbue.mngr_imbue_cloud.plugin.backends import SliceVpsDockerProviderBackend
+from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 
 
 @hookimpl

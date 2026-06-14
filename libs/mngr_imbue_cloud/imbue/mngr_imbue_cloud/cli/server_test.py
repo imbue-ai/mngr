@@ -3,8 +3,6 @@ from datetime import timezone
 
 from click.testing import CliRunner
 
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
 from imbue.mngr_imbue_cloud.cli.server import compute_server_slice_sizing
@@ -14,6 +12,8 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 
 
 def _server(

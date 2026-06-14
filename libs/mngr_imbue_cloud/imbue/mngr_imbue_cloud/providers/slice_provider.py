@@ -8,8 +8,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
@@ -17,22 +15,18 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
-from imbue.mngr.interfaces.provider_backend import ProviderBackendInterface
-from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
-from imbue.mngr_imbue_cloud.bare_metal import slice_base_image_file_url
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
-from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
@@ -367,60 +361,3 @@ class SliceVpsDockerProvider(VpsDockerProvider):
         # Same intent as the base (sync data.json into the host volume), but the
         # outer is reached via the forwarded port that _make_outer_for_vps_ip uses.
         super()._on_certified_host_data_updated(host_id, certified_data, vps_ip)
-
-
-class SliceVpsDockerProviderBackend(ProviderBackendInterface):
-    """Backend for the slice provider (lima-VM "VPS" on a bare-metal box).
-
-    Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``), run from
-    the operator's machine; the lima client drives limactl over SSH on the box.
-    """
-
-    @staticmethod
-    def get_name() -> ProviderBackendName:
-        return ProviderBackendName("imbue_cloud_slice")
-
-    @staticmethod
-    def get_description() -> str:
-        return "Runs agents in Docker containers inside lima VMs ('slices') on a bare-metal box"
-
-    @staticmethod
-    def get_config_class() -> type[ProviderInstanceConfig]:
-        return SliceVpsDockerProviderConfig
-
-    @staticmethod
-    def get_build_args_help() -> str:
-        return (
-            "Slice args are passed through to the shared vps_docker bake (e.g. --file=Dockerfile, the build context)."
-        )
-
-    @staticmethod
-    def get_start_args_help() -> str:
-        return "Start args are passed directly to 'docker run' inside the slice VM."
-
-    @staticmethod
-    def build_provider_instance(
-        name: ProviderInstanceName,
-        config: ProviderInstanceConfig,
-        mngr_ctx: MngrContext,
-    ) -> ProviderInstanceInterface:
-        if not isinstance(config, SliceVpsDockerProviderConfig):
-            raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
-        # Slices boot from the box-staged guest image (file://) by default so a bake
-        # never hits the Debian mirror; an explicit slice_base_image_url overrides it.
-        base_image_url = config.slice_base_image_url or slice_base_image_file_url(config.box_ssh_user)
-        lima_client = LimaSliceVpsClient(
-            box_address=config.box_public_address,
-            box_ssh_user=config.box_ssh_user,
-            private_key_path=config.pool_private_key_path,
-            vm_image_url=base_image_url,
-        )
-        return SliceVpsDockerProvider(
-            name=name,
-            host_dir=config.host_dir,
-            mngr_ctx=mngr_ctx,
-            config=config,
-            vps_client=lima_client,
-            slice_config=config,
-            lima_client=lima_client,
-        )

@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 
 from imbue.mngr_imbue_cloud.errors import OvhCatalogPricingError
-from imbue.mngr_imbue_cloud.pricing import compute_order_pricing
+from imbue.mngr_imbue_cloud.slices.pricing import compute_order_pricing
 
 # OVH catalog prices are in micro-units: $1.00 == 100_000_000.
 _USD = 100_000_000

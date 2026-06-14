@@ -221,6 +221,7 @@ source = [
 root_packages = [
     "imbue.mngr",
     "imbue.minds",
+    "imbue.mngr_imbue_cloud",
 ]
 
 [[tool.importlinter.contracts]]
@@ -254,4 +255,21 @@ layers = [
     "imbue.minds.errors",
     "imbue.minds.utils",
     "imbue.minds.primitives",
+]
+
+[[tool.importlinter.contracts]]
+name = "mngr_imbue_cloud layers contract"
+type = "layers"
+layers = [
+    "imbue.mngr_imbue_cloud.plugin",
+    "imbue.mngr_imbue_cloud.cli",
+    "imbue.mngr_imbue_cloud.bake",
+    "imbue.mngr_imbue_cloud.providers",
+    "imbue.mngr_imbue_cloud.hosts",
+    "imbue.mngr_imbue_cloud.slices",
+    "imbue.mngr_imbue_cloud.connector",
+    "imbue.mngr_imbue_cloud.config",
+    "imbue.mngr_imbue_cloud.data_types",
+    "imbue.mngr_imbue_cloud.errors",
+    "imbue.mngr_imbue_cloud.primitives",
 ]

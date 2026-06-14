@@ -33,38 +33,38 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
-from imbue.mngr_imbue_cloud.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
-from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_gib
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_memory_mib
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
-from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
-from imbue.mngr_imbue_cloud.bare_metal import partition_port_range
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
-from imbue.mngr_imbue_cloud.bare_metal_db import build_slice_pool_host_insert_values
-from imbue.mngr_imbue_cloud.bare_metal_db import fetch_server_capacities
-from imbue.mngr_imbue_cloud.bare_metal_db import insert_bare_metal_server
-from imbue.mngr_imbue_cloud.bare_metal_db import insert_slice_pool_host
-from imbue.mngr_imbue_cloud.bare_metal_db import update_server
-from imbue.mngr_imbue_cloud.bare_metal_prep import DEFAULT_LIMA_VERSION
-from imbue.mngr_imbue_cloud.bare_metal_prep import build_box_prep_script
+from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
+from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
+from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli.admin import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
-from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
-from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
-from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
-from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
-from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
-from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
+from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
+from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
+from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
+from imbue.mngr_imbue_cloud.slices.bare_metal_prep import DEFAULT_LIMA_VERSION
+from imbue.mngr_imbue_cloud.slices.bare_metal_prep import build_box_prep_script
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
@@ -424,7 +424,7 @@ def _slice_run_in_container(
 ) -> tuple[int | None, str, str]:
     """Run a shell command inside a slice's container by SSHing the create-reported port.
 
-    The :class:`~imbue.mngr_imbue_cloud.pool_bake.ContainerCommandRunner` for
+    The :class:`~imbue.mngr_imbue_cloud.bake.pool_bake.ContainerCommandRunner` for
     slices: a slice's per-host forwarded port lives only in the create process's
     memory, so a fresh ``mngr`` can't resolve it -- instead we SSH straight to the
     container's box-forwarded port (``baked.ssh_port``) with the container key the

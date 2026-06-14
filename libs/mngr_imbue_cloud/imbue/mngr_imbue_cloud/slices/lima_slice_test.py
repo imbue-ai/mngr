@@ -1,6 +1,6 @@
 from typing import Any
 
-from imbue.mngr_imbue_cloud.lima_slice import build_slice_lima_yaml
+from imbue.mngr_imbue_cloud.slices.lima_slice import build_slice_lima_yaml
 
 _ROOT_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYrootclient mngr-slice"
 _HOST_PRIV = "-----BEGIN OPENSSH PRIVATE KEY-----\nTESTHOSTKEY\n-----END OPENSSH PRIVATE KEY-----"

@@ -17,13 +17,13 @@ from typing import NoReturn
 import click
 from pydantic import AnyUrl
 
-from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.config import CONNECTOR_URL_ENV_VAR
 from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.session_store import ImbueCloudSessionStore
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
-from imbue.mngr_imbue_cloud.session_store import ImbueCloudSessionStore
 
 _DEFAULT_HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
 

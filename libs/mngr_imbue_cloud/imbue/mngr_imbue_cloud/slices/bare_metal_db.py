@@ -4,11 +4,11 @@ from typing import Any
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_imbue_cloud.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
 
 # Admin tooling writes bare_metal_servers + slice pool_hosts rows directly to the
 # connector's host_pool Neon DB (laptop-side), mirroring how `admin pool create`

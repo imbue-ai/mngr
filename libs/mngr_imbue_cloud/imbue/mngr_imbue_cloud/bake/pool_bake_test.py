@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from imbue.mngr_imbue_cloud.pool_bake import BAKED_SERVICES_AGENT_NAME
-from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
-from imbue.mngr_imbue_cloud.pool_bake import FCT_BAKE_TEMPLATES
-from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
-from imbue.mngr_imbue_cloud.pool_bake import build_pool_create_command
-from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
-from imbue.mngr_imbue_cloud.pool_bake import parse_baked_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
+from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
+from imbue.mngr_imbue_cloud.bake.pool_bake import FCT_BAKE_TEMPLATES
+from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
+from imbue.mngr_imbue_cloud.bake.pool_bake import build_pool_create_command
+from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import parse_baked_host
 
 
 class _ScriptedRunner:

@@ -4,22 +4,6 @@ from datetime import timezone
 import pytest
 
 from imbue.mngr.primitives import HostId
-from imbue.mngr_imbue_cloud.bare_metal import DISK_RESERVE_GB
-from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
-from imbue.mngr_imbue_cloud.bare_metal import choose_raid_level
-from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
-from imbue.mngr_imbue_cloud.bare_metal import compute_capacity
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_budget_gib
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_gib
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_memory_mib
-from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
-from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
-from imbue.mngr_imbue_cloud.bare_metal import is_valid_status_transition
-from imbue.mngr_imbue_cloud.bare_metal import next_server_status
-from imbue.mngr_imbue_cloud.bare_metal import partition_port_range
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
-from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
@@ -30,6 +14,22 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_FAILED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal import DISK_RESERVE_GB
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_BOOT_DISK_GIB
+from imbue.mngr_imbue_cloud.slices.bare_metal import allocate_slice_ports
+from imbue.mngr_imbue_cloud.slices.bare_metal import choose_raid_level
+from imbue.mngr_imbue_cloud.slices.bare_metal import choose_server_for_new_slice
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
+from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.slices.bare_metal import is_valid_status_transition
+from imbue.mngr_imbue_cloud.slices.bare_metal import next_server_status
+from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 
 
 def _server(status: str, slot_count: int = 8) -> BareMetalServer:

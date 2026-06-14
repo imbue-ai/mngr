@@ -12,9 +12,9 @@ import pytest
 from pydantic import AnyUrl
 from pydantic import SecretStr
 
-from imbue.mngr_imbue_cloud.client import ImbueCloudConnectorClient
-from imbue.mngr_imbue_cloud.client import _auth_policy_to_connector_body
-from imbue.mngr_imbue_cloud.client import _parse_auth_policy
+from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
+from imbue.mngr_imbue_cloud.connector.client import _auth_policy_to_connector_body
+from imbue.mngr_imbue_cloud.connector.client import _parse_auth_policy
 from imbue.mngr_imbue_cloud.data_types import AuthPolicy
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError

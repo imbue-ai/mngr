@@ -1,7 +1,7 @@
 from typing import Final
 
 from imbue.imbue_common.pure import pure
-from imbue.mngr_imbue_cloud.bare_metal import slice_base_image_path
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_path
 
 # Lima release to install on the box (matches what the slice path is tested against).
 DEFAULT_LIMA_VERSION: Final[str] = "2.1.2"

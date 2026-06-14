@@ -21,8 +21,8 @@ dependencies = [
 ]
 
 [project.entry-points.mngr]
-imbue_cloud = "imbue.mngr_imbue_cloud.plugin"
-imbue_cloud_slice = "imbue.mngr_imbue_cloud.slice_plugin"
+imbue_cloud = "imbue.mngr_imbue_cloud.plugin.entrypoints"
+imbue_cloud_slice = "imbue.mngr_imbue_cloud.plugin.slice_entrypoints"
 
 [build-system]
 requires = ["hatchling"]
