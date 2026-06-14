@@ -554,15 +554,25 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     get_lifecycle_state() (which runs tmux/ps SSH commands). The markers are
     maintained by the in-process lifecycle plugin (mngr_opencode_plugin.ts):
 
-    - permissions_waiting exists -> PERMISSIONS (blocked on an approval prompt)
     - active file absent -> END_OF_TURN (idle, turn complete)
+    - active present and permissions_waiting present -> PERMISSIONS (blocked on
+      an approval prompt)
     - otherwise -> None (agent is actively running)
+
+    The ``active`` marker is read *first* and a ``permissions_waiting`` verdict is
+    gated on it: an approval prompt can only be open during a live turn, so
+    ``permissions_waiting`` is only meaningful while ``active`` is present. Reading
+    in this order makes a *stranded* ``permissions_waiting`` marker (one that
+    outlived its turn) report END_OF_TURN rather than PERMISSIONS, so correctness
+    no longer depends on the root-idle safety net having deleted the file. This
+    mirrors get_lifecycle_state, which only consults the permission marker when the
+    base state is RUNNING (i.e. ``active`` present and the process alive).
     """
     agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
-        return WaitingReason.PERMISSIONS
     if not _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME):
         return WaitingReason.END_OF_TURN
+    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
+        return WaitingReason.PERMISSIONS
     return None
 
 

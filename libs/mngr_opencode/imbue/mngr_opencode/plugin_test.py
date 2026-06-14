@@ -522,14 +522,26 @@ def test_agent_field_generators_exposes_opencode_waiting_reason() -> None:
     assert callable(generators["waiting_reason"])
 
 
-def test_waiting_reason_returns_permissions_even_when_active(opencode_agent: OpenCodeAgent) -> None:
-    """permissions_waiting takes priority: a prompt is open even though the active
-    marker (set when the session went busy) is still present."""
+def test_waiting_reason_returns_permissions_when_active_and_blocked(opencode_agent: OpenCodeAgent) -> None:
+    """A real open prompt: the active marker (set when the session went busy) is
+    present *and* permissions_waiting is present, so the agent is blocked on an
+    approval prompt."""
     agent_dir = opencode_agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ACTIVE_MARKER_FILENAME).touch()
     (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
     assert _waiting_reason(opencode_agent, opencode_agent.host) == WaitingReason.PERMISSIONS
+
+
+def test_waiting_reason_ignores_stranded_permissions_marker_after_turn(opencode_agent: OpenCodeAgent) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS. The PERMISSIONS verdict is gated on the active
+    marker, so correctness does not depend on the root-idle safety net having
+    deleted the file."""
+    agent_dir = opencode_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / PERMISSIONS_WAITING_FILENAME).touch()
+    assert _waiting_reason(opencode_agent, opencode_agent.host) == WaitingReason.END_OF_TURN
 
 
 def test_waiting_reason_returns_end_of_turn_when_idle(opencode_agent: OpenCodeAgent) -> None:
