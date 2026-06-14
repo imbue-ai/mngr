@@ -179,26 +179,6 @@ class FakeFirewallsClient:
         return FakeOperation(error=self.delete_error)
 
 
-class FakeSnapshotsClient:
-    """Fake SnapshotsClient: records snapshot insert/delete/list, returns canned responses."""
-
-    def __init__(self) -> None:
-        self.inserted: list[compute_v1.Snapshot] = []
-        self.deleted: list[str] = []
-        self.list_result: list[compute_v1.Snapshot] = []
-
-    def insert(self, *, project: str, snapshot_resource: compute_v1.Snapshot) -> FakeOperation:
-        self.inserted.append(snapshot_resource)
-        return FakeOperation()
-
-    def delete(self, *, project: str, snapshot: str) -> FakeOperation:
-        self.deleted.append(snapshot)
-        return FakeOperation()
-
-    def list(self, *, project: str) -> list[compute_v1.Snapshot]:
-        return self.list_result
-
-
 class _StubbedGcpVpsClient(GcpVpsClient):
     """Test-only GcpVpsClient that injects fake compute clients.
 
@@ -212,13 +192,9 @@ class _StubbedGcpVpsClient(GcpVpsClient):
 
     stubbed_instances_client: Any = Field(default=None, description="Fake InstancesClient")
     stubbed_firewalls_client: Any = Field(default=None, description="Fake FirewallsClient")
-    stubbed_snapshots_client: Any = Field(default=None, description="Fake SnapshotsClient")
 
     def _instances(self) -> Any:
         return self.stubbed_instances_client
 
     def _firewalls(self) -> Any:
         return self.stubbed_firewalls_client
-
-    def _snapshots(self) -> Any:
-        return self.stubbed_snapshots_client

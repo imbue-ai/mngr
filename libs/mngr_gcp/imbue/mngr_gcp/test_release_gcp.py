@@ -362,8 +362,3 @@ def gcp_release_client(gcp_release_test_project: str) -> GcpVpsClient:
 def test_api_client_list_instances_does_not_error(gcp_release_client: GcpVpsClient) -> None:
     instances = gcp_release_client.list_instances()
     assert isinstance(instances, list)
-
-
-def test_api_client_list_snapshots_does_not_error(gcp_release_client: GcpVpsClient) -> None:
-    snapshots = gcp_release_client.list_snapshots()
-    assert isinstance(snapshots, list)
