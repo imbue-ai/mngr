@@ -307,9 +307,9 @@ def _remark_static_leaves(dumped: dict[str, Any], static_paths: set[tuple[str, .
         if leaf_key not in container:
             continue
         leaf = container[leaf_key]
-        marker = markers_by_shape.get(type(leaf)) or markers_by_shape.get(_aggregate_shape(leaf))
-        if marker is not None:
-            container[leaf_key] = marker(leaf)
+        shape = _aggregate_shape(leaf)
+        if shape is not None:
+            container[leaf_key] = markers_by_shape[shape](leaf)
     return dumped
 
 
