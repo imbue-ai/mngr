@@ -200,6 +200,59 @@ def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: Mn
     assert found is None
 
 
+def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """Two non-terminated instances sharing a mngr-host-id are refused, not silently disambiguated.
+
+    ``mngr-host-id`` is account-writable, so a duplicate (e.g. an attacker tagging
+    their own instance with a victim's host id) could otherwise steer ``mngr start``
+    -- and the agent-tag writes keyed off this lookup -- onto the wrong instance.
+    The lookup must raise rather than pick the first match.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-real", "stopped", "", {"mngr-host-id": str(host_id), "mngr-provider": "aws-test"}
+                ),
+                _instance_with_tags(
+                    "i-evil", "running", "", {"mngr-host-id": str(host_id), "mngr-provider": "aws-test"}
+                ),
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(MngrError, match="ambiguous"):
+            provider._find_instance_for_host(host_id)
+    finally:
+        stubber.deactivate()
+
+
+def test_rebind_known_hosts_pre_connect_uses_local_keypairs(temp_mngr_ctx: MngrContext) -> None:
+    """The pre-connect known_hosts rebind pins mngr's own local host keys, not tag data.
+
+    On resume the new IP is added to known_hosts *before* the first SSH. Sourcing
+    the host keys from the locally held provider keypairs (injected into the box at
+    create) -- rather than from account-writable EC2 tags -- is what prevents an
+    attacker who can edit tags from substituting their own host key and MITMing the
+    resumed session.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    new_ip = "203.0.113.50"
+    expected_vps_key = provider._get_vps_host_keypair()[1]
+    expected_container_key = provider._get_container_host_keypair()[1]
+
+    provider._rebind_known_hosts_pre_connect(new_ip)
+
+    vps_known_hosts = provider._vps_known_hosts_path().read_text()
+    container_known_hosts = provider._container_known_hosts_path().read_text()
+    assert new_ip in vps_known_hosts and expected_vps_key in vps_known_hosts
+    assert new_ip in container_known_hosts and expected_container_key in container_known_hosts
+
+
 def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict[str, str]) -> dict:
     entry: dict = {"InstanceId": instance_id, "State": {"Name": state}}
     if public_ip:
@@ -418,6 +471,45 @@ def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx
     assert len(agents) == 1
     assert agents[0].agent_id == agent_id
     assert str(agents[0].agent_name) == "a1"
+
+
+def test_discover_hosts_and_agents_skips_instance_with_malformed_host_id_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """One instance with a corrupt mngr-host-id tag must not abort discovery for the others.
+
+    A malformed mngr-host-id yields an invalid ``HostId`` (a ``ValueError``); the
+    offline-discovery loop must skip just that instance (with a warning) and still
+    surface the well-formed stopped host, rather than letting one bad tag take down
+    the whole sweep (which would break ``mngr list`` / ``mngr start`` account-wide).
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    good_host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-bad", "stopped", "", {"mngr-host-id": "not-a-valid-host-id", "mngr-provider": "aws-test"}
+                ),
+                _instance_with_tags(
+                    "i-good",
+                    "stopped",
+                    "",
+                    {"mngr-host-id": str(good_host_id), "mngr-provider": "aws-test", "Name": "mngr-goodhost"},
+                ),
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    host_ids = {host.host_id for host in result}
+    assert good_host_id in host_ids, "well-formed stopped host should still surface"
+    assert any("malformed mngr host tag" in w.lower() for w in log_warnings), log_warnings
 
 
 def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:

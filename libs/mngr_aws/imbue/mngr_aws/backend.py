@@ -68,14 +68,6 @@ AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 # The value is a compact JSON record kept under EC2's 256-char tag-value limit.
 AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
 _MAX_TAG_VALUE_LEN: Final[int] = 256
-# The instance keeps its SSH host keys across a stop/start, but its public IP
-# changes -- and on resume the host record (which holds the keys) is unreadable
-# until we connect, which itself needs the key in known_hosts. Break that
-# chicken-and-egg by stashing the (public) host keys in tags at create, so
-# `start_host` can rebind known_hosts to the new IP *before* connecting. Ed25519
-# public keys are ~80 chars, well under the 256-char tag-value limit.
-SSH_HOST_KEY_TAG: Final[str] = "mngr-ssh-host-key"
-CONTAINER_SSH_HOST_KEY_TAG: Final[str] = "mngr-container-ssh-host-key"
 # The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
 # recover the host name when reconstructing a stopped host from tags.
 _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
@@ -400,11 +392,12 @@ class AwsProvider(VpsDockerProvider):
         # The cached instance list predates the start (stale state / no public
         # IP); drop it so any later discovery sees the running instance + new IP.
         self._instances_cache = None
-        # Rebind known_hosts to the new IP from the tag-stashed host keys BEFORE
+        # Rebind known_hosts to the new IP from mngr's local host keypairs BEFORE
         # connecting -- the instance kept its host keys across the stop/start, but
         # the IP changed, and the record (the other key source) can't be read
-        # until we can SSH in.
-        self._rebind_known_hosts_from_tags(instance, new_ip)
+        # until we can SSH in. The local keypairs are what was injected at create,
+        # so they match what the resumed instance presents.
+        self._rebind_known_hosts_pre_connect(new_ip)
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
         with self._make_outer_for_vps_ip(new_ip) as outer:
@@ -471,20 +464,34 @@ class AwsProvider(VpsDockerProvider):
         EC2 ``DescribeInstances`` tags, so it resolves an instance that is
         stopped and therefore unreachable over SSH. ``list_instances`` already
         filters out terminated instances, so a destroyed host returns ``None``.
+
+        Refuses (raises) when more than one non-terminated instance carries the
+        same ``mngr-host-id`` tag. ``mngr-host-id`` is meant to be unique, but the
+        tag is account-writable, so a duplicate could otherwise silently steer
+        ``mngr start`` (and the agent-tag writes keyed off this lookup) onto the
+        wrong instance; failing loudly is safer than acting on an ambiguous match.
         """
+        matches = self._instances_matching_host_id(host_id)
+        if not matches:
+            # Not in the (possibly stale) cached list. During `mngr create` the
+            # cache can be populated -- e.g. by an earlier discovery/name-conflict
+            # check -- before the new instance exists, so `persist_agent_data` for
+            # the new agent would miss it. Refresh once and retry before giving up.
+            self._instances_cache = None
+            matches = self._instances_matching_host_id(host_id)
+        if len(matches) > 1:
+            ids = sorted(str(m.get("id")) for m in matches)
+            raise MngrError(
+                f"AWS provider {self.name!r}: {len(matches)} non-terminated EC2 instances are tagged "
+                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
+                "Resolve the duplicate tags (or terminate the stray instance) and retry."
+            )
+        return matches[0] if matches else None
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Return every cached non-terminated instance tagged ``mngr-host-id=<host_id>``."""
         wanted_tag = f"mngr-host-id={host_id}"
-        for instance in self._list_instances_cached():
-            if wanted_tag in instance.get("tags", ()):
-                return instance
-        # Not in the (possibly stale) cached list. During `mngr create` the cache
-        # can be populated -- e.g. by an earlier discovery/name-conflict check --
-        # before the new instance exists, so `persist_agent_data` for the new
-        # agent would miss it. Refresh once and retry before giving up.
-        self._instances_cache = None
-        for instance in self._list_instances_cached():
-            if wanted_tag in instance.get("tags", ()):
-                return instance
-        return None
+        return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
     def _record_stop_reason(
         self,
@@ -534,27 +541,30 @@ class AwsProvider(VpsDockerProvider):
                 public_key=record.container_ssh_host_public_key,
             )
 
-    def _rebind_known_hosts_from_tags(self, instance: Mapping[str, Any], new_ip: str) -> None:
-        """Add the new IP to known_hosts using the host keys stashed in EC2 tags.
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
 
-        Runs on resume *before* any SSH connection, since the host record (the
-        other source of the keys) can't be read until we can connect. The keys
-        survive the stop/start; only the IP changed.
+        Runs on resume *before* any SSH connection (the host record, the other key
+        source, can't be read until we can connect). The VPS/container host
+        keypairs are generated and held locally by mngr -- per provider instance,
+        in ``_key_dir()`` -- and injected into the instance at create time, so the
+        public keys here are exactly the ones the resumed instance presents.
+        Sourcing them locally (rather than from EC2 tags, which any principal with
+        ``ec2:CreateTags`` could rewrite) keeps SSH host-key verification anchored
+        to data mngr controls, not to account-writable instance metadata.
         """
-        tags = self._tag_dict_from_normalized(instance)
-        vps_key = tags.get(SSH_HOST_KEY_TAG)
-        container_key = tags.get(CONTAINER_SSH_HOST_KEY_TAG)
-        if vps_key:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(), hostname=new_ip, port=22, public_key=vps_key
-            )
-        if container_key:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=container_key,
-            )
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=new_ip,
+            port=22,
+            public_key=self._get_vps_host_keypair()[1],
+        )
+        add_host_to_known_hosts(
+            known_hosts_path=self._container_known_hosts_path(),
+            hostname=new_ip,
+            port=self.config.container_ssh_port,
+            public_key=self._get_container_host_keypair()[1],
+        )
 
     # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
@@ -595,17 +605,6 @@ class AwsProvider(VpsDockerProvider):
         WARNING; the only consequence is that the agent will not auto-stop on
         idle (manual ``mngr stop --stop-host`` still works).
         """
-        # Stash the (public) host keys in tags so resume can rebind known_hosts to
-        # the instance's new IP before connecting. Best-effort, like the watcher.
-        try:
-            self._store_host_keys_in_tags(host_id)
-        except MngrError as e:
-            logger.warning(
-                "Failed to stash host keys in tags for {} ({}); resume may fail SSH host-key "
-                "verification against the new IP",
-                host_id,
-                e,
-            )
         try:
             self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:
@@ -619,19 +618,6 @@ class AwsProvider(VpsDockerProvider):
                 host_id,
                 e,
             )
-
-    def _store_host_keys_in_tags(self, host_id: HostId) -> None:
-        """Tag the instance with its VPS + container SSH host public keys (for resume)."""
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            return
-        tags: dict[str, str] = {}
-        if record.ssh_host_public_key:
-            tags[SSH_HOST_KEY_TAG] = record.ssh_host_public_key
-        if record.container_ssh_host_public_key:
-            tags[CONTAINER_SSH_HOST_KEY_TAG] = record.container_ssh_host_public_key
-        if tags:
-            self.aws_client.add_tags(VpsInstanceId(record.config.vps_instance_id), tags)
 
     def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the systemd path/service idle watcher on the outer host.
@@ -769,7 +755,18 @@ class AwsProvider(VpsDockerProvider):
         for instance in self._list_instances_cached():
             if instance.get("main_ip") or instance.get("state") != "stopped":
                 continue
-            host_ref = self._discovered_host_from_tags(instance)
+            try:
+                host_ref = self._discovered_host_from_tags(instance)
+            except ValueError as e:
+                # A corrupted / externally-edited mngr-host-id or Name tag yields an
+                # invalid HostId/HostName (both ValueError subclasses). Skip just
+                # this instance rather than letting one bad tag abort offline
+                # discovery for every other stopped host in the account.
+                logger.opt(exception=e).warning(
+                    "Skipping instance {} in offline discovery: malformed mngr host tag(s)",
+                    instance.get("id"),
+                )
+                continue
             if host_ref is None or host_ref.host_id in online_host_ids:
                 continue
             agent_refs: list[DiscoveredAgent] = []
