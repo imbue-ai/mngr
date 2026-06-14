@@ -92,12 +92,13 @@ class GcpProviderConfig(VpsDockerProviderConfig):
         description="Subnetwork name. Required for custom-mode VPCs; None lets GCE pick for auto-mode networks.",
     )
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the auto-created "
-            "firewall rule. Empty by default (fail-closed): without an explicit list, ensure_firewall "
-            "raises rather than create a permissive rule. Use e.g. ['203.0.113.4/32'] to allow only "
-            "your own IP, or ['0.0.0.0/0'] to expose to the public internet (NOT recommended for production)."
+            "firewall rule. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
+            "restrict to your own IP, or [] for no ingress (no firewall rule is created and the "
+            "instance is unreachable from outside its VPC). A warning is logged when the effective "
+            "range is 0.0.0.0/0 or empty."
         ),
     )
     firewall_name: str = Field(

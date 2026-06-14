@@ -21,8 +21,9 @@ def test_default_config_values() -> None:
     assert config.boot_disk_type == "pd-balanced"
     assert config.network == "default"
     assert config.subnetwork is None
-    # Empty by default -- fail-closed; user must opt in to SSH ingress.
-    assert config.allowed_ssh_cidrs == ()
+    # Open by default (fail-open) to match the AWS provider; a warning is logged
+    # at prepare/create time and production users are expected to tighten it.
+    assert config.allowed_ssh_cidrs == ("0.0.0.0/0",)
     assert config.firewall_target_tag == "mngr-ssh"
     assert config.associate_external_ip is True
     assert config.auto_shutdown_seconds is None
