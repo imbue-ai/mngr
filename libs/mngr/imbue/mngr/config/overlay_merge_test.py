@@ -1,30 +1,65 @@
-"""Property test for the overlay-merge PROTOTYPE.
+"""Equivalence guard for the production overlay-merge wiring of
+``AgentTypeConfig.merge_with``.
 
-The ground truth: ``merge_agent_type_via_overlay(base, override)`` must equal
-``base.merge_with(override)`` for every ``(base, override)`` pair. The prototype
-reproduces the result purely through dump -> overlay -> reparse and never calls
+``AgentTypeConfig.merge_with`` now computes its result via the overlay node algebra
+(``overlay_merge.merge_models_via_overlay``) instead of the old field-by-field
+pydantic copy. This test freezes the *old* field-by-field logic verbatim as
+``_reference_agent_type_merge`` and asserts the production ``merge_with`` produces
+an identical result over a diverse corpus, so the refactor stays a pure
+result-preserving change. ``_reference_agent_type_merge`` never calls
 ``merge_with``, so the equality is a real check, not a tautology.
 
 Test instances are constructed the way the loader builds them: via
 ``model_construct`` with only the keys the layer "wrote", so ``model_fields_set``
-is faithful and sparse (exactly what the model-level merge and the pipeline's
-``exclude_unset`` dump both depend on). The corpus spans every field kind called
-out in the spec: disjoint / overlapping / empty scalar sets, ``settings_overrides``
-with bare keys, ``__extend``, nested ``__extend``, ``__assign``, and accumulation
-across base+override, ``cli_args`` as a string / list / unset, the
-``ClaudeAgentConfig`` subclass fields, and ``model_fields_set`` edge cases (empty
-override, base-class override into a subclass self).
+is faithful and sparse (exactly what both the old merge and the pipeline's
+``exclude_unset`` dump depend on). The corpus spans every field kind called out in
+the spec: disjoint / overlapping / empty scalar sets; ``cli_args`` as a string /
+list / unset; ``settings_overrides`` with bare keys, ``__extend``, nested
+``__extend``, ``__assign``, accumulation, extend-over-bare and bare-over-extend; the
+``ClaudeAgentConfig`` subclass fields; and the ``model_fields_set`` edge cases
+(empty override, both empty, base-class override into a subclass self).
 """
 
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
-from imbue.mngr.config.overlay_merge_prototype import merge_agent_type_via_overlay
+from imbue.mngr.errors import ConfigParseError
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.overlay.merge import combine_patches
+
+
+def _reference_agent_type_merge(base: AgentTypeConfig, override: AgentTypeConfig) -> AgentTypeConfig:
+    """The OLD ``AgentTypeConfig.merge_with`` body, frozen verbatim as the reference
+    "old" side of the equivalence guard.
+
+    This is the exact field-by-field logic the production ``merge_with`` had before
+    being rewired onto the overlay algebra. It must stay independent of the new path
+    (it does not call ``merge_with``) so the property test below is a genuine
+    old == new check.
+    """
+    if not isinstance(base, type(override)):
+        raise ConfigParseError(f"Cannot merge {base.__class__.__name__} with {type(override).__name__}")
+
+    explicitly_set = override.model_fields_set
+    if not explicitly_set:
+        return base
+
+    override_values = override.model_dump()
+    base_values = base.model_dump()
+    updates: list[tuple[str, Any]] = []
+    for field_name in explicitly_set:
+        field_info = override.__class__.model_fields.get(field_name)
+        if field_info is not None and is_settings_patch_field(field_info.metadata):
+            updates.append(
+                (field_name, combine_patches(base_values.get(field_name) or {}, override_values[field_name]))
+            )
+        else:
+            updates.append((field_name, override_values[field_name]))
+    return base.model_copy_update(*updates)
 
 
 def _agent(**fields: Any) -> AgentTypeConfig:
@@ -132,37 +167,25 @@ _CASES: list[tuple[str, AgentTypeConfig, AgentTypeConfig]] = [
 
 
 @pytest.mark.parametrize("base,override", [pytest.param(b, o, id=label) for label, b, o in _CASES])
-def test_overlay_prototype_matches_merge_with(base: AgentTypeConfig, override: AgentTypeConfig) -> None:
-    """The overlay pipeline reproduces ``merge_with`` exactly, value-for-value."""
-    expected = base.merge_with(override)
-    actual = merge_agent_type_via_overlay(base, override)
+def test_merge_with_matches_frozen_reference(base: AgentTypeConfig, override: AgentTypeConfig) -> None:
+    """The production (overlay-backed) ``merge_with`` reproduces the frozen
+    field-by-field reference exactly, value-for-value and class-for-class.
+    """
+    expected = _reference_agent_type_merge(base, override)
+    actual = base.merge_with(override)
     assert actual == expected
-    # Re-parsing must preserve the concrete class (subclass stays a subclass).
+    # The overlay reparse must preserve the concrete class (subclass stays a subclass).
     assert type(actual) is type(expected)
 
 
 def test_base_class_override_into_subclass_self() -> None:
     """A base ``AgentTypeConfig`` override merged into a ``ClaudeAgentConfig`` self
     (the loader's "secondary file redefines the type without parent_type" case)
-    re-parses back into the subclass, matching ``merge_with``.
+    re-parses back into the subclass, matching the frozen reference.
     """
     base = _claude(auto_dismiss_dialogs=True, cli_args=("a",))
     override = _agent(cli_args=("b",))
-    expected = base.merge_with(override)
-    actual = merge_agent_type_via_overlay(base, override)
+    expected = _reference_agent_type_merge(base, override)
+    actual = base.merge_with(override)
     assert actual == expected
     assert type(actual) is ClaudeAgentConfig
-
-
-def test_prototype_does_not_call_merge_with() -> None:
-    """Guard against the property test becoming tautological: the prototype's
-    executable code must not call ``merge_with``.
-
-    Docstrings legitimately mention ``merge_with`` (the thing being reproduced), so
-    they are stripped before the check -- only code outside triple-quoted strings is
-    inspected.
-    """
-    source = Path(__file__).with_name("overlay_merge_prototype.py").read_text()
-    # Even-indexed split parts are code (outside docstrings); odd-indexed are docstrings.
-    code_only = "".join(part for index, part in enumerate(source.split('"""')) if index % 2 == 0)
-    assert "merge_with" not in code_only

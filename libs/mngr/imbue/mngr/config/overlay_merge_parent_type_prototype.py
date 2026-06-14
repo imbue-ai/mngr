@@ -4,9 +4,10 @@ Completes the proof-of-approach for the spec in
 ``specs/whole-config-overlay-integration.md`` by reproducing the **last** merge
 axis: the ``parent_type`` inheritance path,
 ``agent_config_registry._apply_custom_overrides_to_parent_config``. This is the
-class-switching variant the two prior prototypes (``overlay_merge_prototype.py``
-for ``AgentTypeConfig.merge_with`` and ``overlay_merge_mngr_prototype.py`` for
-``MngrConfig.merge_with``) deliberately left out.
+class-switching variant the two prior proofs-of-approach (the production
+``overlay_merge.py`` for ``AgentTypeConfig.merge_with`` and
+``overlay_merge_mngr_prototype.py`` for ``MngrConfig.merge_with``) deliberately
+left out.
 
 ``_apply_custom_overrides_to_parent_config(parent_config, custom_config)`` applies
 the *child*'s explicitly-set fields onto the *parent*'s config, but constructs the
@@ -20,7 +21,7 @@ then ``_apply_custom_overrides_to_parent_config(parent_base_config, custom_confi
 to fold the child onto that.
 
 It differs from ``AgentTypeConfig.merge_with`` in exactly three ways, which is why
-the pipeline is the ``overlay_merge_prototype.py`` pipeline with three deltas:
+the pipeline is the production ``overlay_merge.py`` pipeline with three deltas:
 
 1. **Routing metadata is skipped.** The iteration is over
    ``custom_config.model_fields_set`` *minus* ``_METADATA_FIELDS`` =

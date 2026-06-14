@@ -26,6 +26,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -41,7 +42,6 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import is_static_marker
-from imbue.overlay.merge import combine_patches
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -454,22 +454,18 @@ class AgentTypeConfig(FrozenModel):
         if not isinstance(self, type(override)):
             raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
 
-        explicitly_set = override.model_fields_set
-        if not explicitly_set:
-            return self
-
-        override_values = override.model_dump()
-        base_values = self.model_dump()
-        updates: list[tuple[str, Any]] = []
-        for field_name in explicitly_set:
-            field_info = override.__class__.model_fields.get(field_name)
-            if field_info is not None and is_settings_patch_field(field_info.metadata):
-                updates.append(
-                    (field_name, combine_patches(base_values.get(field_name) or {}, override_values[field_name]))
-                )
-            else:
-                updates.append((field_name, override_values[field_name]))
-        return self.model_copy_update(*updates)
+        # The merge is computed via the overlay node algebra (serialize ->
+        # pre-process -> overlay-merge -> reparse) rather than field-by-field
+        # pydantic copy. This is behavior-identical to the old merge: bare fields
+        # assign-by-default (override's set fields win, base carries through),
+        # SettingsPatchField fields accumulate via ``__extend`` (the combine_patches
+        # branch), and the result re-parses into ``type(self)`` so a subclass stays
+        # its concrete class. See ``overlay_merge.merge_models_via_overlay`` and
+        # ``specs/whole-config-overlay-integration.md``.
+        settings_patch_field_names = frozenset(
+            name for name, field in type(override).model_fields.items() if is_settings_patch_field(field.metadata)
+        )
+        return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
 
 
 class ProviderInstanceConfig(FrozenModel):

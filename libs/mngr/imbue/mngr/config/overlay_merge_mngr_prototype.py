@@ -1,7 +1,8 @@
 """PROTOTYPE -- not wired into any production code path.
 
-Extends the ``AgentTypeConfig`` proof-of-approach
-(``overlay_merge_prototype.py``) up to the **top-level** ``MngrConfig.merge_with``,
+Extends the ``AgentTypeConfig`` proof-of-approach (now promoted to the production
+``overlay_merge.py`` and wired into ``AgentTypeConfig.merge_with``) up to the
+**top-level** ``MngrConfig.merge_with``,
 which is the real remaining risk for the design in
 ``specs/whole-config-overlay-integration.md``. It reproduces the *result* of
 ``base.merge_with(override)`` for a whole ``MngrConfig`` via the same
