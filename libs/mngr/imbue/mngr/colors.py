@@ -19,7 +19,7 @@ from typing import IO
 # ERROR_COLOR: Bold red (256-color code 196)
 # BUILD_COLOR: Medium gray (256-color code 245) - visible on both black and white backgrounds
 # DEBUG_COLOR: Solid blue (256-color code 33)
-# TRACE COLOR: Purple (256-color code 99)
+# TRACE_COLOR: Purple (256-color code 99)
 WARNING_COLOR = "\x1b[1;38;5;178m"
 ERROR_COLOR = "\x1b[1;38;5;196m"
 BUILD_COLOR = "\x1b[38;5;245m"
