@@ -8,6 +8,7 @@ import pytest
 from imbue.overlay.errors import NarrowingError
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import ScalarTuple
+from imbue.overlay.markers import StaticDict
 from imbue.overlay.markers import StaticList
 from imbue.overlay.node_merge import apply_extend
 from imbue.overlay.node_merge import combine
@@ -396,6 +397,23 @@ def test_merge_static_payload_suppresses_narrowing() -> None:
     merged, narrowings = merge_narrowing_allowed(base, higher)
     assert finalize(merged) == {"cli_args": ["--verbose"]}
     assert narrowings == []
+
+
+def test_static_dict_is_an_atomic_leaf_through_lift_finalize_lower() -> None:
+    """A ``StaticDict`` (a dict subclass) is carried whole -- not descended into as a
+    patch -- so it keeps its narrowing exemption: replacing a non-empty base dict with
+    a ``StaticDict`` that drops keys does not narrow, and it survives lift/finalize and
+    a lower round-trip intact (it is not dissolved into a node patch)."""
+    static = StaticDict({"allow": ["X"]})
+    # lift keeps it as an atomic leaf payload, not a nested patch.
+    assert lift({"permissions": static}) == {"permissions": Default(static)}
+    # It round-trips through lower unchanged (no key__... suffixes leak in).
+    assert lower(lift({"permissions": static})) == {"permissions": static}
+    # And it suppresses narrowing even though it drops base keys.
+    base = lift_concrete({"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}})
+    merged, narrowings = merge_narrowing_allowed(base, lift({"permissions": static}))
+    assert narrowings == []
+    assert finalize(merged) == {"permissions": {"allow": ["X"]}}
 
 
 def test_merge_scalar_tuple_payload_suppresses_narrowing() -> None:

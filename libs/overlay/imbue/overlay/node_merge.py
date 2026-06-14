@@ -22,6 +22,7 @@ from typing import Any
 
 from imbue.overlay.errors import NarrowingError
 from imbue.overlay.errors import OverlayError
+from imbue.overlay.markers import is_static_marker
 from imbue.overlay.merge import would_assignment_narrow
 from imbue.overlay.nodes import Assign
 from imbue.overlay.nodes import Default
@@ -45,6 +46,16 @@ AssignDrop = tuple[Any, Any, str]
 # The aggregate leaf types a payload may be (besides scalars / nested patches).
 # ``Static*`` markers subclass these and so are covered.
 _AGGREGATE_LEAF_TYPES = (list, tuple, set, frozenset)
+
+
+def _is_patch_dict(value: Any) -> bool:
+    """Return True if ``value`` should be descended into as a nested ``Patch``.
+
+    A plain dict is a patch; a ``Static*`` aggregate (incl. ``StaticDict``, a dict
+    subclass) is an **atomic leaf** -- carried whole, never lifted/lowered into nodes
+    -- so it keeps its narrowing exemption rather than dissolving into a patch.
+    """
+    return isinstance(value, dict) and not is_static_marker(value)
 
 
 # =============================================================================
@@ -75,7 +86,7 @@ def lift(raw: dict[str, Any]) -> Patch:
     explicit_assigns: dict[str, Any] = {}
     extends: dict[str, Any] = {}
     for key, value in raw.items():
-        payload = lift(value) if isinstance(value, dict) else value
+        payload = lift(value) if _is_patch_dict(value) else value
         if is_extend_key(key):
             extends[bare_key(key)] = payload
         elif is_assign_key(key):
@@ -131,7 +142,7 @@ def lower(patch: Patch) -> dict[str, Any]:
     """
     result: dict[str, Any] = {}
     for field, node in patch.items():
-        lowered = lower(node.payload) if isinstance(node.payload, dict) else node.payload
+        lowered = lower(node.payload) if _is_patch_dict(node.payload) else node.payload
         if isinstance(node, Extend):
             result[f"{field}{EXTEND_SUFFIX}"] = lowered
         elif isinstance(node, Assign):
@@ -325,8 +336,9 @@ def finalize(patch: Patch) -> dict[str, Any]:
 
 
 def finalize_payload(payload: Any) -> Any:
-    """Collapse a payload: recurse for a ``Patch``, return the leaf otherwise."""
-    if isinstance(payload, dict):
+    """Collapse a payload: recurse for a ``Patch``, return the leaf otherwise (a
+    ``Static*`` aggregate is an atomic leaf, returned whole)."""
+    if _is_patch_dict(payload):
         return finalize(payload)
     return payload
 
