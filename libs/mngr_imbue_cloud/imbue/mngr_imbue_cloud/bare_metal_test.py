@@ -4,10 +4,13 @@ from datetime import timezone
 import pytest
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr_imbue_cloud.bare_metal import DISK_RESERVE_GB
+from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.bare_metal import choose_raid_level
 from imbue.mngr_imbue_cloud.bare_metal import choose_server_for_new_slice
 from imbue.mngr_imbue_cloud.bare_metal import compute_capacity
+from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_budget_gib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
@@ -71,18 +74,28 @@ def test_compute_slice_memory_mib_rejects_too_small() -> None:
         compute_slice_memory_mib(0)
 
 
-def test_compute_slice_disk_gib_splits_usable_disk() -> None:
-    # (500 - 20 reserve) / 8 slots = 60 GiB each.
-    assert compute_slice_disk_gib(500, 8) == 60
+def test_compute_slice_disk_budget_splits_usable_disk() -> None:
+    # (500 - 20 reserve) / 8 slots = 60 GiB total budget each.
+    assert compute_slice_disk_budget_gib(500, 8) == 60
     # Remainder is dropped (floor).
-    assert compute_slice_disk_gib(477, 8) == (477 - 20) // 8
+    assert compute_slice_disk_budget_gib(477, 8) == (477 - 20) // 8
 
 
-def test_compute_slice_disk_gib_rejects_when_no_room() -> None:
+def test_compute_slice_disk_gib_is_budget_minus_boot_disk() -> None:
+    # Data disk = total budget minus the fixed boot disk, so boot + data == budget.
+    assert compute_slice_disk_gib(500, 8) == 60 - SLICE_BOOT_DISK_GIB
+    assert compute_slice_disk_gib(500, 8) + SLICE_BOOT_DISK_GIB == compute_slice_disk_budget_gib(500, 8)
+
+
+def test_compute_slice_disk_gib_rejects_when_budget_too_small_for_boot() -> None:
+    # Budget below the boot-disk size leaves no room for a data disk.
     with pytest.raises(BareMetalConfigError):
         compute_slice_disk_gib(20, 8)
     with pytest.raises(BareMetalConfigError):
         compute_slice_disk_gib(500, 0)
+    # Budget that fits but is smaller than the boot disk also fails.
+    with pytest.raises(BareMetalConfigError):
+        compute_slice_disk_gib(disk_gb=DISK_RESERVE_GB + SLICE_BOOT_DISK_GIB, slot_count=1)
 
 
 def test_compute_slice_vcpus_applies_mild_overcommit() -> None:

@@ -87,6 +87,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         host_public_key_openssh: str,
         vm_ssh_host_port: int,
         container_ssh_host_port: int,
+        boot_disk_gib: int,
         extra_root_authorized_keys: tuple[str, ...] = (),
     ) -> SliceProvisionResult:
         """Create and start a VPS-parity lima VM for ``host_id`` and return its handle.
@@ -102,6 +103,7 @@ class LimaSliceVpsClient(VpsClientInterface):
             vcpus=vcpus,
             memory_mib=memory_mib,
             disk_gib=disk_gib,
+            boot_disk_gib=boot_disk_gib,
             disk_name=disk_name,
             root_authorized_public_key=root_authorized_public_key,
             host_private_key_pem=host_private_key_pem,

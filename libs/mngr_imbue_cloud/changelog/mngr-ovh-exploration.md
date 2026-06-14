@@ -17,3 +17,5 @@ Added the OVH bare-metal "slices" feature: an alternative to ordering OVH VPSes 
 - The imbue_cloud slow-path rebuild now pins the leased host's outer (VPS-root) SSH host key in the rebuilding provider's known_hosts, so the certified-data sync over the outer connection no longer fails strict host-key checking (applies to OVH VPSes and slices alike).
 
 - `allocate-slice` now also tears down the freshly-baked slice VM if parsing the bake's create-result JSON fails (e.g. a missing/invalid port field), closing a gap where such a failure could leave an orphaned VM holding a box slot with no `pool_hosts` row referencing it.
+
+- Fixed slice disk overcommit: each slice VM has a fixed boot disk (OS + Docker) plus a btrfs data disk whose sizes now sum to the per-slice disk budget ((usable_disk - reserve) / slots). Previously only the data disk was sized and lima defaulted the boot disk to 100 GiB unaccounted, so a box was over-provisioned on disk (thin-provisioned via qcow2 -- it would run out of space if slices filled up). The boot disk is now set explicitly and `compute_slice_disk_gib` returns budget-minus-boot.

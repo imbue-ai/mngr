@@ -3,6 +3,7 @@ from datetime import timezone
 
 from click.testing import CliRunner
 
+from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.bare_metal import compute_capacity
 from imbue.mngr_imbue_cloud.cli.server import _format_capacity_table
 from imbue.mngr_imbue_cloud.cli.server import build_registered_server
@@ -70,8 +71,8 @@ def test_compute_server_slice_sizing_uses_server_inputs_and_specs() -> None:
     assert sizing["vcpus"] == 3
     assert sizing["advertised_memory_gb"] == 8
     assert sizing["memory_mib"] == 8 * 1024 - 512
-    # (477 - 20 reserve) // 8 slots.
-    assert sizing["disk_gib"] == (477 - 20) // 8
+    # Per-slice disk budget (477 - 20 reserve) // 8 slots, minus the fixed boot disk.
+    assert sizing["disk_gib"] == (477 - 20) // 8 - SLICE_BOOT_DISK_GIB
     assert slice_advertised_attributes(sizing) == {"memory_gb": 8, "cpus": 3}
 
 

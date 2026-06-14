@@ -25,6 +25,14 @@ PER_SLICE_MEMORY_OVERHEAD_MIB: Final[int] = 512
 # the usable disk is divided evenly among the box's slices.
 DISK_RESERVE_GB: Final[int] = 20
 
+# Each slice VM has TWO disks whose sizes must sum to the slice's disk budget (no
+# disk overcommit, just like RAM): a fixed boot disk holding the guest OS + Docker
+# (the FCT image + build cache + container layers -- ~11GiB observed, sized with
+# headroom for build spikes) and a btrfs data disk (the rest of the budget) mounted
+# at the host_dir for the agent's per-host volume. lima would otherwise default the
+# boot disk to 100GiB, which (unaccounted) would massively overcommit the box.
+SLICE_BOOT_DISK_GIB: Final[int] = 32
+
 # Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
 # floor(threads * ratio / slots)). Overridable per box at ``admin server
 # register --cpu-overcommit``; RAM is never overcommitted.
@@ -73,17 +81,36 @@ def compute_slice_memory_mib(memory_per_slice_gb: int) -> int:
 
 
 @pure
-def compute_slice_disk_gib(disk_gb: int, slot_count: int) -> int:
-    """Return the per-slice btrfs data-disk size: usable disk (minus reserve) split across slots."""
+def compute_slice_disk_budget_gib(disk_gb: int, slot_count: int) -> int:
+    """Return the TOTAL disk budget for one slice: usable disk (minus reserve) split across slots.
+
+    This budget is the slice VM's whole disk allocation -- boot disk + data disk
+    must sum to it, so the box is never over-provisioned on disk.
+    """
     if slot_count <= 0:
         raise BareMetalConfigError(f"slot_count must be positive, got {slot_count}")
-    usable_disk_gb = disk_gb - DISK_RESERVE_GB
-    per_slice_disk_gib = usable_disk_gb // slot_count
-    if per_slice_disk_gib <= 0:
+    per_slice_budget_gib = (disk_gb - DISK_RESERVE_GB) // slot_count
+    if per_slice_budget_gib <= 0:
         raise BareMetalConfigError(
             f"disk_gb={disk_gb} minus {DISK_RESERVE_GB}GB reserve cannot be split across {slot_count} slot(s)"
         )
-    return per_slice_disk_gib
+    return per_slice_budget_gib
+
+
+@pure
+def compute_slice_disk_gib(disk_gb: int, slot_count: int) -> int:
+    """Return the per-slice btrfs DATA-disk size: the disk budget minus the fixed boot disk.
+
+    Boot disk (``SLICE_BOOT_DISK_GIB``) + this data disk = the per-slice budget, so
+    the two disks together never exceed the box's allocated-per-slice disk.
+    """
+    data_disk_gib = compute_slice_disk_budget_gib(disk_gb, slot_count) - SLICE_BOOT_DISK_GIB
+    if data_disk_gib <= 0:
+        raise BareMetalConfigError(
+            f"per-slice disk budget for disk_gb={disk_gb} across {slot_count} slot(s) is too small to fit the "
+            f"{SLICE_BOOT_DISK_GIB}GiB boot disk plus any data disk"
+        )
+    return data_disk_gib
 
 
 @pure

@@ -13,6 +13,7 @@ def _build() -> dict[str, Any]:
         vcpus=3,
         memory_mib=7680,
         disk_gib=80,
+        boot_disk_gib=16,
         disk_name="mngr-slice-deadbeef-data",
         root_authorized_public_key=_ROOT_PUBKEY,
         host_private_key_pem=_HOST_PRIV,
@@ -35,6 +36,13 @@ def test_slice_yaml_attaches_named_btrfs_data_disk() -> None:
     assert disks[0]["name"] == "mngr-slice-deadbeef-data"
     assert disks[0]["fsType"] == "btrfs"
     assert disks[0]["size"] == "80GiB"
+
+
+def test_slice_yaml_sets_explicit_boot_disk_size() -> None:
+    # The boot disk is sized explicitly (not lima's 100GiB default) so it + the
+    # data disk sum to the slice's disk budget (no disk overcommit).
+    config = _build()
+    assert config["disk"] == "16GiB"
 
 
 def test_slice_yaml_forwards_exactly_vm_and_container_sshd_externally() -> None:
@@ -83,6 +91,7 @@ def test_slice_yaml_authorizes_extra_root_keys_without_dropping_bake_key() -> No
         vcpus=3,
         memory_mib=7680,
         disk_gib=80,
+        boot_disk_gib=16,
         disk_name="mngr-slice-deadbeef-data",
         root_authorized_public_key=_ROOT_PUBKEY,
         host_private_key_pem=_HOST_PRIV,

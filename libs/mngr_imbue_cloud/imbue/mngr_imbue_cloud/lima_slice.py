@@ -76,6 +76,7 @@ def build_slice_lima_yaml(
     vcpus: int,
     memory_mib: int,
     disk_gib: int,
+    boot_disk_gib: int,
     disk_name: str,
     root_authorized_public_key: str,
     host_private_key_pem: str,
@@ -92,7 +93,10 @@ def build_slice_lima_yaml(
     can run its container on it with no loopback). Two host ports on the box are
     forwarded in -- one to the VM's root sshd, one to the inner container sshd --
     and all other guest ports are suppressed (per-VM NAT already isolates VMs
-    from each other).
+    from each other). The ``boot_disk_gib`` boot disk (OS + Docker) plus the
+    ``disk_gib`` btrfs data disk sum to the slice's disk budget, so the box is
+    never over-provisioned on disk (lima would otherwise default the boot disk to
+    100GiB, unaccounted).
     """
     config = generate_default_lima_yaml(
         volume_host_path=None,
@@ -105,6 +109,10 @@ def build_slice_lima_yaml(
     )
     config["cpus"] = vcpus
     config["memory"] = f"{memory_mib}MiB"
+    # Size the boot disk explicitly (OS + Docker storage). Without this lima would
+    # default it to 100GiB, which -- unaccounted against the per-slice budget --
+    # would massively overcommit the box's disk.
+    config["disk"] = f"{boot_disk_gib}GiB"
     # The base config already populated portForwards with mngr_lima's rules that
     # disable auto-forwarding of every guest port. Prepend the slice's two explicit
     # allow rules (matched first) so only the VM sshd and the inner container sshd

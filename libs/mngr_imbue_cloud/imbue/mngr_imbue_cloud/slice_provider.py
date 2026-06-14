@@ -29,6 +29,7 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr_imbue_cloud.bare_metal import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.bare_metal import allocate_slice_ports
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
@@ -234,6 +235,7 @@ class SliceVpsDockerProvider(VpsDockerProvider):
                 host_public_key_openssh=vps_host_public_key,
                 vm_ssh_host_port=vm_ssh_port,
                 container_ssh_host_port=container_ssh_port,
+                boot_disk_gib=SLICE_BOOT_DISK_GIB,
                 extra_root_authorized_keys=extra_root_keys,
             )
             # Pin the VM's (pre-injected) host key for the forwarded outer port.
