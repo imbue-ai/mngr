@@ -3,3 +3,5 @@ The subagent-proxy's own hooks (PROXY spawn/cleanup/reap, DENY deny/reap, and th
 The plugin still operates on `settings.local.json` (and plugin-cache `hooks.json` files) for the one thing that genuinely concerns the *user's* hooks: wrapping user-defined Stop/SubagentStop commands with the `MNGR_CLAUDE_SUBAGENT_PROXY_CHILD` guard so they no-op inside spawned proxy children.
 
 Because that wrap is now the only mngr write to `settings.local.json`, the requirement that the file be gitignored moved here too: the plugin verifies it right before it rewrites the file (and only when there is actually a user Stop hook to wrap), instead of `mngr create` enforcing it unconditionally for every Claude agent.
+
+Removed the now-vestigial `SubagentProxyPluginConfig.merge_with` override; the config merge is routed through the overlay pipeline, which reproduces the same assign-by-default semantics. No user-visible behavior change.
