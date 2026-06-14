@@ -40,6 +40,8 @@ Only after doing all of the above should you begin writing code.
 - During your final reflection, if you see a potentially better way to do something (e.g. by using an existing library or reusing existing code), flag that as a potential task for future improvement.
 - Never use emojis. Remove any emojis you see in the code or docs whenever you are modifying that code or those docs.
 - Be concise in your communications. Don't hype up your results, say "perfect!", or use emojis. Be serious and professional.
+- All changes should have a corresponding changelog entry in the correct project!
+- During your final reflection, if you notice that there was no changelog entry for a change, fix it immediately!  And definitely flag it.
 
 # When coding, follow these guidelines:
 
