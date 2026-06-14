@@ -11,6 +11,7 @@ from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
@@ -23,6 +24,7 @@ from imbue.mngr_gcp import hookimpl
 from imbue.mngr_gcp.cli import gcp_cli_group
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.instance import extract_git_depth
@@ -35,42 +37,44 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 GCP_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("gcp")
 
 
-def _resolve_credentials_and_project_or_unavailable(
-    name: ProviderInstanceName, config: GcpProviderConfig
-) -> tuple[Credentials, str]:
-    """Resolve ADC credentials + project, raising ``ProviderUnavailableError`` on any failure.
+def _resolve_credentials_project_and_zone_or_unavailable(
+    name: ProviderInstanceName, config: GcpProviderConfig, concurrency_group: ConcurrencyGroup
+) -> tuple[Credentials, str, str]:
+    """Resolve ADC credentials, project, and the effective GCE zone, raising ``ProviderUnavailableError`` on failure.
 
-    Validate the cheap, network-free zone/region config first, then resolve ADC
-    (``google.auth.default()``), which serves double duty: it yields both the
-    credentials and the project ADC infers from the environment
-    (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set project`` / metadata), used by
-    ``resolve_project_id`` as the fallback when no explicit ``project_id`` is set.
-    A single ``default()`` call serves both, so we never probe twice.
+    Resolve the zone/region first -- a config-only check, plus a best-effort
+    ``gcloud config get compute/zone`` probe (via ``concurrency_group``) when no
+    ``default_zone`` is pinned -- then resolve ADC (``google.auth.default()``),
+    which yields both the credentials and the project ADC
+    infers from the environment (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set
+    project`` / metadata), used by ``resolve_project_id`` as the fallback when no
+    explicit ``project_id`` is set. A single ``default()`` call serves both, so we
+    never probe twice.
 
-    A failure here means we could not even authenticate to GCP, so the provider's
-    state is *unknown* -- there may well be running hosts we simply cannot see.
-    That is exactly ``ProviderUnavailableError`` (not ``ProviderEmptyError``,
-    which asserts "reached and definitively empty"): the shared discovery path
-    surfaces it to the user instead of silently dropping the provider, and
-    ``mngr gc`` skips it rather than treating an unreachable provider's hosts as
-    garbage. Mirrors the Azure provider's handling of the same condition.
+    A failure here means we could not authenticate to GCP (or the configured
+    zone/region are self-inconsistent), so the provider's state is *unknown* --
+    hence ``ProviderUnavailableError`` (not ``ProviderEmptyError``, which asserts
+    "reached and definitively empty"): the shared discovery path surfaces it
+    instead of silently dropping the provider, and ``mngr gc`` skips it rather
+    than treating its hosts as garbage.
     """
     try:
-        config.validate_zone_in_region()
+        gcloud_zone = None if config.default_zone else get_gcloud_compute_zone(concurrency_group)
+        zone, _region = config.resolve_zone_and_region(gcloud_zone)
         credentials, adc_project = config.get_credentials_and_resolved_project()
         project_id = config.resolve_project_id(adc_project)
     except (ValueError, google_auth_exceptions.GoogleAuthError) as e:
         raise ProviderUnavailableError(name, str(e)) from e
-    return credentials, project_id
+    return credentials, project_id, zone
 
 
 class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
-    """``ParsedVpsBuildOptions`` extended with the GCP-only ``--gcp-spot`` knob.
+    """``ParsedVpsBuildOptions`` extended with the GCP-only ``--gcp-spot`` / ``--gcp-image`` knobs.
 
     Returned by ``GcpProvider._parse_build_args`` and consumed by
-    ``GcpProvider._create_vps_instance`` so the Spot opt-in flows through to
-    ``GcpVpsClient.create_instance`` without touching the shared
-    ``VpsClientInterface`` (mirrors ``ParsedAwsBuildOptions``).
+    ``GcpProvider._create_vps_instance`` so the Spot opt-in and per-host image
+    override flow through to ``GcpVpsClient.create_instance`` without touching the
+    shared ``VpsClientInterface`` (mirrors ``ParsedAwsBuildOptions``).
     """
 
     spot: bool = Field(
@@ -79,9 +83,15 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
             "Per-host opt-in for GCE Spot capacity, from the presence-only ``--gcp-spot`` build arg. "
             "When True, ``GcpVpsClient.create_instance`` launches the VM with "
             "``scheduling.provisioning_model=SPOT`` (and ``instance_termination_action=DELETE`` so a "
-            "preempted Spot VM is deleted, not left stopped). GCE may preempt Spot VMs at any time "
-            "with ~30s notice; opt-in only -- safe for ephemeral / experimental agents, risky for "
-            "long-lived ones."
+            "preempted Spot VM is deleted, not left stopped)."
+        ),
+    )
+    image: str | None = Field(
+        default=None,
+        description=(
+            "Per-host GCE source-image override, from the ``--gcp-image=`` build arg. When set, "
+            "``GcpVpsClient.create_instance`` boots this VM from the given image instead of the "
+            "config's ``default_source_image``; when None the configured default is used."
         ),
     )
 
@@ -122,7 +132,10 @@ class GcpProvider(VpsDockerProvider):
            uploads the SSH key or creates the instance -- means a first-time
            user who hasn't run ``prepare`` gets the clean "run mngr gcp prepare"
            message immediately, instead of it surfacing mid-create under a
-           "Host creation failed, attempting cleanup..." line.
+           "Host creation failed, attempting cleanup..." line. With an empty
+           ``allowed_ssh_cidrs`` (no ingress requested) ``resolve_firewall``
+           short-circuits and this check is a no-op: no rule is expected, so the
+           instance launches intentionally unreachable.
         """
         if not self.gcp_config.project_id:
             logger.info(
@@ -153,9 +166,11 @@ class GcpProvider(VpsDockerProvider):
 
         Accepts ``--gcp-zone=ZONE`` (GCE VMs are zonal, so the placement knob is
         a zone, not a region; it must equal the provider's bound zone), the
-        machine type via ``--gcp-machine-type=TYPE``, ``--gcp-spot``
-        (presence-only, opts the host onto GCE Spot capacity), and the shared
-        ``--git-depth=N``. Composed from the shared low-level helpers (rather
+        machine type via ``--gcp-machine-type=TYPE``, a per-host boot-disk image
+        override via ``--gcp-image=IMAGE`` (defaults to the config's
+        ``default_source_image``), ``--gcp-spot`` (presence-only, opts the host
+        onto GCE Spot capacity), and the shared ``--git-depth=N``. Composed from
+        the shared low-level helpers (rather
         than the ``parse_vps_build_args`` convenience, which hardcodes a
         ``--<prefix>-region=`` flag) so the flag is named ``--gcp-zone`` to
         match GCE's zonal model. The parsed value populates
@@ -166,18 +181,20 @@ class GcpProvider(VpsDockerProvider):
         args = list(build_args or ())
         zone, args = extract_single_value_arg(args, "--gcp-zone=")
         machine_type, args = extract_single_value_arg(args, "--gcp-machine-type=")
+        image, args = extract_single_value_arg(args, "--gcp-image=")
         spot, args = extract_presence_flag(args, "--gcp-spot")
         git_depth, args = extract_git_depth(args)
-        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--gcp-spot", "--git-depth=")
+        valid_args = ("--gcp-zone=", "--gcp-machine-type=", "--gcp-image=", "--gcp-spot", "--git-depth=")
         docker_build_args: list[str] = []
         for arg in args:
             raise_if_vps_migration_arg(arg)
             raise_if_unknown_provider_arg(arg, "gcp", valid_args)
             docker_build_args.append(arg)
         return ParsedGcpBuildOptions(
-            region=zone or self.gcp_config.default_zone,
+            region=zone or self.gcp_client.zone,
             plan=machine_type or self.gcp_config.default_machine_type,
             spot=spot,
+            image=image,
             git_depth=git_depth,
             docker_build_args=tuple(docker_build_args),
         )
@@ -190,14 +207,15 @@ class GcpProvider(VpsDockerProvider):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
     ) -> VpsInstanceId:
-        """GCP override: thread the per-host ``--gcp-spot`` opt-in into ``GcpVpsClient.create_instance``.
+        """GCP override: thread the per-host ``--gcp-spot`` / ``--gcp-image`` knobs into ``GcpVpsClient.create_instance``.
 
         Calls through ``self.gcp_client`` (the concrete typed GCP client) rather
-        than the shared ``self.vps_client`` interface so the GCP-only ``spot``
-        kwarg is statically visible, mirroring ``AwsProvider._create_vps_instance``.
+        than the shared ``self.vps_client`` interface so the GCP-only ``spot`` and
+        ``image`` kwargs are statically visible, mirroring
+        ``AwsProvider._create_vps_instance``.
         """
         match parsed:
-            case ParsedGcpBuildOptions(spot=spot):
+            case ParsedGcpBuildOptions(spot=spot, image=image):
                 pass
             case _:
                 raise MngrError(
@@ -213,6 +231,7 @@ class GcpProvider(VpsDockerProvider):
             ssh_key_ids=ssh_key_ids,
             tags=tags,
             spot=spot,
+            image=image,
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -251,13 +270,16 @@ class GcpProviderBackend(ProviderBackendInterface):
         return (
             "GCE-specific args (consumed by provider, not passed to docker):\n"
             "  --gcp-zone=ZONE          GCE zone, e.g. us-west1-a (GCE VMs are zonal; must equal\n"
-            "                           the provider's configured zone; default: us-west1-a)\n"
+            "                           the provider's configured zone; defaults to the config's\n"
+            "                           default_zone, the active gcloud compute/zone, or us-west1-a)\n"
             "  --gcp-machine-type=TYPE  GCE machine type (default: e2-small)\n"
+            "  --gcp-image=IMAGE        GCE boot-disk source image for this host, overriding the\n"
+            "                           config's default_source_image (a full image / family URL)\n"
             "  --gcp-spot               Run on GCE Spot capacity (presence-only flag; preemptible).\n"
             "  --git-depth=N            Shallow-clone build context to depth N before upload\n"
             "\n"
-            "The GCE VM image is taken from the provider config (default_source_image);\n"
-            "per-host image overrides are not supported via build args.\n"
+            "When --gcp-image is omitted the VM image is taken from the provider config\n"
+            "(default_source_image).\n"
             "\n"
             "All other build args are passed to 'docker build' on the GCE instance.\n"
             "Example: -b --gcp-machine-type=e2-medium -b --file=Dockerfile -b .\n"
@@ -281,12 +303,14 @@ class GcpProviderBackend(ProviderBackendInterface):
         # path surfaces to the user on read paths (mngr list / connect / gc) and
         # which mngr create surfaces directly -- no custom warning or create-path
         # bootstrap hook is needed.
-        credentials, project_id = _resolve_credentials_and_project_or_unavailable(name, config)
+        credentials, project_id, zone = _resolve_credentials_project_and_zone_or_unavailable(
+            name, config, mngr_ctx.concurrency_group
+        )
 
         gcp_client = GcpVpsClient(
             credentials=credentials,
             project_id=project_id,
-            zone=config.default_zone,
+            zone=zone,
             # GCE VM source image -- distinct from config.default_image (inherited),
             # which is the Docker *container* image run inside the VM.
             image=config.default_source_image,

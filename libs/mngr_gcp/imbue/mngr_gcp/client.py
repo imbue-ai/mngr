@@ -8,6 +8,7 @@ from datetime import datetime
 from datetime import timezone
 from typing import Any
 from typing import Final
+from typing import Self
 from uuid import uuid4
 
 from google.api_core import exceptions as google_api_exceptions
@@ -18,7 +19,10 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
@@ -63,16 +67,59 @@ _STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
 # already conform; values can carry uppercase (e.g. a mixed-case provider
 # instance name), so they are lowercased before use.
 _INVALID_LABEL_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9_-]")
+_MAX_LABEL_VALUE_LENGTH: Final[int] = 63
 # RFC1035 instance names: lowercase letter first, then lowercase alphanumerics
 # and dashes, ending alphanumeric, 1-63 chars.
 _INVALID_NAME_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9-]")
+_GCE_INSTANCE_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
 _MAX_INSTANCE_NAME_LENGTH: Final[int] = 63
 # 32-hex host-id suffix (+ a separating dash) is appended to guarantee
 # uniqueness, leaving this many characters for the human-readable label stem.
 _INSTANCE_NAME_STEM_LENGTH: Final[int] = _MAX_INSTANCE_NAME_LENGTH - 33
 
 
-def to_gce_label_value(value: str) -> str:
+class GceLabelValue(NonEmptyStr):
+    """A GCE label value: non-empty, ``[a-z0-9_-]``, at most 63 chars.
+
+    The codebase models identifier strings as ``NonEmptyStr`` subtypes
+    (``SnapshotId``, ``ProviderInstanceName``, ...); this is the GCE-label
+    analog. ``to_gce_label_value`` produces it, and the constructor re-asserts
+    the coercion output is valid -- so a future regression in that coercion (or
+    a pathological empty input that would otherwise yield an invalid empty
+    label) fails fast here rather than at the GCE API.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        candidate = value.strip()
+        if _INVALID_LABEL_CHARS_RE.search(candidate) or not 1 <= len(candidate) <= _MAX_LABEL_VALUE_LENGTH:
+            raise InvalidGceIdentifierError(
+                f"{candidate!r} is not a valid GCE label value "
+                f"(must be 1 to {_MAX_LABEL_VALUE_LENGTH} chars matching [a-z0-9_-])"
+            )
+        return super().__new__(cls, candidate)
+
+
+class GceInstanceName(NonEmptyStr):
+    """A GCE instance name: RFC1035 (lowercase-letter first, ``[a-z0-9-]``,
+    ending alphanumeric, at most 63 chars).
+
+    The ``NonEmptyStr``-subtype analog of ``GceLabelValue`` for instance names.
+    ``_make_instance_name`` produces it; the constructor re-asserts validity for
+    the same fail-fast reason.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        candidate = value.strip()
+        if not _GCE_INSTANCE_NAME_RE.match(candidate) or len(candidate) > _MAX_INSTANCE_NAME_LENGTH:
+            raise InvalidGceIdentifierError(
+                f"{candidate!r} is not a valid GCE instance name "
+                f"(must be RFC1035: lowercase letter first, [a-z0-9-], ending alphanumeric, "
+                f"at most {_MAX_INSTANCE_NAME_LENGTH} chars)"
+            )
+        return super().__new__(cls, candidate)
+
+
+def to_gce_label_value(value: str) -> GceLabelValue:
     """Coerce an arbitrary tag value into a valid GCE label value.
 
     GCE label values are restricted to ``[a-z0-9_-]`` and 63 chars. The same
@@ -81,10 +128,10 @@ def to_gce_label_value(value: str) -> str:
     provider instances whose names differ only by case would collide here -- an
     acceptable, documented edge (name them distinctly).
     """
-    return _INVALID_LABEL_CHARS_RE.sub("-", value.lower())[:63]
+    return GceLabelValue(_INVALID_LABEL_CHARS_RE.sub("-", value.lower())[:_MAX_LABEL_VALUE_LENGTH])
 
 
-def _make_instance_name(label: str, tags: Mapping[str, str]) -> str:
+def _make_instance_name(label: str, tags: Mapping[str, str]) -> GceInstanceName:
     """Build a unique RFC1035-valid GCE instance name from the label and tags.
 
     GCE identifies instances by name (used for every get/delete/operation), so
@@ -99,7 +146,20 @@ def _make_instance_name(label: str, tags: Mapping[str, str]) -> str:
     host_id = tags.get("mngr-host-id", "")
     suffix = host_id.lower().rsplit("-", 1)[-1] if host_id else uuid4().hex
     suffix = _INVALID_NAME_CHARS_RE.sub("", suffix)
-    return f"{stem}-{suffix}"[:_MAX_INSTANCE_NAME_LENGTH].rstrip("-")
+    return GceInstanceName(f"{stem}-{suffix}"[:_MAX_INSTANCE_NAME_LENGTH].rstrip("-"))
+
+
+class FirewallPrepareResult(FrozenModel):
+    """Outcome of ``GcpVpsClient.ensure_firewall`` / ``mngr gcp prepare``."""
+
+    target_tag: str = Field(description="Network tag an instance must carry to receive the rule's SSH ingress")
+    was_created: bool = Field(
+        description=(
+            "True if a new firewall rule was created by this call; False if it already existed "
+            "(idempotent re-run, or a concurrent create won the race) or if no rule was needed "
+            "(empty allowed_ssh_cidrs)"
+        )
+    )
 
 
 class GcpVpsClient(VpsClientInterface):
@@ -120,22 +180,31 @@ class GcpVpsClient(VpsClientInterface):
     credentials: Credentials = Field(frozen=True, description="Resolved ADC credentials for the compute clients")
     project_id: str = Field(frozen=True, description="GCP project this client targets")
     zone: str = Field(frozen=True, description="GCE zone this client targets")
-    image: str = Field(frozen=True, description="Default source image for boot disks created via this client")
+    image: str | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Source image for boot disks created via this client. Required for create_instance; "
+            "the operator commands (mngr gcp prepare/cleanup) leave it None because they only "
+            "touch firewall rules and never launch an instance."
+        ),
+    )
     machine_type: str = Field(default="e2-small", description="Default machine type for instances")
     boot_disk_size_gb: int = Field(default=30, description="Boot disk size in GB")
     boot_disk_type: str = Field(default="pd-balanced", description="Boot disk type")
     network: str = Field(default="default", description="VPC network name")
     subnetwork: str | None = Field(default=None, description="Subnetwork name, or None to let GCE pick")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the auto-created "
-            "firewall rule. Empty by default (fail-closed): ensure_firewall raises rather than creating "
-            "a wide-open rule. Set to e.g. ('203.0.113.4/32',) to restrict to your own IP, or "
-            "('0.0.0.0/0',) to expose to the public internet (NOT recommended for production)."
+            "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the mngr-managed SSH "
+            "firewall rule. Default ('0.0.0.0/0',) allows any IP; set to e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or () for no ingress (no firewall rule is created and the "
+            "instance is unreachable from outside its VPC). A warning is logged when the effective "
+            "range is 0.0.0.0/0 or empty."
         ),
     )
-    firewall_name: str = Field(default="mngr-gcp-ssh", description="Name of the auto-created SSH firewall rule")
+    firewall_name: str = Field(default="mngr-gcp-ssh", description="Name of the mngr-managed SSH firewall rule")
     firewall_target_tag: str = Field(default="mngr-ssh", description="Network tag the firewall rule targets")
     associate_external_ip: bool = Field(default=True, description="Assign an ephemeral external IPv4 to instances")
     service_account_email: str | None = Field(default=None, description="Service account email to attach, or None")
@@ -210,32 +279,61 @@ class GcpVpsClient(VpsClientInterface):
             raise
         return True
 
-    def ensure_firewall(self) -> str:
-        """Ensure the SSH firewall rule exists, creating it if absent. Returns the target tag.
+    def _warn_about_cidrs_if_needed(self) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (no firewall rule is created, so the instance is unreachable from
+        outside its VPC), whereas 0.0.0.0/0 means "open to the internet"
+        (default but worth flagging). Anything else is silent. Mirrors
+        ``AwsVpsClient._warn_about_cidrs_if_needed``.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.warning(
+                "GCP allowed_ssh_cidrs is empty; no SSH firewall rule will be created and instances "
+                "tagged {!r} will be unreachable from outside the VPC unless another rule grants "
+                "ingress. Set allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                self.firewall_target_tag,
+            )
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "GCP allowed_ssh_cidrs includes 0.0.0.0/0; firewall rule {!r} will "
+                "permit SSH from the public internet.",
+                self.firewall_name,
+            )
+
+    def ensure_firewall(self) -> FirewallPrepareResult:
+        """Ensure the SSH firewall rule exists, creating it if absent.
+
+        Returns a ``FirewallPrepareResult`` carrying the target tag and whether
+        a rule was newly created (False on idempotent re-run or empty ingress).
 
         GCE firewalls are network-scoped and tag-targeted (not per-instance
         like an EC2 security group). One rule named ``firewall_name`` allows
         tcp/22 + tcp/``container_ssh_port`` from every CIDR in
         ``allowed_ssh_cidrs`` to instances carrying ``firewall_target_tag``.
 
-        Fails closed if ``allowed_ssh_cidrs`` is empty: rather than create a
-        wide-open rule, raise so the caller makes an explicit decision. A
-        pre-existing rule is reused as-is (ingress is not re-patched); delete it
-        manually to change the allowed CIDRs.
+        Fails open (mirrors ``AwsVpsClient.ensure_security_group``): the default
+        ``allowed_ssh_cidrs`` of ('0.0.0.0/0',) is created and logged as a
+        warning. An empty ``allowed_ssh_cidrs`` creates no rule at all -- GCE
+        rejects an INGRESS rule with no ``source_ranges``, so the analog of
+        AWS's zero-ingress security group is simply the absence of a rule; this
+        is warned and the target tag returned, leaving instances unreachable
+        until some rule grants ingress. A pre-existing rule is reused as-is
+        (ingress is not re-patched); delete it manually to change the allowed
+        CIDRs.
 
         This is the privileged write path, used by ``mngr gcp prepare`` (one-time
         admin setup). The hot path in ``create_instance`` uses
         ``resolve_firewall`` instead, which is lookup-only and needs only
         instance-create permissions (no ``compute.firewalls.create``).
         """
+        self._warn_about_cidrs_if_needed()
         if not self.allowed_ssh_cidrs:
-            raise MngrError(
-                "Cannot auto-create a GCP firewall rule: allowed_ssh_cidrs is empty. "
-                "Set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) for your "
-                "own IP), or pre-create the firewall rule targeting the configured firewall_target_tag."
-            )
+            return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=False)
         if self._firewall_exists():
-            return self.firewall_target_tag
+            return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=False)
 
         firewall = compute_v1.Firewall(
             name=self.firewall_name,
@@ -244,8 +342,9 @@ class GcpVpsClient(VpsClientInterface):
             source_ranges=list(self.allowed_ssh_cidrs),
             target_tags=[self.firewall_target_tag],
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22", str(self.container_ssh_port)])],
-            description="Auto-created by mngr_gcp for SSH access to managed instances",
+            description="Created by mngr gcp prepare for SSH access to mngr-managed instances",
         )
+        was_created = True
         try:
             with self._translate_gcp_errors():
                 operation = self._firewalls().insert(project=self.project_id, firewall_resource=firewall)
@@ -255,13 +354,14 @@ class GcpVpsClient(VpsClientInterface):
             # the race; the rule now exists, which is exactly what we wanted.
             if e.status_code != 409:
                 raise
+            was_created = False
         logger.info(
             "Ensured firewall rule {} (tag {}) in project {}",
             self.firewall_name,
             self.firewall_target_tag,
             self.project_id,
         )
-        return self.firewall_target_tag
+        return FirewallPrepareResult(target_tag=self.firewall_target_tag, was_created=was_created)
 
     def resolve_firewall(self) -> str:
         """Look up the firewall rule without creating or modifying it. Returns the target tag.
@@ -272,15 +372,22 @@ class GcpVpsClient(VpsClientInterface):
         ``mngr gcp prepare`` so a user with restricted IAM gets a clear next
         step rather than an opaque permission denial when the instance later
         proves unreachable.
+
+        Empty ``allowed_ssh_cidrs`` short-circuits to the target tag without a
+        lookup: ``ensure_firewall`` / ``mngr gcp prepare`` creates no rule in
+        that case (GCE rejects an empty-source INGRESS rule), so there is
+        nothing to resolve and pointing the user at ``prepare`` would be wrong.
+        The instance launches intentionally unreachable, matching the
+        fail-open AWS behavior.
         """
+        if not self.allowed_ssh_cidrs:
+            return self.firewall_target_tag
         if self._firewall_exists():
             return self.firewall_target_tag
         raise MngrError(
             f"GCP firewall rule {self.firewall_name!r} does not exist in project {self.project_id!r}. "
             f"Run `mngr gcp prepare --project {self.project_id}` once to create it "
-            "(needs compute.firewalls.create), then retry the create with your usual "
-            "instance-create-only credentials. The rule targets the configured firewall_target_tag "
-            f"({self.firewall_target_tag!r}); every instance is tagged with it."
+            "(needs compute.firewalls.create), then retry the create."
         )
 
     def delete_firewall(self) -> str | None:
@@ -324,6 +431,7 @@ class GcpVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         spot: bool = False,
+        image: str | None = None,
     ) -> VpsInstanceId:
         """Provision a GCE instance in the client's bound zone.
 
@@ -331,15 +439,29 @@ class GcpVpsClient(VpsClientInterface):
         it must equal the zone this client is bound to.
 
         ``spot`` (from the per-host ``--gcp-spot`` build arg) launches the VM on
-        GCE Spot capacity (``scheduling.provisioning_model=SPOT``). GCE can
-        preempt Spot VMs at any time with ~30s notice, so it is opt-in only --
-        suitable for ephemeral / experimental agents, risky for long-lived ones.
+        GCE Spot capacity (``scheduling.provisioning_model=SPOT``).
+
+        ``image`` (from the per-host ``--gcp-image`` build arg) overrides the
+        client's configured source image for this VM only; when None the
+        client's ``image`` (``config.default_source_image``) is used.
         """
         if region != self.zone:
             raise VpsApiError(
                 400,
                 f"Cross-zone create not supported: client bound to zone {self.zone!r}, "
                 f"got region={region!r} (for GCP, --gcp-zone is the placement knob). Instantiate a zone-specific client.",
+            )
+        # The per-host --gcp-image override wins over the client's configured
+        # image; capture the resolved value into a local so the type checker sees
+        # it stay non-None through the later proto construction.
+        source_image = image or self.image
+        if source_image is None:
+            raise VpsApiError(
+                400,
+                "create_instance requires a source image, but none was supplied: no --gcp-image override "
+                "and this client was constructed without one (image=None). The backend always supplies "
+                "config.default_source_image; only the operator commands (mngr gcp prepare/cleanup) build "
+                "an image-less client, and those never create instances.",
             )
 
         # Read-only firewall resolve on the hot path (no compute.firewalls.create
@@ -373,7 +495,7 @@ class GcpVpsClient(VpsClientInterface):
         if ssh_metadata_value:
             metadata_items.append(compute_v1.Items(key="ssh-keys", value=ssh_metadata_value))
 
-        labels = {to_gce_label_value(k): to_gce_label_value(v) for k, v in tags.items()}
+        labels: dict[str, str] = {to_gce_label_value(k): to_gce_label_value(v) for k, v in tags.items()}
         labels["mngr-created-at"] = to_gce_label_value(datetime.now(timezone.utc).strftime("%Y-%m-%dt%H-%M-%S"))
         # Mark instances launched during pytest so the conftest session-end
         # orphan scanner can identify and force-delete any leaks without having
@@ -399,7 +521,7 @@ class GcpVpsClient(VpsClientInterface):
                     boot=True,
                     auto_delete=True,
                     initialize_params=compute_v1.AttachedDiskInitializeParams(
-                        source_image=self.image,
+                        source_image=source_image,
                         disk_size_gb=self.boot_disk_size_gb,
                         disk_type=f"projects/{self.project_id}/zones/{self.zone}/diskTypes/{self.boot_disk_type}",
                     ),
@@ -446,7 +568,7 @@ class GcpVpsClient(VpsClientInterface):
             label,
             self.zone,
             plan,
-            self.image,
+            source_image,
         )
         return VpsInstanceId(instance_name)
 

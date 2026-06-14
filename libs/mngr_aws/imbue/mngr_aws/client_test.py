@@ -483,7 +483,10 @@ def test_ensure_security_group_returns_preset_id_when_provided(
     stubbed_client: tuple[AwsVpsClient, Stubber],
 ) -> None:
     client, _stubber = stubbed_client
-    assert client.ensure_security_group() == "sg-test"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-test"
+    # A caller-supplied ExistingSecurityGroup is never created by prepare.
+    assert result.was_created is False
 
 
 def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: list[str]) -> None:
@@ -520,9 +523,11 @@ def test_ensure_security_group_auto_create_warns_when_no_cidrs(log_warnings: lis
     )
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-empty"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-empty"
+    assert result.was_created is False
     assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
 
 
@@ -552,9 +557,11 @@ def test_ensure_security_group_auto_create_warns_when_open_to_internet(log_warni
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-open"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-open"
+    assert result.was_created is False
     assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
@@ -578,7 +585,9 @@ def test_ensure_security_group_reuses_existing_sg_when_found(
         {},
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-existing"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-existing"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_creates_sg_when_missing(
@@ -606,7 +615,9 @@ def test_ensure_security_group_creates_sg_when_missing(
         {},
         expected_params={"GroupId": "sg-new", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-new"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-new"
+    assert result.was_created is True
 
 
 def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
@@ -632,7 +643,9 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
         {},
         expected_params={"GroupId": "sg-existing", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-existing"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-existing"
+    assert result.was_created is False
 
 
 # =============================================================================

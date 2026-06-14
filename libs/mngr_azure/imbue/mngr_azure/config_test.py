@@ -23,8 +23,9 @@ def test_default_config_values() -> None:
     assert config.subnet_name == "mngr-subnet"
     assert config.nsg_name == "mngr-nsg"
     assert config.os_disk_type == "StandardSSD_LRS"
-    # Fail-closed: no SSH CIDRs by default.
-    assert config.allowed_ssh_cidrs == ()
+    # Open by default (fail-open) to match the AWS / GCP providers; a warning is
+    # logged at prepare/create time and production users are expected to tighten it.
+    assert config.allowed_ssh_cidrs == ("0.0.0.0/0",)
 
 
 def test_backend_name_defaults_to_azure() -> None:

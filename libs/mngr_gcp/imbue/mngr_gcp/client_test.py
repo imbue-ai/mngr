@@ -13,8 +13,12 @@ from google.auth.credentials import AnonymousCredentials
 from google.cloud import compute_v1
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_gcp.client import GceInstanceName
+from imbue.mngr_gcp.client import GceLabelValue
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.client import _make_instance_name
 from imbue.mngr_gcp.client import to_gce_label_value
+from imbue.mngr_gcp.errors import InvalidGceIdentifierError
 from imbue.mngr_gcp.testing import FakeFirewallsClient
 from imbue.mngr_gcp.testing import FakeInstancesClient
 from imbue.mngr_gcp.testing import _StubbedGcpVpsClient
@@ -37,6 +41,7 @@ def _make_client(
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_seconds: int | None = None,
+    image: str | None = "projects/debian-cloud/global/images/family/debian-12",
 ) -> GcpVpsClient:
     # Default to a prepared (existing) firewall so create-path tests don't each
     # have to wire one up; firewall-specific tests pass their own.
@@ -44,7 +49,7 @@ def _make_client(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone="us-west1-a",
-        image="projects/debian-cloud/global/images/family/debian-12",
+        image=image,
         machine_type="e2-small",
         allowed_ssh_cidrs=allowed_ssh_cidrs,
         auto_shutdown_seconds=auto_shutdown_seconds,
@@ -75,6 +80,43 @@ def test_to_gce_label_value_lowercases_and_replaces() -> None:
 
 def test_to_gce_label_value_truncates_to_63() -> None:
     assert len(to_gce_label_value("a" * 100)) == 63
+
+
+def test_to_gce_label_value_returns_validated_type() -> None:
+    """The coercion output is a GceLabelValue, not a bare str, so its validity is type-asserted."""
+    assert isinstance(to_gce_label_value("MyProvider"), GceLabelValue)
+
+
+def test_gce_label_value_rejects_empty_and_invalid() -> None:
+    """Constructing the type directly fails fast on empty or out-of-charset input.
+
+    Guards the latent edge where an all-invalid or empty coercion input would
+    otherwise yield an invalid empty label silently shipped to GCE.
+    """
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("has space")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceLabelValue("a" * 64)
+
+
+def test_make_instance_name_is_valid_and_typed() -> None:
+    """_make_instance_name yields a well-formed, RFC1035-valid GceInstanceName."""
+    name = _make_instance_name("My Agent!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, GceInstanceName)
+    assert name[0].isalpha()
+    assert len(name) <= 63
+
+
+def test_gce_instance_name_rejects_invalid() -> None:
+    """The instance-name type rejects strings that violate RFC1035."""
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("1-starts-with-digit")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("ends-with-dash-")
+    with pytest.raises(InvalidGceIdentifierError):
+        GceInstanceName("Has-Upper")
 
 
 # =============================================================================
@@ -208,6 +250,63 @@ def test_create_instance_spot_composes_with_auto_shutdown() -> None:
     assert scheduling.instance_termination_action == "DELETE"
 
 
+def test_create_instance_uses_configured_image_by_default() -> None:
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+    )
+    # With no override the boot disk uses the client's configured image.
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image
+        == "projects/debian-cloud/global/images/family/debian-12"
+    )
+
+
+def test_create_instance_image_override_wins_over_configured() -> None:
+    """The per-host ``--gcp-image`` override boots from the given image, not the client default."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
+
+
+def test_create_instance_image_override_works_without_configured_image() -> None:
+    """An override lets an image-less client (e.g. operator-style) still create a VM."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances, image=None)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
+
+
 def test_create_instance_cross_zone_raises() -> None:
     client = _make_client()
     with pytest.raises(VpsApiError, match="Cross-zone create not supported"):
@@ -262,17 +361,40 @@ def test_create_instance_raises_clear_error_for_unknown_ssh_key() -> None:
 # =============================================================================
 
 
-def test_ensure_firewall_fails_closed_without_cidrs() -> None:
-    client = _make_client(allowed_ssh_cidrs=())
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_firewall()
+def test_ensure_firewall_skips_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
+    """Empty allowed_ssh_cidrs creates no rule and warns (fail-open, mirrors AWS).
+
+    GCE rejects an INGRESS rule with no source_ranges, so the analog of AWS's
+    zero-ingress security group is simply the absence of a rule: ensure_firewall
+    returns the target tag without inserting anything and logs a warning. The
+    empty case is an "I'll wire my own ingress later" signal, not a fail-closed gate.
+    """
+    firewalls = FakeFirewallsClient()
+    client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=())
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is False
+    assert firewalls.inserted == []
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
+
+
+def test_ensure_firewall_warns_when_open_to_internet(log_warnings: list[str]) -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
+    firewalls = FakeFirewallsClient()
+    client = _make_client(firewalls=firewalls, allowed_ssh_cidrs=("0.0.0.0/0",))
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is True
+    assert firewalls.inserted[0].source_ranges == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_firewall_creates_when_missing() -> None:
     firewalls = FakeFirewallsClient()
     client = _make_client(firewalls=firewalls)
-    tag = client.ensure_firewall()
-    assert tag == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is True
     assert len(firewalls.inserted) == 1
     rule = firewalls.inserted[0]
     assert rule.target_tags == ["mngr-ssh"]
@@ -286,8 +408,9 @@ def test_ensure_firewall_reuses_existing() -> None:
     firewalls = FakeFirewallsClient()
     firewalls.existing = compute_v1.Firewall(name="mngr-gcp-ssh")
     client = _make_client(firewalls=firewalls)
-    tag = client.ensure_firewall()
-    assert tag == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    assert result.was_created is False
     assert firewalls.inserted == []
 
 
@@ -296,7 +419,10 @@ def test_ensure_firewall_tolerates_create_race() -> None:
     firewalls.insert_error = google_api_exceptions.Conflict("already exists")
     client = _make_client(firewalls=firewalls)
     # A concurrent create wins the race -> treated as success, not an error.
-    assert client.ensure_firewall() == "mngr-ssh"
+    result = client.ensure_firewall()
+    assert result.target_tag == "mngr-ssh"
+    # The rule already existed (the racing creator made it), so this call did not create it.
+    assert result.was_created is False
 
 
 def test_resolve_firewall_returns_tag_when_present() -> None:
@@ -309,6 +435,17 @@ def test_resolve_firewall_raises_prepare_hint_when_missing() -> None:
     client = _make_client(firewalls=FakeFirewallsClient())
     with pytest.raises(MngrError, match="mngr gcp prepare"):
         client.resolve_firewall()
+
+
+def test_resolve_firewall_returns_tag_when_cidrs_empty() -> None:
+    """Empty cidrs means no rule is expected, so resolve short-circuits to the tag.
+
+    ensure_firewall / `mngr gcp prepare` creates no rule when cidrs is empty, so
+    there is nothing to look up and pointing the user at prepare would be wrong.
+    The lookup is skipped entirely (no rule present, yet no raise).
+    """
+    client = _make_client(firewalls=FakeFirewallsClient(), allowed_ssh_cidrs=())
+    assert client.resolve_firewall() == "mngr-ssh"
 
 
 def test_delete_firewall_deletes_when_present() -> None:

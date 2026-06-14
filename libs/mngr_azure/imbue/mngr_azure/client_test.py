@@ -8,6 +8,9 @@ from typing import Any
 import pytest
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr_azure.client import AzureVmName
+from imbue.mngr_azure.client import _make_vm_name
+from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
@@ -50,6 +53,41 @@ def _created_vm(client: _StubbedAzureVpsClient) -> Any:
     compute = client.stubbed_compute_client
     assert len(compute.virtual_machines.created) == 1
     return compute.virtual_machines.created[0][1]
+
+
+# =========================================================================
+# VM naming
+# =========================================================================
+
+
+def test_make_vm_name_is_valid_and_typed() -> None:
+    """_make_vm_name yields a well-formed, Azure-valid AzureVmName from a messy label."""
+    name = _make_vm_name("My Agent!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, AzureVmName)
+    assert name[0].isalnum()
+    assert not name.endswith("-")
+    assert len(name) <= 64
+
+
+def test_make_vm_name_falls_back_to_mngr_stem_for_empty_label() -> None:
+    """An all-invalid label still produces a valid name (the 'mngr' stem fallback)."""
+    name = _make_vm_name("!!!", {"mngr-host-id": "host-abc123def456"})
+    assert isinstance(name, AzureVmName)
+    assert name.startswith("mngr-")
+
+
+def test_azure_vm_name_rejects_invalid() -> None:
+    """The VM-name type rejects strings that violate Azure's resource-name shape."""
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("ends-with-dash-")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("Has-Upper")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("has space")
+    with pytest.raises(InvalidAzureIdentifierError):
+        AzureVmName("a" * 65)
 
 
 # =========================================================================
@@ -284,10 +322,30 @@ def test_create_instance_requires_uploaded_ssh_key() -> None:
 # =========================================================================
 
 
-def test_ensure_network_fail_closed_when_no_cidrs() -> None:
+def test_ensure_network_skips_ssh_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
+    """Empty allowed_ssh_cidrs creates the NSG with no SSH allow rule and warns (fail-open).
+
+    The NSG's implicit default-deny then leaves instances unreachable from
+    outside the vnet -- the analog of AWS's zero-ingress security group. (An
+    Azure SecurityRule with an empty source_address_prefixes is API-rejected, so
+    "no ingress" is expressed as the absence of the rule.) ensure_network still
+    succeeds; the empty case is an "I'll wire my own ingress later" signal, not a
+    fail-closed gate. Mirrors the AWS / GCP providers.
+    """
     client = _make_client(allowed_ssh_cidrs=())
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_network()
+    assert client.ensure_network().resource_group == "mngr"
+    nsg = client.stubbed_network_client.network_security_groups.created[0][1]
+    assert nsg.security_rules == []
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
+
+
+def test_ensure_network_warns_when_open_to_internet(log_warnings: list[str]) -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
+    client = _make_client(allowed_ssh_cidrs=("0.0.0.0/0",))
+    assert client.ensure_network().resource_group == "mngr"
+    nsg = client.stubbed_network_client.network_security_groups.created[0][1]
+    assert nsg.security_rules[0].source_address_prefixes == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
@@ -295,7 +353,10 @@ def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
     resource.providers.registration_state = "NotRegistered"
     client = _make_client(resource=resource)
     returned = client.ensure_network()
-    assert returned == "mngr"
+    assert returned.resource_group == "mngr"
+    assert returned.region == _REGION
+    # The fake reports the RG as absent by default, so this is a first-run create.
+    assert returned.was_created is True
     # Resource providers registered.
     assert set(resource.providers.registered) == {"Microsoft.Compute", "Microsoft.Network", "Microsoft.Storage"}
     # RG created with the managed-by tag.
@@ -309,6 +370,18 @@ def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:
     assert len(network.virtual_networks.created) == 1
     subnet = network.virtual_networks.created[0][1].subnets[0]
     assert subnet.network_security_group.id == "/nsg/mngr-nsg"
+
+
+def test_ensure_network_reports_not_created_when_rg_already_exists() -> None:
+    """An idempotent re-run (RG already present) reports was_created=False.
+
+    The resource group / NSG / vnet are still create_or_update'd (idempotent), but
+    the create-vs-reuse signal lets the CLI distinguish a first run from a no-op.
+    """
+    resource = FakeResourceClient()
+    resource.resource_groups.exists = True
+    client = _make_client(resource=resource)
+    assert client.ensure_network().was_created is False
 
 
 def test_resolve_subnet_id_returns_id_when_present() -> None:

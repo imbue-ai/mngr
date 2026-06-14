@@ -11,20 +11,23 @@ from collections.abc import Iterator
 from typing import Any
 from typing import Final
 
-import google.auth
 from google.api_core import exceptions as google_api_exceptions
 from google.auth import exceptions as google_auth_exceptions
 from google.cloud import compute_v1
 from pydantic import Field
 
 from imbue.mngr_gcp.client import GcpVpsClient
+from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.errors import GcpCredentialsError
+from imbue.mngr_gcp.errors import GcpProjectError
 
 # Optional prefix release tests use for their agent names so leaked instances
-# (should the scanner ever fail) are still visually identifiable as test-owned.
-# Cleanup logic does NOT depend on this -- ``GcpVpsClient.create_instance``
-# labels pytest-launched instances with ``mngr-pytest-launched=true`` and the
-# conftest scanner filters on that label.
-GCP_TEST_NAME_PREFIX: Final[str] = "test-gcp-"
+# (should the scanner ever fail) are still visually identifiable as mngr-created
+# test instances. No "gcp" in the prefix: a leaked instance is already in a GCP
+# project, so naming it "gcp" would be redundant. Cleanup logic does NOT depend
+# on this -- ``GcpVpsClient.create_instance`` labels pytest-launched instances
+# with ``mngr-pytest-launched=true`` and the conftest scanner filters on that label.
+GCP_TEST_NAME_PREFIX: Final[str] = "mngr-test-"
 
 # Zone used by the GCP release tests and the session-end leak scan. Tests can
 # override via ``MNGR_GCP_ZONE``; defaults to ``us-west1-a`` to match the
@@ -54,35 +57,37 @@ GCP_TEST_INSTANCE_AUTO_SHUTDOWN_SECONDS: Final[int] = 60 * 60
 def gcp_credentials_available() -> bool:
     """Return True iff Google ADC can resolve credentials.
 
-    Used to gate release tests (skipif) and the session-end cleanup hook (no-op
-    when credentials are absent). Matches what
-    ``GcpProviderConfig.get_credentials_and_resolved_project`` does at
-    provider-construction time, so the gate and production code agree on what
-    counts as "available".
+    Used to gate release tests and the session-end cleanup hook (no-op when
+    credentials are absent). Delegates to the same
+    ``GcpProviderConfig.get_credentials_and_resolved_project`` the provider calls
+    at construction time, so the gate and production code agree on what counts as
+    "available".
     """
     try:
-        credentials, _project = google.auth.default()
-    except google_auth_exceptions.GoogleAuthError:
+        GcpProviderConfig().get_credentials_and_resolved_project()
+    except (GcpCredentialsError, google_auth_exceptions.GoogleAuthError):
         return False
-    return credentials is not None
+    return True
 
 
 def get_default_project() -> str | None:
-    """Return the ADC-resolved project (or ``MNGR_GCP_PROJECT`` override), if any.
+    """Return the resolved GCP project (or ``MNGR_GCP_PROJECT`` override), if any.
 
-    The release tests and the session-end scanner need a project ID. Prefer an
-    explicit ``MNGR_GCP_PROJECT`` env override; otherwise fall back to the
-    project ADC resolves. Returns None when neither is available so callers can
-    skip cleanly.
+    Routes through the exact resolution the provider uses on the normal create
+    path: the ``MNGR_GCP_PROJECT`` env override is mapped onto the config's
+    ``project_id`` (so the configured value wins), and resolution otherwise falls
+    back to the project ADC resolves -- via ``get_credentials_and_resolved_project``
+    + ``resolve_project_id``, the same code production runs. The production path
+    raises ``GcpProjectError`` / ``GcpCredentialsError`` when nothing resolves;
+    here we translate that to ``None`` so the release tests and the session-end
+    scanner can skip cleanly instead of erroring.
     """
-    env_project = os.environ.get("MNGR_GCP_PROJECT")
-    if env_project:
-        return env_project
+    config = GcpProviderConfig(project_id=os.environ.get("MNGR_GCP_PROJECT", ""))
     try:
-        _credentials, project = google.auth.default()
-    except google_auth_exceptions.GoogleAuthError:
+        _credentials, adc_project = config.get_credentials_and_resolved_project()
+        return config.resolve_project_id(adc_project)
+    except (GcpCredentialsError, GcpProjectError, google_auth_exceptions.GoogleAuthError):
         return None
-    return project
 
 
 class FakeOperation:

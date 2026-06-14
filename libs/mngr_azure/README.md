@@ -39,8 +39,12 @@ vnet_name = "mngr-vnet"
 subnet_name = "mngr-subnet"
 nsg_name = "mngr-nsg"
 
-# Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Empty by
-# default (fail-closed): `mngr azure prepare` refuses to create a wide-open NSG.
+# Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Defaults to
+# the wide-open '0.0.0.0/0' (fail-open, matching the AWS / GCP providers; a
+# warning is logged -- tighten for production). SSH auth is key-only (passwords
+# disabled), so 0.0.0.0/0 exposes the port but not a usable login. Use a tight
+# range like ['203.0.113.4/32'], or [] for no SSH allow rule (the NSG default
+# deny then leaves instances unreachable from outside the vnet).
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional OS disk sizing
@@ -62,7 +66,27 @@ permission.
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
 ```
 
+Like AWS and GCP, `prepare` is fail-open: with no `--allowed-ssh-cidr` it falls
+back to the provider config's `allowed_ssh_cidrs` (default `0.0.0.0/0`, open to
+the internet) and logs a warning prompting you to tighten it. SSH auth is
+key-only (passwords disabled), so an open NSG exposes the port but not a usable
+login. Setting `allowed_ssh_cidrs = []` opts out entirely: the NSG is created
+with no SSH allow rule, so its default-deny leaves instances unreachable from
+outside the vnet.
+
 Idempotent — re-running is a no-op when everything already exists.
+
+`prepare` and `cleanup` read their defaults from your `[providers.<name>]`
+settings.toml block, selected with `--provider` (default `azure`), so the
+resource group / vnet / subnet / NSG land with the same names the runtime `mngr
+create --provider <name>` path will resolve. CLI flags override the resolved
+config, which in turn overrides class defaults. For example, with a
+`[providers.azure-west]` block pinning `default_region = "westus"`,
+`resource_group = "mngr-westus"`, and `allowed_ssh_cidrs = ["203.0.113.4/32"]`:
+
+```bash
+mngr azure prepare --provider azure-west   # uses that block's region / RG / CIDRs, no flags needed
+```
 
 ### Teardown: `mngr azure cleanup`
 
@@ -106,7 +130,7 @@ allowed_ssh_cidrs = ["203.0.113.4/32"]
 ```
 
 ```bash
-mngr azure prepare --region westus --resource-group mngr-westus --allowed-ssh-cidr 203.0.113.4/32
+mngr azure prepare --provider azure-west   # reads region / RG / CIDRs from [providers.azure-west]
 mngr create my-west-agent --provider azure-west
 ```
 

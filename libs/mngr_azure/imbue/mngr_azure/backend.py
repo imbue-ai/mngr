@@ -87,33 +87,49 @@ class AzureProvider(VpsDockerProvider):
         return self.azure_client.list_instances(provider_tag=str(self.name))
 
     def _validate_provider_args_for_create(self) -> None:
-        """Refuse to create a VM under pytest without auto_shutdown_seconds set.
+        """Pre-create hook: enforce the pytest safety net, then require the prepared subnet.
 
-        Mirrors the AWS guard: when ``PYTEST_CURRENT_TEST`` is set, the test
-        harness is responsible for configuring a safety net so a killed pytest
-        run cannot leak a billing VM. On Azure that net is two-layered --
-        cloud-init ``shutdown -P +N`` (from ``auto_shutdown_seconds``) powers off
-        the agent, and the conftest session-end orphan scanner force-deletes any
-        leaked VM tagged ``mngr-pytest-launched`` older than the TTL (derived
-        from the same ``auto_shutdown_seconds``). If it is unset, fail closed at
-        the pre-create hook rather than silently leak a VM.
+        Called by ``create_host`` before the first provider write, so every check
+        here fails cleanly with no leaked resources.
 
-        NB: unlike AWS/GCP, an OS ``shutdown -P`` on Azure leaves the VM
-        "Stopped (not deallocated)", which still bills for compute -- so on Azure
-        the *cost* guarantee comes from the orphan scanner, not from
-        auto_shutdown. The guard is still required so the TTL the scanner derives
-        from auto_shutdown_seconds is well-defined.
+        1. Mirror the AWS guard: when ``PYTEST_CURRENT_TEST`` is set, the test
+           harness is responsible for configuring a safety net so a killed pytest
+           run cannot leak a billing VM. On Azure that net is two-layered --
+           cloud-init ``shutdown -P +N`` (from ``auto_shutdown_seconds``) powers
+           off the agent, and the conftest session-end orphan scanner
+           force-deletes any leaked VM tagged ``mngr-pytest-launched`` older than
+           the TTL (derived from the same ``auto_shutdown_seconds``). If it is
+           unset, fail closed here rather than silently leak a VM. NB: unlike
+           AWS/GCP, an OS ``shutdown -P`` on Azure leaves the VM "Stopped (not
+           deallocated)", which still bills for compute -- so on Azure the *cost*
+           guarantee comes from the orphan scanner, not from auto_shutdown. The
+           guard is still required so the TTL the scanner derives is well-defined.
+
+        2. Require the prepared subnet (created once via ``mngr azure prepare``)
+           to already exist. Checking it read-only here -- before ``create_host``
+           uploads the SSH key or creates the VM -- means a first-time user who
+           hasn't run ``prepare`` gets the clean "run mngr azure prepare" message
+           immediately, instead of it surfacing mid-create under a "Host creation
+           failed, attempting cleanup..." line. The hot ``create_instance`` path
+           resolves the subnet again to build the NIC; this extra GET is cheap
+           and is what lets the failure happen early and clean. Mirrors the GCP
+           firewall pre-flight. (Note the subnet exists after ``prepare`` even
+           when ``allowed_ssh_cidrs`` is empty -- prepare still creates the
+           NSG/subnet, just with no SSH allow rule -- so this is not skipped in
+           the no-ingress case.)
         """
-        if "PYTEST_CURRENT_TEST" not in os.environ:
-            return
-        seconds = self._get_effective_auto_shutdown_seconds()
-        if not (seconds and seconds > 0):
-            raise MngrError(
-                "Refusing to create an Azure VM during pytest without auto_shutdown_seconds set on "
-                "the Azure provider config. Set [providers.<instance>] auto_shutdown_seconds = <N> "
-                "in the project settings.toml so the session-end orphan scanner has a well-defined "
-                "TTL (and cloud-init schedules 'shutdown -P +N')."
-            )
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            seconds = self._get_effective_auto_shutdown_seconds()
+            if not (seconds and seconds > 0):
+                raise MngrError(
+                    "Refusing to create an Azure VM during pytest without auto_shutdown_seconds set on "
+                    "the Azure provider config. Set [providers.<instance>] auto_shutdown_seconds = <N> "
+                    "in the project settings.toml so the session-end orphan scanner has a well-defined "
+                    "TTL (and cloud-init schedules 'shutdown -P +N')."
+                )
+        # Read-only subnet pre-flight. ``resolve_subnet_id`` raises a MngrError
+        # pointing at ``mngr azure prepare`` when the subnet is missing.
+        self.azure_client.resolve_subnet_id()
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedAzureBuildOptions:
         """Parse Azure-prefixed build args.

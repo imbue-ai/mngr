@@ -63,6 +63,8 @@ def ovh_test_settings_dir(tmp_path: Path) -> Iterator[Path]:
         # Disable other remote providers so the create-host preflight doesn't
         # trip looking for their credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.aws]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.imbue_cloud]\nis_enabled = false\n"

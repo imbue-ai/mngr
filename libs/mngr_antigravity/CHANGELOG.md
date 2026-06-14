@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-13
+
 ### Added
 
 - Added: `agy` alias for the `antigravity` agent type (`mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`).

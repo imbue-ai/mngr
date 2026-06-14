@@ -16,3 +16,14 @@ class AzureSubscriptionError(AzureProviderError, ValueError):
     config-resolution failures into ``ProviderUnavailableError``) keeps catching
     it.
     """
+
+
+class InvalidAzureIdentifierError(AzureProviderError, ValueError):
+    """A coerced Azure VM resource name failed its validity check.
+
+    Raised by the ``AzureVmName`` constructor when the string handed to it does
+    not satisfy Azure's VM-name rules. In normal operation ``_make_vm_name``
+    always produces a valid string, so this firing signals a regression in that
+    coercion rather than bad user input. Inherits ``ValueError`` for the same
+    backend-catch reason as ``AzureSubscriptionError``.
+    """

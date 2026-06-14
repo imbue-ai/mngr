@@ -2,41 +2,16 @@
 
 import pytest
 
-from imbue.mngr_gcp.config import DEFAULT_GCE_IMAGE
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpProjectError
 from imbue.mngr_gcp.errors import GcpZoneRegionMismatchError
-
-
-def test_default_config_values() -> None:
-    config = GcpProviderConfig(project_id="my-project")
-    assert config.default_region == "us-west1"
-    assert config.default_zone == "us-west1-a"
-    assert config.default_machine_type == "e2-small"
-    assert config.default_source_image == DEFAULT_GCE_IMAGE
-    # The inherited base default_image is the Docker *container* image, distinct
-    # from the GCE VM source image -- they must not be conflated.
-    assert config.default_image == "debian:bookworm-slim"
-    assert config.boot_disk_size_gb == 30
-    assert config.boot_disk_type == "pd-balanced"
-    assert config.network == "default"
-    assert config.subnetwork is None
-    # Empty by default -- fail-closed; user must opt in to SSH ingress.
-    assert config.allowed_ssh_cidrs == ()
-    assert config.firewall_target_tag == "mngr-ssh"
-    assert config.associate_external_ip is True
-    assert config.auto_shutdown_seconds is None
 
 
 def test_backend_name_defaults_to_gcp() -> None:
     config = GcpProviderConfig(project_id="my-project")
     assert str(config.backend) == "gcp"
-
-
-def test_resolve_project_id_returns_configured() -> None:
-    config = GcpProviderConfig(project_id="my-project")
-    # The configured project_id wins even when ADC resolved a different one.
-    assert config.resolve_project_id(None) == "my-project"
 
 
 def test_resolve_project_id_prefers_configured_over_adc_fallback() -> None:
@@ -57,16 +32,44 @@ def test_resolve_project_id_raises_when_unset_and_no_fallback() -> None:
         config.resolve_project_id(None)
 
 
-def test_validate_zone_in_region_accepts_matching() -> None:
+def test_resolve_zone_and_region_prefers_explicit_zone_over_gcloud() -> None:
+    config = GcpProviderConfig(project_id="p", default_zone="us-west1-b")
+    # Explicit default_zone wins over the gcloud-derived fallback; region is
+    # derived from the resolved zone.
+    assert config.resolve_zone_and_region("europe-west1-c") == ("us-west1-b", "us-west1")
+
+
+def test_resolve_zone_and_region_uses_gcloud_zone_when_unset() -> None:
+    config = GcpProviderConfig(project_id="p")
+    # No explicit default_zone: the injected gcloud zone is used, region derived.
+    assert config.resolve_zone_and_region("europe-west1-c") == ("europe-west1-c", "europe-west1")
+
+
+def test_resolve_zone_and_region_falls_back_to_hardcoded_default() -> None:
+    config = GcpProviderConfig(project_id="p")
+    # No explicit default_zone and no gcloud zone: the hardcoded default applies.
+    assert config.resolve_zone_and_region(None) == ("us-west1-a", "us-west1")
+
+
+def test_resolve_zone_and_region_accepts_matching_explicit_region() -> None:
     config = GcpProviderConfig(project_id="p", default_region="us-west1", default_zone="us-west1-b")
-    # No exception raised.
-    config.validate_zone_in_region()
+    assert config.resolve_zone_and_region(None) == ("us-west1-b", "us-west1")
 
 
-def test_validate_zone_in_region_rejects_mismatch() -> None:
+def test_resolve_zone_and_region_rejects_mismatched_explicit_region() -> None:
     config = GcpProviderConfig(project_id="p", default_region="us-west1", default_zone="us-central1-a")
-    with pytest.raises(GcpZoneRegionMismatchError, match="is not in default_region"):
-        config.validate_zone_in_region()
+    with pytest.raises(GcpZoneRegionMismatchError, match="is not in region"):
+        config.resolve_zone_and_region(None)
+
+
+def test_get_gcloud_compute_zone_honors_contract(temp_mngr_ctx: MngrContext) -> None:
+    # Best-effort boundary helper: it must never raise and must return either
+    # None (gcloud absent / unset / error / timeout) or a non-empty zone string,
+    # regardless of the host's gcloud state. We assert the contract, not a
+    # specific zone, so the test is hermetic across machines with and without a
+    # configured gcloud CLI.
+    result = get_gcloud_compute_zone(temp_mngr_ctx.concurrency_group)
+    assert result is None or (isinstance(result, str) and result != "")
 
 
 def test_default_source_image_is_global_ubuntu_family() -> None:

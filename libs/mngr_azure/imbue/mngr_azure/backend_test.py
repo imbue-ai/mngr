@@ -9,21 +9,59 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.backend import AzureProviderBackend
 from imbue.mngr_azure.backend import ParsedAzureBuildOptions
+from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 
 
-def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None) -> AzureProvider:
-    """Construct an AzureProvider via the backend with the given auto-shutdown setting.
+class _SubnetStubClient(AzureVpsClient):
+    """AzureVpsClient with subnet resolution stubbed, for hermetic create-hook tests.
 
-    The credential is a real ``DefaultAzureCredential`` (constructed lazily, no
-    network call), and the guard/parse hooks under test never reach the SDK.
+    The real ``resolve_subnet_id`` makes an Azure network API call. The pre-create
+    hook now invokes it, so tests that exercise the hook stub it: it returns a
+    placeholder id, or (when ``stub_subnet_missing``) raises the same
+    ``mngr azure prepare`` MngrError the real method raises on a 404.
+    """
+
+    stub_subnet_missing: bool = False
+
+    def resolve_subnet_id(self) -> str:
+        if self.stub_subnet_missing:
+            raise MngrError(
+                f"Azure subnet {self.subnet_name!r} (vnet {self.vnet_name!r}, resource group "
+                f"{self.resource_group!r}) does not exist in region {self.region!r}. "
+                "Run `mngr azure prepare` once to create it, then retry the create."
+            )
+        return f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}/subnets/{self.subnet_name}"
+
+
+def _build_provider(
+    mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None, subnet_missing: bool = False
+) -> AzureProvider:
+    """Construct an AzureProvider with the given auto-shutdown and subnet settings.
+
+    Uses a placeholder credential and a subnet-stubbed client: the create-hook and
+    build-args tests that use this helper never make a real Azure API call.
     """
     config = AzureProviderConfig(subscription_id="sub-123", auto_shutdown_seconds=auto_shutdown_seconds)
-    provider = AzureProviderBackend.build_provider_instance(
-        name=ProviderInstanceName("azure"), config=config, mngr_ctx=mngr_ctx
+    client = _SubnetStubClient(
+        credential=object(),
+        subscription_id="sub-123",
+        region=config.default_region,
+        resource_group=config.resource_group,
+        vnet_name=config.vnet_name,
+        subnet_name=config.subnet_name,
+        nsg_name=config.nsg_name,
+        stub_subnet_missing=subnet_missing,
     )
-    assert isinstance(provider, AzureProvider)
-    return provider
+    return AzureProvider(
+        name=ProviderInstanceName("azure-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=mngr_ctx,
+        config=config,
+        vps_client=client,
+        azure_client=client,
+        azure_config=config,
+    )
 
 
 def test_backend_name_and_config_class() -> None:
@@ -87,8 +125,21 @@ def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: Mn
 
 def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=3600)
-    # Should not raise.
+    # Should not raise: auto_shutdown is set and the subnet pre-flight resolves
+    # (the stub client reports the prepared subnet present).
     provider._validate_provider_args_for_create()
+
+
+def test_validate_provider_args_raises_when_subnet_missing(temp_mngr_ctx: MngrContext) -> None:
+    """The read-only subnet pre-flight fires before any VM write when prepare wasn't run.
+
+    A first-time user who skipped ``mngr azure prepare`` should get the clean
+    prepare-pointer error from the pre-create hook, not mid-create under a
+    "Host creation failed, attempting cleanup..." line.
+    """
+    provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=3600, subnet_missing=True)
+    with pytest.raises(MngrError, match="mngr azure prepare"):
+        provider._validate_provider_args_for_create()
 
 
 def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:

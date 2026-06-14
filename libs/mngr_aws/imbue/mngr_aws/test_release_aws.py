@@ -93,9 +93,11 @@ def _write_release_settings(settings_dir: Path) -> None:
         # test settings file is self-documenting -- the test SSH connection
         # from the developer laptop / CI runner needs ingress from any IP.
         'allowed_ssh_cidrs = ["0.0.0.0/0"]\n'
-        # Disable other remote providers so the create-host preflight
-        # doesn't trip on them looking for credentials.
+        # Disable other remote providers so the create-host preflight (and
+        # ``mngr list``) doesn't trip on them looking for credentials.
         "\n[providers.modal]\nis_enabled = false\n"
+        "\n[providers.azure]\nis_enabled = false\n"
+        "\n[providers.gcp]\nis_enabled = false\n"
         "\n[providers.vultr]\nis_enabled = false\n"
         "\n[providers.ovh]\nis_enabled = false\n"
         "\n[providers.imbue_cloud]\nis_enabled = false\n"
@@ -283,7 +285,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -328,7 +329,6 @@ def test_provider_lifecycle_create_stop_start_destroy(
         # --force skips the destroy confirmation, so no stdin input needed.
         # Result is intentionally not checked: best-effort cleanup.
         _run_mngr(aws_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=120)
-        time.sleep(20)
 
 
 # =============================================================================

@@ -1,8 +1,13 @@
+import shutil
+
 import google.auth
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import Credentials
+from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpProjectError
@@ -23,6 +28,55 @@ DEFAULT_SERVICE_ACCOUNT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/a
 # ``mngr_vps_docker`` cloud-init flow works unchanged. The family always
 # resolves to the latest published image.
 DEFAULT_GCE_IMAGE: str = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+
+# Final fallback zone when neither the provider config nor the active gcloud
+# config supplies one. GCE VMs are zonal, so a concrete zone is always required;
+# us-west1-a is an arbitrary but stable default (its region, us-west1, is derived
+# as the leading ``<region>-<suffix>`` prefix of the zone).
+DEFAULT_GCE_ZONE: str = "us-west1-a"
+
+# Cap on the best-effort ``gcloud config get`` probe so a hung gcloud never
+# stalls provider construction (which runs on read paths like ``mngr list``).
+_GCLOUD_CONFIG_GET_TIMEOUT_SECONDS: float = 10.0
+
+
+def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
+    """Best-effort read of the active ``gcloud config get compute/zone``.
+
+    Returns ``None`` when the gcloud CLI is absent, errors, times out, or has no
+    ``compute/zone`` set. mngr authenticates via Application Default Credentials,
+    never the gcloud CLI, so this is purely a convenience: it lets a user's
+    ``gcloud config set compute/zone`` flow through as the default VM placement,
+    exactly as ``google.auth.default()`` already consults gcloud for the default
+    project. It is never required -- an unset or absent gcloud falls back to the
+    configured or hardcoded ``DEFAULT_GCE_ZONE`` (see ``resolve_zone_and_region``).
+
+    ``gcloud`` is probed with ``shutil.which`` first so a missing CLI is a clean
+    ``None`` rather than a process-spawn error, and the command runs through the
+    caller's ``ConcurrencyGroup`` (not ``subprocess``) so the child is tracked and
+    torn down with the run.
+    """
+    if shutil.which("gcloud") is None:
+        return None
+    try:
+        finished = concurrency_group.run_process_to_completion(
+            ("gcloud", "config", "get", "compute/zone"),
+            timeout=_GCLOUD_CONFIG_GET_TIMEOUT_SECONDS,
+            is_checked_after=False,
+        )
+    except ConcurrencyGroupError as e:
+        logger.debug("Best-effort 'gcloud config get compute/zone' probe failed; using fallback zone. {}", e)
+        return None
+    if finished.returncode != 0 or finished.is_timed_out:
+        logger.trace(
+            "'gcloud config get compute/zone' returned no usable zone "
+            "(returncode={}, timed_out={}); using fallback zone.",
+            finished.returncode,
+            finished.is_timed_out,
+        )
+        return None
+    zone = finished.stdout.strip()
+    return zone or None
 
 
 class GcpProviderConfig(VpsDockerProviderConfig):
@@ -47,19 +101,28 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     project_id: str = Field(
         default="",
         description=(
-            "GCP project ID for new instances. A plain identifier, not a credential. When left "
-            "empty, the project is taken from Application Default Credentials (the active "
-            "'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to "
-            "pin a specific project. Leave the ADC mechanism to supply the actual credentials."
+            "GCP project ID for new instances. A plain identifier, not a credential (ADC supplies "
+            "the actual credentials). When left empty, the project is taken from Application Default "
+            "Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env "
+            "var); set it explicitly to pin a specific project."
         ),
     )
-    default_region: str = Field(
-        default="us-west1",
-        description="Default GCE region (e.g., 'us-west1'). Used to validate the chosen zone.",
+    default_region: str | None = Field(
+        default=None,
+        description=(
+            "Default GCE region (e.g., 'us-west1'). Used only to validate the resolved zone. When "
+            "unset, the region is derived from the resolved zone, so it never needs to be set "
+            "explicitly; set it to assert a region and catch a mismatched default_zone typo."
+        ),
     )
-    default_zone: str = Field(
-        default="us-west1-a",
-        description="Default GCE zone (GCE VMs are zonal, e.g. 'us-west1-a'). Must lie in default_region.",
+    default_zone: str | None = Field(
+        default=None,
+        description=(
+            "Default GCE zone (GCE VMs are zonal, e.g. 'us-west1-a'). When unset, the zone is taken "
+            "from the active 'gcloud config get compute/zone' if the gcloud CLI is available, "
+            "otherwise it falls back to 'us-west1-a'; set it explicitly to pin a zone. Must lie in "
+            "default_region when both are set explicitly."
+        ),
     )
     default_machine_type: str = Field(
         default="e2-small",
@@ -85,29 +148,30 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     network: str = Field(
         default="default",
-        description="VPC network name for the instance NIC and the auto-created firewall rule.",
+        description="VPC network name for the instance NIC and the firewall rule `mngr gcp prepare` creates.",
     )
     subnetwork: str | None = Field(
         default=None,
         description="Subnetwork name. Required for custom-mode VPCs; None lets GCE pick for auto-mode networks.",
     )
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
-            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the auto-created "
-            "firewall rule. Empty by default (fail-closed): without an explicit list, ensure_firewall "
-            "raises rather than create a permissive rule. Use e.g. ['203.0.113.4/32'] to allow only "
-            "your own IP, or ['0.0.0.0/0'] to expose to the public internet (NOT recommended for production)."
+            "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the firewall rule "
+            "`mngr gcp prepare` creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ['203.0.113.4/32'] to "
+            "restrict to your own IP, or [] for no ingress (no firewall rule is created and the "
+            "instance is unreachable from outside its VPC). A warning is logged when the effective "
+            "range is 0.0.0.0/0 or empty."
         ),
     )
     firewall_name: str = Field(
         default="mngr-gcp-ssh",
-        description="Name of the network-scoped firewall rule auto-created to allow SSH ingress.",
+        description="Name of the network-scoped firewall rule `mngr gcp prepare` creates to allow SSH ingress.",
     )
     firewall_target_tag: str = Field(
         default="mngr-ssh",
         description=(
-            "Network tag bound to the auto-created firewall rule. Every instance is tagged with it so "
+            "Network tag bound to the firewall rule `mngr gcp prepare` creates. Every instance is tagged with it so "
             "the rule targets only mngr-managed VMs (GCE firewalls are network-scoped + tag-targeted, "
             "not per-instance like an EC2 security group)."
         ),
@@ -122,7 +186,11 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     )
     service_account_email: str | None = Field(
         default=None,
-        description="Optional service account email attached to launched instances. A plain identifier.",
+        description=(
+            "Optional service account email attached to launched instances. A plain identifier. When "
+            "None, the field is omitted from the create request, so GCE applies its normal default "
+            "for an unspecified service account."
+        ),
     )
     service_account_scopes: tuple[str, ...] = Field(
         default=DEFAULT_SERVICE_ACCOUNT_SCOPES,
@@ -194,16 +262,34 @@ class GcpProviderConfig(VpsDockerProviderConfig):
             )
         return project_id
 
-    def validate_zone_in_region(self) -> None:
-        """Raise ``GcpZoneRegionMismatchError`` if ``default_zone`` does not lie in ``default_region``.
+    def resolve_zone_and_region(self, gcloud_zone: str | None) -> tuple[str, str]:
+        """Resolve the effective GCE zone and region, raising ``GcpZoneRegionMismatchError`` on conflict.
+
+        Zone precedence: the explicitly configured ``default_zone``, then
+        ``gcloud_zone`` (the active ``gcloud config get compute/zone``, injected
+        by the caller as a best-effort default and ``None`` when the gcloud CLI
+        is absent), then ``DEFAULT_GCE_ZONE``. This mirrors how
+        ``resolve_project_id`` layers an explicit value over a gcloud/ADC-derived
+        fallback. The region is the explicitly configured ``default_region`` when
+        set, else derived from the resolved zone.
 
         GCE zone names are ``<region>-<suffix>`` (e.g. ``us-west1-a`` is in
-        ``us-west1``). A mismatched pair (e.g. region ``us-west1`` with zone
-        ``us-central1-a``) is almost always a config typo that would otherwise
-        surface as a confusing firewall/subnetwork-region error at create time.
+        ``us-west1``). When ``default_region`` is set explicitly and disagrees
+        with the resolved zone (e.g. region ``us-west1`` with zone
+        ``us-central1-a``), that is almost always a config typo that would
+        otherwise surface as a confusing firewall/subnetwork-region error at
+        create time, so it raises here instead.
+
+        ``gcloud_zone`` is injected by the caller (which owns the
+        ``ConcurrencyGroup`` used to shell out to gcloud) so this method stays
+        pure and deterministically testable -- the same pattern as
+        ``resolve_project_id``'s ``adc_fallback_project``.
         """
-        if not self.default_zone.startswith(f"{self.default_region}-"):
+        zone = self.default_zone or gcloud_zone or DEFAULT_GCE_ZONE
+        region = self.default_region or zone.rsplit("-", 1)[0]
+        if not zone.startswith(f"{region}-"):
             raise GcpZoneRegionMismatchError(
-                f"GCP default_zone {self.default_zone!r} is not in default_region "
-                f"{self.default_region!r} (expected a zone like {self.default_region}-a)."
+                f"GCP zone {zone!r} is not in region {region!r} (expected a zone like {region}-a). "
+                "Check default_zone / default_region (or the active 'gcloud config get compute/zone')."
             )
+        return zone, region

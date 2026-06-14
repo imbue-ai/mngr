@@ -1,15 +1,18 @@
 """End-to-end release tests for the Azure provider.
 
 These tests provision and destroy real VMs on Azure. They cost real money --
-typically a few cents per run for a ~5-minute Standard_B2s -- and are
-double-gated:
+typically a few cents per run for a ~5-minute Standard_B2s -- and are gated:
 
-- Azure credentials must be resolvable via ``DefaultAzureCredential`` (an
-  ``az login`` session, a service principal, or a managed identity). See
-  ``testing.azure_credentials_available`` -- the same probe the session-end
-  cleanup hook uses.
-- ``MNGR_AZURE_RELEASE_TESTS=1`` must be set explicitly, and a subscription must
-  be resolvable (``AZURE_SUBSCRIPTION_ID`` or ``MNGR_AZURE_SUBSCRIPTION_ID``).
+- ``MNGR_AZURE_RELEASE_TESTS=1`` must be set explicitly. When it is unset the
+  whole module is skipped.
+- Once opted in, Azure credentials must be resolvable via
+  ``DefaultAzureCredential`` (an ``az login`` session, a service principal, or a
+  managed identity; see ``testing.azure_credentials_available``, the same probe
+  the session-end cleanup hook uses) and a subscription must be resolvable
+  (``AZURE_SUBSCRIPTION_ID`` / ``MNGR_AZURE_SUBSCRIPTION_ID`` / the active ``az``
+  subscription). Opting in without either makes the tests *fail* (not skip), so
+  a run the user explicitly requested but that cannot reach Azure is visible
+  rather than silently reported as "skipped".
 
 Damage control against leaked VM cost (see ``conftest.py`` for the full
 picture): each test's ``finally`` calls ``mngr destroy --force``; the
@@ -47,16 +50,39 @@ from imbue.mngr_azure.testing import AZURE_TEST_VM_SIZE
 from imbue.mngr_azure.testing import azure_credentials_available
 from imbue.mngr_azure.testing import get_default_subscription_id
 
-_SUBSCRIPTION_ID = get_default_subscription_id()
-
 pytestmark = [
     pytest.mark.release,
     pytest.mark.timeout(1200),
+    # Skip only when the user did not opt in. Opting in but lacking credentials or
+    # a resolvable subscription is a misconfiguration, handled below by
+    # ``_fail_if_opted_in_without_credentials`` (credentials) and
+    # ``azure_release_subscription_id`` (subscription): they fail loudly rather
+    # than skipping, so a release-test run that the user explicitly requested but
+    # that cannot reach Azure is visible instead of silently reported as "skipped".
     pytest.mark.skipif(
-        not (azure_credentials_available() and AZURE_RELEASE_TESTS_OPT_IN and _SUBSCRIPTION_ID is not None),
-        reason="Azure credentials, MNGR_AZURE_RELEASE_TESTS=1, or a subscription id not set",
+        not AZURE_RELEASE_TESTS_OPT_IN,
+        reason="MNGR_AZURE_RELEASE_TESTS=1 not set",
     ),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _fail_if_opted_in_without_credentials() -> None:
+    """Fail (not skip) when release tests were opted into but Azure credentials are unresolvable.
+
+    The ``skipif`` above has already excluded the not-opted-in case, so reaching
+    here means ``MNGR_AZURE_RELEASE_TESTS=1`` is set. If credentials cannot be
+    resolved the run is misconfigured -- fail explicitly rather than let the test
+    pass as skipped, which would hide that the requested run never executed. (A
+    missing subscription is caught with its own message by
+    ``azure_release_subscription_id``.)
+    """
+    if not azure_credentials_available():
+        pytest.fail(
+            "MNGR_AZURE_RELEASE_TESTS=1 is set but Azure credentials could not be resolved, so the "
+            "release tests cannot run. Run `az login` (or set AZURE_CLIENT_ID / AZURE_TENANT_ID / "
+            "AZURE_CLIENT_SECRET for a service principal), or unset MNGR_AZURE_RELEASE_TESTS to skip them."
+        )
 
 
 def _write_release_settings(settings_dir: Path, subscription_id: str) -> None:
@@ -99,7 +125,11 @@ def _real_azure_config_dir() -> str:
 @pytest.fixture(scope="session")
 def azure_release_subscription_id() -> str:
     subscription_id = get_default_subscription_id()
-    assert subscription_id is not None, "release-test skipif guarantees a subscription is resolvable"
+    assert subscription_id is not None, (
+        "MNGR_AZURE_RELEASE_TESTS=1 is set but no Azure subscription could be resolved, so the "
+        "release tests cannot run. Set AZURE_SUBSCRIPTION_ID / MNGR_AZURE_SUBSCRIPTION_ID, run "
+        "`az account set --subscription <id>`, or unset MNGR_AZURE_RELEASE_TESTS to skip them."
+    )
     return subscription_id
 
 
@@ -245,7 +275,6 @@ def test_provider_lifecycle_create_exec_and_destroy(
         assert "azure" in result.stdout
     finally:
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -288,7 +317,6 @@ def test_provider_lifecycle_create_stop_start_destroy(
         assert "alive-after-restart" in result.stdout
     finally:
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 @pytest.mark.rsync
@@ -363,7 +391,6 @@ def test_provider_create_builds_dockerfile_on_vm(
         )
     finally:
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
-        time.sleep(20)
 
 
 # =============================================================================
