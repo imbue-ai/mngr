@@ -440,6 +440,7 @@ class GcpVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         spot: bool = False,
+        image: str | None = None,
     ) -> VpsInstanceId:
         """Provision a GCE instance in the client's bound zone.
 
@@ -448,6 +449,10 @@ class GcpVpsClient(VpsClientInterface):
 
         ``spot`` (from the per-host ``--gcp-spot`` build arg) launches the VM on
         GCE Spot capacity (``scheduling.provisioning_model=SPOT``).
+
+        ``image`` (from the per-host ``--gcp-image`` build arg) overrides the
+        client's configured source image for this VM only; when None the
+        client's ``image`` (``config.default_source_image``) is used.
         """
         if region != self.zone:
             raise VpsApiError(
@@ -455,17 +460,18 @@ class GcpVpsClient(VpsClientInterface):
                 f"Cross-zone create not supported: client bound to zone {self.zone!r}, "
                 f"got region={region!r} (for GCP, --gcp-zone is the placement knob). Instantiate a zone-specific client.",
             )
-        if self.image is None:
+        # The per-host --gcp-image override wins over the client's configured
+        # image; capture the resolved value into a local so the type checker sees
+        # it stay non-None through the later proto construction.
+        source_image = image or self.image
+        if source_image is None:
             raise VpsApiError(
                 400,
-                "create_instance requires a source image, but this client was constructed without one "
-                "(image=None). The backend always supplies config.default_source_image; only the operator "
-                "commands (mngr gcp prepare/cleanup) build an image-less client, and those never create instances.",
+                "create_instance requires a source image, but none was supplied: no --gcp-image override "
+                "and this client was constructed without one (image=None). The backend always supplies "
+                "config.default_source_image; only the operator commands (mngr gcp prepare/cleanup) build "
+                "an image-less client, and those never create instances.",
             )
-        # Capture the narrowed (non-None) image into a local: the later proto
-        # construction is past intervening calls that would widen ``self.image``
-        # back to ``str | None`` for the type checker.
-        source_image = self.image
 
         # Read-only firewall resolve on the hot path (no compute.firewalls.create
         # needed); the privileged create lives in `mngr gcp prepare`.

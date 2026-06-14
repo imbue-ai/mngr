@@ -24,6 +24,7 @@ import click
 from google.auth import exceptions as google_auth_exceptions
 from loguru import logger
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.output_helpers import emit_event
@@ -36,6 +37,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
+from imbue.mngr_gcp.config import get_gcloud_compute_zone
 from imbue.mngr_gcp.errors import GcpCredentialsError
 from imbue.mngr_gcp.errors import GcpError
 from imbue.mngr_gcp.errors import GcpProjectError
@@ -106,6 +108,7 @@ def _build_operator_client(
     firewall_target_tag: str | None,
     network: str | None,
     allowed_ssh_cidrs: tuple[str, ...],
+    concurrency_group: ConcurrencyGroup,
 ) -> GcpVpsClient:
     """Construct a ``GcpVpsClient`` for the ``mngr gcp`` operator commands.
 
@@ -124,6 +127,12 @@ def _build_operator_client(
     call ``create_instance`` (the sole consumer of ``image``). ``prepare`` passes
     the effective ingress CIDRs; ``cleanup`` passes ``()`` (it only deletes,
     never authorizes ingress, so the value is unused there).
+
+    The zone is resolved with the same precedence as the runtime create path:
+    explicit ``--zone`` > the config's ``default_zone`` > the active ``gcloud
+    config get compute/zone`` (best-effort, via ``concurrency_group``) >
+    ``DEFAULT_GCE_ZONE`` -- so the operator client binds to the same zone a
+    later ``mngr create`` would use.
     """
     credentials, adc_project = base.get_credentials_and_resolved_project()
     resolved_project = project_id or base.project_id or adc_project
@@ -135,10 +144,15 @@ def _build_operator_client(
             "'gcloud config set project <your-project>' (the active gcloud project is used "
             "automatically when Application Default Credentials are present)."
         )
+    if zone:
+        resolved_zone = zone
+    else:
+        gcloud_zone = None if base.default_zone else get_gcloud_compute_zone(concurrency_group)
+        resolved_zone, _region = base.resolve_zone_and_region(gcloud_zone)
     return GcpVpsClient(
         credentials=credentials,
         project_id=resolved_project,
-        zone=zone or base.default_zone,
+        zone=resolved_zone,
         network=network or base.network,
         firewall_name=firewall_name or base.firewall_name,
         firewall_target_tag=firewall_target_tag or base.firewall_target_tag,
@@ -324,6 +338,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
             opts.firewall_target_tag,
             opts.network,
             effective_cidrs,
+            mngr_ctx.concurrency_group,
         )
     except google_auth_exceptions.GoogleAuthError as e:
         # GoogleAuthError is not an ``MngrError``, so wrap it into one for a clean
@@ -391,7 +406,9 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     try:
         # firewall_target_tag and allowed_ssh_cidrs are irrelevant to delete;
         # pass None (falls back to the base tag) and an empty tuple.
-        client = _build_operator_client(base, opts.project_id, None, opts.firewall_name, None, opts.network, ())
+        client = _build_operator_client(
+            base, opts.project_id, None, opts.firewall_name, None, opts.network, (), mngr_ctx.concurrency_group
+        )
     except google_auth_exceptions.GoogleAuthError as e:
         # Same credential wrapping as the prepare path; the GcpError ValueErrors
         # propagate with their specific type.

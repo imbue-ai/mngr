@@ -119,6 +119,7 @@ mngr create my-central-agent --provider gcp-central
 mngr create my-agent --provider gcp
 mngr create my-agent --provider gcp -b --gcp-machine-type=e2-medium -b --gcp-zone=us-west1-b
 mngr create my-agent --provider gcp -b --gcp-spot   # run on (preemptible) GCE Spot capacity
+mngr create my-agent --provider gcp -b --gcp-image=projects/my-proj/global/images/family/custom   # per-host boot image
 mngr list
 mngr exec my-agent "echo hello"
 mngr stop my-agent
@@ -126,7 +127,7 @@ mngr start my-agent
 mngr destroy my-agent
 ```
 
-Note: GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. The chosen zone must belong to the provider's `default_region`.
+Note: GCE VMs are zonal, so the placement knob is `--gcp-zone=` (e.g. `us-west1-b`), not a region. When `default_region` is set explicitly, the chosen zone must belong to it; otherwise the region is derived from the zone. The boot-disk image can be overridden per host with `--gcp-image=` (otherwise the config's `default_source_image` is used).
 
 > **`mngr stop` / `mngr start` are container-level, not VM-level (current limitation).** They stop and start the agent's Docker *container* over SSH; the underlying GCE VM keeps running and billing while an agent is stopped. Pausing the GCE instance itself to stop compute billing (a Modal-like idle-paused-but-resumable lifecycle) is **not yet implemented** for GCP. See [Future improvements](#future-improvements).
 
@@ -137,8 +138,8 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | Field | Default | Description |
 |-------|---------|-------------|
 | `project_id` | gcloud/ADC default | GCP project ID. A plain identifier, not a credential. Falls back to the active `gcloud config set project` / `GOOGLE_CLOUD_PROJECT` when empty. |
-| `default_region` | `us-west1` | GCE region. Used to validate that the chosen zone belongs to it. |
-| `default_zone` | `us-west1-a` | Zone for new instances (GCE VMs are zonal). |
+| `default_region` | derived from zone | GCE region. Used only to validate the resolved zone. When unset it is derived from the zone; set it to assert a region and catch a mismatched `default_zone` typo. |
+| `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active `gcloud config get compute/zone` if the gcloud CLI is available, otherwise `us-west1-a`. |
 | `default_machine_type` | `e2-small` | GCE machine type. |
 | `default_source_image` | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts` | GCE VM boot-disk image (distinct from the base `default_image`, which is the Docker *container* image run inside the VM). GCE image families are global, so no per-region map is needed. Ubuntu (not Debian): the stock GCE Debian images do not run cloud-init, so the `user-data` bootstrap would be silently ignored. |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
@@ -148,7 +149,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Tuple of inbound CIDRs for tcp/22 and tcp/`container_ssh_port`. Defaults open to the internet (fail-open, like AWS); warned at prepare/create time. Set `()` for no ingress (no rule created; instance unreachable). |
 | `firewall_target_tag` | `mngr-ssh` | Network tag bound to the firewall rule `mngr gcp prepare` creates; every instance is tagged with it. |
 | `associate_external_ip` | `True` | Assign an ephemeral external IPv4 to instances. |
-| `service_account_email` | `None` | Optional service account attached to launched instances. |
+| `service_account_email` | `None` | Optional service account attached to launched instances. When `None` the field is omitted from the create request, so GCE applies its normal default for an unspecified service account. |
 | `service_account_scopes` | `("https://www.googleapis.com/auth/cloud-platform",)` | OAuth scopes for the attached service account (only used when `service_account_email` is set). |
 | `auto_shutdown_seconds` | `None` | When set, instances launch with `scheduling.max_run_duration` + `instance_termination_action=DELETE` so the VM self-deletes after N seconds. Leave `None` for normal long-lived behavior; useful for ephemeral test / scratch hosts. |
 
@@ -191,6 +192,7 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host`; run `mngr gcp cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists in the project).
 - Auto-delete: when `auto_shutdown_seconds` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).
 - Spot capacity: the per-host `--gcp-spot` build arg launches the VM with `scheduling.provisioning_model=SPOT` (and `instance_termination_action=DELETE`, so a preempted Spot VM is deleted rather than left stopped -- mngr has no VM-level resume yet). It composes with `auto_shutdown_seconds` (both land on one `Scheduling`). GCE can preempt Spot VMs at any time with ~30s notice, so it is opt-in only: good for ephemeral / experimental agents, risky for long-lived ones. Mirrors the AWS `--aws-spot` flag.
+- Per-host image override: the `--gcp-image=<image>` build arg boots a single VM from the given GCE source image (a full image or family URL) instead of the config's `default_source_image`. Unlike the other VPS providers, where image selection is config-only, GCP exposes this per-host knob; an unset flag falls back to `default_source_image`. Note the cloud-init caveat above -- an image that does not run cloud-init with the GCE datasource will silently ignore the `user-data` bootstrap.
 - **No automatic snapshot-on-create**: unlike `mngr_modal`, this provider does not snapshot GCE instances automatically. `GcpVpsClient.create_snapshot` / `list_snapshots` / `delete_snapshot` are implemented (boot-disk snapshots); you can call them manually via `mngr snapshot`, or write a plugin that hooks `on_host_created`.
 - **Stop/start operate on the container, not the GCE VM**: `mngr stop` / `mngr start` stop and start the agent's Docker container (Docker over SSH), not the GCE instance itself, so the instance keeps running and `compute.instances.stop` / `compute.instances.start` are not needed (they are intentionally absent from the IAM list above). This is the current shared `mngr_vps_docker` behavior across all VPS providers. VM-level stop/start is future work -- see below.
 
@@ -222,6 +224,5 @@ Production code enforces this: `GcpProvider._validate_provider_args_for_create` 
 ## Future improvements
 
 - **VM-level stop/start (known limitation).** Today `mngr stop` / `mngr start` only stop/start the agent's Docker container; the GCE VM keeps running and billing. True VM-level stop/start -- GCE `instances.stop` / `instances.start`, releasing and rebinding the ephemeral external IP on resume, plus offline (label-based) discovery so stopped instances stay visible to `mngr list` / `mngr start` -- would give a Modal-like idle-paused-but-resumable lifecycle that actually stops compute billing. The AWS provider is gaining this on a separate branch (`mngr/aws-stop`), implemented entirely within `mngr_aws` (it overrides `stop_host` / `start_host` and adds `stop_instance` / `start_instance` to its client; the shared `mngr_vps_docker` base is left untouched). GCP needs its own parallel implementation in `mngr_gcp` -- it is **not** covered by `mngr/aws-stop`.
-- `--vps-image=<image>` build-arg for per-host image override.
 - GPU instances with accelerator configs.
 - Stable external addressing via reserved static IPs (needed once VM-level stop/start lands, since a stopped GCE VM releases its ephemeral external IP).

@@ -47,6 +47,7 @@ def _make_client(
     *,
     allowed_ssh_cidrs: tuple[str, ...] = ("203.0.113.4/32",),
     auto_shutdown_seconds: int | None = None,
+    image: str | None = "projects/debian-cloud/global/images/family/debian-12",
 ) -> GcpVpsClient:
     # Default to a prepared (existing) firewall so create-path tests don't each
     # have to wire one up; firewall-specific tests pass their own.
@@ -54,7 +55,7 @@ def _make_client(
         credentials=AnonymousCredentials(),
         project_id="test-project",
         zone="us-west1-a",
-        image="projects/debian-cloud/global/images/family/debian-12",
+        image=image,
         machine_type="e2-small",
         allowed_ssh_cidrs=allowed_ssh_cidrs,
         auto_shutdown_seconds=auto_shutdown_seconds,
@@ -254,6 +255,63 @@ def test_create_instance_spot_composes_with_auto_shutdown() -> None:
     assert scheduling.provisioning_model == "SPOT"
     assert scheduling.max_run_duration.seconds == 3600
     assert scheduling.instance_termination_action == "DELETE"
+
+
+def test_create_instance_uses_configured_image_by_default() -> None:
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+    )
+    # With no override the boot disk uses the client's configured image.
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image
+        == "projects/debian-cloud/global/images/family/debian-12"
+    )
+
+
+def test_create_instance_image_override_wins_over_configured() -> None:
+    """The per-host ``--gcp-image`` override boots from the given image, not the client default."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
+
+
+def test_create_instance_image_override_works_without_configured_image() -> None:
+    """An override lets an image-less client (e.g. operator-style) still create a VM."""
+    instances = FakeInstancesClient()
+    client = _make_client(instances, image=None)
+    client.upload_ssh_key("key-1", "pub")
+    client.create_instance(
+        label="mngr-host",
+        region="us-west1-a",
+        plan="e2-small",
+        user_data="x",
+        ssh_key_ids=["key-1"],
+        tags={"mngr-host-id": "host-00000000000000000000000000000000"},
+        image="projects/my-proj/global/images/family/custom",
+    )
+    assert (
+        instances.inserted[0].disks[0].initialize_params.source_image == "projects/my-proj/global/images/family/custom"
+    )
 
 
 def test_create_instance_cross_zone_raises() -> None:
