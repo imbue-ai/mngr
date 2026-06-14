@@ -992,11 +992,15 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   codex's single touch/remove flag (opencode is a server with concurrent subagent sessions).
   Root-session idle clears any stranded marker as a safety net (codex uses the root `Stop`).
   `OpenCodeAgent.get_lifecycle_state` promotes RUNNING -> WAITING while the marker is present,
-  mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. (Caveat: the
-  `@opencode-ai/sdk` type stubs are out of sync with the shipped binary -- they name the events
-  `permission.updated`/`permissionID`, but the running 1.16.2 server emits
-  `permission.asked`/`requestID`, verified by inspecting the binary. The plugin accepts **both**
-  names since opencode self-upgrades.) No upstream change was required.
+  mirroring claude/codex; `END_OF_TURN` follows from the `active` marker being absent. Covered live
+  by a release test (`test_opencode_waiting_reason_reports_permissions`): a real `bash: ask` agent
+  blocks on an approval prompt and the marker appears -- the one check that exercises the real event
+  wiring against the binary. (Caveat / **revisit**: the `@opencode-ai/sdk` type stubs are out of sync
+  with the shipped binary -- they name the events `permission.updated`/`permissionID`, but the
+  running server emits `permission.asked`/`requestID`, verified by inspecting the binary at **both**
+  1.16.2 and 1.17.7. The plugin accepts **both** names since opencode self-upgrades; once the sdk and
+  binary reconverge -- or opencode documents which is canonical -- the dead branch can be dropped.)
+  No upstream change was required.
 - **codex** -- **status: implemented** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
   hook command) and `PostToolUse` clears it; the root `Stop` clears any stranded marker as a

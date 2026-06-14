@@ -1,3 +1,5 @@
 Implemented the `waiting_reason` listing field for the `opencode` agent type, matching claude and codex. `mngr list` now reports *why* a WAITING opencode agent is blocked: `PERMISSIONS` when a tool is waiting on an approval prompt (an `ask` permission policy), or `END_OF_TURN` when the agent is idle with its turn complete.
 
 The in-process lifecycle plugin now tracks opencode's `permission.asked` / `permission.replied` events, keeping a `permissions_waiting` marker present while any prompt is open (it tracks pending request ids, so concurrent prompts from task-tool subagents are handled). While that marker is present the agent is promoted from RUNNING to WAITING, so a blocking approval prompt no longer reads as RUNNING. A stranded prompt is cleared when the root turn ends, as a safety net. (The `@opencode-ai/sdk` type stubs name these events `permission.updated`/`permissionID` rather than the binary's `permission.asked`/`requestID`; the plugin accepts both since opencode self-upgrades.)
+
+Verified end-to-end against the live opencode binary (1.17.7) by a release test that creates a real `bash: ask` agent, triggers a tool call, and asserts the marker appears.
