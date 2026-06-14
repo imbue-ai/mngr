@@ -26,6 +26,13 @@ EXTEND_SUFFIX: Final[str] = "__extend"
 # convention for ``MNGR__*`` segments.
 EXTEND_SUFFIX_ENV: Final[str] = "__EXTEND"
 
+# Operator suffix on a leaf key indicating "assign the value, but do not record a
+# narrowing violation". Behaviorally identical to a bare assign (replace the value
+# from the layer below) except the narrowing check is suppressed for this key --
+# the explicit "I am replacing this, don't warn" opt-out. Resolves in the
+# assign-phase (alongside bare keys), before any sibling ``__extend``.
+ASSIGN_SUFFIX: Final[str] = "__assign"
+
 
 @pure
 def parse_scalar_value(value_str: str) -> Any:
@@ -54,6 +61,57 @@ def is_extend_key(key: str) -> bool:
 def bare_key(extend_key: str) -> str:
     """Return the field name with the ``__extend`` suffix stripped."""
     return extend_key[: -len(EXTEND_SUFFIX)]
+
+
+def is_assign_key(key: str) -> bool:
+    """Return True if ``key`` is an ``__assign``-suffixed leaf key.
+
+    Mirrors ``is_extend_key``: the suffix must be preceded by at least one
+    character so a bare ``__assign`` (whose ``assign_bare_key`` would be empty)
+    is not treated as an assign key.
+    """
+    return key.endswith(ASSIGN_SUFFIX) and len(key) > len(ASSIGN_SUFFIX)
+
+
+def assign_bare_key(assign_key: str) -> str:
+    """Return the field name with the ``__assign`` suffix stripped."""
+    return assign_key[: -len(ASSIGN_SUFFIX)]
+
+
+def resolved_bare_key(key: str) -> str:
+    """Return the bare field name for any key, stripping ``__extend``/``__assign``.
+
+    A bare key is returned unchanged. Used to detect operator collisions on the
+    same field within one layer.
+    """
+    if is_extend_key(key):
+        return bare_key(key)
+    if is_assign_key(key):
+        return assign_bare_key(key)
+    return key
+
+
+def check_no_conflicting_assign(value: Mapping[str, Any], field_path: str = "") -> None:
+    """Raise ``ConfigParseError`` if a dict has both a bare ``key`` and ``key__assign``.
+
+    The two are contradictory assigns of the same field in the same layer. (Two
+    ``key__assign`` or two ``key__extend`` cannot occur -- they would be duplicate
+    dict keys.) Checks only this dict level; recursion is handled by the callers
+    that descend into nested dicts.
+    """
+    assign_bare_names = {assign_bare_key(key) for key in value if is_assign_key(key)}
+    if not assign_bare_names:
+        return
+    bare_names = {key for key in value if not is_extend_key(key) and not is_assign_key(key)}
+    conflicts = sorted(assign_bare_names & bare_names)
+    if conflicts:
+        location = f" at '{field_path}'" if field_path else ""
+        names = ", ".join(conflicts)
+        raise ConfigParseError(
+            f"Conflicting assignment{location}: field(s) [{names}] have both a bare key and a "
+            f"'{ASSIGN_SUFFIX}' key in the same layer. Use exactly one of bare assign or "
+            f"'{ASSIGN_SUFFIX}' (assign without the narrowing check), not both."
+        )
 
 
 def apply_extend(
@@ -136,16 +194,21 @@ def extend_dict(
     The result starts as a shallow copy of ``current_value`` so sibling keys that
     the patch does not mention are preserved.
     """
+    check_no_conflicting_assign(extend_value, field_path)
     result: dict[str, Any] = dict(current_value)
-    # First pass: bare keys assign (resolving nested markers against empty).
+    # First pass (assign-phase): bare and ``__assign`` keys assign (resolving
+    # nested markers against empty). ``__assign`` is value-identical to bare here;
+    # the suffix only suppresses narrowing, which this marker-free merge never tracks.
     for key, value in extend_value.items():
         if is_extend_key(key):
             continue
+        bare = assign_bare_key(key) if is_assign_key(key) else key
         if isinstance(value, Mapping):
-            result[key] = extend_dict({}, value, f"{field_path}.{key}")
+            result[bare] = extend_dict({}, value, f"{field_path}.{bare}")
         else:
-            result[key] = value
-    # Second pass: ``key__extend`` keys extend the (possibly just-assigned) value.
+            result[bare] = value
+    # Second pass (extend-phase): ``key__extend`` keys extend the (possibly
+    # just-assigned) value.
     for key, value in extend_value.items():
         if not is_extend_key(key):
             continue
@@ -171,12 +234,15 @@ def combine_patches(
     ``B`` in order (associativity).
 
     Pure, recursive, and associative. Per key, the four-rule table (with ``f`` the
-    bare key and ``f__extend`` the marker):
+    bare key and ``f__extend`` the marker). A ``f__assign`` key behaves exactly
+    like a bare ``f`` for value purposes (it is an assign), but keeps its suffix in
+    the output so a later narrowing pass knows to suppress the check:
 
-    - ``higher`` has bare ``f``: **bare wins** -- ``result[f]`` is ``higher``'s
-      value (recursively combined against nothing so its own nested markers stay
-      structured but no lower contribution leaks in), and any ``lower[f__extend]``
-      for the same key is dropped.
+    - ``higher`` has an assign for ``f`` (bare ``f`` or ``f__assign``): **assign
+      wins** -- ``result``'s entry for ``f`` is ``higher``'s value (recursively
+      combined against nothing so its own nested markers stay structured but no
+      lower contribution leaks in), under the same key name (preserving any
+      ``__assign`` suffix), and any ``lower`` contribution for ``f`` is dropped.
     - ``higher`` has ``f__extend``:
         * ``lower`` has a concrete bare ``f``: ``result[f]`` (bare) =
           ``apply_extend(lower[f], higher_value)`` -- extend the bare value; it
@@ -188,8 +254,11 @@ def combine_patches(
 
     Keys present only in ``lower`` carry through unchanged.
     """
-    # ``higher`` bare keys that supersede any same-named lower marker.
-    higher_bare_keys = {key for key in higher if not is_extend_key(key)}
+    check_no_conflicting_assign(higher, ".".join(path))
+    check_no_conflicting_assign(lower, ".".join(path))
+    # ``higher`` assign keys (bare or ``__assign``), mapped bare-name -> output key.
+    higher_assign_keys = {resolved_bare_key(key): key for key in higher if not is_extend_key(key)}
+    higher_bare_keys = set(higher_assign_keys)
 
     result: dict[str, Any] = {}
 
@@ -199,14 +268,15 @@ def combine_patches(
         if not _is_lower_key_overridden_by_higher(key, higher_bare_keys, higher):
             result[key] = value
 
-    # Apply higher bare keys (bare wins; recurse a dict value against nothing so
-    # its own nested markers stay structured without merging in lower).
-    for key in higher_bare_keys:
-        value = higher[key]
+    # Apply higher assign keys (assign wins; recurse a dict value against nothing so
+    # its own nested markers stay structured without merging in lower). The output
+    # key preserves any ``__assign`` suffix.
+    for bare, out_key in higher_assign_keys.items():
+        value = higher[out_key]
         if isinstance(value, Mapping):
-            result[key] = combine_patches({}, dict(value), path=path + (key,))
+            result[out_key] = combine_patches({}, dict(value), path=path + (bare,))
         else:
-            result[key] = value
+            result[out_key] = value
 
     # Apply higher markers.
     for key, value in higher.items():
@@ -214,9 +284,10 @@ def combine_patches(
             continue
         bare = bare_key(key)
         if bare in higher_bare_keys:
-            # A bare key in the same higher layer already won.
+            # An assign in the same higher layer already won.
             continue
         field_path = ".".join(path + (bare,))
+        assign_lower_key = f"{bare}{ASSIGN_SUFFIX}"
         if bare in lower and not is_extend_key(bare):
             lower_value = lower[bare]
             if isinstance(lower_value, Mapping) and isinstance(value, Mapping):
@@ -232,6 +303,15 @@ def combine_patches(
                 # Lower has a concrete bare leaf (list/tuple/set/scalar) -> extend it;
                 # stays bare. Leaf shapes carry no nested markers.
                 result[bare] = apply_extend(lower_value, value, field_path)
+        elif assign_lower_key in lower:
+            # Lower assigned ``f`` without warning, higher extends it. Extend onto the
+            # assigned value (extend is a superset, so still no narrowing) and keep the
+            # ``__assign`` suffix so the assign-without-warning intent is preserved.
+            lower_value = lower[assign_lower_key]
+            if isinstance(lower_value, Mapping) and isinstance(value, Mapping):
+                result[assign_lower_key] = combine_patches(dict(lower_value), dict(value), path=path + (bare,))
+            else:
+                result[assign_lower_key] = apply_extend(lower_value, value, field_path)
         elif key in lower:
             # Lower has a marker for the same field -> combine the marker values.
             result[key] = _combine_marker_values(lower[key], value, field_path, path + (bare,))
@@ -249,11 +329,15 @@ def _is_lower_key_overridden_by_higher(
     """Return True if a ``lower`` key is superseded or combined-into by ``higher``.
 
     The corresponding ``result`` entry is then produced from the ``higher`` side
-    (a bare value that wins, or a combined marker), so the lower key is not carried
-    through verbatim. ``key`` may be bare or an ``__extend`` marker; in both cases
-    the comparison is on the bare field name.
+    (a value that wins, or a combined marker), so the lower key is not carried
+    through verbatim. ``key`` may be bare, an ``__extend`` marker, or an
+    ``__assign`` key; in all cases the comparison is on the bare field name.
+
+    A lower ``__assign`` key combined-into by a higher ``__extend`` is overridden
+    here too: the marker pass rewrites it to ``f__assign`` with the extended value
+    (preserving the no-warn intent), so it must not also be carried through verbatim.
     """
-    bare = bare_key(key) if is_extend_key(key) else key
+    bare = resolved_bare_key(key)
     return bare in higher_bare_keys or f"{bare}{EXTEND_SUFFIX}" in higher
 
 

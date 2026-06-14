@@ -24,8 +24,11 @@ from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import would_assignment_narrow
 from imbue.mngr.config.key_resolver_primitives import apply_extend
+from imbue.mngr.config.key_resolver_primitives import assign_bare_key
 from imbue.mngr.config.key_resolver_primitives import bare_key
+from imbue.mngr.config.key_resolver_primitives import check_no_conflicting_assign
 from imbue.mngr.config.key_resolver_primitives import extend_dict
+from imbue.mngr.config.key_resolver_primitives import is_assign_key
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import InvalidKeyPathError
 
@@ -117,17 +120,22 @@ def resolve_extends(
     remain an extend (against the runtime command's params) instead of
     silently becoming an assign that would narrow them.
     """
+    check_no_conflicting_assign(override, ".".join(path))
     result: dict[str, Any] = {}
-    # First pass: copy bare keys and recurse into nested dicts.
+    # First pass (assign-phase): copy bare and ``__assign`` keys, recursing into
+    # nested dicts. ``__assign`` is value-identical to bare here -- the suffix only
+    # suppresses narrowing, and ``resolve_extends`` does no narrowing tracking -- so
+    # it collapses to the bare field name in the resolved output.
     for key, value in override.items():
         if is_extend_key(key):
             continue
+        bare = assign_bare_key(key) if is_assign_key(key) else key
         if isinstance(value, dict):
-            result[key] = resolve_extends(base, value, path=path + (key,))
+            result[bare] = resolve_extends(base, value, path=path + (bare,))
         else:
-            result[key] = value
-    # Second pass: apply ``__extend`` keys against either the just-set bare
-    # value (if both forms appear in the same layer) or the base lookup.
+            result[bare] = value
+    # Second pass (extend-phase): apply ``__extend`` keys against either the
+    # just-set assign value (if both forms appear in the same layer) or the base.
     for key, value in override.items():
         if not is_extend_key(key):
             continue
@@ -175,23 +183,28 @@ def fold_settings_patch(
     concrete base). Pure; the narrowing list is returned rather than raised so the
     caller can apply the escape hatch.
     """
+    check_no_conflicting_assign(patch, ".".join(path))
     result: dict[str, Any] = dict(base)
     narrowings: list[str] = []
 
-    # First pass: bare keys assign (resolving their own nested markers against
-    # empty so nothing leaks), narrow-checked against the base value.
+    # First pass (assign-phase): bare and ``__assign`` keys assign (resolving their
+    # own nested markers against empty so nothing leaks). A bare key is
+    # narrow-checked against the base value; an ``__assign`` key assigns identically
+    # but suppresses the narrowing check (the explicit no-warn opt-out).
     for key, value in patch.items():
         if is_extend_key(key):
             continue
-        key_path = path + (key,)
+        suppress_narrowing = is_assign_key(key)
+        bare = assign_bare_key(key) if suppress_narrowing else key
+        key_path = path + (bare,)
         dotted = ".".join(key_path)
         if isinstance(value, Mapping):
             assigned: Any = extend_dict({}, value, dotted)
         else:
             assigned = value
-        if would_assignment_narrow(base.get(key), assigned):
+        if not suppress_narrowing and would_assignment_narrow(base.get(bare), assigned):
             narrowings.append(dotted)
-        result[key] = assigned
+        result[bare] = assigned
 
     # Second pass: ``key__extend`` keys extend the just-assigned bare value (if the
     # same layer set one) or the base value.

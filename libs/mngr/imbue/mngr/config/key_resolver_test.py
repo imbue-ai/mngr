@@ -12,9 +12,12 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.key_resolver import fold_settings_patch
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver_primitives import ASSIGN_SUFFIX
 from imbue.mngr.config.key_resolver_primitives import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver_primitives import assign_bare_key
 from imbue.mngr.config.key_resolver_primitives import bare_key
 from imbue.mngr.config.key_resolver_primitives import combine_patches
+from imbue.mngr.config.key_resolver_primitives import is_assign_key
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.config.key_resolver_primitives import parse_scalar_value
 from imbue.mngr.errors import ConfigParseError
@@ -597,3 +600,109 @@ def test_fold_settings_patch_output_has_no_markers() -> None:
         return False
 
     assert not _has_marker(merged)
+
+
+# =============================================================================
+# __assign operator
+# =============================================================================
+
+
+def test_is_assign_key_recognises_suffix() -> None:
+    assert is_assign_key("permissions__assign")
+    assert is_assign_key("a__assign")
+
+
+def test_is_assign_key_rejects_bare_suffix() -> None:
+    assert not is_assign_key(ASSIGN_SUFFIX)
+
+
+def test_is_assign_key_rejects_plain_field() -> None:
+    assert not is_assign_key("permissions")
+    assert not is_assign_key("permissions__extend")
+
+
+def test_assign_bare_key_strips_suffix() -> None:
+    assert assign_bare_key("permissions__assign") == "permissions"
+
+
+def test_fold_assign_key_assigns_like_bare_but_records_no_narrowing() -> None:
+    """``key__assign`` replaces the base value identically to a bare key, but the
+    narrowing that a bare key would record is suppressed."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    merged, narrowings = fold_settings_patch(base, {"permissions__assign": {"allow": ["X"]}})
+    assert merged == {"permissions": {"allow": ["X"]}}
+    assert narrowings == []
+
+
+def test_fold_bare_key_still_narrows_when_assign_would_not() -> None:
+    """Sanity contrast: the same drop via a *bare* key still records a narrowing."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    _, narrowings = fold_settings_patch(base, {"permissions": {"allow": ["X"]}})
+    assert narrowings == ["permissions"]
+
+
+def test_fold_assign_then_extend_in_same_layer_resets_without_warning_then_adds() -> None:
+    """``key__assign`` (assign-phase) runs before ``key__extend`` (extend-phase):
+    reset-without-warning, then add."""
+    base: dict[str, Any] = {"unset_vars": ["OLD"]}
+    merged, narrowings = fold_settings_patch(base, {"unset_vars__assign": [], "unset_vars__extend": ["A"]})
+    assert merged == {"unset_vars": ["A"]}
+    assert narrowings == []
+
+
+def test_fold_assign_nested_inside_extend_suppresses_nested_narrowing() -> None:
+    """A bare key nested in an ``__extend`` narrows; switching it to ``__assign``
+    suppresses that nested narrowing while keeping the same merged value."""
+    base: dict[str, Any] = {"permissions": {"defaultMode": "acceptEdits", "allow": ["old"]}}
+    merged, narrowings = fold_settings_patch(base, {"permissions__extend": {"allow__assign": ["X"]}})
+    assert merged == {"permissions": {"defaultMode": "acceptEdits", "allow": ["X"]}}
+    assert narrowings == []
+
+
+def test_fold_bare_plus_assign_same_key_raises() -> None:
+    """A bare key and ``key__assign`` for the same field in one layer is a
+    contradictory double-assign -> ``ConfigParseError``."""
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        fold_settings_patch({}, {"model": "opus", "model__assign": "sonnet"})
+
+
+def test_resolve_extends_assign_key_assigns_like_bare() -> None:
+    """``resolve_extends`` collapses ``key__assign`` to the bare field name (it does
+    no narrowing tracking, so the suffix has no other effect there)."""
+    base = MngrConfig(unset_vars=["OLD"])
+    resolved = resolve_extends(base, {"unset_vars__assign": ["NEW"]})
+    assert resolved == {"unset_vars": ["NEW"]}
+
+
+def test_resolve_extends_assign_then_extend_resets_then_adds() -> None:
+    base = MngrConfig(unset_vars=["OLD"])
+    resolved = resolve_extends(base, {"unset_vars__assign": [], "unset_vars__extend": ["A"]})
+    assert resolved == {"unset_vars": ["A"]}
+
+
+def test_resolve_extends_bare_plus_assign_same_key_raises() -> None:
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        resolve_extends(MngrConfig(), {"unset_vars": [], "unset_vars__assign": []})
+
+
+def test_combine_patches_higher_assign_wins_and_keeps_suffix() -> None:
+    """A higher ``__assign`` wins over a lower marker (like bare) and keeps its
+    suffix so the eventual fold suppresses narrowing."""
+    lower: dict[str, Any] = {"f__extend": ["A"]}
+    higher: dict[str, Any] = {"f__assign": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f__assign": ["B"]}
+
+
+def test_combine_patches_lower_assign_plus_higher_extend_keeps_assign_suffix() -> None:
+    """A lower ``__assign`` extended by a higher ``__extend`` extends the assigned
+    value and retains the ``__assign`` suffix (no-warn intent preserved)."""
+    lower: dict[str, Any] = {"f__assign": ["A"]}
+    higher: dict[str, Any] = {"f__extend": ["B"]}
+    combined = combine_patches(lower, higher)
+    assert combined == {"f__assign": ["A", "B"]}
+
+
+def test_combine_patches_bare_plus_assign_same_layer_raises() -> None:
+    with pytest.raises(ConfigParseError, match="Conflicting assignment"):
+        combine_patches({}, {"f": 1, "f__assign": 2})
