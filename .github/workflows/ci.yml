@@ -7,6 +7,36 @@ on:
     branches: ['**']
 
 jobs:
+  # Authoritative changelog gate. Runs on the orchestrator (not in an offload
+  # sandbox) because it diffs the PR branch against its real base branch, and
+  # the sandbox has no base ref -- doing the diff there passes vacuously. Pure
+  # stdlib, so no `uv sync`; just enough git history to compute the diff.
+  check-changelog:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      # Shallow checkout, then deepen ONLY HEAD's ancestry (same rationale as
+      # the offload jobs below: a bare `--unshallow` pulls every branch). The
+      # merge-base with the base branch is an ancestor of HEAD, so deepening
+      # HEAD plus fetching the base tip is enough for a three-dot diff.
+      - uses: actions/checkout@v6
+
+      - name: Fetch base branch and deepen HEAD for the changelog diff
+        run: |
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --no-tags --unshallow origin "$(git rev-parse HEAD)"
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check changelog entries
+        run: python -m scripts.check_changelog_entries
+
   # Unit + integration tests via offload on Modal
   test-offload:
     runs-on: ubuntu-latest
