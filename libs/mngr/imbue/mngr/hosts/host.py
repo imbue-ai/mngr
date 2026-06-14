@@ -1916,7 +1916,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     raise UserInputError(
                         f"{stderr.strip()}\n"
                         f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
-                        f"To work directly in the existing worktree, use --in-place from that directory"
+                        f"To work directly in the existing worktree, use --transfer=none from that directory"
                     )
                 # `git worktree add` cannot resolve any commit reference in a
                 # repo with no commits and reports a cryptic error. Probe HEAD
