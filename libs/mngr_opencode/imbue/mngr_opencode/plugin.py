@@ -50,6 +50,7 @@ import shlex
 import urllib.parse
 from collections.abc import Callable
 from collections.abc import Mapping
+from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import ClassVar
@@ -58,6 +59,7 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.logging import log_span
 from imbue.mngr import hookimpl
 from imbue.mngr.agents.base_agent import BaseAgent
@@ -67,21 +69,25 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.hosts.common import copy_on_host
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_opencode import resources as _opencode_resources
+from imbue.mngr_opencode.opencode_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENABLED_VALUE
 from imbue.mngr_opencode.opencode_config import EMIT_COMMON_ENV_VAR
 from imbue.mngr_opencode.opencode_config import LAUNCH_SCRIPT_NAME
 from imbue.mngr_opencode.opencode_config import OPENCODE_BIN_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_PORT_ENV_VAR
 from imbue.mngr_opencode.opencode_config import OPENCODE_WORKDIR_ENV_VAR
+from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 from imbue.mngr_opencode.opencode_config import PLUGIN_FILENAME
 from imbue.mngr_opencode.opencode_config import READY_SENTINEL_FILENAME
 from imbue.mngr_opencode.opencode_config import build_opencode_config
@@ -210,6 +216,22 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
         # attach client is the pane's foreground process (lifecycle detection
         # also matches it among pane descendants).
         return "opencode"
+
+    def get_lifecycle_state(self) -> AgentLifecycleState:
+        """Get lifecycle state, accounting for the ``permissions_waiting`` marker.
+
+        The lifecycle plugin touches ``permissions_waiting`` while opencode is
+        blocked on a tool-approval prompt (its ``ask`` permission policy) and clears
+        it once the prompt is answered. The base state reads only the ``active``
+        marker, which stays present during a prompt (the session is still busy), so
+        on its own it would report RUNNING. Promote RUNNING -> WAITING while the
+        agent is blocked, since it cannot progress without user intervention. The
+        promotion rule lives in ``_resolve_lifecycle_state_for_permission`` so it can
+        be unit-tested without a live server.
+        """
+        base_state = super().get_lifecycle_state()
+        is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)
+        return _resolve_lifecycle_state_for_permission(base_state, is_blocked_on_permission)
 
     def wait_for_ready_signal(
         self, is_creating: bool, start_action: Callable[[], None], timeout: float | None = None
@@ -491,3 +513,60 @@ class OpenCodeAgent(BaseAgent[OpenCodeAgentConfig], HasCommonTranscriptMixin):
 def register_agent_type() -> tuple[str, type[AgentInterface] | None, type[AgentTypeConfig]]:
     """Register the opencode agent type."""
     return ("opencode", OpenCodeAgent, OpenCodeAgentConfig)
+
+
+def _resolve_lifecycle_state_for_permission(
+    base_state: AgentLifecycleState, is_blocked_on_permission: bool
+) -> AgentLifecycleState:
+    """Layer the ``permissions_waiting`` signal onto the base lifecycle state.
+
+    Promotes RUNNING -> WAITING while opencode is blocked on a tool-approval prompt
+    (the base state, which reads only the ``active`` marker, would otherwise report
+    RUNNING since the session stays busy). Every non-RUNNING base state passes
+    through unchanged. Kept pure (no agent/host) so ``get_lifecycle_state``'s
+    promotion rule is unit-testable without standing up a live server.
+    """
+    if base_state == AgentLifecycleState.RUNNING and is_blocked_on_permission:
+        return AgentLifecycleState.WAITING
+    return base_state
+
+
+class WaitingReason(UpperCaseStrEnum):
+    """Why an opencode agent is in the WAITING lifecycle state."""
+
+    PERMISSIONS = auto()
+    END_OF_TURN = auto()
+
+
+def _host_file_exists(host: OnlineHostInterface, path: Path) -> bool:
+    """Check whether a file exists on the host (no tmux/ps SSH overhead)."""
+    try:
+        host.read_text_file(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> WaitingReason | None:
+    """Return why the agent is waiting based on marker files, or None.
+
+    Reads the agent state directory's marker files directly rather than calling
+    get_lifecycle_state() (which runs tmux/ps SSH commands). The markers are
+    maintained by the in-process lifecycle plugin (mngr_opencode_plugin.ts):
+
+    - permissions_waiting exists -> PERMISSIONS (blocked on an approval prompt)
+    - active file absent -> END_OF_TURN (idle, turn complete)
+    - otherwise -> None (agent is actively running)
+    """
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
+    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
+        return WaitingReason.PERMISSIONS
+    if not _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME):
+        return WaitingReason.END_OF_TURN
+    return None
+
+
+@hookimpl
+def agent_field_generators() -> tuple[str, dict[str, Callable[[AgentInterface, OnlineHostInterface], Any]]] | None:
+    """Expose opencode-specific agent fields for listing."""
+    return ("opencode", {"waiting_reason": _waiting_reason})

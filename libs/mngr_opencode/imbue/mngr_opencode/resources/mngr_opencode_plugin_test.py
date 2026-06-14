@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr_opencode.opencode_config import PERMISSIONS_WAITING_FILENAME
 
 _PLUGIN_NAME = "mngr_opencode_plugin.ts"
 _PLUGIN_PATH = Path(__file__).parent / _PLUGIN_NAME
@@ -166,3 +167,65 @@ def test_user_and_assistant_text_captured(tmp_path: Path) -> None:
     assert by_type["assistant_message"]["tool_calls"][0]["tool_name"] == "bash"
     assert by_type["tool_result"]["output"] == "hi"
     assert by_type["tool_result"]["is_error"] is False
+
+
+# Permission events: opencode emits `permission.updated` (a full Permission, with
+# an `id`) when a tool blocks on approval, and `permission.replied` (carrying the
+# `permissionID`) when it is answered. The plugin keeps the permissions_waiting
+# marker present iff some permission id is still pending.
+def _permission_ask(permission_id: str, session_id: str = "ses_root") -> dict[str, Any]:
+    return {
+        "type": "permission.updated",
+        "properties": {
+            "id": permission_id,
+            "type": "edit",
+            "sessionID": session_id,
+            "messageID": "m1",
+            "title": "Edit file",
+            "metadata": {},
+            "time": {"created": 1000},
+        },
+    }
+
+
+def _permission_reply(permission_id: str, session_id: str = "ses_root") -> dict[str, Any]:
+    return {
+        "type": "permission.replied",
+        "properties": {"sessionID": session_id, "permissionID": permission_id, "response": "once"},
+    }
+
+
+def _marker_present(state: Path) -> bool:
+    return (state / PERMISSIONS_WAITING_FILENAME).exists()
+
+
+def test_permission_ask_creates_waiting_marker(tmp_path: Path) -> None:
+    state = _run_plugin(tmp_path, [_permission_ask("perm_1")])
+    assert _marker_present(state)
+
+
+def test_permission_reply_clears_waiting_marker(tmp_path: Path) -> None:
+    state = _run_plugin(tmp_path, [_permission_ask("perm_1"), _permission_reply("perm_1")])
+    assert not _marker_present(state)
+
+
+def test_marker_persists_while_any_permission_still_pending(tmp_path: Path) -> None:
+    """Two concurrent prompts; replying to one leaves the marker present for the other."""
+    state = _run_plugin(
+        tmp_path,
+        [_permission_ask("perm_1"), _permission_ask("perm_2", "ses_child"), _permission_reply("perm_1")],
+    )
+    assert _marker_present(state)
+
+
+def test_root_idle_clears_stranded_waiting_marker(tmp_path: Path) -> None:
+    """Safety net: a prompt stranded without a reply is cleared when the root turn ends."""
+    state = _run_plugin(
+        tmp_path,
+        [
+            {"type": "session.created", "properties": {"info": {"id": "ses_root"}}},
+            _permission_ask("perm_1"),
+            {"type": "session.idle", "properties": {"sessionID": "ses_root"}},
+        ],
+    )
+    assert not _marker_present(state)

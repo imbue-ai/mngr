@@ -1,0 +1,1 @@
+Updated the agent-plugin-parity spec to record that `opencode` now implements the `waiting_reason` field generator (online), and corrected the permission-event names it uses (`permission.updated` / `permission.replied`, not the previously-guessed `permission.asked`).

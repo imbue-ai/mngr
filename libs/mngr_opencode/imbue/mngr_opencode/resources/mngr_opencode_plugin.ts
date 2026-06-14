@@ -12,13 +12,24 @@
 // when MNGR_OPENCODE_ROLE=server -- the role mngr sets exclusively on the serve
 // invocation. In every other process it is inert.
 //
-// In the server process it does three things, keyed off $MNGR_AGENT_STATE_DIR:
+// In the server process it does four things, keyed off $MNGR_AGENT_STATE_DIR:
 //
 //   1. Active marker -> RUNNING vs WAITING. BaseAgent.get_lifecycle_state reads
 //      the presence of $MNGR_AGENT_STATE_DIR/active as "actively working". The
 //      plugin touches it when a session goes busy and removes it when the ROOT
 //      session goes idle (the session with no `parentID`), so task-tool subagents
 //      keep the agent RUNNING until the whole turn is done.
+//
+//   1b. Permissions-waiting marker -> WAITING reason. While a tool is blocked on an
+//      approval prompt (the `ask` permission policy), opencode emits
+//      `permission.updated` (one per blocked tool, carrying the permission id) and
+//      `permission.replied` when it is answered. The plugin tracks the set of
+//      pending ids and keeps $MNGR_AGENT_STATE_DIR/permissions_waiting present iff
+//      the set is non-empty, so OpenCodeAgent.get_lifecycle_state can promote
+//      RUNNING -> WAITING and `mngr list` can report a PERMISSIONS reason. Cleared
+//      as a safety net on root idle (a prompt stranded without a reply). The marker
+//      is independent of the active recompute -- the session stays busy (active
+//      present) the whole time a prompt is open.
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to
@@ -47,9 +58,11 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileS
 import { dirname, join } from "node:path"
 
 // Keep in sync with opencode_config.py: ACTIVE_MARKER_FILENAME,
-// RAW_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_RELATIVE_PATH,
-// COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR, SERVER_ROLE, EMIT_COMMON_ENV_VAR.
+// PERMISSIONS_WAITING_FILENAME, RAW_TRANSCRIPT_RELATIVE_PATH,
+// COMMON_TRANSCRIPT_RELATIVE_PATH, COMMON_TRANSCRIPT_SOURCE, ROLE_ENV_VAR,
+// SERVER_ROLE, EMIT_COMMON_ENV_VAR.
 const ACTIVE_MARKER_FILENAME = "active"
+const PERMISSIONS_WAITING_FILENAME = "permissions_waiting"
 const RAW_TRANSCRIPT_RELATIVE_PATH = "logs/opencode_transcript/events.jsonl"
 const COMMON_TRANSCRIPT_RELATIVE_PATH = "events/opencode/common_transcript/events.jsonl"
 const COMMON_TRANSCRIPT_SOURCE = "opencode/common_transcript"
@@ -93,6 +106,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
   }
 
   const markerPath = join(stateDir, ACTIVE_MARKER_FILENAME)
+  const permissionsWaitingPath = join(stateDir, PERMISSIONS_WAITING_FILENAME)
   const rawTranscriptPath = join(stateDir, RAW_TRANSCRIPT_RELATIVE_PATH)
   const commonTranscriptPath = join(stateDir, COMMON_TRANSCRIPT_RELATIVE_PATH)
   const emitCommon = process.env[EMIT_COMMON_ENV_VAR] === "1"
@@ -162,6 +176,36 @@ export const MngrLifecyclePlugin: Plugin = async () => {
     } catch {
       // best-effort
     }
+  }
+
+  // Permission ids currently awaiting a reply. The permissions_waiting marker is
+  // present iff this set is non-empty. opencode emits one `permission.updated` per
+  // tool blocked on approval (carrying the permission id) and one
+  // `permission.replied` when it is answered; tracking ids (rather than a single
+  // flag like codex) handles concurrent prompts, e.g. from task-tool subagents.
+  const pendingPermissions = new Set<string>()
+
+  const refreshPermissionsMarker = (): void => {
+    try {
+      if (pendingPermissions.size > 0) {
+        writeFileSync(permissionsWaitingPath, "")
+      } else {
+        rmSync(permissionsWaitingPath, { force: true })
+      }
+    } catch {
+      // best-effort: a transient fs error must not break OpenCode's loop
+    }
+  }
+
+  // Clear the active marker AND any pending permission state when the root turn
+  // ends. The permissions reset is a safety net: a prompt cancelled/denied or
+  // stranded without a `permission.replied` would otherwise leave the agent
+  // reporting PERMISSIONS forever. The whole turn is done, so nothing can still be
+  // legitimately pending.
+  const clearMarkersForRootIdle = (): void => {
+    clearMarker()
+    pendingPermissions.clear()
+    refreshPermissionsMarker()
   }
 
   let rawDirEnsured = false
@@ -294,7 +338,7 @@ export const MngrLifecyclePlugin: Plugin = async () => {
           touchMarker()
         } else if (status === "idle") {
           if (isRootSession(event.properties.sessionID)) {
-            clearMarker()
+            clearMarkersForRootIdle()
           }
           rebuildCommon()
         }
@@ -302,9 +346,22 @@ export const MngrLifecyclePlugin: Plugin = async () => {
       }
       if (type === "session.idle") {
         if (isRootSession(event.properties.sessionID)) {
-          clearMarker()
+          clearMarkersForRootIdle()
         }
         rebuildCommon()
+        return
+      }
+
+      if (type === "permission.updated") {
+        // A tool is blocked on an approval prompt; properties is the Permission.
+        pendingPermissions.add(event.properties.id)
+        refreshPermissionsMarker()
+        return
+      }
+      if (type === "permission.replied") {
+        // The prompt was answered (allowed or denied); clear that pending id.
+        pendingPermissions.delete(event.properties.permissionID)
+        refreshPermissionsMarker()
         return
       }
 
