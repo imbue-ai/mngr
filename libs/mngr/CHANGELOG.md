@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.13] - 2026-06-13
+
 ### Added
 
 - Added: Cross-plugin file-preservation API letting plugins declare a single list of paths to preserve, executed uniformly against either an online host or a stopped host's volume.

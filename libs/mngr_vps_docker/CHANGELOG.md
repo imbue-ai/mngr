@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.6] - 2026-06-13
+
 ### Added
 
 - Added: `MinimalVpsDockerProvider` (in `mngr_vps_docker.instance`) pairs with a `vps_client` whose provisioning calls raise (e.g. an `ExternallyManagedVpsClient` stub) -- provisioning is managed elsewhere and this provider only runs the post-provisioning host-setup machinery. Its `_parse_build_args` extracts `--git-depth=N` and forwards the rest to docker; the legacy `--vps-*` prefix is rejected with a migration error. Used by `mngr_imbue_cloud`'s slow path.
