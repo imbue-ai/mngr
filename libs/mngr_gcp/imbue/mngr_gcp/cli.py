@@ -18,6 +18,7 @@ override the resolved config, which in turn overrides class defaults.
 """
 
 from typing import Any
+from typing import assert_never
 
 import click
 from google.auth import exceptions as google_auth_exceptions
@@ -25,10 +26,14 @@ from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.output_helpers import emit_event
 from imbue.mngr.cli.output_helpers import write_human_line
+from imbue.mngr.cli.output_helpers import write_json_line
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_gcp.client import FirewallPrepareResult
 from imbue.mngr_gcp.client import GcpVpsClient
 from imbue.mngr_gcp.config import GcpProviderConfig
 
@@ -162,6 +167,71 @@ def _raise_if_no_project(client: GcpVpsClient) -> None:
         )
 
 
+def _output_prepare_result(
+    result: FirewallPrepareResult,
+    firewall_name: str,
+    project_id: str,
+    output_format: OutputFormat,
+) -> None:
+    """Emit the result of ``mngr gcp prepare`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` so a caller can
+    tell a first-run create from an idempotent no-op.
+    """
+    data = {
+        "firewall_name": firewall_name,
+        "target_tag": result.target_tag,
+        "project_id": project_id,
+        "created": result.was_created,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("prepared", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            write_human_line(
+                "Prepared GCP firewall rule {} (tag {}) in project {}",
+                firewall_name,
+                result.target_tag,
+                project_id,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _output_cleanup_result(
+    deleted_firewall: str | None,
+    firewall_name: str,
+    project_id: str,
+    output_format: OutputFormat,
+) -> None:
+    """Emit the result of ``mngr gcp cleanup`` in the requested format.
+
+    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    ``cleaned_up`` event. ``deleted`` is False when the rule was already absent
+    (idempotent no-op).
+    """
+    data = {
+        "firewall_name": firewall_name,
+        "project_id": project_id,
+        "deleted": deleted_firewall is not None,
+    }
+    match output_format:
+        case OutputFormat.JSON:
+            write_json_line(data)
+        case OutputFormat.JSONL:
+            emit_event("cleaned_up", data, OutputFormat.JSONL)
+        case OutputFormat.HUMAN:
+            if deleted_firewall is None:
+                write_human_line("Nothing to clean up: no firewall rule {} in project {}.", firewall_name, project_id)
+            else:
+                write_human_line("Cleaned up GCP firewall rule {} in project {}", deleted_firewall, project_id)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 @click.group(name="gcp")
 def gcp_cli_group() -> None:
     """GCP-provider operator commands (one-time setup)."""
@@ -235,7 +305,7 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     ``mngr create --provider gcp`` only needs instance create/get/list
     permissions (no firewall-management permissions).
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="gcp prepare",
         command_class=_GcpPrepareCliOptions,
@@ -263,11 +333,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # ``GcpProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     _raise_if_no_project(client)
-    target_tag = client.ensure_firewall()
-    logger.info(
-        "Prepared GCP firewall rule {} (tag {}) in project {}", client.firewall_name, target_tag, client.project_id
-    )
-    write_human_line(client.firewall_name)
+    result = client.ensure_firewall()
+    _output_prepare_result(result, client.firewall_name, client.project_id, output_opts.output_format)
 
 
 @gcp_cli_group.command(name="cleanup")
@@ -316,7 +383,7 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     compute.firewalls.delete. Does not touch per-host keys -- those are created
     and deleted by the create/destroy lifecycle, not by `prepare`.
     """
-    mngr_ctx, _output_opts, opts = setup_command_context(
+    mngr_ctx, output_opts, opts = setup_command_context(
         ctx=ctx,
         command_name="gcp cleanup",
         command_class=_GcpOperatorCliOptions,
@@ -331,10 +398,4 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         raise click.ClickException(str(e)) from e
     _raise_if_no_project(client)
     deleted_firewall = _perform_cleanup(client)
-    if deleted_firewall is None:
-        write_human_line(
-            f"Nothing to clean up: no firewall rule {client.firewall_name!r} in project {client.project_id}."
-        )
-    else:
-        logger.info("Cleaned up GCP firewall rule {} in project {}", deleted_firewall, client.project_id)
-        write_human_line(deleted_firewall)
+    _output_cleanup_result(deleted_firewall, client.firewall_name, client.project_id, output_opts.output_format)
