@@ -107,8 +107,10 @@ from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
-from imbue.overlay.merge import finalize
-from imbue.overlay.merge import merge
+from imbue.overlay.node_merge import finalize
+from imbue.overlay.node_merge import lift
+from imbue.overlay.node_merge import lift_concrete
+from imbue.overlay.node_merge import merge_narrowing_allowed
 from imbue.overlay.operators import is_extend_key
 
 _READY_SIGNAL_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -591,18 +593,20 @@ def _build_settings_json(
     for hook_config in hook_configs:
         data = merge_hooks_config(data, hook_config) or data
 
-    # Normalize the base ``B``: resolve any ``__extend`` a user may have placed in
-    # their home settings.json against an empty base (extend-against-empty =
-    # assign), so ``B`` is concrete by construction. mngr's own flags/hooks carry
-    # no markers, so in practice only the synced home file could contribute one.
-    data = finalize(data)
+    # Normalize the base ``B``: lift any ``__extend`` a user may have placed in
+    # their home settings.json into nodes and finalize against nothing
+    # (extend-against-empty = assign), so ``B`` is concrete by construction. mngr's
+    # own flags/hooks carry no markers, so in practice only the synced home file
+    # could contribute one.
+    base = finalize(lift(data))
 
-    # Merge the settings_overrides patch onto the concrete base ``B``. ``__extend``
-    # markers merge against ``B``; bare keys assign. Narrowing is tracked inside the
-    # merge and reported at any depth (including bare keys nested in an ``__extend``);
-    # ``__assign`` keys and ``Static*`` values suppress it. ``finalize`` then resolves
-    # any marker preserved against an absent ``B`` key.
-    merged, narrowings = merge(data, config.settings_overrides)
+    # Fold the ``settings_overrides`` patch onto the concrete base ``B`` via the
+    # typed-node algebra: lift ``B`` as an all-``Default`` patch and the overrides as
+    # a node patch, then combine. ``Extend`` nodes merge onto the base value (list
+    # concat / set union / recursive dict merge); ``Default`` (bare) nodes assign.
+    # Narrowing is recorded at any depth (including a bare key nested inside an
+    # ``Extend``); ``Assign`` (``__assign``) nodes and ``Static*`` values suppress it.
+    merged, narrowings = merge_narrowing_allowed(lift_concrete(base), lift(config.settings_overrides))
 
     # Narrowing guard: any bare override key (at any depth) that drops a non-empty
     # aggregate from ``B`` hard-errors unless the escape hatch is set.

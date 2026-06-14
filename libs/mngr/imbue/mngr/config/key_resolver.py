@@ -128,6 +128,15 @@ def resolve_extends(
         if is_extend_key(key):
             continue
         bare = assign_bare_key(key) if is_assign_key(key) else key
+        # Preserve a deferred ``__assign`` verbatim when the base has no value,
+        # mirroring the deferred ``__extend`` handling below: the ``key__assign`` is
+        # carried to the runtime consumer (``_build_settings_json``), which re-lifts
+        # it as a no-warn ``Assign`` instead of a narrowing-checked bare assign.
+        # Scoped to paths whose consumer understands ``__assign`` (settings_overrides,
+        # not create_templates, whose ``apply_create_template`` reads only ``__extend``).
+        if is_assign_key(key) and is_deferred_assign_path(path) and _walk_to_field(base, path + (bare,)) is None:
+            result[key] = value
+            continue
         if isinstance(value, dict):
             result[bare] = resolve_extends(base, value, path=path + (bare,))
         else:
@@ -221,3 +230,25 @@ def is_deferred_extend_path(path: tuple[str, ...]) -> bool:
     for the registry of deferred paths and their consumers.
     """
     return any(matcher.matches(path) for matcher in _DEFERRED_EXTEND_MATCHERS)
+
+
+# Deferred paths where a ``__assign`` marker (not only ``__extend``) is also
+# preserved for runtime resolution. Scoped to ``settings_overrides``, whose consumer
+# (``_build_settings_json``) re-lifts the stored patch and honours the no-warn
+# ``Assign``. ``create_templates`` is intentionally excluded: its consumer
+# (``apply_create_template``) reads only ``__extend``, so a preserved ``__assign``
+# there would surface as a literal option key.
+_DEFERRED_ASSIGN_MATCHERS: Final[tuple[_PrefixMatcher, ...]] = (
+    _PrefixMatcher(prefix=("agent_types", _WILDCARD_SEGMENT, "settings_overrides")),
+)
+
+
+def is_deferred_assign_path(path: tuple[str, ...]) -> bool:
+    """Return True when a ``__assign`` marker at ``path`` should be preserved for
+    deferred runtime resolution rather than collapsed to a bare assign at load.
+
+    Distinct from ``is_deferred_extend_path``: deferred ``__assign`` preservation is
+    limited to consumers that re-lift the stored patch and understand the no-warn
+    assign (``settings_overrides``), so the no-warn intent survives to provision.
+    """
+    return any(matcher.matches(path) for matcher in _DEFERRED_ASSIGN_MATCHERS)

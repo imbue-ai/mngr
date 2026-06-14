@@ -348,6 +348,28 @@ def test_resolve_extends_preserves_deep_extend_inside_settings_overrides() -> No
     assert resolved == override
 
 
+def test_resolve_extends_preserves_assign_inside_settings_overrides() -> None:
+    """A ``<key>__assign`` under ``settings_overrides`` whose base lookup yields
+    ``None`` is preserved verbatim (not collapsed to bare), so the no-warn intent
+    survives to the provision-time fold, where it suppresses the narrowing guard.
+    Contrast ``create_templates`` (below), whose consumer reads only ``__extend``.
+    """
+    base = MngrConfig()
+    override = {"agent_types": {"my_claude": {"settings_overrides": {"permissions__assign": {"allow": ["X"]}}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == override
+
+
+def test_resolve_extends_collapses_assign_inside_create_templates() -> None:
+    """``create_templates`` is excluded from deferred-``__assign`` preservation: its
+    consumer (``apply_create_template``) reads only ``__extend``, so a ``__assign``
+    there collapses to a bare key at config-load as before."""
+    base = MngrConfig()
+    override = {"create_templates": {"tmpl": {"env__assign": {"A": "1"}}}}
+    resolved = resolve_extends(base, override)
+    assert resolved == {"create_templates": {"tmpl": {"env": {"A": "1"}}}}
+
+
 # =============================================================================
 # resolve_extends -- __assign operator (collapses to bare; no narrowing tracking)
 # =============================================================================
