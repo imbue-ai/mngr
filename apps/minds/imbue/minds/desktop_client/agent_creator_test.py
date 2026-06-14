@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -294,6 +295,14 @@ def test_build_mngr_create_command_aws_requires_region() -> None:
             launch_mode=LaunchMode.AWS,
             host_name=HostName("hello"),
         )
+
+
+def test_run_mngr_aws_prepare_requires_region() -> None:
+    # prepare runs before the create-command builder in the AWS create flow, so
+    # it must reject an empty region with the same message rather than shelling
+    # out to ``mngr aws prepare --provider aws- --region ''``.
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        run_mngr_aws_prepare("")
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:

@@ -990,6 +990,12 @@ def run_mngr_aws_prepare(
     clear message on the creating page rather than a deferred opaque create
     failure.
     """
+    # AWS is region-locked per provider instance, so a region is required to
+    # name the ``aws-<region>`` provider. Fail fast with the same message
+    # ``_build_mngr_create_command`` raises so the empty-region case is rejected
+    # consistently regardless of which step trips first.
+    if not region:
+        raise MngrCommandError("AWS mode requires a region")
     provider_name = f"aws-{region}"
     command = [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region]
     logger.info("Running: {}", " ".join(command))
