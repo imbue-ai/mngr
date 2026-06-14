@@ -46,6 +46,7 @@ def test_apply_custom_overrides_combines_settings_patch_field() -> None:
         settings_overrides={"permissions__extend": {"allow__extend": ["C"]}},
     )
     result = _apply_custom_overrides_to_parent_config(parent, child)
+    assert isinstance(result, _SubclassAgentConfig)
     assert result.settings_overrides == {
         "model": "opus",
         "permissions__extend": {"allow__extend": ["P", "C"]},
