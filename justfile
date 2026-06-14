@@ -845,7 +845,7 @@ release *args:
 # check would pass vacuously. Pure stdlib, so no `uv sync` needed.
 # Check that this branch has a changelog entry per project it touches.
 check-changelog:
-    python -m scripts.check_changelog_entries
+    uv run python -m scripts.check_changelog_entries
 
 # (Re)deploy the nightly changelog-consolidation schedule from current source.
 changelog-deploy:
