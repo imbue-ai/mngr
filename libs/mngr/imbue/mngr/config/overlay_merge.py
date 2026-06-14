@@ -239,8 +239,9 @@ def _reparse_container_entries(
     container_dict_field_names: frozenset[str],
     base_classes: dict[str, dict[Any, type[BaseModel]]],
     override_classes: dict[str, dict[Any, type[BaseModel]]],
-) -> None:
-    """Re-parse each container entry back into its concrete model class, in place.
+) -> dict[str, Any]:
+    """Re-parse each container entry back into its concrete model class, returning a
+    new dict with the container fields replaced (the input is left untouched).
 
     The whole-model ``model_validate`` cannot pick a subclass for a container entry
     (the declared value type is the base ``AgentTypeConfig`` / ``PluginConfig`` /
@@ -250,8 +251,9 @@ def _reparse_container_entries(
     per-key merge keeps for a key present in both), falling back to the override
     entry's class for a key the override added.
     """
+    result = dict(merged_dict)
     for field_name in container_dict_field_names:
-        container = merged_dict.get(field_name)
+        container = result.get(field_name)
         if not container:
             continue
         base_field_classes = base_classes.get(field_name, {})
@@ -261,7 +263,8 @@ def _reparse_container_entries(
             entry_class = base_field_classes.get(key) or override_field_classes.get(key)
             assert entry_class is not None, f"no class recovered for {field_name}.{key}"
             reparsed[key] = entry_class.model_validate(entry)
-        merged_dict[field_name] = reparsed
+        result[field_name] = reparsed
+    return result
 
 
 def _is_settings_patch_narrowing(
@@ -447,5 +450,5 @@ def merge_models_via_overlay_with_narrowings(
         merged_classes,
         entry_patch_fn,
     )
-    _reparse_container_entries(merged_dict, container_dict_field_names, base_classes, override_classes)
+    merged_dict = _reparse_container_entries(merged_dict, container_dict_field_names, base_classes, override_classes)
     return config_class.model_validate(merged_dict), settings_narrowings
