@@ -426,21 +426,10 @@ class AgentTypeConfig(FrozenModel):
     def merge_with(self, override: Self) -> Self:
         """Merge this config with an override config.
 
-        Uses model_fields_set to determine which fields were explicitly set in
-        the override config, so that subclass-specific fields (e.g., ClaudeAgentConfig's
-        auto_dismiss_dialogs) are correctly preserved during merges.
-
-        All aggregate fields flip to assign-by-default: a list/tuple/dict/set
-        value in the override replaces the base value entirely. Use the
-        ``field__extend`` operator in TOML / ``--setting`` / env vars to get
-        additive behavior.
-
-        Exception: a field marked ``SettingsPatchField`` (e.g.
-        ``ClaudeAgentConfig.settings_overrides``) is a settings *patch* that
-        **accumulates** across config scopes rather than assigning. Its base and
-        override values are combined per-key via ``combine_patches`` (preserving /
-        combining ``__extend`` markers, higher-bare-wins), so a lower scope's
-        contribution is never dropped wholesale -- not even non-overlapping keys.
+        Uses ``model_fields_set`` so a sparse override preserves subclass-specific
+        fields (e.g. ``ClaudeAgentConfig.auto_dismiss_dialogs``). Aggregate fields
+        assign-by-default (use ``field__extend`` for additive); a ``SettingsPatchField``
+        accumulates instead. See ``config/README.md`` for the full merge scheme.
         """
         # Allow override to be the same class or a base class of self (e.g., when
         # a secondary config file defines the same custom type without repeating
@@ -449,13 +438,9 @@ class AgentTypeConfig(FrozenModel):
         if not isinstance(self, type(override)):
             raise ConfigParseError(f"Cannot merge {self.__class__.__name__} with {type(override).__name__}")
 
-        # The merge is computed via the overlay node algebra (serialize ->
-        # pre-process -> overlay-merge -> reparse) rather than field-by-field
-        # pydantic copy. This is behavior-identical to the old merge: bare fields
-        # assign-by-default (override's set fields win, base carries through),
-        # SettingsPatchField fields accumulate via ``__extend`` (the combine_patches
-        # branch), and the result re-parses into ``type(self)`` so a subclass stays
-        # its concrete class. See ``overlay_merge.merge_models_via_overlay``.
+        # Computed via the overlay pipeline (behavior-identical to the old
+        # field-by-field merge); see ``overlay_merge.merge_models_via_overlay``
+        # and ``config/README.md``.
         settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
 
@@ -702,34 +687,14 @@ class MngrConfig(FrozenModel):
     )
 
     def merge_with(self, override: Self) -> Self:
-        """Merge this config with an override config.
+        """Merge this config with an override config (the loader's whole-config merge).
 
-        Assign-by-default for every aggregate field (list, tuple, dict,
-        frozenset). The override's value replaces the base value entirely
-        when explicitly set (non-None / non-empty). Use the ``__extend``
-        suffix on the override's TOML key (or ``--setting`` / env var) to
-        get additive behavior — that resolution happens before merge_with
-        is invoked.
-
-        Carveout: the top-level *container* dicts (``agent_types``,
-        ``providers``, ``plugins``, ``commands``, ``create_templates``)
-        keep their per-key additive merge — adding ``[agent_types.foo]``
-        at one scope does not drop another scope's ``[agent_types.bar]``.
-        For keys that appear in both, the sub-class's ``merge_with`` is
-        invoked, where leaf fields again use assign-by-default.
-
-        The merge is computed via the overlay node algebra (serialize ->
-        pre-process -> overlay-merge -> reparse) rather than a field-by-field
-        pydantic copy. This is behavior-identical to the old merge: bare scalars
-        assign-by-default treating a ``None`` override as unset (the
-        ``drop_none_values`` pass reproduces ``_assign_scalar`` / the
-        ``override.<field> is not None`` guards, including the optional ``retry`` /
-        ``logging`` sub-models); the container dicts merge per key via a two-level
-        ``__extend`` (reproducing ``_merge_container_dict``, with each shared-key
-        entry combined field-by-field = its own ``merge_with``); and container entry
-        subclasses (e.g. ``ClaudeAgentConfig``) re-parse into their concrete class so
-        subclass-only fields and ``SettingsPatchField`` accumulation survive. See
-        ``overlay_merge.merge_models_via_overlay``.
+        Assign-by-default for aggregate fields; the top-level container dicts
+        (``agent_types``, ``providers``, ``plugins``, ``commands``, ``create_templates``)
+        merge per-key (a shared key invokes the entry's own ``merge_with``), and
+        ``SettingsPatchField`` fields accumulate. Computed via the overlay pipeline,
+        behavior-identical to the old field-by-field merge; see ``config/README.md``
+        for the scheme. Delegates to ``merge_with_narrowings``.
         """
         merged, _narrowings = self.merge_with_narrowings(override)
         return merged

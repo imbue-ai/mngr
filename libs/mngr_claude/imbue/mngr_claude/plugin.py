@@ -575,12 +575,11 @@ def _build_settings_json(
     # could contribute one.
     base = finalize(lift(data))
 
-    # Fold the ``settings_overrides`` patch onto the concrete base ``B`` via the
-    # typed-node algebra: lift ``B`` as an all-``Default`` patch and the overrides as
-    # a node patch, then combine. ``Extend`` nodes merge onto the base value (list
-    # concat / set union / recursive dict merge); ``Default`` (bare) nodes assign.
-    # Narrowing is recorded at any depth (including a bare key nested inside an
-    # ``Extend``); ``Assign`` (``__assign``) nodes and ``Static*`` values suppress it.
+    # Fold the ``settings_overrides`` patch onto the concrete base ``B`` via the overlay
+    # typed-node algebra -- the deferred-resolution consumer for ``settings_overrides``
+    # (see the mngr config/README.md and the ``imbue.overlay`` README). ``Extend`` merges
+    # onto the base, bare ``Default`` assigns, and ``Assign`` / ``Static*`` suppress the
+    # narrowing otherwise recorded for a dropped aggregate.
     merged, narrowings = merge_narrowing_allowed(lift_concrete(base), lift(config.settings_overrides))
 
     # Narrowing guard: any bare override key (at any depth) that drops a non-empty

@@ -95,37 +95,18 @@ def _apply_custom_overrides_to_parent_config(
     parent_config: AgentTypeConfig,
     custom_config: AgentTypeConfig,
 ) -> AgentTypeConfig:
-    """Apply custom type overrides onto a parent config instance.
+    """Apply a custom agent type's overrides onto its parent type's config.
 
-    Handles the case where parent_config may be a subclass of AgentTypeConfig
-    (e.g., ClaudeAgentConfig) by constructing a new instance of the parent's
-    concrete class with the base fields overridden. Iterates over all fields
-    that were explicitly set in the custom config (including subclass-specific
-    fields like auto_dismiss_dialogs).
-
-    All fields use assign-by-default. Tuple/list/dict fields no longer
-    auto-concatenate across parent inheritance; use the ``field__extend``
-    operator in TOML to opt into additive behavior.
-
-    Exception: a field marked ``SettingsPatchField`` (e.g.
-    ``ClaudeAgentConfig.settings_overrides``) is a settings *patch* that
-    **accumulates** across the parent/child inheritance boundary rather than
-    assigning. Parent and child values are combined per-key (the parent's
-    non-overlapping keys survive into the child, with higher/child-bare-wins for
-    overlapping keys, preserving / combining ``__extend`` markers). Cross-scope
-    narrowing of ``settings_overrides`` at config-load is intentionally not
-    surfaced, deferred together with the broader narrowing-philosophy decision.
-
-    The result is computed via the overlay node algebra (serialize ->
-    pre-process -> overlay-merge -> reparse) in
-    ``overlay_merge.merge_models_via_overlay``, behavior-identical to the old
-    field-by-field copy. ``parent_config`` is the base, so the output re-parses
-    into ``type(parent_config)`` (the class-switching crux: a base-class
-    ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields a
-    ``ClaudeAgentConfig``, its subclass-only fields supplied by the parent).
-    ``_METADATA_FIELDS`` (``parent_type`` / ``plugin``) are dropped from the
-    child's sparse dump (inheritance routing, never runtime config), and
-    ``serialize_as_any`` keeps subclass-only fields through the dump.
+    The ``parent_type`` inheritance arm of the config merge (see ``config/README.md``):
+    delegates to ``overlay_merge.merge_models_via_overlay`` with ``parent_config`` as the
+    base, so the result reparses into ``type(parent_config)`` -- the class-switching crux,
+    where a base-class ``custom_config`` folded onto a ``ClaudeAgentConfig`` parent yields
+    a ``ClaudeAgentConfig`` with the parent's subclass-only fields. ``_METADATA_FIELDS``
+    (``parent_type`` / ``plugin``) are dropped from the child's dump (inheritance routing,
+    never runtime config) and ``serialize_as_any`` keeps subclass-only fields. Assign-by-
+    default, except ``SettingsPatchField`` fields accumulate across the boundary; cross-scope
+    ``settings_overrides`` narrowing here is intentionally not surfaced (deferred with the
+    broader narrowing-philosophy decision).
     """
     settings_patch_field_names = get_settings_patch_field_names(type(parent_config))
     return merge_models_via_overlay(

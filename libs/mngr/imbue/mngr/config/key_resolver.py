@@ -1,16 +1,15 @@
-"""Shared resolver for setting overrides.
+"""Shared resolver for setting overrides: the one place mngr recognises the operator
+suffixes (``__extend`` / ``__assign``) across every surface -- env vars, TOML,
+``--setting``, ``mngr config`` -- so they stay in lockstep.
 
-Recognizes the ``__extend`` suffix on leaf keys and resolves it against the
-current config state into a plain assignment. The bare key is always an
-assignment; ``key__extend`` means "extend the base value": concat for
-list/tuple, recursive key-merge for dict, union for set/frozenset.
+Runs before ``parse_config`` and resolves each marker against the current config state
+into a plain assignment, except on the deferred-resolution paths (see
+``_DEFERRED_EXTEND_MATCHERS``), whose markers are preserved for a runtime base. The raw
+dict it returns is otherwise marker-free, so the parser never sees the operators.
 
-The resolver runs before ``parse_config``; the raw dict it returns contains
-no ``__extend`` keys, so the parser never has to know about the operator.
-
-A single source of truth for the operator name and the segment separator is
-kept here so env-var parsing, TOML parsing, ``--setting`` parsing, and
-``mngr config`` all stay in lockstep.
+For the operator semantics themselves (concat / recursive dict-merge / set-union, the
+two-phase within-layer resolution) see the ``imbue.overlay`` README; for mngr's scheme
+end-to-end see ``config/README.md``.
 """
 
 from collections.abc import Mapping
@@ -129,23 +128,18 @@ def _resolve_extends(
     *,
     path: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Walk ``override`` and resolve any ``__extend``-suffixed leaf keys
-    against ``base``, returning a new dict where every key is a plain
-    assignment.
+    """Walk ``override`` and resolve any ``__extend`` / ``__assign``-suffixed leaf keys
+    against ``base``, returning a new dict where every key is a plain assignment.
 
-    Within a single layer of ``override``, a bare ``key`` is applied first
-    if present, and the sibling ``key__extend`` (if also present) extends
-    the just-assigned value. Lookups against ``base`` traverse pydantic
-    model attributes and Mapping keys interchangeably, so the same
-    function works whether ``base`` is a parsed ``MngrConfig``, a nested
-    config object, or a raw dict.
-
-    Inside a ``create_templates.<name>`` block, an ``<opt>__extend`` whose
-    base lookup yields ``None`` is preserved verbatim rather than collapsed
-    into a bare assign. Template options are applied lazily at
-    ``mngr create`` time, so a brand-new template's ``env__extend`` should
-    remain an extend (against the runtime command's params) instead of
-    silently becoming an assign that would narrow them.
+    Implements mngr's within-layer resolution -- assign-phase then extend-phase (see
+    ``config/README.md`` and the ``imbue.overlay`` README for the semantics). Lookups
+    against ``base`` traverse pydantic model attributes and Mapping keys interchangeably,
+    so the same function works whether ``base`` is a parsed ``MngrConfig``, a nested
+    config object, or a raw dict. On a deferred-resolution path (see
+    ``_DEFERRED_*_MATCHERS``) a marker whose base lookup yields ``None`` is preserved
+    verbatim rather than collapsed, so it resolves later against a concrete runtime base
+    (a new template's ``env__extend`` against the ``mngr create`` params; a
+    ``settings_overrides`` marker against the provision base).
     """
     check_no_conflicting_assign(override, ".".join(path))
     result: dict[str, Any] = {}

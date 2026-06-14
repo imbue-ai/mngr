@@ -1,58 +1,27 @@
 """Production overlay-merge pipeline for pydantic config models.
 
-This module replaces the field-by-field pydantic copy in
-``AgentTypeConfig.merge_with`` *and* ``MngrConfig.merge_with`` with a
-*serialize -> pre-process -> overlay-merge -> reparse* pipeline built on the
-typed-node algebra in ``imbue.overlay.node_merge``. It is the promotion of the
-proven ``AgentTypeConfig`` and ``MngrConfig`` proofs-of-approach into a reusable
-production function, behavior-identical to the old merges it replaces.
+``merge_models_via_overlay`` reproduces a model's old field-by-field merge by going
+through ``model_dump`` -> overlay ``combine`` -> ``model_validate``, built on the
+typed-node algebra in ``imbue.overlay.node_merge``. It backs ``AgentTypeConfig.merge_with``,
+``MngrConfig.merge_with``, and ``parent_type`` inheritance.
 
-The single public entry point ``merge_models_via_overlay`` reproduces the *result*
-of the model's old field-by-field merge by going only through ``model_dump`` ->
-overlay ``combine`` -> ``model_validate``:
+The pipeline is **serialize -> pre-process -> overlay merge -> reparse**:
 
-1. **Serialize.** ``base.model_dump()`` (full -- the accumulated base) and
-   ``override.model_dump(exclude_unset=True)`` (sparse -- only the fields this layer
-   actually wrote, the ``model_fields_set`` semantics the model-level merge relies
-   on). Python mode, the same mode the old ``merge_with`` dumps in, so values
-   round-trip without json-mode coercion drift; the re-parse re-coerces declared
-   types regardless. ``serialize_as_any`` is threaded so subclass container entries
-   (e.g. ``ClaudeAgentConfig``) serialize through their concrete type and keep their
-   subclass-only fields.
-2. **Pre-process.** Drop ``drop_field_names`` from the sparse override; when
-   ``drop_none_values`` is set, also drop keys whose value is ``None`` on *both*
-   sides (``parse_config`` pads every unset scalar to ``None``, and TOML has no null,
-   so a ``None`` value is always *unset*; dropping it reproduces ``_assign_scalar`` /
-   the ``if override.<field> is not None`` guards -- and dropping a ``None`` base
-   sub-model reproduces the old merge's defensive None-base guard, so the re-parse
-   defaults it rather than feeding ``None`` into a non-nullable field).
-   Rename each ``SettingsPatchField`` key (passed in as
-   ``settings_patch_field_names``) to ``<field>__extend`` so the algebra accumulates
-   it (``Extend`` over ``Extend`` recurses, combining the two patches and any nested
-   ``__extend`` markers) -- exactly the ``combine_patches`` branch of the old merge.
-   Each *container-additive* field (``container_dict_field_names``) is rewritten as a
-   two-level ``__extend``: the container field itself is ``__extend`` (so overlay
-   deep-merges per key, never assign-replacing the whole dict), and each entry key is
-   *also* ``__extend`` with the entry's own ``SettingsPatchField``\\s marked
-   ``__extend`` (so a key present in both layers ``combine``\\s the two entry patches
-   field-by-field -- which *is* the entry's own ``merge_with``). Every other key
-   stays bare, which the algebra lifts to a ``Default`` (assign-by-default).
-3. **Merge.** ``lift`` both pre-processed dicts and ``merge_narrowing_allowed`` higher
-   (override) over lower (base), which returns the merged patch *and* the narrowing
-   paths. The merged *value* is behavior-identical to the old field-by-field merge;
-   the narrowing paths are filtered to the ones rooted at a ``SettingsPatchField``
-   field and returned by ``merge_models_via_overlay_with_narrowings`` so the loader can
-   route them into its flag-gated aggregation (the cross-scope ``settings_overrides``
-   narrowing that ``detect_settings_narrowing`` deliberately exempts). The value-only
-   ``merge_models_via_overlay`` discards them.
-4. **Lower + re-parse.** ``lower`` (not ``finalize``) the combined patch -- ``lower``
-   preserves the accumulated inner ``__extend`` markers in the settings patch, just
-   as the old merge stores the ``combine_patches`` output verbatim; ``finalize``
-   over-resolves them and diverges. Strip the synthetic ``__extend`` suffixes off the
-   settings-patch fields and container fields/entries, re-parse each container entry
-   into its concrete (sub)class, then re-parse the whole dict into ``type(base)`` via
-   ``model_validate`` so a subclass (e.g. ``ClaudeAgentConfig``) stays its concrete
-   class and its subclass-only fields round-trip.
+1. Serialize the full base and the sparse (``exclude_unset``) override.
+2. Pre-process the override into the operator language: a ``SettingsPatchField`` ->
+   ``<field>__extend`` (accumulate); each container-additive field -> a two-level
+   ``__extend``; ``drop_none_values`` -> drop keys that are ``None`` on both sides
+   (an unset scalar); every other key stays bare (assign).
+3. ``lift`` both and ``merge_narrowing_allowed`` override over base (the value, plus
+   the ``SettingsPatchField``-rooted narrowing paths for the with-narrowings variant).
+4. ``lower`` (not ``finalize``, so inner ``__extend`` markers survive), strip the
+   synthetic suffixes, reparse container entries into their concrete classes, and
+   reparse the whole dict into ``type(base)``.
+
+See ``config/README.md`` for the rationale behind each step (why ``exclude_unset``,
+why a two-level container ``__extend``, why ``lower`` not ``finalize``, and how the
+narrowing paths are routed). The per-function/helper docstrings below cover their
+specific contracts.
 """
 
 from collections.abc import Callable
