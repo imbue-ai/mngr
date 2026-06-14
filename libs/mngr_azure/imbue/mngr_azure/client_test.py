@@ -17,6 +17,7 @@ from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import make_azure_http_error
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -511,33 +512,25 @@ def test_destroy_instance_idempotent_on_404() -> None:
     client.destroy_instance(VpsInstanceId("vm1"))
 
 
-def test_create_snapshot_from_os_disk() -> None:
-    compute = FakeComputeClient()
-    compute.virtual_machines.get_result = SimpleNamespace(
-        storage_profile=SimpleNamespace(os_disk=SimpleNamespace(managed_disk=SimpleNamespace(id="/disks/os")))
-    )
-    client = _make_client(compute=compute)
-    snapshot_id = client.create_snapshot(VpsInstanceId("vm1"), "my snapshot")
-    assert len(compute.snapshots.created) == 1
-    snapshot = compute.snapshots.created[0][1]
-    assert snapshot.creation_data.source_resource_id == "/disks/os"
-    assert snapshot.tags["description"] == "my snapshot"
-    assert str(snapshot_id).startswith("mngr-snap-")
+# Managed-disk snapshot support is intentionally unwired (the Azure provider has
+# no host snapshot workflow); the three VpsClientInterface snapshot methods are
+# stubbed to fail loudly, mirroring AwsVpsClient.
+def test_create_snapshot_raises_unavailable() -> None:
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
+        client.create_snapshot(VpsInstanceId("vm1"), "irrelevant")
 
 
-def test_list_snapshots_round_trips_description() -> None:
-    compute = FakeComputeClient()
-    compute.snapshots.list_result = [
-        SimpleNamespace(
-            name="mngr-snap-1",
-            tags={"description": "backup"},
-            time_created=datetime(2026, 6, 10, tzinfo=timezone.utc),
-        )
-    ]
-    client = _make_client(compute=compute)
-    snapshots = client.list_snapshots()
-    assert snapshots[0].id == VpsSnapshotId("mngr-snap-1")
-    assert snapshots[0].description == "backup"
+def test_delete_snapshot_raises_unavailable() -> None:
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
+        client.delete_snapshot(VpsSnapshotId("mngr-snap-irrelevant"))
+
+
+def test_list_snapshots_raises_unavailable() -> None:
+    client = _make_client()
+    with pytest.raises(VpsDockerError, match="managed-disk snapshot support is not implemented"):
+        client.list_snapshots()
 
 
 def test_ssh_key_lifecycle_in_memory() -> None:

@@ -33,6 +33,7 @@ from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
+from imbue.mngr_vps_docker.errors import VpsDockerError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
@@ -872,54 +873,31 @@ class AzureVpsClient(VpsClientInterface):
         return self.resource_group
 
     # =========================================================================
-    # Snapshot Operations (OS managed disk of a VM)
+    # Snapshot Operations
     # =========================================================================
 
-    def _os_disk_id(self, instance_id: VpsInstanceId) -> str:
-        with self._translate_azure_errors():
-            vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
-        managed_disk = vm.storage_profile.os_disk.managed_disk
-        if managed_disk is None or not managed_disk.id:
-            raise VpsApiError(500, f"VM {instance_id} has no OS managed disk")
-        return managed_disk.id
+    # Managed-disk snapshot wiring (create / delete / list) was written
+    # speculatively to satisfy the shared ``VpsClientInterface`` abstractmethods,
+    # but the Azure provider has no host snapshot workflow today -- nothing in
+    # ``mngr_azure`` or the broader ``mngr`` CLI calls these methods. Stubbed out
+    # with the same "unavailable" shape as ``ExternallyManagedVpsClient`` (and
+    # ``AwsVpsClient``) so any future caller fails loudly instead of running real
+    # snapshot API calls that nothing else expects.
+    def _snapshots_unavailable(self, operation: str) -> VpsDockerError:
+        return VpsDockerError(
+            f"VPS API operation '{operation}' is unavailable: managed-disk snapshot support "
+            "is not implemented in mngr_azure. The Azure provider currently has no host "
+            "snapshot workflow; restore from a fresh `mngr create` instead."
+        )
 
     def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        os_disk_id = self._os_disk_id(instance_id)
-        snapshot_name = f"mngr-snap-{uuid4().hex}"
-        # Azure snapshots have no description field; stash it in a tag so
-        # list_snapshots can round-trip it.
-        snapshot_tags = {**self._base_tags(), "description": description}
-        snapshot = compute_models.Snapshot(
-            location=self.region,
-            tags=snapshot_tags,
-            properties=compute_models.SnapshotProperties(
-                creation_data=compute_models.CreationData(create_option="Copy", source_resource_id=os_disk_id)
-            ),
-        )
-        with self._translate_azure_errors():
-            self._compute().snapshots.begin_create_or_update(self.resource_group, snapshot_name, snapshot).result()
-        logger.info("Created Azure snapshot {} from OS disk of {}", snapshot_name, instance_id)
-        return VpsSnapshotId(snapshot_name)
+        raise self._snapshots_unavailable("create_snapshot")
 
     def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        with self._translate_azure_errors():
-            self._compute().snapshots.begin_delete(self.resource_group, str(snapshot_id)).result()
-        logger.info("Deleted Azure snapshot {}", snapshot_id)
+        raise self._snapshots_unavailable("delete_snapshot")
 
     def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        snapshots: list[VpsSnapshotInfo] = []
-        with self._translate_azure_errors():
-            page = self._compute().snapshots.list_by_resource_group(self.resource_group)
-            for snapshot in page:
-                tags = dict(snapshot.tags or {})
-                snapshots.append(
-                    VpsSnapshotInfo(
-                        id=VpsSnapshotId(snapshot.name),
-                        description=tags.get("description", ""),
-                        created_at=snapshot.time_created,
-                    )
-                )
-        return snapshots
+        raise self._snapshots_unavailable("list_snapshots")
 
     # =========================================================================
     # SSH Key Operations (no native Azure per-key resource; in-memory map)
