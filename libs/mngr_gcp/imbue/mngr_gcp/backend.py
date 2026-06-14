@@ -47,13 +47,11 @@ def _resolve_credentials_and_project_or_unavailable(
     ``resolve_project_id`` as the fallback when no explicit ``project_id`` is set.
     A single ``default()`` call serves both, so we never probe twice.
 
-    A failure here means we could not even authenticate to GCP, so the provider's
-    state is *unknown* -- there may well be running hosts we simply cannot see.
-    That is exactly ``ProviderUnavailableError`` (not ``ProviderEmptyError``,
-    which asserts "reached and definitively empty"): the shared discovery path
-    surfaces it to the user instead of silently dropping the provider, and
-    ``mngr gc`` skips it rather than treating an unreachable provider's hosts as
-    garbage. Mirrors the Azure provider's handling of the same condition.
+    A failure here means we could not authenticate to GCP, so the provider's
+    state is *unknown* -- hence ``ProviderUnavailableError`` (not
+    ``ProviderEmptyError``, which asserts "reached and definitively empty"): the
+    shared discovery path surfaces it instead of silently dropping the provider,
+    and ``mngr gc`` skips it rather than treating its hosts as garbage.
     """
     try:
         config.validate_zone_in_region()
@@ -79,9 +77,7 @@ class ParsedGcpBuildOptions(ParsedVpsBuildOptions):
             "Per-host opt-in for GCE Spot capacity, from the presence-only ``--gcp-spot`` build arg. "
             "When True, ``GcpVpsClient.create_instance`` launches the VM with "
             "``scheduling.provisioning_model=SPOT`` (and ``instance_termination_action=DELETE`` so a "
-            "preempted Spot VM is deleted, not left stopped). GCE may preempt Spot VMs at any time "
-            "with ~30s notice; opt-in only -- safe for ephemeral / experimental agents, risky for "
-            "long-lived ones."
+            "preempted Spot VM is deleted, not left stopped)."
         ),
     )
 

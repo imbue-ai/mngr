@@ -393,9 +393,7 @@ class GcpVpsClient(VpsClientInterface):
         it must equal the zone this client is bound to.
 
         ``spot`` (from the per-host ``--gcp-spot`` build arg) launches the VM on
-        GCE Spot capacity (``scheduling.provisioning_model=SPOT``). GCE can
-        preempt Spot VMs at any time with ~30s notice, so it is opt-in only --
-        suitable for ephemeral / experimental agents, risky for long-lived ones.
+        GCE Spot capacity (``scheduling.provisioning_model=SPOT``).
         """
         if region != self.zone:
             raise VpsApiError(
