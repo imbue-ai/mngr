@@ -7,7 +7,8 @@ resolve ``__extend`` against a concrete value; ``combine_patches`` condenses two
 marker-carrying patches without a base; ``merge`` wraps ``combine_patches`` with
 recursive narrowing detection; ``finalize`` resolves any remaining markers against
 an empty base. The narrowing predicate ``would_assignment_narrow`` lives here too,
-since ``merge`` filters the raw assign-drop candidates through it.
+since ``merge`` filters the raw assign-drop candidates through it; its path-collecting
+counterpart ``narrowing_paths`` reports the specific narrowed leaf paths.
 """
 
 from collections.abc import Mapping
@@ -65,6 +66,40 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     if any(key not in override_value for key in base_value):
         return True
     return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
+
+
+def narrowing_paths(base_value: Any, override_value: Any, prefix: str) -> list[str]:
+    """Return the dotted paths at which assigning ``override_value`` over ``base_value``
+    narrows, where ``prefix`` is the dotted path of the value being assigned (the field).
+
+    The path-collecting counterpart to ``would_assignment_narrow`` (same structure, same
+    exemptions): the result is non-empty iff ``would_assignment_narrow`` is ``True``. A
+    list/set narrowing, a whole-aggregate replacement, or a dropped dict key reports at the
+    field ``prefix`` itself; a same-keys dict whose nested values narrow reports the deep
+    leaf path of each narrowed value. ``Static*`` overrides, no-ops, supersets, and
+    empty/non-aggregate bases yield ``[]``.
+    """
+    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
+        return []
+    if is_static_marker(override_value):
+        return []
+    if isinstance(base_value, (list, tuple)):
+        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
+            return []
+        return [prefix]
+    if isinstance(base_value, (set, frozenset)):
+        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
+            return []
+        return [prefix]
+    # base_value is a non-empty dict
+    if not isinstance(override_value, dict):
+        return [prefix]
+    if any(key not in override_value for key in base_value):
+        return [prefix]
+    return sum(
+        (narrowing_paths(sub_base, override_value[key], f"{prefix}.{key}") for key, sub_base in base_value.items()),
+        [],
+    )
 
 
 def apply_extend(

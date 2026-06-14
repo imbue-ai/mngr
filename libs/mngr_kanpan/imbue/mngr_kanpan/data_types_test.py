@@ -6,7 +6,6 @@ from pydantic import ValidationError
 
 from imbue.mngr.config.data_types import LoggingConfig
 from imbue.mngr.config.data_types import MngrConfig
-from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import PluginName
@@ -171,9 +170,9 @@ def test_effective_staleness_threshold_uses_explicit_value_when_set() -> None:
 
 # The kanpan plugin no longer carries a custom ``merge_with`` that unions its dict fields
 # across config scopes. Cross-scope merges now go through the standard overlay pipeline,
-# which assigns-by-default and relies on ``detect_settings_narrowing`` to catch any
-# cross-scope drop. These tests lock in that the per-field paths
-# (``plugins.kanpan.<field>``) are flagged on a drop and pass on a pure superset addition.
+# which assigns-by-default and surfaces any cross-scope drop through the narrowing paths
+# returned by ``MngrConfig.merge_with_narrowings``. These tests lock in that the per-field
+# paths (``plugins.kanpan.<field>``) are flagged on a drop and pass on a pure superset addition.
 
 
 def _kanpan_mngr_config_base(plugin_config: KanpanPluginConfig) -> MngrConfig:
@@ -208,7 +207,7 @@ def test_kanpan_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
     override = _kanpan_mngr_config_override(
         KanpanPluginConfig.model_construct(commands={"a": CustomCommand.model_construct(name="A")})
     )
-    assert "plugins.kanpan.commands" in detect_settings_narrowing(base, override)
+    assert "plugins.kanpan.commands" in base.merge_with_narrowings(override)[1]
 
 
 def test_kanpan_commands_cross_scope_superset_does_not_narrow() -> None:
@@ -223,7 +222,7 @@ def test_kanpan_commands_cross_scope_superset_does_not_narrow() -> None:
             }
         )
     )
-    assert "plugins.kanpan.commands" not in detect_settings_narrowing(base, override)
+    assert "plugins.kanpan.commands" not in base.merge_with_narrowings(override)[1]
 
 
 def test_kanpan_shell_commands_cross_scope_drop_is_flagged_as_narrowing() -> None:
@@ -240,7 +239,7 @@ def test_kanpan_shell_commands_cross_scope_drop_is_flagged_as_narrowing() -> Non
             shell_commands={"slack": {"name": "Slack", "header": "SLACK", "command": "find-slack"}}
         )
     )
-    assert "plugins.kanpan.shell_commands" in detect_settings_narrowing(base, override)
+    assert "plugins.kanpan.shell_commands" in base.merge_with_narrowings(override)[1]
 
 
 def test_kanpan_shell_commands_cross_scope_superset_does_not_narrow() -> None:
@@ -257,4 +256,4 @@ def test_kanpan_shell_commands_cross_scope_superset_does_not_narrow() -> None:
             }
         )
     )
-    assert "plugins.kanpan.shell_commands" not in detect_settings_narrowing(base, override)
+    assert "plugins.kanpan.shell_commands" not in base.merge_with_narrowings(override)[1]

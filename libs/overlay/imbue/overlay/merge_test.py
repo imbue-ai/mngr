@@ -15,6 +15,7 @@ from imbue.overlay.merge import combine_patches
 from imbue.overlay.merge import extend_dict
 from imbue.overlay.merge import finalize
 from imbue.overlay.merge import merge
+from imbue.overlay.merge import narrowing_paths
 from imbue.overlay.merge import would_assignment_narrow
 from imbue.overlay.operators import is_extend_key
 
@@ -413,3 +414,54 @@ def test_would_assignment_narrow_exempts_static_tuple() -> None:
 def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
     assert would_assignment_narrow(("0.0.0.0/0",), ScalarTuple(("203.0.113.4/32",))) is False
     assert would_assignment_narrow(("0.0.0.0/0",), ("203.0.113.4/32",)) is True
+
+
+# =============================================================================
+# narrowing_paths -- deep-path counterpart of would_assignment_narrow
+# =============================================================================
+
+
+def test_narrowing_paths_top_level_list_drop_reports_field() -> None:
+    assert narrowing_paths(["a", "b"], ["c"], "tags") == ["tags"]
+
+
+def test_narrowing_paths_superset_yields_nothing() -> None:
+    assert narrowing_paths(["a"], ["a", "b"], "tags") == []
+
+
+def test_narrowing_paths_static_override_yields_nothing() -> None:
+    assert narrowing_paths(["a", "b"], StaticList(["c"]), "tags") == []
+
+
+def test_narrowing_paths_dict_dropped_key_reports_dict_field() -> None:
+    assert narrowing_paths({"x": 1, "y": 2}, {"x": 1}, "opts") == ["opts"]
+
+
+def test_narrowing_paths_non_dict_over_dict_reports_dict_field() -> None:
+    assert narrowing_paths({"x": 1}, ["x"], "opts") == ["opts"]
+
+
+def test_narrowing_paths_nested_list_narrowing_reports_deep_path() -> None:
+    assert narrowing_paths({"env": ["A", "B"]}, {"env": ["A"]}, "defaults") == ["defaults.env"]
+
+
+def test_narrowing_paths_doubly_nested_value_narrowing_reports_full_deep_path() -> None:
+    base = {"create": {"defaults": {"env": ["A", "B"]}}}
+    override = {"create": {"defaults": {"env": ["A"]}}}
+    assert narrowing_paths(base, override, "commands") == ["commands.create.defaults.env"]
+
+
+def test_narrowing_paths_multiple_narrowing_keys_yields_multiple_paths() -> None:
+    base = {"env": ["A", "B"], "ports": ["1", "2"], "kept": ["X"]}
+    override = {"env": ["A"], "ports": ["1"], "kept": ["X"]}
+    assert narrowing_paths(base, override, "defaults") == ["defaults.env", "defaults.ports"]
+
+
+def test_narrowing_paths_empty_or_scalar_base_yields_nothing() -> None:
+    assert narrowing_paths([], ["a"], "tags") == []
+    assert narrowing_paths("x", "y", "name") == []
+
+
+def test_narrowing_paths_set_drop_reports_field_but_superset_does_not() -> None:
+    assert narrowing_paths({"a", "b"}, {"a"}, "tags") == ["tags"]
+    assert narrowing_paths({"a"}, {"a", "b"}, "tags") == []

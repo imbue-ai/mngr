@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import shlex
-from collections.abc import Mapping
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
@@ -42,7 +41,6 @@ from imbue.mngr.primitives import UserId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.overlay.markers import ScalarTuple
-from imbue.overlay.markers import is_static_marker
 
 USER_ID_FILENAME: Final[str] = "user_id"
 
@@ -77,9 +75,9 @@ class SettingsPatchField:
     The field carrying this marker (``ClaudeAgentConfig.settings_overrides``) lives
     on a plugin subclass; the base ``merge_with`` reads the marker generically, so
     core never has to know the field's name. Because such a field accumulates
-    (combine, never assign), it is also exempt from the assign-narrowing detector
-    (``detect_settings_narrowing``): a higher layer that merely adds keys is a
-    superset and cannot narrow.
+    (combine, never assign), a higher layer that merely adds keys is a superset and
+    cannot narrow; only a bare assign that drops a non-empty aggregate *inside* the
+    patch is surfaced as a narrowing (by the overlay merge, at any depth).
     """
 
 
@@ -154,157 +152,12 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
 # (instead of assign-by-default). These count as containers *only* at the top level of
 # ``MngrConfig``: a same-named field nested inside a sub-model (e.g. a plugin config's
 # own ``commands`` dict) is an ordinary aggregate, narrowing-checked as a leaf -- not
-# per-key-recursed (which would silently skip its dropped keys). The narrowing walker
-# therefore guards the match with a depth check (top level only); the overlay merge only
+# per-key-recursed (which would silently skip its dropped keys). The overlay merge only
 # ever marks the outermost ``MngrConfig`` dict, so a name match there is already
 # unambiguous.
 _CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
     {"agent_types", "providers", "plugins", "commands", "create_templates"}
 )
-
-
-def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
-    """Return dotted paths where ``override`` would silently drop entries from
-    a non-empty aggregate value in ``base`` (``list``, ``tuple``, ``dict``,
-    ``set``, ``frozenset``).
-
-    Used by the loader to surface accidental data loss when the new
-    assign-by-default merge semantics replace a previous additive merge. The
-    check is recursive: container dicts (``agent_types``, ``providers``,
-    ``plugins``, ``commands``, ``create_templates``) traverse per key so only
-    the actually-narrowing sub-fields are flagged. Sub-models recurse by
-    their own ``model_fields_set`` so untouched fields are ignored.
-
-    "Narrowing" is defined as the override losing at least one base entry --
-    a missing list/set element, a missing dict key, or an explicit empty
-    aggregate over a non-empty base. No-ops (override equals base) and
-    supersets (every base entry survives, e.g. an ``__extend`` result) pass
-    without flagging. Against a list/tuple base, a ``ScalarTuple`` override is
-    also exempt: a string-shaped TOML value (e.g. ``cli_args = "..."``) or a
-    field declared replace-by-default (e.g. ``allowed_ssh_cidrs``) is a coherent
-    single value, so a higher-precedence layer that replaces it expresses scalar
-    replacement rather than aggregate narrowing. Value mutations at a shared dict
-    key recurse instead of flagging at the parent.
-
-    Layers that didn't write the field (override value is ``None``, since
-    ``parse_config`` defaults missing fields to ``None``) are skipped by
-    ``_walk_for_narrowing`` so an unrelated layer's omission never counts
-    as a narrowing assignment.
-
-    Returns dotted paths like ``commands.create.defaults.env``. The list is
-    empty when there are no narrowing assignments.
-    """
-    violations: list[str] = []
-    _walk_for_narrowing(base, override, path=(), violations=violations)
-    return violations
-
-
-def _walk_for_narrowing(
-    base: Any,
-    override: Any,
-    path: tuple[str, ...],
-    violations: list[str],
-) -> None:
-    if isinstance(override, BaseModel):
-        explicitly_set = override.model_fields_set
-        for field_name in override.__class__.model_fields:
-            if field_name not in explicitly_set:
-                continue
-            override_value = getattr(override, field_name)
-            # ``None`` mirrors the ``if override.<field> is not None`` test used
-            # throughout MngrConfig.merge_with: parse_config sets every kwarg
-            # (often to ``None``) so model_fields_set alone over-reports which
-            # fields the layer actually touched. A ``None`` value means the
-            # layer did not write the field, so it cannot narrow anything.
-            if override_value is None:
-                continue
-            field_info = override.__class__.model_fields.get(field_name)
-            if field_info is not None and is_settings_patch_field(field_info.metadata):
-                # A ``SettingsPatchField`` accumulates (combine, never assign) across
-                # config layers, so a higher layer is always a superset and cannot
-                # narrow. Skip the assign-narrowing check entirely; any intentional
-                # bare drop is caught later by the provision fold against the base.
-                continue
-            base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
-            sub_path = path + (field_name,)
-            if not path and field_name in _CONTAINER_DICT_FIELDS:
-                # Per-key recurse for MngrConfig's top-level container dicts (agent_types,
-                # providers, plugins, commands, create_templates). The ``not path`` guard
-                # scopes this to the *top level*: a same-named field nested inside a
-                # sub-model (e.g. a plugin config's own ``commands`` dict, whose path is
-                # non-empty) is narrowing-checked as a leaf aggregate instead of being
-                # mis-treated as a container (which per-key recurses and silently skips
-                # dropped keys).
-                _walk_for_narrowing(base_value, override_value, sub_path, violations)
-                continue
-            _check_narrowing(base_value, override_value, sub_path, violations)
-        return
-    if isinstance(override, Mapping):
-        # Container dict (e.g. ``commands``) -- recurse per key against
-        # whatever the base has at that key. Keys present only in override
-        # are pure additions and never narrow.
-        for key, sub_override in override.items():
-            sub_base = base.get(key) if isinstance(base, Mapping) else None
-            if sub_base is None:
-                continue
-            _walk_for_narrowing(sub_base, sub_override, path + (str(key),), violations)
-
-
-def _check_narrowing(
-    base_value: Any,
-    override_value: Any,
-    path: tuple[str, ...],
-    violations: list[str],
-) -> None:
-    """Check a single field for narrowing, recursing into nested aggregates.
-
-    Sub-models recurse into their explicitly-set fields; aggregates check
-    whether every base entry survives in the override. For dicts the check
-    is two-pass: missing keys are flagged at this level (the dict has been
-    truncated), while shared keys recurse so a value mutation inside a
-    nested aggregate surfaces at the deeper path rather than at the parent.
-
-    Clearing a non-empty aggregate (``env = []`` over ``env = ["X=5"]``) is
-    treated as narrowing too: it drops every prior entry, which is the most
-    extreme form of data loss the safety net is meant to catch. To clear,
-    the user must set ``allow_settings_key_assignment_narrowing = true``.
-    Against a non-empty list/tuple base, three forms of override pass without
-    warning: no-ops (override equals base), supersets (every base entry
-    survives, e.g. ``__extend`` results or additive assigns that happen to
-    include every prior value), and ``ScalarTuple`` overrides (a string-shaped
-    TOML value such as ``cli_args = "..."``, or a replace-by-default field such
-    as ``allowed_ssh_cidrs``, is a coherent single value, so replacing it is
-    scalar replacement rather than aggregate narrowing).
-    """
-    if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
-        _walk_for_narrowing(base_value, override_value, path, violations)
-        return
-    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return
-    # A ``Static*`` override (e.g. a string-derived ``cli_args``, a replace-by-default
-    # ``allowed_ssh_cidrs``, or an explicitly atomic ``StaticList`` / ``StaticDict``)
-    # replaces the whole aggregate as a coherent unit -- a value-set, not narrowing.
-    if is_static_marker(override_value):
-        return
-    if isinstance(base_value, (list, tuple)):
-        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
-            return
-        violations.append(".".join(path))
-        return
-    if isinstance(base_value, (set, frozenset)):
-        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
-            return
-        violations.append(".".join(path))
-        return
-    # base_value is a non-empty dict
-    if not isinstance(override_value, dict):
-        violations.append(".".join(path))
-        return
-    if any(key not in override_value for key in base_value):
-        violations.append(".".join(path))
-        return
-    for key, sub_base in base_value.items():
-        _check_narrowing(sub_base, override_value[key], path + (str(key),), violations)
 
 
 # === Enums ===
@@ -698,16 +551,17 @@ class MngrConfig(FrozenModel):
         return merged
 
     def merge_with_narrowings(self, override: Self) -> tuple[Self, list[str]]:
-        """Like ``merge_with``, but also return the ``SettingsPatchField`` narrowing
-        paths surfaced by the overlay merge.
+        """Like ``merge_with``, but also return every narrowing path the overlay merge
+        surfaced -- the single config-load narrowing detector.
 
-        These are the cross-scope ``settings_overrides`` bare-drops that
-        ``detect_settings_narrowing`` deliberately exempts (a ``SettingsPatchField``
-        accumulates, so the narrowing only shows up inside the patch). The loader
-        routes them into its flag-gated narrowing aggregation. Paths are rooted at the
-        offending settings field, e.g. ``agent_types.<name>.settings_overrides.<key>...``.
-        ``merge_with`` delegates here and discards the paths for callers that only need
-        the merged value.
+        These are the cross-scope bare-drops of a non-empty aggregate by a
+        higher-precedence layer: both ordinary assign-by-default field drops (e.g.
+        ``agent_types.<name>.cli_args``, ``commands.create.defaults.env``) and
+        ``SettingsPatchField`` drops *inside* an accumulating settings patch (e.g.
+        ``agent_types.<name>.settings_overrides.<key>...``). ``Static*`` atomic
+        aggregates are exempt via the override-side re-marking. The loader routes the
+        whole list into its flag-gated narrowing aggregation. ``merge_with`` delegates
+        here and discards the paths for callers that only need the merged value.
         """
         settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay_with_narrowings(

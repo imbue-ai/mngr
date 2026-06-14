@@ -26,7 +26,6 @@ from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.loader import block_disabled_plugins
@@ -482,11 +481,10 @@ def apply_settings_to_config(
     # ``--setting`` cannot silently drop entries from the merged config either.
     # Honor the existing setting on ``config``, since ``--setting`` runs after
     # config-file loading, so the resolved value is already known here.
-    if not config.allow_settings_key_assignment_narrowing:
-        violations = detect_settings_narrowing(config, settings_config)
-        if violations:
-            raise _build_setting_narrowing_error(violations)
-    return config.merge_with(settings_config)
+    merged, violations = config.merge_with_narrowings(settings_config)
+    if violations and not config.allow_settings_key_assignment_narrowing:
+        raise _build_setting_narrowing_error(violations)
+    return merged
 
 
 # Top-level setting key segments whose effect is consumed earlier in

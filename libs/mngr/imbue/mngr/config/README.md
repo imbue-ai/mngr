@@ -106,19 +106,27 @@ base" for why this is sound (associativity).
 
 ## Narrowing at config-load
 
-Two disjoint paths surface a narrowing (a higher layer's bare assign silently
-dropping a non-empty aggregate from a lower layer):
+A narrowing is a higher layer's bare assign silently dropping a non-empty aggregate
+that a lower layer set. **All** narrowing detection flows through the one overlay
+merge: `merge_models_via_overlay_with_narrowings` returns every narrowing path it
+finds, and the loader (`_collect_narrowing`) attributes each to the layer that set
+the dropped value. There is no separate model-walker.
 
-- **Assign-by-default fields** -- `detect_settings_narrowing` (`data_types.py`) walks
-  the merged models. A `ScalarTuple` / `StringDerivedTuple` (a string-shaped TOML
-  value coerced to a tuple) is a scalar, not an aggregate, so replacing it is exempt;
-  the container dict fields count as containers only at the **top level** of
-  `MngrConfig`, so a same-named field nested in a sub-model is checked as a leaf.
-- **`SettingsPatchField` fields** -- exempt from the walker above (they accumulate),
-  so their cross-scope narrowings come from the overlay merge instead:
-  `merge_models_via_overlay_with_narrowings` returns the settings-patch narrowing
-  paths, which the loader routes into the same aggregation.
+The overlay's `narrowing_paths` does the detection (in `imbue.overlay.merge`):
 
-Both feed the flag-gated error: collected violations raise unless
+- An override that is a superset, a no-op, or a `Static*` atomic aggregate does **not**
+  narrow. A `ScalarTuple` / `StringDerivedTuple` (a string-shaped TOML value coerced to
+  a tuple) is a `Static*`, so replacing it is a value-set, not narrowing. Because
+  `model_dump` strips the `Static*` subclass back to a plain aggregate, the pipeline
+  re-marks those values on the override before merging (see `_collect_static_marker_paths`
+  / `_remark_static_leaves`) -- which relies on the markers' proven-pure round-trip.
+- A `SettingsPatchField` accumulates rather than assigns, so a higher layer is always a
+  superset of it *except* for an in-patch bare drop, which `narrowing_paths` reports like
+  any other -- the cross-scope `settings_overrides` narrowing.
+- Reported paths point at the narrowed leaf: a dropped dict key or a narrowed
+  list/set is reported at its field; a nested dict whose value narrows reports the deep
+  path (e.g. `commands.create.defaults.env`).
+
+Collected violations feed the flag-gated error: they raise unless
 `allow_settings_key_assignment_narrowing` is set (a transitional escape hatch;
 per-key, prefer `key__extend` to accumulate or `key__assign` to replace without warning).

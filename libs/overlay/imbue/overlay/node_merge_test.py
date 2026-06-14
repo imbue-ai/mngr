@@ -391,6 +391,16 @@ def test_merge_default_over_non_empty_aggregate_narrows() -> None:
     assert narrowings == ["permissions"]
 
 
+def test_merge_nested_dict_value_narrowing_reports_deep_leaf_path() -> None:
+    """A same-keys dict whose nested value narrows reports the deep leaf path, not the
+    containing field: ``commands.create.defaults`` keeps all keys, but its ``env`` list
+    drops an entry, so the narrowing is reported at ``commands.create.defaults.env``."""
+    base = lift_concrete({"commands": {"create": {"defaults": {"env": ["A", "B"]}}}})
+    higher = lift({"commands": {"create": {"defaults": {"env": ["A"]}}}})
+    _, narrowings = merge_narrowing_allowed(base, higher)
+    assert narrowings == ["commands.create.defaults.env"]
+
+
 def test_merge_static_payload_suppresses_narrowing() -> None:
     base = lift_concrete({"cli_args": ["--debug", "--trace"]})
     higher = lift({"cli_args": StaticList(["--verbose"])})

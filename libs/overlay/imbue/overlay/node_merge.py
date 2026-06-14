@@ -23,7 +23,7 @@ from typing import Any
 from imbue.overlay.errors import NarrowingError
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import is_static_marker
-from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.merge import narrowing_paths
 from imbue.overlay.nodes import Assign
 from imbue.overlay.nodes import Default
 from imbue.overlay.nodes import Extend
@@ -39,8 +39,8 @@ from imbue.overlay.operators import is_extend_key
 
 # A candidate assign drop recorded by ``combine`` for the narrowing filter:
 # ``(lower_payload, higher_payload, dotted_path)``. ``combine`` appends one for
-# every ``Default`` that overrides a lower node; ``_merge`` then keeps only those
-# that actually narrow (via ``would_assignment_narrow`` on the finalized payloads).
+# every ``Default`` that overrides a lower node; ``_merge`` then expands each into the
+# specific narrowed leaf paths (via ``narrowing_paths`` on the finalized payloads).
 AssignDrop = tuple[Any, Any, str]
 
 # The aggregate leaf types a payload may be (besides scalars / nested patches).
@@ -351,18 +351,19 @@ def finalize_payload(payload: Any) -> Any:
 def _merge(lower: Patch, higher: Patch) -> tuple[Patch, list[str]]:
     """Combine ``higher`` over ``lower`` and return the patch plus narrowing paths.
 
-    Collects ``AssignDrop`` candidates during ``combine`` and keeps only those that
-    actually narrow, comparing the **finalized** payloads via ``would_assignment_narrow``
-    (so ``Static*`` and superset overrides are exempt). Never raises for narrowing
-    (only a structural ``OverlayError`` from ``combine`` can propagate).
+    Collects ``AssignDrop`` candidates during ``combine``, then expands each into the
+    specific narrowed leaf paths via ``narrowing_paths`` on the **finalized** payloads,
+    seeded with the recorded dotted field path as the prefix. ``Static*`` and superset
+    overrides are exempt (yield no paths); a dropped dict key or a list/set narrowing
+    reports at the field path, while a nested dict value narrowing reports the deep leaf
+    path. Never raises for narrowing (only a structural ``OverlayError`` from ``combine``
+    can propagate).
     """
     assign_drops: list[AssignDrop] = []
     merged = combine(lower, higher, assign_drops=assign_drops)
-    narrowings = [
-        dotted
-        for lower_payload, higher_payload, dotted in assign_drops
-        if would_assignment_narrow(finalize_payload(lower_payload), finalize_payload(higher_payload))
-    ]
+    narrowings: list[str] = []
+    for lower_payload, higher_payload, dotted in assign_drops:
+        narrowings.extend(narrowing_paths(finalize_payload(lower_payload), finalize_payload(higher_payload), dotted))
     return merged, narrowings
 
 

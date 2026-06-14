@@ -92,11 +92,11 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    # detect_settings_narrowing in config/data_types.py walks MngrConfig (and
-    # sub-model) fields by name via the model_fields iterable, which is the same
-    # pattern documented inline on _walk_to_field. Switching to model_dump
-    # round-tripping to dodge the ratchet would re-introduce the serialisation
-    # cost _walk_to_field was rewritten to avoid (see its docstring).
+    # config/key_resolver.py's _walk_to_field walks MngrConfig (and sub-model)
+    # fields by name via the model_fields iterable (the override resolver looks up
+    # a field whose name is only known at runtime from the override dict). Switching
+    # to model_dump round-tripping to dodge the ratchet would re-introduce the
+    # serialisation cost _walk_to_field was rewritten to avoid (see its docstring).
     #
     # cli/create.py uses the same map-driven `getattr(opts, config_field, ())`
     # pattern twice -- once for AgentProvisioningOptions

@@ -27,17 +27,28 @@ def test_is_static_marker_rejects_plain_aggregates() -> None:
     assert not is_static_marker("scalar")
 
 
+def _assert_pure_remark_round_trip(marker: object, plain: object) -> None:
+    """Assert ``marker`` survives a strip-to-plain then re-mark with no loss.
+
+    ``plain`` is the serialized form (``model_dump`` strips the ``Static*`` subclass
+    back to its builtin aggregate). Re-wrapping it in ``type(marker)`` must reproduce
+    the marker exactly, which holds only because the marker carries no instance state
+    beyond the aggregate.
+    """
+    assert not is_static_marker(plain)
+    remarked = type(marker)(plain)
+    assert remarked == marker
+    assert is_static_marker(remarked)
+    # No instance state beyond the aggregate, so re-marking cannot lose anything.
+    assert not vars(marker)
+
+
 def test_static_markers_are_pure_and_round_trip_by_remarking() -> None:
     """The purity requirement (see ``markers.py``): a ``Static*`` marker adds no state
     beyond its builtin aggregate, so re-wrapping the plain (serialized) form in the same
     type reproduces it. This is the no-op round-trip a consumer relies on to re-mark a
     value that ``model_dump`` has stripped back to a plain aggregate."""
-    plain_base = {StaticTuple: tuple, ScalarTuple: tuple, StaticList: list, StaticDict: dict}
-    for marker in (StaticTuple(("a", "b")), ScalarTuple(("a",)), StaticList(["a", "b"]), StaticDict({"a": 1})):
-        plain = plain_base[type(marker)](marker)
-        assert not is_static_marker(plain)  # the serialized form has lost the marker
-        remarked = type(marker)(plain)  # re-marking reconstructs it
-        assert remarked == marker
-        assert is_static_marker(remarked)
-        # No instance state beyond the aggregate, so re-marking cannot lose anything.
-        assert not vars(marker)
+    _assert_pure_remark_round_trip(StaticTuple(("a", "b")), tuple(StaticTuple(("a", "b"))))
+    _assert_pure_remark_round_trip(ScalarTuple(("a",)), tuple(ScalarTuple(("a",))))
+    _assert_pure_remark_round_trip(StaticList(["a", "b"]), list(StaticList(["a", "b"])))
+    _assert_pure_remark_round_trip(StaticDict({"a": 1}), dict(StaticDict({"a": 1})))

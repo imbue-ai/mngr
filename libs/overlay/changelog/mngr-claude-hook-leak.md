@@ -20,3 +20,10 @@ narrowing path) and `merge_narrowing_allowed` (returns the patch and the paths w
 raising). Because the algebra never re-parses a field name or unwraps a payload to look
 for an inner operator, stacked suffixes (`a__extend__assign`) are safe by construction:
 they lift to a single wrapper on a literal field name and never reactivate.
+
+Narrowing detection now reports the specific narrowed leaf path rather than the
+containing field. A new `narrowing_paths` predicate (the path-collecting counterpart of
+`would_assignment_narrow`) drives this: a same-keys dict whose nested value narrows
+yields the deep leaf path (e.g. `commands.create.defaults.env`), while a dropped dict
+key or a list/set narrowing still reports at the field. The raise/no-raise decision is
+unchanged -- only the path strings are more precise.

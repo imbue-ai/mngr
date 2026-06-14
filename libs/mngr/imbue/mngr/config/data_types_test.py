@@ -23,10 +23,12 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
-from imbue.mngr.config.data_types import detect_settings_narrowing
+from imbue.mngr.config.data_types import _CONTAINER_DICT_FIELDS
 from imbue.mngr.config.data_types import get_or_create_user_id
+from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -41,6 +43,66 @@ from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
 from imbue.overlay.merge import would_assignment_narrow
+
+
+def _is_settings_patch_rooted(
+    dotted_path: str,
+    override_patch_field_names: frozenset[str],
+    container_dict_field_names: frozenset[str],
+    container_entry_classes: dict[str, dict[Any, type[Any]]],
+) -> bool:
+    """True if ``dotted_path`` is rooted at a ``SettingsPatchField`` field -- either the
+    merged model's own top-level patch field, or a patch field of a container entry's
+    concrete class (``<container>.<entry>.<settings_field>...``)."""
+    segments = dotted_path.split(".")
+    if segments[0] in override_patch_field_names:
+        return True
+    if (
+        len(segments) >= 3
+        and segments[0] in container_dict_field_names
+        and segments[1] in container_entry_classes.get(segments[0], {})
+    ):
+        entry_class = container_entry_classes[segments[0]][segments[1]]
+        return segments[2] in get_settings_patch_field_names(entry_class)
+    return False
+
+
+def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
+    """Drive the live overlay narrowing detector and return the NON-settings-patch subset
+    -- the exact output the deleted model-walker produced.
+
+    The model-walker was removed from production once all config-load narrowing moved onto
+    the overlay merge (``merge_with_narrowings``), which now returns *every* narrowing
+    (settings-patch drops included). This test-side helper reruns that merge with the same
+    kwargs the loader uses, then drops the ``SettingsPatchField``-rooted paths (which the
+    walker exempted), so the existing assertions exercise the surviving production path
+    unchanged. The old-vs-new equivalence is independently guarded in ``overlay_merge_test``.
+    """
+    override_patch_field_names = get_settings_patch_field_names(type(override))
+    if isinstance(base, MngrConfig):
+        container_field_names = _CONTAINER_DICT_FIELDS
+        narrowings = base.merge_with_narrowings(override)[1]
+    else:
+        container_field_names = frozenset()
+        narrowings = merge_models_via_overlay_with_narrowings(
+            base, override, settings_patch_field_names=override_patch_field_names
+        )[1]
+    base_fields = dict(base)
+    override_fields = dict(override)
+    container_entry_classes: dict[str, dict[Any, type[Any]]] = {
+        field_name: {
+            **{key: type(value) for key, value in (base_fields.get(field_name) or {}).items()},
+            **{key: type(value) for key, value in (override_fields.get(field_name) or {}).items()},
+        }
+        for field_name in container_field_names
+    }
+    return [
+        dotted_path
+        for dotted_path in narrowings
+        if not _is_settings_patch_rooted(
+            dotted_path, override_patch_field_names, container_field_names, container_entry_classes
+        )
+    ]
 
 
 class _TestAgentTypeConfig(AgentTypeConfig):
@@ -1011,8 +1073,8 @@ def test_detect_settings_narrowing_exempts_string_derived_tuple_override(mngr_te
     """A ``StringDerivedTuple`` override over a non-empty list/tuple base is
     exempt from narrowing detection even when the tokens differ.
 
-    Locks in the leaf-level rule (``_check_narrowing``) directly so a future
-    refactor that breaks the marker discrimination is caught here, not just by
+    Locks in the marker exemption through the overlay narrowing path directly so a
+    future refactor that breaks the marker discrimination is caught here, not just by
     the loader-level integration test.
     """
     base = MngrConfig(
@@ -1046,11 +1108,10 @@ def test_detect_settings_narrowing_still_flags_plain_tuple_override(mngr_test_pr
 
 
 def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
-    """``would_assignment_narrow`` mirrors the leaf-level exemption used by
-    ``_check_narrowing``: a ``StringDerivedTuple`` override over a non-empty
-    list/tuple base reports no narrowing, while a plain-tuple override with
-    the same tokens still does. This is the rule the template-application
-    guard in ``apply_create_template`` relies on.
+    """``would_assignment_narrow`` mirrors the leaf-level marker exemption: a
+    ``StringDerivedTuple`` override over a non-empty list/tuple base reports no
+    narrowing, while a plain-tuple override with the same tokens still does. This is
+    the rule the template-application guard in ``apply_create_template`` relies on.
     """
     base: tuple[str, ...] = ("--debug",)
     assert would_assignment_narrow(base, StringDerivedTuple(("--verbose",))) is False

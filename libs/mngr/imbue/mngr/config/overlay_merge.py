@@ -13,7 +13,7 @@ The pipeline is **serialize -> pre-process -> overlay merge -> reparse**:
    ``__extend``; ``drop_none_values`` -> drop keys that are ``None`` on both sides
    (an unset scalar); every other key stays bare (assign).
 3. ``lift`` both and ``merge_narrowing_allowed`` override over base (the value, plus
-   the ``SettingsPatchField``-rooted narrowing paths for the with-narrowings variant).
+   every narrowing path for the with-narrowings variant).
 4. ``lower`` (not ``finalize``, so inner ``__extend`` markers survive), strip the
    synthetic suffixes, reparse container entries into their concrete classes, and
    reparse the whole dict into ``type(base)``.
@@ -240,42 +240,6 @@ def _reparse_container_entries(
     return result
 
 
-def _is_settings_patch_narrowing(
-    dotted_path: str,
-    settings_patch_field_names: frozenset[str],
-    container_dict_field_names: frozenset[str],
-    entry_classes_by_field: dict[str, dict[Any, type[BaseModel]]],
-    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn,
-) -> bool:
-    """Return True if ``dotted_path`` is rooted at a ``SettingsPatchField`` field.
-
-    The overlay narrowing paths come back with bare (un-suffixed) segment names
-    because ``lift`` strips the ``__extend`` markers when building the patch. Two
-    rooting shapes count as a settings-patch narrowing:
-
-    - ``<settings_field>...`` -- the merged model's own ``SettingsPatchField`` field
-      (the ``AgentTypeConfig`` case, where ``settings_overrides`` is top-level).
-    - ``<container>.<entry>.<settings_field>...`` -- a ``SettingsPatchField`` field of
-      a container entry's concrete class (the ``MngrConfig`` case, where the patch
-      lives inside an ``agent_types`` entry).
-
-    Every other narrowing path is a non-settings field, which the loader's
-    ``detect_settings_narrowing`` already handles (and which exempts settings fields),
-    so surfacing it here would double-count -- those are filtered out.
-    """
-    segments = dotted_path.split(".")
-    if segments[0] in settings_patch_field_names:
-        return True
-    if (
-        len(segments) >= 3
-        and segments[0] in container_dict_field_names
-        and segments[1] in entry_classes_by_field.get(segments[0], {})
-    ):
-        entry_class = entry_classes_by_field[segments[0]][segments[1]]
-        return segments[2] in settings_patch_field_names_for_class(entry_class)
-    return False
-
-
 def _collect_static_marker_paths(model: BaseModel) -> set[tuple[str, ...]]:
     """Collect the dotted paths (as segment tuples) of every ``Static*`` marker value
     living on the *live* ``model``, matching the sparse ``model_dump(exclude_unset=True)``.
@@ -402,8 +366,8 @@ def merge_models_via_overlay_with_narrowings(
     drop_none_values: bool = False,
     settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
 ) -> tuple[ModelT, list[str]]:
-    """Merge ``override`` onto ``base`` and also return the ``SettingsPatchField``
-    narrowing paths (see module docstring for the merge mechanics).
+    """Merge ``override`` onto ``base`` and also return *every* narrowing path the
+    overlay merge surfaced (see module docstring for the merge mechanics).
 
     ``settings_patch_field_names`` are the ``SettingsPatchField``-marked field names
     on the *model itself* (accumulate via ``__extend`` rather than assign-by-default).
@@ -421,13 +385,15 @@ def merge_models_via_overlay_with_narrowings(
 
     Returns ``(merged, narrowings)``: ``merged`` is a ``type(base)`` instance (so a
     subclass like ``ClaudeAgentConfig`` keeps its concrete class and subclass-only
-    fields), and ``narrowings`` is the list of dotted paths where a higher-precedence
-    bare assign drops a non-empty aggregate that a lower scope set *inside a*
-    ``SettingsPatchField`` field. The narrowings are filtered to settings-patch fields
-    only (see ``_is_settings_patch_narrowing``): non-settings narrowings are left for
-    the loader's ``detect_settings_narrowing`` (which exempts settings fields), so
-    surfacing them here would double-count and would mis-narrow scalar fields whose
-    ``Static*`` markers do not survive the ``model_dump``.
+    fields), and ``narrowings`` is the full list of dotted paths where a
+    higher-precedence bare assign drops a non-empty aggregate a lower scope set --
+    both ``SettingsPatchField`` drops (inside an accumulating settings patch) and
+    ordinary assign-by-default field drops. The latter exempt ``Static*`` atomic
+    aggregates (a string-shaped ``cli_args``, a provider's ``allowed_ssh_cidrs``, an
+    explicit ``StaticList`` / ``StaticDict``) via the override-side re-marking
+    (``_remark_static_leaves``), so a coherent scalar replacement is not flagged. This
+    is the single config-load narrowing detector; the loader routes the whole list
+    into its flag-gated narrowing error.
     """
     config_class = type(base)
     pipeline = _run_overlay_pipeline(
@@ -440,17 +406,6 @@ def merge_models_via_overlay_with_narrowings(
         drop_none_values=drop_none_values,
         settings_patch_field_names_for_class=settings_patch_field_names_for_class,
     )
-    settings_narrowings = [
-        dotted_path
-        for dotted_path in pipeline.all_narrowings
-        if _is_settings_patch_narrowing(
-            dotted_path,
-            settings_patch_field_names,
-            container_dict_field_names,
-            pipeline.merged_classes,
-            pipeline.entry_patch_fn,
-        )
-    ]
 
     merged_dict = _from_operator_dict(
         lower(pipeline.merged_patch),
@@ -462,14 +417,13 @@ def merge_models_via_overlay_with_narrowings(
     merged_dict = _reparse_container_entries(
         merged_dict, container_dict_field_names, pipeline.base_classes, pipeline.override_classes
     )
-    return config_class.model_validate(merged_dict), settings_narrowings
+    return config_class.model_validate(merged_dict), pipeline.all_narrowings
 
 
 class _OverlayPipelineResult(BaseModel):
     """The shared outputs of the serialize -> re-mark -> pre-process -> lift ->
-    ``merge_narrowing_allowed`` pipeline, consumed both by the value-producing public
-    merge (which lowers ``merged_patch`` and re-parses) and by
-    ``_overlay_all_narrowing_paths`` (which only reads ``all_narrowings``)."""
+    ``merge_narrowing_allowed`` pipeline, consumed by the public merge (which lowers
+    ``merged_patch``, re-parses, and returns ``all_narrowings``)."""
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -571,37 +525,3 @@ def _run_overlay_pipeline(
         merged_classes=merged_classes,
         entry_patch_fn=entry_patch_fn,
     )
-
-
-def _overlay_all_narrowing_paths(
-    base: BaseModel,
-    override: BaseModel,
-    *,
-    settings_patch_field_names: frozenset[str],
-    drop_field_names: frozenset[str] = frozenset(),
-    serialize_as_any: bool = False,
-    container_dict_field_names: frozenset[str] = frozenset(),
-    drop_none_values: bool = False,
-    settings_patch_field_names_for_class: SettingsPatchFieldNamesFn | None = None,
-) -> list[str]:
-    """Return the FULL (unfiltered) list of overlay narrowing paths for ``override`` over
-    ``base`` -- every dotted path where a higher-precedence bare assign drops a non-empty
-    aggregate, with no ``SettingsPatchField`` filter applied.
-
-    Runs the same serialize -> re-mark -> pre-process -> ``lift`` -> ``merge_narrowing_allowed``
-    pipeline as ``merge_models_via_overlay_with_narrowings`` (sharing
-    ``_run_overlay_pipeline``), but skips the settings-patch filter. Exposed for the
-    migration's equivalence test against ``detect_settings_narrowing``; the public merge
-    functions are unaffected.
-    """
-    pipeline = _run_overlay_pipeline(
-        base,
-        override,
-        settings_patch_field_names=settings_patch_field_names,
-        drop_field_names=drop_field_names,
-        serialize_as_any=serialize_as_any,
-        container_dict_field_names=container_dict_field_names,
-        drop_none_values=drop_none_values,
-        settings_patch_field_names_for_class=settings_patch_field_names_for_class,
-    )
-    return pipeline.all_narrowings

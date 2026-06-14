@@ -32,11 +32,13 @@ list / unset; ``settings_overrides`` with bare keys, ``__extend``, nested
 import inspect
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 from pydantic import Field
 
 from imbue.mngr.config.agent_config_registry import _METADATA_FIELDS
@@ -52,19 +54,17 @@ from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import ScalarStrTuple
 from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import _CONTAINER_DICT_FIELDS
-from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import get_settings_patch_field_names
 from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import parse_config
-from imbue.mngr.config.overlay_merge import _is_settings_patch_narrowing
-from imbue.mngr.config.overlay_merge import _overlay_all_narrowing_paths
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
+from imbue.overlay.markers import is_static_marker
 from imbue.overlay.merge import combine_patches
 from imbue.overlay.merge import merge
 
@@ -1069,18 +1069,132 @@ def test_parent_type_reference_does_not_call_production() -> None:
 
 
 # =============================================================================
-# Overlay (with Static* re-marking) vs detect_settings_narrowing equivalence
+# Overlay vs frozen model-walker (detect_settings_narrowing) equivalence guard
 # =============================================================================
 #
-# Migrating ALL narrowing onto the overlay path: the overlay pipeline strips ``Static*``
-# markers in ``model_dump`` and so would wrongly flag a replacement of an atomic aggregate
-# (a string-shaped ``cli_args``, a provider's ``allowed_ssh_cidrs``, an explicit
-# ``StaticList`` / ``StaticDict``) as narrowing. ``_overlay_all_narrowing_paths`` now
-# re-marks those values after the dump. This section proves that, with re-marking, the
-# overlay path reproduces the model-walking ``detect_settings_narrowing`` *exactly* for the
-# non-settings fields (the settings-patch subset is filtered out, matching what the walker
-# itself exempts). A mismatch on any corpus case is a real semantic divergence, not a test
-# bug, and must be reported rather than worked around.
+# All config-load narrowing now flows through the overlay merge
+# (``MngrConfig.merge_with_narrowings``); the old model-walking ``detect_settings_narrowing``
+# was removed from production. This section freezes that walker verbatim as
+# ``_reference_detect_settings_narrowing`` (+ its ``_reference_walk_for_narrowing`` /
+# ``_reference_check_narrowing`` helpers) and the production filter helper
+# ``_is_settings_patch_narrowing``, matching the ``_reference_*`` equivalence-guard pattern
+# used above for the merges. It then proves that the NON-settings subset of the overlay
+# narrowing paths reproduces the frozen walker *exactly* over the corpus. The overlay strips
+# ``Static*`` markers in ``model_dump`` and re-marks them on the override side after the dump
+# (``_remark_static_leaves``), so a replacement of an atomic aggregate (a string-shaped
+# ``cli_args``, a provider's ``allowed_ssh_cidrs``, an explicit ``StaticList`` /
+# ``StaticDict``) stays narrowing-exempt, matching the walker. A mismatch on any corpus case
+# is a real semantic divergence, not a test bug, and must be reported rather than worked
+# around.
+
+
+def _reference_detect_settings_narrowing(base: Any, override: Any) -> list[str]:
+    """Frozen verbatim copy of the OLD production ``detect_settings_narrowing`` body,
+    kept as the independent "old" side of the overlay narrowing equivalence guard.
+
+    Returns dotted paths where ``override`` would silently drop entries from a non-empty
+    aggregate value in ``base`` (``list``, ``tuple``, ``dict``, ``set``, ``frozenset``).
+    See the production overlay merge for the surviving detector this is checked against.
+    """
+    violations: list[str] = []
+    _reference_walk_for_narrowing(base, override, path=(), violations=violations)
+    return violations
+
+
+def _reference_walk_for_narrowing(
+    base: Any,
+    override: Any,
+    path: tuple[str, ...],
+    violations: list[str],
+) -> None:
+    """Frozen verbatim copy of the OLD production ``_walk_for_narrowing`` body."""
+    if isinstance(override, BaseModel):
+        explicitly_set = override.model_fields_set
+        for field_name in override.__class__.model_fields:
+            if field_name not in explicitly_set:
+                continue
+            override_value = getattr(override, field_name)
+            if override_value is None:
+                continue
+            field_info = override.__class__.model_fields.get(field_name)
+            if field_info is not None and is_settings_patch_field(field_info.metadata):
+                continue
+            base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
+            sub_path = path + (field_name,)
+            if not path and field_name in _CONTAINER_DICT_FIELDS:
+                _reference_walk_for_narrowing(base_value, override_value, sub_path, violations)
+                continue
+            _reference_check_narrowing(base_value, override_value, sub_path, violations)
+        return
+    if isinstance(override, Mapping):
+        for key, sub_override in override.items():
+            sub_base = base.get(key) if isinstance(base, Mapping) else None
+            if sub_base is None:
+                continue
+            _reference_walk_for_narrowing(sub_base, sub_override, path + (str(key),), violations)
+
+
+def _reference_check_narrowing(
+    base_value: Any,
+    override_value: Any,
+    path: tuple[str, ...],
+    violations: list[str],
+) -> None:
+    """Frozen verbatim copy of the OLD production ``_check_narrowing`` body."""
+    if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
+        _reference_walk_for_narrowing(base_value, override_value, path, violations)
+        return
+    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
+        return
+    if is_static_marker(override_value):
+        return
+    if isinstance(base_value, (list, tuple)):
+        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
+            return
+        violations.append(".".join(path))
+        return
+    if isinstance(base_value, (set, frozenset)):
+        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
+            return
+        violations.append(".".join(path))
+        return
+    if not isinstance(override_value, dict):
+        violations.append(".".join(path))
+        return
+    if any(key not in override_value for key in base_value):
+        violations.append(".".join(path))
+        return
+    for key, sub_base in base_value.items():
+        _reference_check_narrowing(sub_base, override_value[key], path + (str(key),), violations)
+
+
+def _is_settings_patch_narrowing(
+    dotted_path: str,
+    settings_patch_field_names: frozenset[str],
+    container_dict_field_names: frozenset[str],
+    entry_classes_by_field: dict[str, dict[Any, type[BaseModel]]],
+    settings_patch_field_names_for_class: Callable[[type[BaseModel]], frozenset[str]],
+) -> bool:
+    """Return True if ``dotted_path`` is rooted at a ``SettingsPatchField`` field.
+
+    Moved here from production (it has no remaining production caller now that the overlay
+    merge returns every narrowing unfiltered). Used by this guard to split the overlay's
+    full narrowing list into the non-settings subset the frozen walker covers. Two rooting
+    shapes count as a settings-patch narrowing: the merged model's own ``SettingsPatchField``
+    field (``<settings_field>...``), and a ``SettingsPatchField`` field of a container
+    entry's concrete class (``<container>.<entry>.<settings_field>...``).
+    """
+    segments = dotted_path.split(".")
+    if segments[0] in settings_patch_field_names:
+        return True
+    if (
+        len(segments) >= 3
+        and segments[0] in container_dict_field_names
+        and segments[1] in entry_classes_by_field.get(segments[0], {})
+    ):
+        entry_class = entry_classes_by_field[segments[0]][segments[1]]
+        return segments[2] in settings_patch_field_names_for_class(entry_class)
+    return False
 
 
 class _ProviderWithScalarTuple(ProviderInstanceConfig):
@@ -1223,9 +1337,10 @@ _NARROWING_CASES: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = [
 
 
 def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> list[str]:
-    """Run ``_overlay_all_narrowing_paths`` with the SAME kwargs ``MngrConfig.merge_with_narrowings``
-    uses, then drop the ``SettingsPatchField``-rooted paths (reusing the production
-    ``_is_settings_patch_narrowing``) -- the subset ``detect_settings_narrowing`` exempts.
+    """Take the FULL overlay narrowing list the surviving production path returns
+    (``MngrConfig.merge_with_narrowings(...)[1]``), then drop the
+    ``SettingsPatchField``-rooted paths (via ``_is_settings_patch_narrowing``) -- the
+    subset the frozen walker exempts.
     """
     settings_patch_field_names = get_settings_patch_field_names(type(override))
     base_fields = dict(base)
@@ -1237,15 +1352,7 @@ def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> 
         }
         for field_name in _CONTAINER_DICT_FIELDS
     }
-    all_paths = _overlay_all_narrowing_paths(
-        base,
-        override,
-        settings_patch_field_names=settings_patch_field_names,
-        serialize_as_any=True,
-        container_dict_field_names=_CONTAINER_DICT_FIELDS,
-        drop_none_values=True,
-        settings_patch_field_names_for_class=get_settings_patch_field_names,
-    )
+    all_paths = base.merge_with_narrowings(override)[1]
     return [
         dotted_path
         for dotted_path in all_paths
@@ -1266,12 +1373,13 @@ def _overlay_non_settings_narrowings(base: MngrConfig, override: MngrConfig) -> 
 def test_overlay_non_settings_narrowing_matches_walker(
     base_layers: list[dict[str, Any]], override_raw: dict[str, Any]
 ) -> None:
-    """With ``Static*`` re-marking, the NON-settings subset of the overlay narrowing paths
-    reproduces ``detect_settings_narrowing`` exactly over the corpus. Compared as sorted
+    """The NON-settings subset of the live overlay narrowing paths
+    (``MngrConfig.merge_with_narrowings``) reproduces the frozen model-walker
+    ``_reference_detect_settings_narrowing`` exactly over the corpus. Compared as sorted
     lists so order is irrelevant. A failure here is a real semantic divergence between the
-    overlay narrowing detector and the model-walker -- do not weaken this assertion."""
+    overlay narrowing detector and the old model-walker -- do not weaken this assertion."""
     base = _base_from_layers(*base_layers)
     override = _parse_layer(override_raw)
     overlay_paths = sorted(_overlay_non_settings_narrowings(base, override))
-    walker_paths = sorted(detect_settings_narrowing(base, override))
+    walker_paths = sorted(_reference_detect_settings_narrowing(base, override))
     assert overlay_paths == walker_paths

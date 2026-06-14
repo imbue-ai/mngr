@@ -28,7 +28,7 @@ from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
-from imbue.mngr.config.loader import _collect_layer_narrowing
+from imbue.mngr.config.loader import _collect_narrowing
 from imbue.mngr.config.loader import _display_path
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
 from imbue.mngr.config.loader import _parse_agent_types
@@ -2237,10 +2237,10 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # Tests for cross-scope settings_overrides narrowing (the SettingsPatchField case).
 #
 # A ``SettingsPatchField`` (claude's ``settings_overrides``) accumulates across
-# config scopes, so ``detect_settings_narrowing`` exempts it. But a higher scope
-# with a *bare* key nested inside the patch can still drop a non-empty aggregate a
+# config scopes, so the field as a whole is never a superset-narrowing. But a higher
+# scope with a *bare* key nested inside the patch can still drop a non-empty aggregate a
 # lower scope set -- that is real narrowing. These tests verify the overlay merge
-# now surfaces it through the loader's existing flag-gated aggregation.
+# surfaces it through the loader's existing flag-gated aggregation.
 # =============================================================================
 
 
@@ -2281,11 +2281,11 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
     """A local layer whose bare ``settings_overrides`` key drops a non-empty
     aggregate set by the project layer now raises the standard narrowing error.
 
-    This is the previously-silent cross-scope ``settings_overrides`` drop: the
-    ``SettingsPatchField`` exemption in ``detect_settings_narrowing`` makes it
-    invisible to the field-narrowing walker, but the overlay merge surfaces it. The
-    bare ``permissions`` dict in the local layer assign-replaces the project layer's
-    ``permissions`` dict, so the narrowing is recorded at the ``permissions`` path.
+    This is the previously-silent cross-scope ``settings_overrides`` drop: because the
+    patch field accumulates, the drop only shows up *inside* it -- where the overlay
+    merge surfaces it. The bare ``permissions`` dict in the local layer assign-replaces
+    the project layer's ``permissions`` dict, so the narrowing is recorded at the
+    ``permissions`` path.
     """
     pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
     _write_settings_overrides_narrowing_config(project_dir)
@@ -2394,7 +2394,7 @@ def test_display_path_contracts_home_dir(tmp_path: Path) -> None:
     assert _display_path(outside) == str(outside)
 
 
-def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> None:
+def test_collect_narrowing_attributes_highest_precedence_lower_layer() -> None:
     """The dropped-from side is the highest-precedence already-merged layer whose
     value the new layer narrows. Because the merge is assign-by-default, that
     layer holds the merged base value being dropped.
@@ -2409,8 +2409,9 @@ def test_collect_layer_narrowing_attributes_highest_precedence_lower_layer() -> 
     base = user_layer.merge_with(project_layer)
     local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
 
-    violations = _collect_layer_narrowing(
-        base,
+    narrowing_paths = base.merge_with_narrowings(local_layer)[1]
+    violations = _collect_narrowing(
+        narrowing_paths,
         local_layer,
         local_source,
         [(user_source, user_layer), (project_source, project_layer)],
