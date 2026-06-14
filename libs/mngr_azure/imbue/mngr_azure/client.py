@@ -153,11 +153,13 @@ class AzureVpsClient(VpsClientInterface):
     os_disk_size_gb: int = Field(default=30, description="OS managed-disk size in GB")
     os_disk_type: str = Field(default="StandardSSD_LRS", description="OS managed-disk storage account type")
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the NSG created by "
-            "ensure_network. Empty by default (fail-closed): ensure_network raises rather than create "
-            "a wide-open rule."
+            "ensure_network. Default ('0.0.0.0/0',) allows any IP (fail-open, like AWS/GCP); set to "
+            "e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no SSH allow rule (the NSG "
+            "default-deny then leaves instances unreachable from outside the vnet). A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched VMs")
@@ -255,17 +257,17 @@ class AzureVpsClient(VpsClientInterface):
         tcp/22 + tcp/``container_ssh_port`` to ``allowed_ssh_cidrs``), and the
         vnet whose subnet references that NSG.
 
-        Fails closed if ``allowed_ssh_cidrs`` is empty: rather than create a
-        wide-open NSG, raise so the caller makes an explicit decision. This is
-        the privileged write path used by ``mngr azure prepare``; the hot path in
+        Fails open (mirrors ``AwsVpsClient.ensure_security_group`` /
+        ``GcpVpsClient.ensure_firewall``): the default ``allowed_ssh_cidrs`` of
+        ('0.0.0.0/0',) creates a world-open allow rule and is logged as a
+        warning. An empty ``allowed_ssh_cidrs`` creates the NSG with no SSH allow
+        rule at all -- the NSG's implicit default-deny inbound then leaves
+        instances unreachable from outside the vnet, the analog of AWS's
+        zero-ingress security group; this is also warned. This is the privileged
+        write path used by ``mngr azure prepare``; the hot path in
         ``create_instance`` uses ``resolve_subnet_id`` instead (lookup-only).
         """
-        if not self.allowed_ssh_cidrs:
-            raise MngrError(
-                "Cannot auto-create an Azure NSG: allowed_ssh_cidrs is empty. "
-                "Set allowed_ssh_cidrs to a tuple of CIDR blocks (e.g. ('203.0.113.4/32',) for your "
-                "own IP), or pre-create the network targeting the configured subnet/NSG."
-            )
+        self._warn_about_cidrs_if_needed()
         self._register_resource_providers()
         with self._translate_azure_errors():
             self._resource().resource_groups.create_or_update(
@@ -284,11 +286,45 @@ class AzureVpsClient(VpsClientInterface):
         )
         return self.resource_group
 
+    def _warn_about_cidrs_if_needed(self) -> None:
+        """Emit a one-line warning when the effective CIDR set is empty or 0.0.0.0/0.
+
+        The two cases need different wording: empty means "no usable ingress"
+        (the NSG is created with no SSH allow rule, so its default-deny leaves
+        the instance unreachable from outside the vnet), whereas 0.0.0.0/0 means
+        "open to the internet" (default but worth flagging). Anything else is
+        silent. Mirrors ``AwsVpsClient._warn_about_cidrs_if_needed`` /
+        ``GcpVpsClient._warn_about_cidrs_if_needed``.
+        """
+        if not self.allowed_ssh_cidrs:
+            logger.warning(
+                "Azure allowed_ssh_cidrs is empty; NSG {!r} will be created with no SSH allow rule and "
+                "instances will be unreachable from outside the vnet (default-deny) unless another rule "
+                "grants ingress. Set allowed_ssh_cidrs on the provider config (e.g. ('203.0.113.4/32',)) to fix.",
+                self.nsg_name,
+            )
+            return
+        if "0.0.0.0/0" in self.allowed_ssh_cidrs:
+            logger.warning(
+                "Azure allowed_ssh_cidrs includes 0.0.0.0/0; NSG {!r} will permit SSH from the public "
+                "internet. Acceptable for ephemeral dev hosts (key-only auth -- passwords are disabled); "
+                "tighten to a single IP / CIDR (e.g. ('203.0.113.4/32',)) for production.",
+                self.nsg_name,
+            )
+
     def _ensure_nsg(self) -> str:
-        """Create / update the NSG opening SSH ingress. Returns its resource id."""
+        """Create / update the NSG opening SSH ingress. Returns its resource id.
+
+        With an empty ``allowed_ssh_cidrs`` no allow rule is added: the NSG is
+        created with only Azure's implicit rules (default-deny inbound), so the
+        instance is unreachable from outside the vnet -- the analog of AWS's
+        zero-ingress security group. (An Azure ``SecurityRule`` with an empty
+        ``source_address_prefixes`` is rejected by the API, so "no ingress" must
+        be expressed as the absence of the rule, not an empty-source rule.)
+        """
         security_rules: list[Any] = []
         priority = 1000
-        for port in ("22", str(self.container_ssh_port)):
+        for port in ("22", str(self.container_ssh_port)) if self.allowed_ssh_cidrs else ():
             security_rules.append(
                 network_models.SecurityRule(
                     name=f"mngr-allow-tcp-{port}",

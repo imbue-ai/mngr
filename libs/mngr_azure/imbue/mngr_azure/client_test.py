@@ -285,10 +285,30 @@ def test_create_instance_requires_uploaded_ssh_key() -> None:
 # =========================================================================
 
 
-def test_ensure_network_fail_closed_when_no_cidrs() -> None:
+def test_ensure_network_skips_ssh_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
+    """Empty allowed_ssh_cidrs creates the NSG with no SSH allow rule and warns (fail-open).
+
+    The NSG's implicit default-deny then leaves instances unreachable from
+    outside the vnet -- the analog of AWS's zero-ingress security group. (An
+    Azure SecurityRule with an empty source_address_prefixes is API-rejected, so
+    "no ingress" is expressed as the absence of the rule.) ensure_network still
+    succeeds; the empty case is an "I'll wire my own ingress later" signal, not a
+    fail-closed gate. Mirrors the AWS / GCP providers.
+    """
     client = _make_client(allowed_ssh_cidrs=())
-    with pytest.raises(MngrError, match="allowed_ssh_cidrs is empty"):
-        client.ensure_network()
+    assert client.ensure_network() == "mngr"
+    nsg = client.stubbed_network_client.network_security_groups.created[0][1]
+    assert nsg.security_rules == []
+    assert any("allowed_ssh_cidrs is empty" in msg for msg in log_warnings)
+
+
+def test_ensure_network_warns_when_open_to_internet(log_warnings: list[str]) -> None:
+    """0.0.0.0/0 is the default but should still produce a visible warning at prepare time."""
+    client = _make_client(allowed_ssh_cidrs=("0.0.0.0/0",))
+    assert client.ensure_network() == "mngr"
+    nsg = client.stubbed_network_client.network_security_groups.created[0][1]
+    assert nsg.security_rules[0].source_address_prefixes == ["0.0.0.0/0"]
+    assert any("0.0.0.0/0" in msg for msg in log_warnings)
 
 
 def test_ensure_network_creates_rg_nsg_vnet_and_registers_providers() -> None:

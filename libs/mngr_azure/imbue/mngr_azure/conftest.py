@@ -84,7 +84,14 @@ _TEST_LEAK_TTL: Final[timedelta] = timedelta(seconds=AZURE_TEST_INSTANCE_AUTO_SH
 def _force_delete_vms(compute: Any, vm_names: list[str]) -> None:
     for vm_name in vm_names:
         try:
-            compute.virtual_machines.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, vm_name)
+            # Await the delete (``.result()``): ``begin_delete`` returns an
+            # LROPoller immediately, so a server-side delete failure only
+            # surfaces on ``.result()``. Without it, the ``except`` arm can only
+            # catch request-submission errors and a delete the server later
+            # rejects is silently dropped -- the session would then report the
+            # leak as cleaned when it was not. Mirrors the production
+            # ``destroy_instance`` path (which awaits) and the GCP conftest fix.
+            compute.virtual_machines.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, vm_name).result()
         except AzureError as e:
             logger.warning("Failed to delete leaked Azure VM {}: {}", vm_name, e)
 
@@ -139,7 +146,11 @@ def _reclaim_orphan_test_network(network: Any) -> None:
         if nic.virtual_machine is not None or not _is_orphan_test_resource(nic, cutoff):
             continue
         try:
-            network.network_interfaces.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, nic.name)
+            # Await the delete: ``begin_delete`` is async, and awaiting it both
+            # surfaces server-side failures into the ``except`` arm (so a failed
+            # reclaim is logged, not silently dropped) and ensures the NIC is
+            # gone before we try to delete the public IP it holds below.
+            network.network_interfaces.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, nic.name).result()
             logger.info("Reclaimed orphaned test NIC {}", nic.name)
         except AzureError as e:
             logger.warning("Failed to reclaim orphaned test NIC {}: {}", nic.name, e)
@@ -152,7 +163,9 @@ def _reclaim_orphan_test_network(network: Any) -> None:
         if public_ip.ip_configuration is not None or not _is_orphan_test_resource(public_ip, cutoff):
             continue
         try:
-            network.public_ip_addresses.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, public_ip.name)
+            # Await the delete so a server-side failure surfaces into the
+            # ``except`` arm and is logged rather than silently dropped.
+            network.public_ip_addresses.begin_delete(AZURE_DEFAULT_RESOURCE_GROUP, public_ip.name).result()
             logger.info("Reclaimed orphaned test public IP {}", public_ip.name)
         except AzureError as e:
             logger.warning("Failed to reclaim orphaned test public IP {}: {}", public_ip.name, e)

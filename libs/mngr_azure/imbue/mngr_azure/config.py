@@ -167,12 +167,14 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         description="OS managed-disk storage account type (e.g. 'StandardSSD_LRS', 'Premium_LRS', 'Standard_LRS').",
     )
     allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=(),
+        default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/<container_ssh_port> on the NSG created by "
-            "`mngr azure prepare`. Empty by default (fail-closed): without an explicit list, prepare "
-            "raises rather than create a permissive rule. Use e.g. ['203.0.113.4/32'] to allow only "
-            "your own IP, or ['0.0.0.0/0'] to expose to the public internet (NOT recommended for production)."
+            "`mngr azure prepare`. Default ('0.0.0.0/0',) allows any IP (fail-open, matching the AWS / "
+            "GCP providers; a warning is logged -- tighten for production). Use e.g. ['203.0.113.4/32'] "
+            "to restrict to your own IP, or [] for no SSH ingress (the NSG is created with no allow "
+            "rule, so its default deny leaves instances unreachable from outside the vnet). SSH auth is "
+            "key-only (passwords disabled), so 0.0.0.0/0 exposes the port but not a usable login."
         ),
     )
     associate_public_ip: bool = Field(

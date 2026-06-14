@@ -192,8 +192,7 @@ def azure_cli_group() -> None:
     multiple=True,
     help=(
         "Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. "
-        "Defaults to the resolved provider config's allowed_ssh_cidrs. Fail-closed: with neither "
-        "supplied nor configured, prepare refuses to create a wide-open NSG."
+        "Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production."
     ),
 )
 @add_common_options
@@ -226,8 +225,11 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     try:
         resource_group_name = client.ensure_network()
     except MngrError as e:
-        # Fail-closed: ensure_network raises when no --allowed-ssh-cidr was
-        # supplied. Surface it as a clean CLI error rather than a traceback.
+        # ensure_network's network writes go through _translate_azure_errors,
+        # which raises VpsApiError (a MngrError) on Azure API failures (quota,
+        # auth, conflicting NSG, etc.). Surface those as a clean CLI error rather
+        # than a traceback. (allowed_ssh_cidrs is now fail-open, so an empty list
+        # no longer raises here -- it creates a no-ingress NSG with a warning.)
         raise click.ClickException(str(e)) from e
     logger.info("Prepared Azure resource group {} in region {}", resource_group_name, client.region)
     write_human_line(resource_group_name)

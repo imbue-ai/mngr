@@ -39,8 +39,12 @@ vnet_name = "mngr-vnet"
 subnet_name = "mngr-subnet"
 nsg_name = "mngr-nsg"
 
-# Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Empty by
-# default (fail-closed): `mngr azure prepare` refuses to create a wide-open NSG.
+# Inbound CIDRs for tcp/22 and the container SSH port on the NSG. Defaults to
+# the wide-open '0.0.0.0/0' (fail-open, matching the AWS / GCP providers; a
+# warning is logged -- tighten for production). SSH auth is key-only (passwords
+# disabled), so 0.0.0.0/0 exposes the port but not a usable login. Use a tight
+# range like ['203.0.113.4/32'], or [] for no SSH allow rule (the NSG default
+# deny then leaves instances unreachable from outside the vnet).
 allowed_ssh_cidrs = ["203.0.113.4/32"]
 
 # Optional OS disk sizing
@@ -61,6 +65,14 @@ permission.
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
 ```
+
+Like AWS and GCP, `prepare` is fail-open: with no `--allowed-ssh-cidr` it falls
+back to the provider config's `allowed_ssh_cidrs` (default `0.0.0.0/0`, open to
+the internet) and logs a warning prompting you to tighten it. SSH auth is
+key-only (passwords disabled), so an open NSG exposes the port but not a usable
+login. Setting `allowed_ssh_cidrs = []` opts out entirely: the NSG is created
+with no SSH allow rule, so its default-deny leaves instances unreachable from
+outside the vnet.
 
 Idempotent — re-running is a no-op when everything already exists.
 
