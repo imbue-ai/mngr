@@ -837,6 +837,16 @@ def _classify_waiting_reason(is_active: bool, is_blocked_on_permission: bool) ->
     during a live turn, so a *stranded* ``permissions_waiting`` marker (one that
     outlived its turn) reports END_OF_TURN rather than PERMISSIONS. Correctness
     therefore does not depend on a cleanup hook having deleted the marker.
+
+    Known limitation: this gate cannot recover the one case where the ``active``
+    marker is *also* stranded. Cancelling a dialog (Esc / "No") interrupts the turn
+    and codex 0.139.0 fires no terminal hook for it -- no PostToolUse, no Stop, no
+    Notification (verified live) -- so both markers persist until the next turn's
+    Stop. With ``is_active`` True and ``is_blocked_on_permission`` True this returns
+    PERMISSIONS even though the dialog is closed. The lifecycle state stays WAITING
+    (correct -- the agent is waiting for the user); only this reason sub-field is
+    briefly wrong, and it self-heals at the next Stop. Accepted rather than worked
+    around; an app-server-backed variant would remove the ambiguity.
     """
     if not is_active:
         return WaitingReason.END_OF_TURN
