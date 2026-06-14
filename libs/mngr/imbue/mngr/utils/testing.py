@@ -1625,6 +1625,18 @@ def write_discovery_snapshot_to_path(
     events_path.write_text(json.dumps(event) + "\n")
 
 
+class FakeTtyStream(StringIO):
+    """A StringIO that reports itself as a TTY, for exercising color logic.
+
+    Used by tests that need ``should_use_color`` (and the code paths gated on it,
+    e.g. ``MngrError.show``) to take the colored branch even though the test's
+    real streams are not terminals.
+    """
+
+    def isatty(self) -> bool:
+        return True
+
+
 def walk_concrete_subclasses(cls: type) -> list[type]:
     """Return every concrete (non-abstract) subclass of ``cls`` reachable via ``__subclasses__``.
 

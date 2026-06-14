@@ -40,6 +40,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.utils.logging import ERROR_COLOR
 from imbue.mngr.utils.logging import RESET_COLOR
+from imbue.mngr.utils.testing import FakeTtyStream
 from imbue.mngr.utils.testing import assert_init_first_param_is_provider_name
 from imbue.mngr.utils.testing import walk_concrete_subclasses
 
@@ -396,13 +397,6 @@ def test_provider_error_subclass_takes_provider_name_first(subclass: type) -> No
     assert_init_first_param_is_provider_name(subclass)
 
 
-class _FakeTtyStream(io.StringIO):
-    """A StringIO that reports itself as a TTY so the colored show() path runs."""
-
-    def isatty(self) -> bool:
-        return True
-
-
 def test_show_colors_error_prefix_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     """On a color-capable terminal the whole ``Error:`` line is wrapped in ERROR_COLOR.
 
@@ -410,7 +404,7 @@ def test_show_colors_error_prefix_on_tty(monkeypatch: pytest.MonkeyPatch) -> Non
     first") used to print in the same color as normal output, so it blended in.
     """
     monkeypatch.delenv("NO_COLOR", raising=False)
-    stream = _FakeTtyStream()
+    stream = FakeTtyStream()
     MngrError("run mngr gcp prepare first").show(file=stream)
     assert stream.getvalue() == f"{ERROR_COLOR}Error: run mngr gcp prepare first{RESET_COLOR}\n"
 
@@ -427,7 +421,7 @@ def test_show_is_plain_when_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_show_is_plain_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> None:
     """The NO_COLOR convention disables color even on a TTY."""
     monkeypatch.setenv("NO_COLOR", "")
-    stream = _FakeTtyStream()
+    stream = FakeTtyStream()
     MngrError("boom").show(file=stream)
     assert stream.getvalue() == "Error: boom\n"
 
@@ -435,7 +429,7 @@ def test_show_is_plain_when_no_color_set(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_show_includes_user_help_text_inside_colored_span(monkeypatch: pytest.MonkeyPatch) -> None:
     """``user_help_text`` is appended via format_message and stays inside the colored span."""
     monkeypatch.delenv("NO_COLOR", raising=False)
-    stream = _FakeTtyStream()
+    stream = FakeTtyStream()
     UserInputError("bad flag").show(file=stream)
     rendered = stream.getvalue()
     assert rendered.startswith(ERROR_COLOR)
