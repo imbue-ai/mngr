@@ -114,9 +114,11 @@ def _apply_custom_overrides_to_parent_config(
     **accumulates** across the parent/child inheritance boundary rather than
     assigning. Parent and child values are combined per-key via ``merge`` (the
     unified combine; its narrowings are discarded here -- cross-scope narrowing of
-    ``settings_overrides`` at config-load is intentionally not surfaced in this PR),
-    preserving / combining ``__extend`` markers with higher/child-bare-wins, so the
-    parent's non-overlapping keys survive into the child.
+    ``settings_overrides`` at config-load is intentionally not surfaced, deferred
+    together with the broader narrowing-philosophy decision; see
+    ``specs/config-merge-operators.md``). The combine preserves / combines
+    ``__extend`` markers with higher/child-bare-wins, so the parent's non-overlapping
+    keys survive into the child.
     """
     explicitly_set_fields = custom_config.model_fields_set
     if not explicitly_set_fields - _METADATA_FIELDS:
