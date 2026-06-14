@@ -26,6 +26,8 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
 
 
@@ -518,3 +520,32 @@ def test_event_ids_are_stable_and_per_conversation(state_dir: Path) -> None:
     events = _read_common_events(state_dir)
     ids = sorted(e["event_id"] for e in events)
     assert ids == ["conv-A-0-user", "conv-B-0-user"]
+
+
+def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:
+    """Every record antigravity's converter emits must validate against the shared envelope schema.
+
+    Guards against the antigravity emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    _write_raw_transcript(
+        state_dir,
+        [
+            _user_input("conv-A", 0, "create test.txt"),
+            _planner_response(
+                "conv-A",
+                2,
+                text="hi there",
+                tool_calls=[{"name": "write_to_file", "args": {"path": "test.txt"}}],
+            ),
+            _code_action("conv-A", 3, content="Created test.txt"),
+        ],
+    )
+
+    _run_converter(state_dir)
+
+    records = _read_common_events(state_dir)
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record

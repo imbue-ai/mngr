@@ -6,6 +6,8 @@ import boto3
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.config.data_types import ScalarStrTuple
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
@@ -122,17 +124,13 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="VPC ID. Only used to scope auto-created security group lookups.",
     )
-    allowed_ssh_cidrs: tuple[str, ...] = Field(
-        default=("0.0.0.0/0",),
+    allowed_ssh_cidrs: ScalarStrTuple = Field(
+        default=ScalarTuple(("0.0.0.0/0",)),
         description=(
-            "CIDR blocks allowed INBOUND (security-group ingress) on tcp/22 and "
-            "tcp/<container_ssh_port> of the auto-created security group; egress is left "
-            "untouched. Default ('0.0.0.0/0',) means reachable from any IP -- key-only SSH "
-            "is the actual protection, and a warning is logged at provision time. This "
-            "matches the de-facto Vultr / OVH norm in this monorepo (neither ships a "
-            "managed firewall). Tighten for production, e.g. ('203.0.113.4/32',) for a "
-            "single IP. Empty tuple = no ingress rule at all (the SG is unreachable from "
-            "outside its VPC; also logged as a warning)."
+            "Inbound (ingress) CIDRs for tcp/22 and the container SSH port on the "
+            "auto-created security group. Default ('0.0.0.0/0',) allows any IP; use e.g. "
+            "('203.0.113.4/32',) to restrict, or () for no ingress. A warning is logged "
+            "when the effective range is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(
