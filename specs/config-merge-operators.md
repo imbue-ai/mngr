@@ -115,10 +115,12 @@ Two related items belong with this same decision (they share the flag / aggregat
 policy and should land coherently, not piecemeal):
 
 - **Surface the cross-scope `settings_overrides` narrowings that are currently discarded.**
-  `AgentTypeConfig.merge_with` (cross config scope) and
-  `_apply_custom_overrides_to_parent_config` (`parent_type` inheritance) combine the
-  `SettingsPatchField` `settings_overrides` via `merge(...)` / `combine_patches(...)[0]` and
-  **throw away the returned narrowing paths**. The `SettingsPatchField` exemption assumes an
+  `AgentTypeConfig.merge_with` (cross config scope) combines the `SettingsPatchField`
+  `settings_overrides` via `combine_patches(...)` *without* asking for narrowings (it does not
+  pass the optional `assign_drops` out-param), while `_apply_custom_overrides_to_parent_config`
+  (`parent_type` inheritance) combines via `merge(...)[0]` and **throws away the narrowing-path
+  list `merge` returns**. Either way the cross-scope narrowing signal is never surfaced. The
+  `SettingsPatchField` exemption assumes an
   accumulating field is "always a superset," but a higher/child scope with a **bare** key can
   still drop a lower/parent scope's entries -- that's real narrowing, and for ordinary
   (non-patch) fields it *is* raised. It is dropped today because (1) raising inline in those
