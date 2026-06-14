@@ -516,10 +516,12 @@ def build_codex_hooks_config() -> dict[str, Any]:
 
     * ``UserPromptSubmit`` -> ``set_active_marker.sh``: set the root-turn flag (so
       ``BaseAgent.get_lifecycle_state`` reports RUNNING) and, at a fresh root
-      turn, record the root ``session_id`` and ``transcript_path``. After the
-      marker is set it signals the ``mngr-submit-<session>`` tmux wait-for channel
-      (``SUBMIT_WAIT_CHANNEL_PREFIX``), so ``send_message`` returns only once the
-      agent reads RUNNING.
+      turn, record the root ``session_id`` and ``transcript_path`` and clear any
+      stranded ``permissions_waiting`` marker (a second safety net alongside the
+      root ``Stop``, so a new turn never inherits a prior dialog's state). After
+      the marker is set it signals the ``mngr-submit-<session>`` tmux wait-for
+      channel (``SUBMIT_WAIT_CHANNEL_PREFIX``), so ``send_message`` returns only
+      once the agent reads RUNNING.
     * ``Stop`` -> ``clear_active_marker.sh``: clear the root-turn flag when the
       *root* agent's loop ends, then recompute (in-flight subagents keep the
       marker). The clear is guarded on the recorded root ``session_id`` so a

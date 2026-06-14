@@ -93,6 +93,7 @@ from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import symlink_on_host
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -850,15 +851,25 @@ def _waiting_reason(agent: AgentInterface, host: OnlineHostInterface) -> Waiting
     get_lifecycle_state() (which runs tmux/ps SSH commands). The markers are
     maintained by the codex lifecycle hooks (see build_codex_hooks_config):
 
-    - permissions_waiting exists -> PERMISSIONS (blocked on an approval dialog)
     - active file absent -> END_OF_TURN (idle, turn complete)
+    - active present and permissions_waiting present -> PERMISSIONS (blocked on
+      an approval dialog)
     - otherwise -> None (agent is actively running)
+
+    The ``active`` marker is read *first* and a ``permissions_waiting`` verdict is
+    gated on it: a tool-approval dialog can only be open during a live turn, so
+    ``permissions_waiting`` is only meaningful while ``active`` is present. Reading
+    in this order makes a *stranded* ``permissions_waiting`` marker (one that
+    outlived its turn) report END_OF_TURN rather than PERMISSIONS, so correctness
+    no longer depends on the Stop-hook safety net having deleted the file. This
+    mirrors get_lifecycle_state, which only consults the permission marker when the
+    base state is RUNNING (i.e. ``active`` present and the process alive).
     """
-    agent_dir = host.host_dir / "agents" / str(agent.id)
-    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
-        return WaitingReason.PERMISSIONS
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     if not _host_file_exists(host, agent_dir / ACTIVE_MARKER_FILENAME):
         return WaitingReason.END_OF_TURN
+    if _host_file_exists(host, agent_dir / PERMISSIONS_WAITING_FILENAME):
+        return WaitingReason.PERMISSIONS
     return None
 
 

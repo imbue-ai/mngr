@@ -971,7 +971,29 @@ def test_agent_field_generators_returns_correct_structure() -> None:
 def test_agent_field_generators_waiting_reason_returns_permissions(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
-    """waiting_reason returns PERMISSIONS when permissions_waiting file exists."""
+    """waiting_reason returns PERMISSIONS when blocked mid-turn (active present and
+    permissions_waiting present)."""
+    result = agent_field_generators()
+    assert result is not None
+    _, generators = result
+    waiting_reason = generators["waiting_reason"]
+
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "active").touch()
+    (agent_dir / "permissions_waiting").touch()
+
+    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+
+
+def test_agent_field_generators_waiting_reason_ignores_stranded_permissions_marker(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A stranded permissions_waiting marker (active absent -> turn over) reports
+    END_OF_TURN, not PERMISSIONS: the PERMISSIONS verdict is gated on the active
+    marker so a marker that outlived its turn cannot mislabel an idle agent."""
     result = agent_field_generators()
     assert result is not None
     _, generators = result
@@ -983,7 +1005,7 @@ def test_agent_field_generators_waiting_reason_returns_permissions(
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / "permissions_waiting").touch()
 
-    assert waiting_reason(agent, host) == WaitingReason.PERMISSIONS
+    assert waiting_reason(agent, host) == WaitingReason.END_OF_TURN
 
 
 def test_agent_field_generators_waiting_reason_returns_end_of_turn(

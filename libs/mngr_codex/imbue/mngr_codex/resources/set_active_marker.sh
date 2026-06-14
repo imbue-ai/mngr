@@ -6,7 +6,8 @@
 # path. It marks the root turn active and, when this prompt opens a fresh root
 # turn, records the payload's session id as the turn's root in
 # `codex_root_session` and the rollout `transcript_path` in
-# `codex_transcript_path`.
+# `codex_transcript_path`, and clears any stranded `permissions_waiting` marker so
+# the new turn does not inherit a prior (denied/cancelled) dialog's state.
 #
 # Async-subagent model: codex subagents run ASYNCHRONOUSLY, so the marker is not
 # a simple touch/remove. It is recomputed under a lock from two pieces of state
@@ -73,6 +74,15 @@ if [ ! -e "$CODEX_MARKER_FILE" ]; then
     if [ -n "$transcript_path" ]; then
         printf '%s' "$transcript_path" > "$CODEX_TRANSCRIPT_PATH_FILE"
     fi
+
+    # Clear any stranded permission-waiting marker as a new root turn opens. A
+    # dialog that was denied/cancelled (no PostToolUse) can outlive its turn; the
+    # Stop hook normally removes it, but if that was missed the marker would make
+    # this fresh turn report PERMISSIONS once `active` is set below. Guarded by the
+    # same "marker absent" check as the root-session capture, so a nested codex
+    # (whose prompt fires while the marker is present) never clears the root's
+    # dialog state.
+    rm -f "$CODEX_PERMISSIONS_WAITING_FILE"
 fi
 
 # Ensure the subagents dir exists (the SubagentStart/Stop hooks also create it,
