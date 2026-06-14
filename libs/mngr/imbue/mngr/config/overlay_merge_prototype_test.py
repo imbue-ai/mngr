@@ -16,6 +16,7 @@ across base+override, ``cli_args`` as a string / list / unset, the
 override, base-class override into a subclass self).
 """
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -161,8 +162,6 @@ def test_prototype_does_not_call_merge_with() -> None:
     they are stripped before the check -- only code outside triple-quoted strings is
     inspected.
     """
-    from pathlib import Path
-
     source = Path(__file__).with_name("overlay_merge_prototype.py").read_text()
     # Even-indexed split parts are code (outside docstrings); odd-indexed are docstrings.
     code_only = "".join(part for index, part in enumerate(source.split('"""')) if index % 2 == 0)
