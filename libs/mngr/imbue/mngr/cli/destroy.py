@@ -764,8 +764,8 @@ def _destroy_emptied_hosts(
     runs immediately after is the safety net that retries once the failure
     clears). So a *raised* error from this sweep does not contribute to the
     command's exit code. A host that *was* destroyed but left a real resource
-    behind is surfaced normally -- those failures come back from ``destroy_host``
-    as a returned list, which we do record.
+    behind is surfaced normally -- those failures come back as a
+    ``CleanupFailedGroup`` raised by ``destroy_host``, which we catch and record.
     """
     for host, provider in online_hosts_with_provider:
         host_name = host.get_name()
