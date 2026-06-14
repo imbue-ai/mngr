@@ -39,6 +39,7 @@ from imbue.mngr_imbue_cloud.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.pool_bake import run_mngr_command
 from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_ovh.client import build_ovh_client
@@ -333,6 +334,22 @@ def _harden_ovh_vps(management_public_key: str, baked: BakedPoolHost, full_addre
         )
 
 
+def _ovh_run_in_container(
+    baked: BakedPoolHost, label: str, command: str, timeout_seconds: float
+) -> tuple[int | None, str, str]:
+    """Run a shell command inside an OVH pool host's container via ``mngr exec`` (login shell).
+
+    The :class:`~imbue.mngr_imbue_cloud.pool_bake.ContainerCommandRunner` for OVH:
+    the agent is resolvable in the operator's mngr state, so ``mngr exec`` reaches
+    the container; wrapping in ``bash -lc`` puts ``uv``/``mngr`` on PATH in the FCT
+    image. Returns ``(returncode, stdout, stderr)``.
+    """
+    address = f"{BAKED_SERVICES_AGENT_NAME}@{baked.host_name}.ovh"
+    wrapped = f"bash -lc {shlex.quote(command)}"
+    result = run_mngr_command(["exec", address, wrapped], timeout=int(timeout_seconds))
+    return result.returncode, result.stdout, result.stderr
+
+
 def _create_single_pool_host(
     workspace_dir: Path,
     attributes: dict[str, Any],
@@ -344,12 +361,14 @@ def _create_single_pool_host(
 ) -> bool:
     """Create a single OVH pool host. Returns True on success.
 
-    Delegates the provider-generic FCT bake (create + stop + sshd hardening +
-    chat-agent teardown) to :func:`bake_pool_host`, supplying only the
-    OVH-specific pieces: the ``ovh`` provider + per-bake datacenter, the
-    cancelled-VPS recycle override, the ufw + management-key hook, the extra OVH
-    IAM tags, and the OVH ``pool_hosts`` insert. The row's ``attributes`` are the
-    request-side dict so the connector's ``attributes @>`` match can find it.
+    Delegates the provider-generic FCT create + parse to :func:`bake_pool_host` and
+    the shared container sshd-harden + chat-agent teardown to
+    :func:`finalize_baked_pool_host` (via the ``mngr exec`` transport), supplying
+    only the OVH-specific pieces: the ``ovh`` provider + per-bake datacenter, the
+    cancelled-VPS recycle override, stopping the services agent, the ufw +
+    management-key install, the extra OVH IAM tags, and the OVH ``pool_hosts``
+    insert. The row's ``attributes`` are the request-side dict so the connector's
+    ``attributes @>`` match can find it.
 
     ``extra_tags`` is a tuple of ``KEY=VALUE`` strings forwarded as
     ``MNGR_VPS_EXTRA_TAGS`` to the inner ``mngr create``; ``mngr_ovh`` attaches
@@ -383,12 +402,23 @@ def _create_single_pool_host(
     if not baked.ssh_host:
         raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
 
-    # OVH-specific host hardening: a fresh OVH VPS needs ufw + the pool management
-    # key (slices authorize the pool key at carve time, so they skip this). Done
-    # after the FCT bake; the host is not yet in the pool (no row), so the brief
-    # pre-ufw window is not user-reachable.
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
+    # Stop the freshly-baked services agent (it boots during create); the user's
+    # lease re-starts it. Use the per-bake-unique address so sequential bakes don't
+    # stop the wrong `system-services` agent.
+    stop_result = run_mngr_command(["stop", full_address], timeout=120)
+    if stop_result.returncode != 0:
+        raise PoolBakeError(
+            f"`mngr stop {full_address}` failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
+        )
+    # OVH-specific host hardening: a fresh OVH VPS needs ufw + the pool management
+    # key (slices authorize the pool key at carve time, so they skip this). The
+    # host is not yet in the pool (no row), so the brief pre-ufw window is not
+    # user-reachable.
     _harden_ovh_vps(management_public_key, baked, full_address)
+    # Shared FCT post-bake: harden the container sshd + tear down the bootstrap
+    # chat agent, over the OVH (mngr exec) transport.
+    finalize_baked_pool_host(_ovh_run_in_container, baked, host_name=host_name)
 
     row_id = uuid4()
     conn = psycopg2.connect(database_url)

@@ -89,6 +89,7 @@ class BakedPoolHost(FrozenModel):
     agent_id: str = Field(description="mngr agent id of the baked services agent")
     host_id: str = Field(description="mngr host id of the baked pool host")
     host_name: str = Field(description="per-bake-unique host name")
+    ssh_user: str = Field(default="root", description="agent (container) SSH user")
     ssh_host: str | None = Field(default=None, description="agent SSH hostname (the VPS/box address)")
     ssh_port: int | None = Field(default=None, description="agent (container) SSH port")
     ssh_key_path: str | None = Field(default=None, description="on-disk private key path for the agent SSH endpoint")
@@ -247,6 +248,7 @@ def parse_baked_host(stdout: str, *, host_name: str) -> BakedPoolHost:
         agent_id=str(parsed["agent_id"]),
         host_id=str(parsed["host_id"]),
         host_name=str(parsed.get("host_name", host_name)),
+        ssh_user=str(parsed.get("ssh_user", "root")),
         ssh_host=parsed.get("ssh_host"),
         ssh_port=int(ssh_port) if ssh_port is not None else None,
         ssh_key_path=parsed.get("ssh_key_path"),
@@ -254,62 +256,17 @@ def parse_baked_host(stdout: str, *, host_name: str) -> BakedPoolHost:
     )
 
 
-def _ensure_container_sshd_robust(full_address: str) -> None:
-    """Bump the container sshd's pre-auth limits so the lease/claim flow doesn't lose connections.
-
-    The default ``MaxStartups=10:30:100`` caps the pre-auth queue tightly, and the
-    imbue_cloud lease + claim flow plus parallel ``mngr observe`` discovery
-    routinely exceeds it and drops connections mid-rsync. Packed into one
-    shell-quoted ``mngr exec`` COMMAND positional.
-    """
-    sshd_command = shlex.join(["/usr/sbin/sshd", "-o", "MaxSessions=100", "-o", "MaxStartups=100:30:200"])
-    run_mngr_command(["exec", full_address, sshd_command], timeout=30)
-
-
-def _teardown_bootstrap_chat_agent(full_address: str, *, host_name: str, sentinel_timeout_seconds: int) -> None:
-    """Tear down the FCT-bootstrap-created chat agent so the user's first lease gets a fresh one.
-
-    During the bake the services agent booted and the FCT bootstrap created an
-    initial chat agent named after the bake's ``host_name`` -- the wrong name for
-    the user's eventual workspace, and the bootstrap won't recreate it on later
-    starts (it left a sentinel). Wait (inside the container) for that sentinel,
-    then destroy the chat agent and remove the sentinel so the user's first start
-    recreates the chat agent under their own host name.
-
-    If no sentinel appears within the timeout, the bootstrap never created a chat
-    agent (e.g. inference creds absent) -- there is nothing to tear down, so this
-    warns and returns. When the sentinel *is* present the destroy must succeed: a
-    destroy error almost always signals a vendored-mngr / FCT-template skew, and
-    shipping a pool host whose bootstrap state we don't understand has bitten us
-    before, so we fail the bake rather than land a half-known host in the pool.
-    """
-    sentinel = shlex.quote(INITIAL_CHAT_SENTINEL_PATH)
-    wait_inner = f"until test -f {sentinel}; do sleep 5; done"
-    wait_command = shlex.join(
-        ["bash", "-lc", f"timeout {int(sentinel_timeout_seconds)} bash -c {shlex.quote(wait_inner)}"]
-    )
-    wait_result = run_mngr_command(["exec", full_address, wait_command], timeout=sentinel_timeout_seconds + 60)
-    if wait_result.returncode != 0:
-        logger.warning("No initial-chat sentinel appeared for {}; skipping chat-agent teardown", host_name)
-        return
-    logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
-    # ``mngr exec`` parses ``AGENTS... COMMAND``; pack the whole remote command
-    # into one shell-quoted positional so it lands as a single COMMAND.
-    chat_destroy_cmd = shlex.join(["mngr", "destroy", host_name, "--force"])
-    chat_destroy = run_mngr_command(["exec", full_address, chat_destroy_cmd], timeout=120)
-    if chat_destroy.returncode != 0:
-        raise PoolBakeError(
-            f"destroying bootstrap chat agent {host_name!r} via "
-            f"`mngr exec {full_address} {chat_destroy_cmd!r}` failed "
-            f"(exit {chat_destroy.returncode}): {chat_destroy.stderr.strip()}"
-        )
-    logger.info("  Removing initial-chat sentinel: {}", INITIAL_CHAT_SENTINEL_PATH)
-    sentinel_rm_cmd = shlex.join(["rm", "-f", INITIAL_CHAT_SENTINEL_PATH])
-    sentinel_rm = run_mngr_command(["exec", full_address, sentinel_rm_cmd], timeout=30)
-    if sentinel_rm.returncode != 0:
-        raise PoolBakeError(
-            f"removing initial-chat sentinel {INITIAL_CHAT_SENTINEL_PATH!r} failed: {sentinel_rm.stderr.strip()}"
-        )
+# A function that runs a shell command *inside the baked pool host's container*
+# and returns ``(returncode, stdout, stderr)``. The transport is provider-specific
+# and supplied by the caller, because reaching a baked host differs by provider:
+# OVH uses ``mngr exec`` (the agent is resolvable in the operator's mngr state);
+# a slice's per-host sshd port lives only in the create process's memory, so a
+# fresh ``mngr`` can't resolve it -- the slice caller instead SSHes straight to the
+# create-reported forwarded port. The runner receives the :class:`BakedPoolHost`
+# (so the slice transport can read that endpoint) plus a label + timeout, and is
+# expected to execute the command via a login shell (so ``uv``/``mngr`` are on
+# PATH inside the FCT container).
+ContainerCommandRunner = Callable[[BakedPoolHost, str, str, float], tuple[int | None, str, str]]
 
 
 def bake_pool_host(
@@ -320,30 +277,21 @@ def bake_pool_host(
     workspace_dir: Path,
     extra_create_args: Sequence[str] = (),
     extra_create_env: Mapping[str, str] | None = None,
-    on_failure_after_create: Callable[[BakedPoolHost], None] | None = None,
-    sentinel_timeout_seconds: int = _SENTINEL_WAIT_TIMEOUT_SECONDS,
 ) -> BakedPoolHost:
-    """Bake one FCT pool host on a provisioned host and return its resolved details.
+    """Run ``mngr create`` for one FCT pool host and return its resolved details.
 
-    Sequence (identical for OVH + slices): ``mngr create`` (with the FCT
-    templates + ``--format json``) -> parse host details -> stop the services
-    agent -> harden the container sshd -> tear down the bootstrap chat agent. The
-    caller then runs any provider-specific host hardening (OVH installs ufw + the
-    management key; slices need none, having authorized the pool key at carve time)
-    and inserts the provider-specific ``pool_hosts`` row from the returned
-    :class:`BakedPoolHost`.
+    Shared by OVH + slices: builds the FCT create command (templates + labels +
+    ``--format json``), runs it (with the provider-specific ``extra_create_args`` /
+    ``extra_create_env``), and parses the create JSON into a :class:`BakedPoolHost`.
+    The provider-specific post-create work -- stopping the services agent (OVH),
+    container sshd-hardening + chat-agent teardown (both, via
+    :func:`finalize_baked_pool_host`), host hardening (OVH ufw + management key),
+    the ``pool_hosts`` insert, and any rollback -- is the caller's, since the
+    transport to reach the baked host and the rollback differ by provider.
 
-    Failure handling: ``mngr create`` failing means the host was never fully
-    provisioned (the provider rolls back its own VM/VPS), so this just raises. But
-    if a *post-create* step fails, the host exists and would leak -- so
-    ``on_failure_after_create`` (if given) is invoked with the resolved
-    :class:`BakedPoolHost` to tear it down before the :class:`PoolBakeError`
-    propagates. That callback must be best-effort (it must not raise; it runs on an
-    already-failing path). Callers whose later hardening/insert can also fail
-    should run the same rollback around those steps, keyed on the returned
-    ``host_id``.
-
-    Raises :class:`PoolBakeError` on any required step failing.
+    A failed ``mngr create`` means the host was never fully provisioned (the
+    provider rolls back its own VM/VPS), so this just raises. Raises
+    :class:`PoolBakeError` on create failure or unparseable output.
     """
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.{provider_instance}"
     attributes_json = json.dumps(dict(attributes))
@@ -360,21 +308,66 @@ def bake_pool_host(
         )
     baked = parse_baked_host(create_result.stdout, host_name=host_name)
     logger.info("  Baked services agent {} on host {}", baked.agent_id, baked.host_id)
-
-    # The host now exists; any failure past this point must tear it down (via the
-    # caller's rollback) so it does not leak its slot / forwarded ports.
-    try:
-        stop_result = run_mngr_command(["stop", full_address], timeout=120)
-        if stop_result.returncode != 0:
-            raise PoolBakeError(
-                f"`mngr stop {full_address}` failed (exit {stop_result.returncode}): {stop_result.stderr.strip()}"
-            )
-        _ensure_container_sshd_robust(full_address)
-        _teardown_bootstrap_chat_agent(
-            full_address, host_name=host_name, sentinel_timeout_seconds=sentinel_timeout_seconds
-        )
-    except PoolBakeError:
-        if on_failure_after_create is not None:
-            on_failure_after_create(baked)
-        raise
     return baked
+
+
+def finalize_baked_pool_host(
+    run_in_container: ContainerCommandRunner,
+    baked: BakedPoolHost,
+    *,
+    host_name: str,
+    sentinel_timeout_seconds: int = _SENTINEL_WAIT_TIMEOUT_SECONDS,
+) -> None:
+    """Harden the container sshd and tear down the FCT bootstrap chat agent (shared FCT post-bake).
+
+    Runs entirely *inside* the baked container via the caller-supplied
+    ``run_in_container`` transport, so it works for both an OVH VPS (``mngr exec``)
+    and a slice (direct SSH). Steps:
+
+    1. Bump the container sshd's pre-auth limits (best-effort): the default
+       ``MaxStartups=10:30:100`` caps the pre-auth queue tightly and the lease +
+       claim flow plus parallel ``mngr observe`` discovery routinely exceeds it.
+    2. Wait for the FCT bootstrap's initial-chat sentinel, then destroy the
+       bootstrap-created chat agent (named after the bake host) and remove the
+       sentinel -- so the user's first lease re-creates the chat agent under their
+       own workspace name.
+
+    If no sentinel appears within the timeout the bootstrap never created a chat
+    agent (e.g. inference creds absent), so there is nothing to tear down and this
+    returns. When the sentinel *is* present the destroy must succeed: a destroy
+    error almost always signals a vendored-mngr / FCT-template skew, and shipping a
+    pool host whose bootstrap state we don't understand has bitten us before, so we
+    raise rather than land a half-known host in the pool.
+    """
+    sshd_command = shlex.join(["/usr/sbin/sshd", "-o", "MaxSessions=100", "-o", "MaxStartups=100:30:200"])
+    sshd_rc, _sshd_out, sshd_err = run_in_container(baked, "sshd-harden", sshd_command, 30.0)
+    if sshd_rc != 0:
+        logger.warning("Could not harden container sshd for {} (exit {}): {}", host_name, sshd_rc, sshd_err.strip())
+
+    sentinel = shlex.quote(INITIAL_CHAT_SENTINEL_PATH)
+    wait_command = (
+        f"timeout {int(sentinel_timeout_seconds)} bash -c {shlex.quote(f'until test -f {sentinel}; do sleep 5; done')}"
+    )
+    wait_rc, _wait_out, _wait_err = run_in_container(
+        baked, "sentinel-wait", wait_command, float(sentinel_timeout_seconds + 60)
+    )
+    if wait_rc != 0:
+        logger.warning("No initial-chat sentinel appeared for {}; skipping chat-agent teardown", host_name)
+        return
+
+    logger.info("  Destroying bootstrap-created chat agent: {}", host_name)
+    # Use the canonical in-container mngr invocation (uv run mngr in /mngr/code),
+    # which works regardless of transport / login PATH in the FCT image.
+    destroy_command = f"cd /mngr/code && uv run mngr destroy {shlex.quote(host_name)} --force"
+    destroy_rc, _destroy_out, destroy_err = run_in_container(baked, "chat-destroy", destroy_command, 120.0)
+    if destroy_rc != 0:
+        raise PoolBakeError(
+            f"destroying bootstrap chat agent {host_name!r} failed (exit {destroy_rc}): {destroy_err.strip()}"
+        )
+    logger.info("  Removing initial-chat sentinel: {}", INITIAL_CHAT_SENTINEL_PATH)
+    rm_command = shlex.join(["rm", "-f", INITIAL_CHAT_SENTINEL_PATH])
+    rm_rc, _rm_out, rm_err = run_in_container(baked, "sentinel-rm", rm_command, 30.0)
+    if rm_rc != 0:
+        raise PoolBakeError(
+            f"removing initial-chat sentinel {INITIAL_CHAT_SENTINEL_PATH!r} failed (exit {rm_rc}): {rm_err.strip()}"
+        )

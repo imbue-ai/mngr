@@ -13,6 +13,7 @@ are exercised without OVH.
 import base64
 import json
 import os
+import shlex
 import shutil
 import tempfile
 import threading
@@ -56,8 +57,10 @@ from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.pool_bake import bake_pool_host
+from imbue.mngr_imbue_cloud.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.pool_bake import sync_mngr_into_template
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
@@ -405,6 +408,41 @@ def _rollback_slice_vm(*, server: BareMetalServer, ssh_user: str, private_key_pa
         logger.warning("Rollback of orphaned slice VM for {} on {} failed: {}", host_id, server.public_address, exc)
 
 
+def _slice_run_in_container(
+    baked: BakedPoolHost, label: str, command: str, timeout_seconds: float
+) -> tuple[int | None, str, str]:
+    """Run a shell command inside a slice's container by SSHing the create-reported port.
+
+    The :class:`~imbue.mngr_imbue_cloud.pool_bake.ContainerCommandRunner` for
+    slices: a slice's per-host forwarded port lives only in the create process's
+    memory, so a fresh ``mngr`` can't resolve it -- instead we SSH straight to the
+    container's box-forwarded port (``baked.ssh_port``) with the container key the
+    create recorded. Wrapped in ``bash -lc`` so ``uv``/``mngr`` are on PATH in the
+    FCT image. Returns ``(returncode, stdout, stderr)``.
+    """
+    if not baked.ssh_host or baked.ssh_port is None or not baked.ssh_key_path:
+        return 1, "", f"baked slice {baked.host_name} missing container SSH connection info"
+    ssh_command = [
+        "ssh",
+        "-i",
+        baked.ssh_key_path,
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=20",
+        "-o",
+        "ServerAliveInterval=30",
+        "-p",
+        str(baked.ssh_port),
+        f"{baked.ssh_user}@{baked.ssh_host}",
+        f"bash -lc {shlex.quote(command)}",
+    ]
+    cg = ConcurrencyGroup(name=f"slice-container-{label}")
+    with cg:
+        result = cg.run_process_to_completion(command=ssh_command, timeout=timeout_seconds, is_checked_after=False)
+    return result.returncode, result.stdout, result.stderr
+
+
 def _bake_one_slice(
     *,
     server: BareMetalServer,
@@ -418,10 +456,12 @@ def _bake_one_slice(
 ) -> dict[str, Any]:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
-    Returns an outcome dict (never raises). The slice provider carves the VM over
-    SSH on the box and bakes the shared container; the provider-generic
-    :func:`bake_pool_host` runs the FCT bake + chat-agent teardown. Any failure
-    after the VM exists rolls the VM back so it does not leak its box slot/ports.
+    Returns an outcome dict (never raises). ``bake_pool_host`` carves the VM (over
+    SSH on the box, inside the slice provider) and bakes the shared container; the
+    shared :func:`finalize_baked_pool_host` then hardens the container sshd and
+    tears down the bootstrap chat agent over the slice (direct-SSH) transport. Any
+    failure once the VM exists rolls the VM back so it does not leak its box
+    slot/ports (a ``mngr create`` failure is already rolled back by the provider).
     """
     ssh_user = server.lima_service_user or "limahost"
     host_name = f"slice-{uuid4().hex}"
@@ -442,40 +482,37 @@ def _bake_one_slice(
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
             ),
-            on_failure_after_create=lambda failed: _rollback_slice_vm(
-                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=failed.host_id
-            ),
         )
-        if baked.outer_ssh_port is None or baked.ssh_port is None:
-            _rollback_slice_vm(
-                server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
-            )
-            raise BareMetalProvisioningError(
-                f"slice {host_name} create JSON missing the forwarded ports (vm={baked.outer_ssh_port}, "
-                f"container={baked.ssh_port})"
-            )
-        host_id_obj = HostId(baked.host_id)
-        values = build_slice_pool_host_insert_values(
-            row_id=str(uuid4()),
-            box_public_address=str(server.public_address),
-            agent_id=baked.agent_id,
-            host_id=baked.host_id,
-            host_name=host_name,
-            vm_ssh_host_port=baked.outer_ssh_port,
-            container_ssh_host_port=baked.ssh_port,
-            attributes_json=attributes_json,
-            region=server.region,
-            bare_metal_server_id=str(server.id),
-            lima_instance_name=slice_lima_instance_name(host_id_obj),
-            lima_disk_name=slice_lima_disk_name(host_id_obj),
-        )
+        # The VM now exists; any failure in the post-create steps or the insert must
+        # tear it down so it does not leak its box slot + forwarded ports.
         try:
+            if baked.outer_ssh_port is None or baked.ssh_port is None:
+                raise BareMetalProvisioningError(
+                    f"slice {host_name} create JSON missing the forwarded ports (vm={baked.outer_ssh_port}, "
+                    f"container={baked.ssh_port})"
+                )
+            finalize_baked_pool_host(_slice_run_in_container, baked, host_name=host_name)
+            host_id_obj = HostId(baked.host_id)
+            values = build_slice_pool_host_insert_values(
+                row_id=str(uuid4()),
+                box_public_address=str(server.public_address),
+                agent_id=baked.agent_id,
+                host_id=baked.host_id,
+                host_name=host_name,
+                vm_ssh_host_port=baked.outer_ssh_port,
+                container_ssh_host_port=baked.ssh_port,
+                attributes_json=attributes_json,
+                region=server.region,
+                bare_metal_server_id=str(server.id),
+                lima_instance_name=slice_lima_instance_name(host_id_obj),
+                lima_disk_name=slice_lima_disk_name(host_id_obj),
+            )
             conn = psycopg2.connect(database_url)
             try:
                 insert_slice_pool_host(conn, values)
             finally:
                 conn.close()
-        except (psycopg2.Error, OSError):
+        except (PoolBakeError, BareMetalProvisioningError, MngrError, psycopg2.Error, OSError):
             _rollback_slice_vm(
                 server=server, ssh_user=ssh_user, private_key_path=private_key_path, host_id=baked.host_id
             )
