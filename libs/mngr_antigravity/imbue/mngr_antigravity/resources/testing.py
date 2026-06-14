@@ -1,7 +1,7 @@
 """Test helpers for building synthetic agy conversation ``.db`` fixtures.
 
 agy stores each conversation as a protobuf SQLite ``.db`` whose ``steps.step_payload`` is a
-serialized ``gemini_coder.Step`` (see ``decode_agy_transcript.py`` and ``dev/README.md``).
+serialized ``gemini_coder.Step`` (see ``decode_agy_transcript.py`` and ``regenerating_protobuf_schema.md``).
 These helpers are the inverse of the decoder's wire-walk: they encode minimal ``Step`` blobs
 and write a ``steps`` table, so tests can exercise decoding/streaming without a live agy.
 """

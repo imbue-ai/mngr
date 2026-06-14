@@ -4,7 +4,7 @@ NOTE -- best-effort black magic, NOT a style exemplar for the rest of the repo. 
 (and ``scripts/extract_antigravity_proto_schema.py``) reverse-engineers an *undocumented,
 version-unstable* format: agy publishes no ``.proto`` schema and renumbers fields roughly
 weekly, so the field/enum map below is recovered empirically from the binary and can silently
-break on any agy release (see ``libs/mngr_antigravity/dev/README.md`` for the recovery process and the release-marked
+break on any agy release (see ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the recovery process and the release-marked
 re-verification test). The decode is deliberately defensive and lossy -- it degrades or skips
 malformed, truncated, or schema-drifted input (empty timestamps, dropped steps, ``utf-8``
 ``"replace"``, broad "return on anything unexpected") rather than guaranteeing a faithful
@@ -22,7 +22,7 @@ JSONL had** (``step_index``/``source``/``type``/``status``/``created_at``/``cont
 
 ``steps.step_payload`` is a serialized ``gemini_coder.Step`` protobuf. agy publishes no
 schema; the field/enum map below was recovered from the binary's embedded descriptors (see
-``libs/mngr_antigravity/dev/README.md`` for the recovery process and how to re-verify it
+``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the recovery process and how to re-verify it
 after an agy release). This decoder is a small, dependency-free protobuf wire-walk -- it
 does not need the ``protobuf`` library or any shipped descriptors.
 
@@ -41,7 +41,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-# --- gemini_coder.Step field numbers (recovered; see dev/README.md) ----------------------
+# --- gemini_coder.Step field numbers (recovered; see regenerating_protobuf_schema.md) ----
 _STEP_TYPE = 1
 _STEP_STATUS = 4
 _STEP_METADATA = 5

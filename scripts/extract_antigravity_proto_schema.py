@@ -7,7 +7,7 @@ embedded ``FileDescriptorProto``s, walks them with hand-rolled varint parsing, a
 recovers most -- not all -- descriptors (some legacy-gzip-registered ones are missed by design).
 Run it as a dev/verification tool, not as a model for general repo conventions; the patterns
 here (bare-ish parse guards, ``while True`` byte walks, broad probing) are specific to reverse-
-engineering a hostile format. See ``libs/mngr_antigravity/dev/README.md`` and the companion decoder
+engineering a hostile format. See ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` and the companion decoder
 (``libs/mngr_antigravity/imbue/mngr_antigravity/resources/decode_agy_transcript.py``).
 
 Why this exists
@@ -25,7 +25,7 @@ descriptors you can read the real field names/numbers and enum values that
 ``libs/mngr_antigravity/imbue/mngr_antigravity/resources/decode_agy_transcript.py`` keys off.
 
 antigravity ships ~weekly and may renumber fields, so re-run this against each new binary and
-diff the output (see ``libs/mngr_antigravity/dev/README.md`` for the full procedure and the
+diff the output (see ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the full procedure and the
 schema map). ``test_antigravity_proto_schema.py`` mechanizes that diff as a release-marked
 test that runs this script (as a subprocess) against the installed ``agy`` binary.
 

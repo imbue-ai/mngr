@@ -5,7 +5,7 @@
 # SQLite .db per conversation under
 # $ANTIGRAVITY_APP_DATA_DIR/conversations/<conv_id>.db (earlier agy wrote a
 # per-conversation JSONL transcript that this script used to tail; see
-# libs/mngr_antigravity/dev/README.md for the migration and the recovered schema).
+# libs/mngr_antigravity/regenerating_protobuf_schema.md for the migration and the recovered schema).
 #
 # This script is now a thin supervisor around decode_agy_transcript.py, which
 # reads new `steps` rows from each of this agent's conversation .db files and

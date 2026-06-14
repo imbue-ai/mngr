@@ -389,7 +389,7 @@ class AntigravityAgent(InteractiveTuiAgent[AntigravityAgentConfig], HasCommonTra
         guard + poll loop); ``decode_agy_transcript.py`` does the actual work of
         reading new steps from agy's per-conversation SQLite ``.db`` and emitting
         the JSON records (agy >= 1.0.4 replaced the JSONL transcript the streamer
-        used to tail; see the module docstrings and ``dev/README.md``).
+        used to tail; see the module docstrings and ``regenerating_protobuf_schema.md``).
         """
         return {
             _RAW_TRANSCRIPT_SCRIPT_NAME: _load_antigravity_resource_script(_RAW_TRANSCRIPT_SCRIPT_NAME),
