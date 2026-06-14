@@ -87,6 +87,19 @@ def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
     return any(isinstance(item, SettingsPatchField) for item in metadata)
 
 
+def _settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[str]:
+    """Return the ``SettingsPatchField``-marked field names of a model class.
+
+    Read off the pydantic field metadata so the overlay merge pipeline marks exactly
+    the accumulate-not-assign fields, without hard-coding any field name. A class with
+    no such fields (every config model except the settings-bearing ``AgentTypeConfig``
+    subclass) yields an empty set.
+    """
+    return frozenset(
+        name for name, field in model_class.model_fields.items() if is_settings_patch_field(field.metadata)
+    )
+
+
 class StringDerivedTuple(ScalarTuple):
     """Marker for a tuple value originally provided as a single string in user
     settings.
@@ -134,37 +147,6 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     lexer.whitespace_split = True
     lexer.commenters = ""
     return tuple(lexer)
-
-
-def _assign_scalar(base_value: Any, override_value: Any) -> Any:
-    """Return ``override_value`` when it is not None; otherwise fall back to ``base_value``.
-
-    Used inside ``MngrConfig.merge_with`` to express the "override wins if
-    explicitly set" rule for scalar fields without duplicating the conditional
-    at every call site.
-    """
-    return override_value if override_value is not None else base_value
-
-
-def _merge_container_dict(
-    base: dict[Any, Any],
-    override: dict[Any, Any],
-) -> dict[Any, Any]:
-    """Per-key additive merge for the top-level container dicts on ``MngrConfig``.
-
-    Keys present in only one side are preserved. Keys present in both are
-    merged via the value's ``merge_with`` method. This is the explicit
-    carveout from the otherwise assign-by-default rule.
-    """
-    merged: dict[Any, Any] = {}
-    for key in set(base.keys()) | set(override.keys()):
-        if key in base and key in override:
-            merged[key] = base[key].merge_with(override[key])
-        elif key in override:
-            merged[key] = override[key]
-        else:
-            merged[key] = base[key]
-    return merged
 
 
 # The top-level container dicts on ``MngrConfig`` whose merge is per-key
@@ -462,9 +444,7 @@ class AgentTypeConfig(FrozenModel):
         # branch), and the result re-parses into ``type(self)`` so a subclass stays
         # its concrete class. See ``overlay_merge.merge_models_via_overlay`` and
         # ``specs/whole-config-overlay-integration.md``.
-        settings_patch_field_names = frozenset(
-            name for name, field in type(override).model_fields.items() if is_settings_patch_field(field.metadata)
-        )
+        settings_patch_field_names = _settings_patch_field_names(type(override))
         return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
 
 
@@ -817,85 +797,30 @@ class MngrConfig(FrozenModel):
         at one scope does not drop another scope's ``[agent_types.bar]``.
         For keys that appear in both, the sub-class's ``merge_with`` is
         invoked, where leaf fields again use assign-by-default.
+
+        The merge is computed via the overlay node algebra (serialize ->
+        pre-process -> overlay-merge -> reparse) rather than a field-by-field
+        pydantic copy. This is behavior-identical to the old merge: bare scalars
+        assign-by-default treating a ``None`` override as unset (the
+        ``drop_none_values`` pass reproduces ``_assign_scalar`` / the
+        ``override.<field> is not None`` guards, including the optional ``retry`` /
+        ``logging`` sub-models); the container dicts merge per key via a two-level
+        ``__extend`` (reproducing ``_merge_container_dict``, with each shared-key
+        entry combined field-by-field = its own ``merge_with``); and container entry
+        subclasses (e.g. ``ClaudeAgentConfig``) re-parse into their concrete class so
+        subclass-only fields and ``SettingsPatchField`` accumulation survive. See
+        ``overlay_merge.merge_models_via_overlay`` and
+        ``specs/whole-config-overlay-integration.md``.
         """
-        merged_agent_types = _merge_container_dict(self.agent_types, override.agent_types)
-        merged_providers = _merge_container_dict(self.providers, override.providers)
-        merged_plugins = _merge_container_dict(self.plugins, override.plugins)
-        merged_commands = _merge_container_dict(self.commands, override.commands)
-        merged_create_templates = _merge_container_dict(self.create_templates, override.create_templates)
-
-        # Merge the optional sub-models defensively: when the base is unset (None),
-        # the override wins outright -- there is nothing to merge into -- rather than
-        # calling ``.merge_with`` on ``None``. (In production the left operand is
-        # always the loader's defaulted accumulator, so the base is non-None and the
-        # plain merge path is taken; this guard matters for a raw ``parse_config``
-        # layer, which defaults retry/logging to ``None``.)
-        merged_retry = (
-            self.retry.merge_with(override.retry)
-            if self.retry is not None and override.retry is not None
-            else (override.retry if override.retry is not None else self.retry)
-        )
-        merged_logging = (
-            self.logging.merge_with(override.logging)
-            if self.logging is not None and override.logging is not None
-            else (override.logging if override.logging is not None else self.logging)
-        )
-
-        return self.__class__(
-            prefix=_assign_scalar(self.prefix, override.prefix),
-            default_host_dir=_assign_scalar(self.default_host_dir, override.default_host_dir),
-            pager=_assign_scalar(self.pager, override.pager),
-            unset_vars=override.unset_vars if override.unset_vars is not None else self.unset_vars,
-            work_dir_extra_paths=override.work_dir_extra_paths
-            if override.work_dir_extra_paths is not None
-            else self.work_dir_extra_paths,
-            enabled_backends=override.enabled_backends
-            if override.enabled_backends is not None
-            else self.enabled_backends,
-            agent_types=merged_agent_types,
-            providers=merged_providers,
-            plugins=merged_plugins,
-            # disabled_plugins is a deliberate carveout from the assign-by-default
-            # rule: it is populated by CLI ``--disable-plugin`` flags via
-            # ``_apply_plugin_overrides`` *after* layers have been merged, and
-            # individual TOML layers do not normally write to it. An override
-            # with an empty frozenset is indistinguishable from "not set", so we
-            # preserve the base value instead of wiping it. Users wanting to
-            # disable a specific plugin per-scope should use
-            # ``[plugins.<name>] enabled = false`` rather than this field.
-            disabled_plugins=override.disabled_plugins if override.disabled_plugins else self.disabled_plugins,
-            commands=merged_commands,
-            create_templates=merged_create_templates,
-            pre_command_scripts=override.pre_command_scripts
-            if override.pre_command_scripts is not None
-            else self.pre_command_scripts,
-            is_remote_agent_installation_allowed=_assign_scalar(
-                self.is_remote_agent_installation_allowed,
-                override.is_remote_agent_installation_allowed,
-            ),
-            connect_command=_assign_scalar(self.connect_command, override.connect_command),
-            retry=merged_retry,
-            logging=merged_logging,
-            is_nested_tmux_allowed=_assign_scalar(self.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
-            headless=_assign_scalar(self.headless, override.headless),
-            is_error_reporting_enabled=_assign_scalar(
-                self.is_error_reporting_enabled,
-                override.is_error_reporting_enabled,
-            ),
-            is_allowed_in_pytest=_assign_scalar(self.is_allowed_in_pytest, override.is_allowed_in_pytest),
-            default_destroyed_host_persisted_seconds=_assign_scalar(
-                self.default_destroyed_host_persisted_seconds,
-                override.default_destroyed_host_persisted_seconds,
-            ),
-            default_min_online_host_age_seconds=_assign_scalar(
-                self.default_min_online_host_age_seconds,
-                override.default_min_online_host_age_seconds,
-            ),
-            agent_ready_timeout=_assign_scalar(self.agent_ready_timeout, override.agent_ready_timeout),
-            allow_settings_key_assignment_narrowing=_assign_scalar(
-                self.allow_settings_key_assignment_narrowing,
-                override.allow_settings_key_assignment_narrowing,
-            ),
+        settings_patch_field_names = _settings_patch_field_names(type(override))
+        return merge_models_via_overlay(
+            self,
+            override,
+            settings_patch_field_names=settings_patch_field_names,
+            serialize_as_any=True,
+            container_dict_field_names=_CONTAINER_DICT_FIELDS,
+            drop_none_values=True,
+            settings_patch_field_names_for_class=_settings_patch_field_names,
         )
 
 

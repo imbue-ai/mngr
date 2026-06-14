@@ -4,10 +4,9 @@ Completes the proof-of-approach for the spec in
 ``specs/whole-config-overlay-integration.md`` by reproducing the **last** merge
 axis: the ``parent_type`` inheritance path,
 ``agent_config_registry._apply_custom_overrides_to_parent_config``. This is the
-class-switching variant the two prior proofs-of-approach (the production
-``overlay_merge.py`` for ``AgentTypeConfig.merge_with`` and
-``overlay_merge_mngr_prototype.py`` for ``MngrConfig.merge_with``) deliberately
-left out.
+class-switching variant the two prior, now-production paths (the production
+``overlay_merge.py`` pipeline, wired into both ``AgentTypeConfig.merge_with`` and
+``MngrConfig.merge_with``) deliberately left out.
 
 ``_apply_custom_overrides_to_parent_config(parent_config, custom_config)`` applies
 the *child*'s explicitly-set fields onto the *parent*'s config, but constructs the
@@ -72,8 +71,8 @@ from imbue.overlay.operators import EXTEND_SUFFIX
 # the dependency on the private constant is explicit and visible at its use sites,
 # and the prototype stays in exact lockstep with the function it reproduces -- if a
 # field were added to the skip set, the prototype follows automatically rather than
-# silently diverging. Mirrors how ``overlay_merge_mngr_prototype.py`` reads
-# ``data_types._CONTAINER_DICT_FIELDS``.
+# silently diverging. Mirrors how ``overlay_merge.py`` reads
+# ``data_types._CONTAINER_DICT_FIELDS`` for the wired ``MngrConfig`` merge.
 _METADATA_FIELDS = agent_config_registry._METADATA_FIELDS
 
 

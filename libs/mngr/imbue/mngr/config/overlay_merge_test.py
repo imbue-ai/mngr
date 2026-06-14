@@ -1,5 +1,14 @@
 """Equivalence guard for the production overlay-merge wiring of
-``AgentTypeConfig.merge_with``.
+``AgentTypeConfig.merge_with`` and ``MngrConfig.merge_with``.
+
+Both now compute their result via the overlay node algebra
+(``overlay_merge.merge_models_via_overlay``). This file freezes each old
+field-by-field body verbatim as a ``_reference_*`` function and asserts the
+production method reproduces it over a diverse corpus, so the refactor stays a pure
+result-preserving change. The first half covers ``AgentTypeConfig``; the second half
+(below the ``MngrConfig.merge_with equivalence guard`` banner) covers the top-level
+``MngrConfig`` merge -- the container-additive dicts, the None-padding drop, and the
+``serialize_as_any`` subclass round-tripping.
 
 ``AgentTypeConfig.merge_with`` now computes its result via the overlay node algebra
 (``overlay_merge.merge_models_via_overlay``) instead of the old field-by-field
@@ -20,14 +29,29 @@ list / unset; ``settings_overrides`` with bare keys, ``__extend``, nested
 (empty override, both empty, base-class override into a subclass self).
 """
 
+import inspect
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Annotated
 from typing import Any
 
 import pytest
+from pydantic import Field
 
+from imbue.mngr.config.agent_config_registry import register_agent_config
+from imbue.mngr.config.agent_config_registry import reset_agent_config_registry
 from imbue.mngr.config.data_types import AgentTypeConfig
+from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import is_settings_patch_field
 from imbue.mngr.config.loader import _normalize_tuple_fields_for_construct
+from imbue.mngr.config.loader import parse_config
+from imbue.mngr.config.provider_config_registry import register_provider_config
+from imbue.mngr.config.provider_config_registry import reset_provider_config_registry
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.overlay.merge import combine_patches
 
@@ -189,3 +213,427 @@ def test_base_class_override_into_subclass_self() -> None:
     actual = base.merge_with(override)
     assert actual == expected
     assert type(actual) is ClaudeAgentConfig
+
+
+# =============================================================================
+# MngrConfig.merge_with equivalence guard
+# =============================================================================
+#
+# ``MngrConfig.merge_with`` now computes its result via the same overlay node
+# algebra (``overlay_merge.merge_models_via_overlay`` with the container /
+# None-drop extensions) instead of the old field-by-field pydantic copy. The
+# section below freezes the *old* body verbatim as ``_reference_mngr_config_merge``
+# (with the old ``_assign_scalar`` / ``_merge_container_dict`` helpers inlined,
+# since they were deleted when the body was rewired) and asserts the production
+# ``merge_with`` produces an identical result over the spec corpus, compared at the
+# user-visible stage (after the loader's final default-applying validation, via
+# ``finalize_like_loader``). ``_reference_mngr_config_merge`` never calls
+# ``MngrConfig.merge_with``, so the equality is a real check, not a tautology
+# (guarded by ``test_mngr_reference_does_not_call_mngr_merge_with``).
+#
+# Construction mirrors the loader exactly: base = the loader's defaulted
+# accumulator (an initial ``model_construct`` config, optionally pre-merged with
+# prior layers), override = a fresh ``parse_config`` layer (the padded sparse
+# construction whose ``None`` scalars are the whole point of the top-level probe).
+
+
+def _reference_assign_scalar(base_value: Any, override_value: Any) -> Any:
+    """Frozen copy of the old ``data_types._assign_scalar``: override wins iff not None."""
+    return override_value if override_value is not None else base_value
+
+
+def _reference_merge_container_dict(base: dict[Any, Any], override: dict[Any, Any]) -> dict[Any, Any]:
+    """Frozen copy of the old ``data_types._merge_container_dict``: per-key additive
+    merge (key in both -> entry ``merge_with``; key in one side -> carried through).
+    """
+    merged: dict[Any, Any] = {}
+    for key in set(base.keys()) | set(override.keys()):
+        if key in base and key in override:
+            merged[key] = base[key].merge_with(override[key])
+        elif key in override:
+            merged[key] = override[key]
+        else:
+            merged[key] = base[key]
+    return merged
+
+
+def _reference_mngr_config_merge(base: MngrConfig, override: MngrConfig) -> MngrConfig:
+    """The OLD ``MngrConfig.merge_with`` body, frozen verbatim as the "old" side of the
+    equivalence guard (with the deleted ``_assign_scalar`` / ``_merge_container_dict``
+    helpers inlined as ``_reference_*``). It must stay independent of the new path (it
+    invokes the *container entries'* own ``merge_with`` but never ``MngrConfig``'s) so
+    the property test below is a genuine old == new check.
+    """
+    merged_agent_types = _reference_merge_container_dict(base.agent_types, override.agent_types)
+    merged_providers = _reference_merge_container_dict(base.providers, override.providers)
+    merged_plugins = _reference_merge_container_dict(base.plugins, override.plugins)
+    merged_commands = _reference_merge_container_dict(base.commands, override.commands)
+    merged_create_templates = _reference_merge_container_dict(base.create_templates, override.create_templates)
+
+    merged_retry = (
+        base.retry.merge_with(override.retry)
+        if base.retry is not None and override.retry is not None
+        else (override.retry if override.retry is not None else base.retry)
+    )
+    merged_logging = (
+        base.logging.merge_with(override.logging)
+        if base.logging is not None and override.logging is not None
+        else (override.logging if override.logging is not None else base.logging)
+    )
+
+    return base.__class__(
+        prefix=_reference_assign_scalar(base.prefix, override.prefix),
+        default_host_dir=_reference_assign_scalar(base.default_host_dir, override.default_host_dir),
+        pager=_reference_assign_scalar(base.pager, override.pager),
+        unset_vars=override.unset_vars if override.unset_vars is not None else base.unset_vars,
+        work_dir_extra_paths=override.work_dir_extra_paths
+        if override.work_dir_extra_paths is not None
+        else base.work_dir_extra_paths,
+        enabled_backends=override.enabled_backends if override.enabled_backends is not None else base.enabled_backends,
+        agent_types=merged_agent_types,
+        providers=merged_providers,
+        plugins=merged_plugins,
+        disabled_plugins=override.disabled_plugins if override.disabled_plugins else base.disabled_plugins,
+        commands=merged_commands,
+        create_templates=merged_create_templates,
+        pre_command_scripts=override.pre_command_scripts
+        if override.pre_command_scripts is not None
+        else base.pre_command_scripts,
+        is_remote_agent_installation_allowed=_reference_assign_scalar(
+            base.is_remote_agent_installation_allowed,
+            override.is_remote_agent_installation_allowed,
+        ),
+        connect_command=_reference_assign_scalar(base.connect_command, override.connect_command),
+        retry=merged_retry,
+        logging=merged_logging,
+        is_nested_tmux_allowed=_reference_assign_scalar(base.is_nested_tmux_allowed, override.is_nested_tmux_allowed),
+        headless=_reference_assign_scalar(base.headless, override.headless),
+        is_error_reporting_enabled=_reference_assign_scalar(
+            base.is_error_reporting_enabled,
+            override.is_error_reporting_enabled,
+        ),
+        is_allowed_in_pytest=_reference_assign_scalar(base.is_allowed_in_pytest, override.is_allowed_in_pytest),
+        default_destroyed_host_persisted_seconds=_reference_assign_scalar(
+            base.default_destroyed_host_persisted_seconds,
+            override.default_destroyed_host_persisted_seconds,
+        ),
+        default_min_online_host_age_seconds=_reference_assign_scalar(
+            base.default_min_online_host_age_seconds,
+            override.default_min_online_host_age_seconds,
+        ),
+        agent_ready_timeout=_reference_assign_scalar(base.agent_ready_timeout, override.agent_ready_timeout),
+        allow_settings_key_assignment_narrowing=_reference_assign_scalar(
+            base.allow_settings_key_assignment_narrowing,
+            override.allow_settings_key_assignment_narrowing,
+        ),
+    )
+
+
+def _finalize_like_loader(config: MngrConfig) -> MngrConfig:
+    """Apply the loader's *final* validation step to a (possibly padded) config,
+    yielding the user-visible config with defaults filled in.
+
+    Reproduces the tail of ``load_config``: read field *values* off ``config`` (not a
+    serialized dump), omit the padded ``None`` scalars / unset ``retry`` / ``logging``
+    so ``model_validate`` supplies their defaults, and pass the container dicts and
+    explicitly-set sub-models through as live instances (so concrete container-entry
+    subclasses keep their subclass-only fields). Applied to *both* sides of the
+    equality, so a genuine value divergence in any set field still survives.
+    """
+    config_dict: dict[str, Any] = {
+        field_name: value for field_name, value in dict(config).items() if value is not None
+    }
+    return MngrConfig.model_validate(config_dict)
+
+
+def _parse_layer(raw: dict[str, Any]) -> MngrConfig:
+    """Parse a raw TOML-shaped dict into a ``MngrConfig`` the way the loader does
+    (the padded ``parse_config`` construction), with no plugins disabled -- so the
+    corpus is built through the *real* padded path whose ``None`` scalars are the
+    point of the top-level probe.
+    """
+    return parse_config(raw, frozenset())
+
+
+def _initial_config() -> MngrConfig:
+    """The loader's initial accumulator config: ``model_construct`` with defaults
+    applied (so ``retry`` / ``logging`` are non-``None`` and scalars are defaulted),
+    exactly as ``load_config`` builds its starting point before merging layers."""
+    return MngrConfig.model_construct(
+        prefix="mngr-",
+        default_host_dir=Path("~/.mngr"),
+        agent_types={},
+        providers={},
+        plugins={},
+        logging=LoggingConfig(),
+        commands={},
+    )
+
+
+def _base_from_layers(*raw_layers: dict[str, Any]) -> MngrConfig:
+    """Build a base accumulator by merging ``raw_layers`` (each a raw TOML-shaped dict,
+    parsed via the padded ``parse_config``) into the initial config using the
+    production ``merge_with`` -- the genuine left-operand shape of a real merge."""
+    config = _initial_config()
+    for raw in raw_layers:
+        config = config.merge_with(_parse_layer(raw))
+    return config
+
+
+class _MngrClaudeLikeConfig(AgentTypeConfig):
+    """A settings-bearing ``AgentTypeConfig`` subclass standing in for the real
+    ``ClaudeAgentConfig``: carries a ``SettingsPatchField`` plus a subclass-only
+    scalar, so the corpus exercises the settings-patch combine and subclass
+    round-tripping inside ``agent_types`` entries without depending on the claude
+    plugin package's parsing.
+    """
+
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(default_factory=dict)
+    auto_dismiss_dialogs: bool | None = Field(default=None)
+
+
+@pytest.fixture
+def _registered_mngr_config_classes() -> Iterator[None]:
+    """Register the stand-in container-entry config classes for the duration of each
+    test, then reset the registries (test isolation). ``claude`` -> the settings-
+    bearing subclass; ``docker`` -> the base provider config (so provider blocks
+    parse). Unregistered plugin / command / create-template entries fall back to
+    their base classes, which need no registration.
+    """
+    reset_agent_config_registry()
+    reset_provider_config_registry()
+    register_agent_config("claude", _MngrClaudeLikeConfig)
+    register_provider_config("docker", ProviderInstanceConfig)
+    try:
+        yield
+    finally:
+        reset_agent_config_registry()
+        reset_provider_config_registry()
+
+
+# Each case is (label, base_layers, override_raw). ``base_layers`` are raw TOML-shaped
+# dicts merged into the initial config (via the production ``merge_with``) to form the
+# base accumulator; ``override_raw`` is parsed into a padded sparse layer. Both are
+# built at *test* time (inside the parametrized function) so the registry fixture has
+# already registered ``claude`` / ``docker``.
+_MNGR_CASES: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = [
+    # --- scalars: set/unset/overlap, default vs non-default ---
+    ("scalar_override_only", [], {"prefix": "ovr-"}),
+    ("scalar_base_only", [{"prefix": "base-"}], {"headless": True}),
+    ("both_empty", [], {}),
+    ("scalar_overlap", [{"prefix": "base-"}], {"prefix": "ovr-"}),
+    (
+        "nondefault_base_unset_override",
+        [{"agent_ready_timeout": 99.0, "is_error_reporting_enabled": False}],
+        {"prefix": "y"},
+    ),
+    ("override_sets_default_value", [{"is_error_reporting_enabled": False}], {"is_error_reporting_enabled": True}),
+    ("strnone_override", [{"pager": "less", "connect_command": "cc"}], {"pager": "more"}),
+    ("strnone_carry_base", [{"pager": "less", "connect_command": "cc"}], {"prefix": "w"}),
+    # --- aggregate assign-by-default fields (not container) ---
+    ("unset_vars_replace", [{"unset_vars": ["A", "B"]}], {"unset_vars": ["C"]}),
+    ("unset_vars_carry_base", [{"unset_vars": ["A", "B"]}], {"prefix": "x"}),
+    ("enabled_backends_replace", [{"enabled_backends": ["docker"]}], {"enabled_backends": ["modal"]}),
+    ("work_dir_extra_paths", [], {"work_dir_extra_paths": {"/a": "COPY"}}),
+    ("pre_command_scripts", [], {"pre_command_scripts": {"create": ["echo hi"]}}),
+    # --- retry / logging sub-models ---
+    ("retry_partial", [], {"retry": {"connect_retry_times": 9}}),
+    ("retry_carry_base", [{"retry": {"connect_retry_times": 7}}], {"prefix": "x"}),
+    ("retry_both_set", [{"retry": {"connect_retry_times": 7}}], {"retry": {"connect_retry_delay": "9s"}}),
+    ("logging_partial", [{"logging": {"max_log_size_mb": 7}}], {"logging": {"is_logging_env_vars": True}}),
+    ("logging_carry_base", [{"logging": {"max_log_size_mb": 7}}], {"prefix": "z"}),
+    # --- agent_types: disjoint / shared / subclass / cli_args ---
+    ("agent_types_disjoint", [{"agent_types": {"foo": {"command": "c"}}}], {"agent_types": {"bar": {"command": "d"}}}),
+    (
+        "agent_types_shared",
+        [{"agent_types": {"foo": {"command": "c"}}}],
+        {"agent_types": {"foo": {"cli_args": "--x"}}},
+    ),
+    (
+        "agent_types_subclass_scalar",
+        [{"agent_types": {"c": {"parent_type": "claude", "auto_dismiss_dialogs": True}}}],
+        {"agent_types": {"c": {"parent_type": "claude", "cli_args": "--y"}}},
+    ),
+    (
+        "agent_types_cli_args_string_replaces_list",
+        [{"agent_types": {"a": {"cli_args": ["x", "y"]}}}],
+        {"agent_types": {"a": {"cli_args": "--new flag"}}},
+    ),
+    # --- agent_types: nested settings_overrides accumulation ---
+    (
+        "settings_bare_disjoint",
+        [{"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "sonnet"}}}}],
+        {"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"env": "x"}}}},
+    ),
+    (
+        "settings_bare_overlap",
+        [{"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "sonnet", "k": 1}}}}],
+        {"agent_types": {"c": {"parent_type": "claude", "settings_overrides": {"model": "opus"}}}},
+    ),
+    (
+        "settings_extend_accumulate",
+        [
+            {
+                "agent_types": {
+                    "c": {
+                        "parent_type": "claude",
+                        "settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(a)"]}},
+                    }
+                }
+            }
+        ],
+        {
+            "agent_types": {
+                "c": {
+                    "parent_type": "claude",
+                    "settings_overrides": {"permissions__extend": {"allow__extend": ["Bash(b)"]}},
+                }
+            }
+        },
+    ),
+    (
+        "settings_nested_extend_plus_bare",
+        [
+            {
+                "agent_types": {
+                    "c": {
+                        "parent_type": "claude",
+                        "settings_overrides": {
+                            "model": "sonnet",
+                            "permissions__extend": {"allow__extend": ["Bash(a)"]},
+                        },
+                    }
+                }
+            }
+        ],
+        {
+            "agent_types": {
+                "c": {
+                    "parent_type": "claude",
+                    "settings_overrides": {"env": "x", "permissions__extend": {"allow__extend": ["Bash(b)"]}},
+                }
+            }
+        },
+    ),
+    # --- commands: defaults assign vs default_subcommand-only ---
+    (
+        "commands_subcommand_only",
+        [{"commands": {"create": {"new_host": "docker", "default_subcommand": "x"}}}],
+        {"commands": {"create": {"default_subcommand": "y"}}},
+    ),
+    (
+        "commands_defaults_replace",
+        [{"commands": {"create": {"new_host": "docker"}}}],
+        {"commands": {"create": {"connect": False}}},
+    ),
+    (
+        "commands_disjoint",
+        [{"commands": {"create": {"new_host": "docker"}}}],
+        {"commands": {"start": {"foreground": True}}},
+    ),
+    # --- providers ---
+    (
+        "providers_partial",
+        [{"providers": {"p": {"backend": "docker", "is_enabled": True}}}],
+        {"providers": {"p": {"backend": "docker", "min_online_host_age_seconds": 5.0}}},
+    ),
+    (
+        "providers_disjoint",
+        [{"providers": {"p": {"backend": "docker"}}}],
+        {"providers": {"q": {"backend": "docker", "is_enabled": False}}},
+    ),
+    # --- plugins ---
+    ("plugins_partial", [{"plugins": {"pl": {"enabled": True}}}], {"plugins": {"pl": {"enabled": False}}}),
+    ("plugins_disjoint", [{"plugins": {"pl": {"enabled": True}}}], {"plugins": {"other": {"enabled": False}}}),
+    # --- create_templates ---
+    (
+        "create_templates_replace",
+        [{"create_templates": {"t": {"new_host": "modal"}}}],
+        {"create_templates": {"t": {"target_path": "/r"}}},
+    ),
+    (
+        "create_templates_disjoint",
+        [{"create_templates": {"t": {"new_host": "modal"}}}],
+        {"create_templates": {"u": {"new_host": "docker"}}},
+    ),
+    # --- mixtures: scalars + multiple containers + retry together ---
+    (
+        "combined_all_kinds",
+        [
+            {
+                "prefix": "base-",
+                "agent_ready_timeout": 42.0,
+                "agent_types": {
+                    "c": {
+                        "parent_type": "claude",
+                        "auto_dismiss_dialogs": True,
+                        "settings_overrides": {
+                            "model": "sonnet",
+                            "permissions__extend": {"allow__extend": ["Bash(a)"]},
+                        },
+                    },
+                    "keep": {"command": "kept"},
+                },
+                "commands": {"create": {"new_host": "docker"}},
+                "retry": {"connect_retry_times": 7},
+            }
+        ],
+        {
+            "prefix": "ovr-",
+            "agent_types": {
+                "c": {
+                    "parent_type": "claude",
+                    "cli_args": "--c",
+                    "settings_overrides": {"env": "x", "permissions__extend": {"allow__extend": ["Bash(b)"]}},
+                },
+                "new": {"command": "added"},
+            },
+            "commands": {"start": {"foreground": True}},
+            "logging": {"max_log_size_mb": 3},
+        },
+    ),
+]
+
+
+@pytest.mark.usefixtures("_registered_mngr_config_classes")
+@pytest.mark.parametrize(
+    "base_layers,override_raw", [pytest.param(layers, o, id=label) for label, layers, o in _MNGR_CASES]
+)
+def test_mngr_merge_with_matches_frozen_reference(
+    base_layers: list[dict[str, Any]], override_raw: dict[str, Any]
+) -> None:
+    """The production (overlay-backed) ``MngrConfig.merge_with`` reproduces the frozen
+    field-by-field reference exactly, compared at the user-visible (final-default-
+    applied) stage on both sides."""
+    base = _base_from_layers(*base_layers)
+    override = _parse_layer(override_raw)
+    expected = _finalize_like_loader(_reference_mngr_config_merge(base, override))
+    actual = _finalize_like_loader(base.merge_with(override))
+    assert actual == expected
+
+
+@pytest.mark.usefixtures("_registered_mngr_config_classes")
+def test_mngr_container_entry_subclass_is_preserved() -> None:
+    """A ``claude`` (subclass) ``agent_types`` entry round-trips as the subclass
+    through ``MngrConfig.merge_with``, so subclass-only fields survive."""
+    base = _base_from_layers({"agent_types": {"c": {"parent_type": "claude", "auto_dismiss_dialogs": True}}})
+    override = _parse_layer({"agent_types": {"c": {"parent_type": "claude", "cli_args": "--y"}}})
+    actual = base.merge_with(override)
+    entry = actual.agent_types[AgentTypeName("c")]
+    assert type(entry) is _MngrClaudeLikeConfig
+    assert entry.auto_dismiss_dialogs is True
+
+
+def test_mngr_reference_does_not_call_mngr_merge_with() -> None:
+    """Guard against the equivalence test becoming tautological: the frozen reference
+    must not call ``MngrConfig.merge_with`` (it does invoke container *entries'* own
+    ``merge_with``, which is legitimate -- that is the per-key sub-merge the old body
+    performed). Inspecting the source for the absence of a ``MngrConfig`` self-merge
+    is sufficient: the reference dispatches the top-level merge by hand, never through
+    the production method under test.
+    """
+    source = inspect.getsource(_reference_mngr_config_merge)
+    # The reference must construct the result directly (``base.__class__(...)``) and
+    # must never delegate the whole-config merge to the method under test.
+    assert "base.merge_with(override)" not in source
+    assert "base.__class__(" in source
