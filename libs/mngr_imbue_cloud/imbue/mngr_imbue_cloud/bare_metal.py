@@ -146,6 +146,37 @@ def allocate_slice_ports(
 
 
 @pure
+def partition_port_range(
+    port_range_start: int, port_range_end: int, partition_count: int, index: int
+) -> tuple[int, int]:
+    """Split ``[start, end)`` into ``partition_count`` disjoint sub-ranges; return the ``index``-th.
+
+    ``allocate-slice`` bakes several slices on one box concurrently, each in its
+    own ``mngr create`` process that picks the lowest free ports in the range it is
+    given. If every process saw the whole range it would deterministically pick the
+    same two lowest ports (the in-process probe only sees ports already bound, not a
+    sibling bake's chosen-but-not-yet-bound ports), so the bakes would collide.
+    Giving each bake a disjoint window removes that collision. Each window must hold
+    at least the two ports a slice needs.
+    """
+    if partition_count <= 0:
+        raise BareMetalConfigError(f"partition_count must be positive, got {partition_count}")
+    if not 0 <= index < partition_count:
+        raise BareMetalConfigError(f"index {index} out of range for {partition_count} partition(s)")
+    total = port_range_end - port_range_start
+    window = total // partition_count
+    if window < 2:
+        raise SliceCapacityError(
+            f"port range [{port_range_start}, {port_range_end}) is too small to split across "
+            f"{partition_count} slice(s) (each needs at least 2 ports)"
+        )
+    window_start = port_range_start + index * window
+    # The last partition absorbs any remainder so the full range is covered.
+    window_end = port_range_end if index == partition_count - 1 else window_start + window
+    return window_start, window_end
+
+
+@pure
 def next_server_status(current: BareMetalServerStatus) -> BareMetalServerStatus | None:
     """Return the next forward lifecycle status, or None if ``current`` is terminal (ready/failed)."""
     next_value = _NEXT_STATUS_BY_CURRENT.get(str(current))

@@ -39,6 +39,7 @@ from imbue.mngr_imbue_cloud.bare_metal import compute_slice_disk_gib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_memory_mib
 from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
+from imbue.mngr_imbue_cloud.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.bare_metal_db import build_slice_pool_host_insert_values
@@ -557,6 +558,8 @@ def _bake_into_outcomes(
     private_key_path: Path,
     pool_public_key: str,
     database_url: str,
+    port_range_start: int,
+    port_range_end: int,
     outcomes: list[dict[str, Any]],
     outcomes_lock: "threading.Lock",
 ) -> None:
@@ -567,6 +570,8 @@ def _bake_into_outcomes(
         private_key_path=private_key_path,
         pool_public_key=pool_public_key,
         database_url=database_url,
+        port_range_start=port_range_start,
+        port_range_end=port_range_end,
     )
     with outcomes_lock:
         outcomes.append(outcome)
@@ -621,8 +626,15 @@ def _bake_and_record_one_slice(
     private_key_path: Path,
     pool_public_key: str,
     database_url: str,
+    port_range_start: int,
+    port_range_end: int,
 ) -> dict[str, Any]:
-    """Bake one slice on its box and insert its pool_hosts row. Returns an outcome dict (never raises)."""
+    """Bake one slice on its box and insert its pool_hosts row. Returns an outcome dict (never raises).
+
+    ``port_range_start`` / ``port_range_end`` bound the box host ports this bake may
+    forward. Concurrent bakes are each handed a disjoint window so they cannot pick
+    the same ports (see :func:`partition_port_range`).
+    """
     address = server.public_address
     ssh_user = server.lima_service_user or "root"
     host_name = f"slice-{uuid4().hex}"
@@ -644,8 +656,8 @@ def _bake_and_record_one_slice(
             slice_vcpus=sizing["vcpus"],
             slice_memory_mib=sizing["memory_mib"],
             slice_disk_gib=sizing["disk_gib"],
-            port_range_start=DEFAULT_SLICE_PORT_RANGE_START,
-            port_range_end=DEFAULT_SLICE_PORT_RANGE_END,
+            port_range_start=port_range_start,
+            port_range_end=port_range_end,
         )
         logger.info("Baking slice {} on {} ({})", host_name, server.id, address)
         bake_result = _run_remote(
@@ -844,10 +856,17 @@ def allocate_slice(
             private_key_path=private_key_path,
         )
 
-        # Bake all slices in parallel (one thread each); the per-slice port probe
-        # keeps concurrent bakes on the same box from colliding.
+        # Bake all slices in parallel (one thread each). Each bake is a separate
+        # mngr create process that picks the lowest free ports in the window it is
+        # given; handing each a DISJOINT sub-range of the box port range stops
+        # concurrent bakes from deterministically choosing the same ports (the
+        # in-process probe can't see a sibling bake's not-yet-bound choice).
         outcomes: list[dict[str, Any]] = []
         outcomes_lock = threading.Lock()
+        port_windows = [
+            partition_port_range(DEFAULT_SLICE_PORT_RANGE_START, DEFAULT_SLICE_PORT_RANGE_END, count, idx)
+            for idx in range(count)
+        ]
         threads = [
             ObservableThread(
                 target=_bake_into_outcomes,
@@ -857,6 +876,8 @@ def allocate_slice(
                     private_key_path=private_key_path,
                     pool_public_key=pool_public_key,
                     database_url=resolved_database_url,
+                    port_range_start=port_windows[idx][0],
+                    port_range_end=port_windows[idx][1],
                     outcomes=outcomes,
                     outcomes_lock=outcomes_lock,
                 ),

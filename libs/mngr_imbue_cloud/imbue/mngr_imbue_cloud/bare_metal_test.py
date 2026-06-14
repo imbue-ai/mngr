@@ -14,6 +14,7 @@ from imbue.mngr_imbue_cloud.bare_metal import compute_slice_vcpus
 from imbue.mngr_imbue_cloud.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.bare_metal import is_valid_status_transition
 from imbue.mngr_imbue_cloud.bare_metal import next_server_status
+from imbue.mngr_imbue_cloud.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
@@ -138,6 +139,36 @@ def test_allocate_slice_ports_raises_when_fewer_than_two_free() -> None:
 def test_allocate_slice_ports_rejects_empty_range() -> None:
     with pytest.raises(BareMetalConfigError):
         allocate_slice_ports(used_ports=set(), port_range_start=22000, port_range_end=22000)
+
+
+def test_partition_port_range_gives_disjoint_covering_windows() -> None:
+    windows = [partition_port_range(22000, 32000, 4, idx) for idx in range(4)]
+    # Each window holds plenty of ports for a slice's two forwards.
+    for start, end in windows:
+        assert end - start >= 2
+    # Windows are disjoint and ordered (no two concurrent bakes share a port).
+    for (_, prev_end), (next_start, _) in zip(windows, windows[1:], strict=False):
+        assert next_start >= prev_end
+    # The last window absorbs the remainder so the whole range is covered.
+    assert windows[0][0] == 22000
+    assert windows[-1][1] == 32000
+
+
+def test_partition_port_range_single_partition_is_the_whole_range() -> None:
+    assert partition_port_range(22000, 32000, 1, 0) == (22000, 32000)
+
+
+def test_partition_port_range_rejects_window_too_small_for_a_slice() -> None:
+    # 3 ports across 2 partitions -> 1 port each, too few for a slice's two forwards.
+    with pytest.raises(SliceCapacityError):
+        partition_port_range(22000, 22003, 2, 0)
+
+
+def test_partition_port_range_rejects_bad_index_and_count() -> None:
+    with pytest.raises(BareMetalConfigError):
+        partition_port_range(22000, 32000, 0, 0)
+    with pytest.raises(BareMetalConfigError):
+        partition_port_range(22000, 32000, 4, 4)
 
 
 def test_next_server_status_walks_the_forward_chain() -> None:
