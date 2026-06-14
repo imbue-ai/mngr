@@ -196,21 +196,32 @@ inheritance) is still pydantic-model field-by-field assignment that `model_dump`
 values; it does **not** round-trip the whole config through overlay.
 
 Step 3 -- routing the **whole** config merge through overlay (serialize → pre-process → merge →
-re-parse) -- is the remaining work. Nothing is a hard technical blocker, but it is gated on:
+re-parse) -- is the remaining work. Nothing is a hard technical blocker. The real risk is one item
+(`model_fields_set` fidelity); the rest is tractable work:
 
-- **The narrowing-policy decision (Stage 2 in [config-merge-operators.md](./config-merge-operators.md)).**
-  The unified path runs every field through overlay's narrowing, so the flag / raise-immediately /
-  aggregate / `__assign` policy must be settled first or the integration is built on shifting ground.
-- **`model_fields_set` fidelity (the subtle correctness risk).** The model-level merge applies only
-  *explicitly-set* fields so an untouched field is not clobbered. A dict round-trip must preserve this
-  via `model_dump(exclude_unset=True)`, reproducing the loader's nuanced None-handling ("parse_config
-  sets every kwarg, often to None, so `model_fields_set` over-reports"). This is the trickiest part.
+- **`model_fields_set` fidelity -- the one genuine correctness risk; approach it tests-first.** The
+  model-level merge applies only *explicitly-set* fields so an untouched field is not clobbered. A
+  dict round-trip must preserve this via `model_dump(exclude_unset=True)`, reproducing the loader's
+  nuanced None-handling ("parse_config sets every kwarg, often to None, so `model_fields_set`
+  over-reports"). Write the round-trip-fidelity tests (especially set-to-None vs unset) first.
+- **The narrowing-policy decision is *not* a prerequisite (decoupled).** Overlay returns narrowing
+  paths *policy-agnostically* (`merge_narrowing_allowed` never consults the flag), so the unified path
+  just routes them into the loader's existing flag-gated aggregation -- preserving today's behavior --
+  and Stage 2 (raise-immediately / drop the flag, in
+  [config-merge-operators.md](./config-merge-operators.md)) then changes **only the loader**,
+  independently, before or after. The two do not block each other.
 - **A config-shaped serializer that flattens transparent wrappers** (`CommandDefaults.defaults` /
   `CreateTemplate.options`) so override paths line up with base paths -- what `_walk_to_field`
   special-cases today.
-- **Writing the pre-processing passes** (`mark_subtree_extend` for container fields,
-  `settings_overrides`, re-wrapping `StringDerivedTuple`/`Static*`), since those markers/semantics do
-  not survive `model_dump`.
+- **Re-establishing markers at *merge* time.** The *final* re-parse reconstructs markers by default
+  (the after-validators re-run), so the output model is correct -- but `Static*` markers are stripped
+  by `model_dump` (per `StaticTuple`'s docstring) and matter *during* the merge (a `Static*` replace
+  is narrowing-exempt). Today's code sidesteps this by doing narrowing on freshly-*parsed* models, not
+  dumped dicts. The unified path must re-establish Static-ness *before* the merge: easy for
+  schema-declared Static (`ScalarStrTuple` fields -- re-mark from the annotation), lossy only for
+  `StringDerivedTuple` ("written as a string"), addressed by merging on the *raw* pre-parse layers or
+  accepting the string-vs-list distinction is dropped. Plus the container-additive / `SettingsPatchField`
+  semantics expressed as pre-processing passes (`mark_subtree_extend`, etc.).
 - **Blast radius**: it rewrites the core config-load path everything depends on -- gated on appetite,
   not feasibility.
 
