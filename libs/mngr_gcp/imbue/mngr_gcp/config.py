@@ -3,6 +3,7 @@ import shutil
 import google.auth
 from google.auth import exceptions as google_auth_exceptions
 from google.auth.credentials import Credentials
+from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -50,10 +51,10 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
     project. It is never required -- an unset or absent gcloud falls back to the
     configured or hardcoded ``DEFAULT_GCE_ZONE`` (see ``resolve_zone_and_region``).
 
-    The ``gcloud`` binary is probed with ``shutil.which`` first so a missing CLI
-    is a clean ``None`` rather than a process-spawn error, and the command runs
-    through the caller's ``ConcurrencyGroup`` (not ``subprocess`` directly) so the
-    child is tracked and torn down with the rest of the run.
+    ``gcloud`` is probed with ``shutil.which`` first so a missing CLI is a clean
+    ``None`` rather than a process-spawn error, and the command runs through the
+    caller's ``ConcurrencyGroup`` (not ``subprocess``) so the child is tracked and
+    torn down with the run.
     """
     if shutil.which("gcloud") is None:
         return None
@@ -63,9 +64,16 @@ def get_gcloud_compute_zone(concurrency_group: ConcurrencyGroup) -> str | None:
             timeout=_GCLOUD_CONFIG_GET_TIMEOUT_SECONDS,
             is_checked_after=False,
         )
-    except ConcurrencyGroupError:
+    except ConcurrencyGroupError as e:
+        logger.debug("Best-effort 'gcloud config get compute/zone' probe failed; using fallback zone. {}", e)
         return None
     if finished.returncode != 0 or finished.is_timed_out:
+        logger.trace(
+            "'gcloud config get compute/zone' returned no usable zone "
+            "(returncode={}, timed_out={}); using fallback zone.",
+            finished.returncode,
+            finished.is_timed_out,
+        )
         return None
     zone = finished.stdout.strip()
     return zone or None
@@ -93,10 +101,10 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     project_id: str = Field(
         default="",
         description=(
-            "GCP project ID for new instances. A plain identifier, not a credential. When left "
-            "empty, the project is taken from Application Default Credentials (the active "
-            "'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env var); set it explicitly to "
-            "pin a specific project. Leave the ADC mechanism to supply the actual credentials."
+            "GCP project ID for new instances. A plain identifier, not a credential (ADC supplies "
+            "the actual credentials). When left empty, the project is taken from Application Default "
+            "Credentials (the active 'gcloud config set project' or the GOOGLE_CLOUD_PROJECT env "
+            "var); set it explicitly to pin a specific project."
         ),
     )
     default_region: str | None = Field(

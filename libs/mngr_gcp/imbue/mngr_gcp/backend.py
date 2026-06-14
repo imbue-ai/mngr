@@ -45,7 +45,7 @@ def _resolve_credentials_project_and_zone_or_unavailable(
     Resolve the zone/region first -- a config-only check, plus a best-effort
     ``gcloud config get compute/zone`` probe (via ``concurrency_group``) when no
     ``default_zone`` is pinned -- then resolve ADC (``google.auth.default()``),
-    which serves double duty: it yields both the credentials and the project ADC
+    which yields both the credentials and the project ADC
     infers from the environment (``GOOGLE_CLOUD_PROJECT`` / ``gcloud config set
     project`` / metadata), used by ``resolve_project_id`` as the fallback when no
     explicit ``project_id`` is set. A single ``default()`` call serves both, so we

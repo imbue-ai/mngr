@@ -341,11 +341,11 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
             mngr_ctx.concurrency_group,
         )
     except google_auth_exceptions.GoogleAuthError as e:
-        # GoogleAuthError is not an ``MngrError``, so wrap it into one for a clean
-        # CLI message. The no-ADC / no-project cases raised by ``_build_operator_client``
-        # (``GcpCredentialsError`` / ``GcpProjectError``) are already ``GcpError``
-        # (``MngrError``) subclasses, so they render cleanly and are left to
-        # propagate with their specific type intact rather than being flattened.
+        # GoogleAuthError is not an ``MngrError``, so wrap it for a clean CLI
+        # message. The no-ADC / no-project cases (``GcpCredentialsError`` /
+        # ``GcpProjectError`` from ``_build_operator_client``) are already
+        # ``MngrError`` subclasses, so they propagate with their specific type
+        # intact rather than being flattened.
         raise GcpCredentialsError(str(e)) from e
     result = client.ensure_firewall()
     _output_prepare_result(result, client.firewall_name, client.project_id, output_opts.output_format)
