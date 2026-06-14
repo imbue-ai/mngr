@@ -114,8 +114,7 @@ def _apply_custom_overrides_to_parent_config(
     non-overlapping keys survive into the child, with higher/child-bare-wins for
     overlapping keys, preserving / combining ``__extend`` markers). Cross-scope
     narrowing of ``settings_overrides`` at config-load is intentionally not
-    surfaced, deferred together with the broader narrowing-philosophy decision;
-    see ``specs/config-merge-operators.md``.
+    surfaced, deferred together with the broader narrowing-philosophy decision.
 
     The result is computed via the overlay node algebra (serialize ->
     pre-process -> overlay-merge -> reparse) in
@@ -126,8 +125,7 @@ def _apply_custom_overrides_to_parent_config(
     ``ClaudeAgentConfig``, its subclass-only fields supplied by the parent).
     ``_METADATA_FIELDS`` (``parent_type`` / ``plugin``) are dropped from the
     child's sparse dump (inheritance routing, never runtime config), and
-    ``serialize_as_any`` keeps subclass-only fields through the dump. See
-    ``specs/whole-config-overlay-integration.md``.
+    ``serialize_as_any`` keeps subclass-only fields through the dump.
     """
     settings_patch_field_names = get_settings_patch_field_names(type(parent_config))
     return merge_models_via_overlay(

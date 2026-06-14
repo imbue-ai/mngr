@@ -4,9 +4,8 @@ This module replaces the field-by-field pydantic copy in
 ``AgentTypeConfig.merge_with`` *and* ``MngrConfig.merge_with`` with a
 *serialize -> pre-process -> overlay-merge -> reparse* pipeline built on the
 typed-node algebra in ``imbue.overlay.node_merge``. It is the promotion of the
-proven ``AgentTypeConfig`` and ``MngrConfig`` proofs-of-approach (see
-``specs/whole-config-overlay-integration.md``) into a reusable production function,
-behavior-identical to the old merges it replaces.
+proven ``AgentTypeConfig`` and ``MngrConfig`` proofs-of-approach into a reusable
+production function, behavior-identical to the old merges it replaces.
 
 The single public entry point ``merge_models_via_overlay`` reproduces the *result*
 of the model's old field-by-field merge by going only through ``model_dump`` ->

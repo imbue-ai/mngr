@@ -1,117 +1,137 @@
 # overlay
 
-A small, **total, dependency-free** library for merging **layered configuration**. It
-operates purely on plain dicts / lists / sets / scalars plus a tiny set of key-suffix
-operators and atomic-value markers. It knows nothing about your config framework
-(pydantic, dataclasses), your file formats (TOML, YAML, env vars, CLI flags), or your
-schema. You compile your config into its operator language, it merges, and you read the
+**Consistent, principled, and expressive merging of layered settings.**
+
+Almost every application builds its effective configuration by stacking layers in
+precedence order -- built-in defaults `<` user `<` project `<` local `<` environment
+`<` command line. The hard part is not reading the layers; it is *combining* them in a
+way that is predictable and that lets a user say exactly what they mean. The two
+obvious defaults both fail:
+
+- **Assign-by-default** -- a higher layer's value replaces the lower's *wholesale*, so
+  setting one nested key silently drops its siblings.
+- **Deep-merge-by-default** -- you can never cleanly *replace* a value, and list
+  semantics are ambiguous (concat? union? replace?).
+
+`overlay` is a small, **total, dependency-free** library that fixes this with **explicit
+per-key operators** (assign vs. extend), **atomic-value markers**, and a **narrowing
+guard** that flags when an assign would silently drop entries from the layer below. It
+operates purely on plain `dict` / `list` / `set` / scalar data. It knows nothing about
+your config framework, your file formats (TOML, YAML, env vars, CLI flags), or your
+schema: you compile your config into its operator language, it merges, and you read the
 result back and re-parse into your own types.
 
-It owns exactly one thing: **the algebra of how N precedence-ordered layers of config
-combine** -- assign vs. merge, narrowing detection, and deferred resolution against a
-runtime base. Nothing else.
+It owns exactly one thing: **the algebra of how N precedence-ordered layers combine.**
 
-## Why it exists
+## The operator language
 
-Layered config (built-in defaults < user < project < local < env < CLI) needs a
-*precise, predictable* merge. The two obvious defaults are both surprising:
+Operators ride on **key suffixes** in the surface dict you hand the library:
 
-- **Assign-by-default**: a higher layer's value replaces the lower's *wholesale* -- so
-  setting one nested key silently drops its siblings.
-- **Deep-merge-by-default**: you can never cleanly *replace* a value, and list semantics
-  are ambiguous.
-
-The fix is **explicit operators** (assign vs. extend) plus a **narrowing guard** that
-flags when an assign silently drops entries from the layer below.
-
-## Core model
-
-### Values
-
-Ordinary JSON-shaped data: `dict`, `list`, `set`, scalar. Plus optional **`Static*`
-wrappers** (`StaticTuple`, `StaticList`, `StaticDict`): "this aggregate is **atomic** --
-replacing it is a value-set, not narrowing." `ScalarTuple` is a `StaticTuple` subclass
-for a tuple-typed value that is semantically a single scalar (e.g. a value written as a
-single string and coerced into a tuple).
-
-### Operators (key suffixes)
-
-- **bare `key`** -> **assign**: replace the value from the layer below.
-  Narrowing-checked.
-- **`key__extend`** -> **merge** onto the layer below: list concat, set union,
+- **bare `key`** -> **assign**: replace the value from the layer below. Narrowing-checked.
+- **`key__extend`** -> **merge** onto the layer below: list concat, set union, and
   **recursive** dict merge (nested `__extend` go deeper; nested *bare* keys assign at
-  their level). Never narrows -- an extend is always a superset.
-- **`key__assign`** -> **assign without the narrowing warning**: an explicit "yes, I am
-  replacing this, I know it drops things."
+  their own level). Never narrows -- an extend is always a superset.
+- **`key__assign`** -> **assign without the narrowing warning**: the explicit "yes, I am
+  replacing this, I know it drops things" opt-out.
 
-`EXTEND_SUFFIX` (`__extend`), `EXTEND_SUFFIX_ENV` (`__EXTEND`), and `ASSIGN_SUFFIX`
-(`__assign`) are exported for surfaces that need to recognise or emit the suffixes.
+Aggregate values can be wrapped in a **`Static*` marker** (`StaticList`, `StaticDict`,
+`StaticTuple`) meaning "this aggregate is **atomic** -- replacing it is a value-set, not
+narrowing." `ScalarTuple` is a `StaticTuple` subclass for a tuple that is semantically a
+single scalar (e.g. a value written as one string and coerced to a tuple).
 
-### Within-layer resolution (order-independent)
+The suffix constants (`EXTEND_SUFFIX` = `__extend`, `EXTEND_SUFFIX_ENV` = `__EXTEND`,
+`ASSIGN_SUFFIX` = `__assign`) and key helpers are exported for surfaces that emit or
+recognise them.
 
-A single layer is resolved in two phases: **assign-phase** (bare keys and `__assign`)
-then **extend-phase** (`__extend`). This is deliberately **independent of key order** --
-important because some sources are unordered (env vars have no document order). Exactly
-one combination is an error: a bare `key` **and** `key__assign` for the same key in the
-same layer (two contradictory assigns); `check_no_conflicting_assign` raises
-`OverlayError` on it. Everything else falls out mechanically:
+### Within-layer resolution is order-independent
 
-- `key` + `key__extend` -> assign then extend = "reset, then add".
-- `key__assign` + `key__extend` -> no-warn assign then extend = "reset-without-warning,
-  then add".
+A single layer can mention a field more than once (`key` and `key__extend`). The library
+resolves each layer in two phases -- **assign-phase** (bare keys and `__assign`) then
+**extend-phase** (`__extend`) -- so the outcome never depends on key order. This matters
+because some sources are unordered (environment variables have no document order).
+Exactly one combination is an error: a bare `key` **and** `key__assign` for the *same*
+key in the *same* layer (two contradictory assigns) raises `OverlayError`. Everything
+else falls out mechanically -- `key` + `key__extend` means "reset, then add."
 
 ### Narrowing
 
 A **bare** assign that drops a non-empty aggregate entry from the layer below is a
-*narrowing*, recorded with its dotted path -- **recursively**, including bare keys nested
-inside an `__extend` value. `__extend` never narrows (superset); `__assign` and
-`Static*` values suppress it (`would_assignment_narrow` honours both). The library only
-**reports** narrowings; **the caller decides when and whether to raise.** There is no
-global "allow narrowing" flag -- suppression is *per-key* via `__assign`.
+*narrowing*, recorded with its dotted path -- **recursively**, including a bare key
+nested inside an `__extend` value. `__extend` never narrows (it is a superset); a
+`__assign` or a `Static*` value suppresses the check. **The library only reports
+narrowings; the caller decides when and whether to raise.** There is no global "allow
+narrowing" flag -- suppression is *per-key*, via `__assign`.
 
-## Operations
+## The representation: typed nodes
 
-### `merge(lower, higher) -> (patch, narrowings)`
+Internally the operator does **not** live in the key string; it lives in the **type** of
+a typed-node wrapper. `lift` converts the suffix surface syntax into a `Patch` (a
+`dict[str, Node]`) whose values are one of three frozen wrappers:
 
-Combine two patches, `higher` over `lower`. **Preserves** any `__extend` marker that has
-nothing concrete to resolve against (so it can resolve later against a runtime base);
-**combines** two markers for the same key; a higher **bare** key wins over a lower
-marker. Records narrowings. **Pure. Associative** --
-`finalize(merge(merge(B, X), Y)) == finalize(merge(B, merge(X, Y)))` -- so layers can be
-combined in any grouping, and a runtime base supplied early or late gives the same
-result. Raises only on the bare-plus-`__assign` conflict (a parse error).
+- `Default(payload)` -- assign, narrowing-checked (the bare `key`).
+- `Assign(payload)` -- assign without the check (`key__assign`).
+- `Extend(payload)` -- merge onto the layer below (`key__extend`).
 
-### `finalize(patch) -> dict`
+The load-bearing invariant is that a node's payload is **never** a bare node -- it is a
+leaf or a nested `Patch`. The algebra inspects and rewrites only the *outermost* wrapper
+and never re-parses a key string, which is what makes a stacked suffix like
+`a__extend__assign` harmless: it lifts to a literal field name `a__extend` under a single
+`Assign` wrapper and is never re-interpreted.
 
-Resolve any **remaining** `__extend` against nothing (extend-against-empty = assign),
-producing a **marker-free** dict. Pure.
+## API
 
-### Lower-level building blocks
+All operations are pure functions over a `Patch`.
 
-`apply_extend` / `extend_dict` resolve a single `__extend` value against a concrete
-value; `combine_patches` is the marker-preserving combine that `merge` wraps with
-narrowing detection. These are exported for consumers that need the pieces directly.
+| Function | Purpose |
+| --- | --- |
+| `lift(raw)` | Suffix-keyed surface dict -> `Patch`. Resolves within-layer "reset then add"; raises on the bare-plus-`__assign` conflict. |
+| `lift_concrete(base)` | A plain, already-resolved dict -> an all-`Default` `Patch`. Use it to put a concrete base at the bottom of the fold. |
+| `merge(lower, higher)` | Combine `higher` over `lower`; **raises `NarrowingError`** (aggregating every narrowing path) -- the strict default. |
+| `merge_narrowing_allowed(lower, higher)` | Same combine, but returns `(patch, narrowing_paths)` for the caller to surface or discard instead of raising. |
+| `finalize(patch)` | Collapse a `Patch` to a plain, marker-free `dict` (a surviving `Extend` resolves against nothing = assign). |
+| `lower(patch)` | Inverse of `lift`: a `Patch` back to a suffix-keyed dict, for carrying an unresolved patch as plain (e.g. JSON-able) data. |
 
-### Pipeline
+`NarrowingError` and the base `OverlayError` live in `errors`; the node types and
+markers in `nodes` / `markers`.
 
-Fold your layers low -> high with `merge` (put a concrete runtime base at the **bottom**
-if you have one), then `finalize` once, and raise on the accumulated `narrowings` per
-your policy. Associativity means you can pre-combine the layers available at config-load
-time and `merge` a later-arriving runtime base onto the front -- identical result.
+### Typical pipeline
 
-## What the library does NOT do (the consumer's job)
+`lift` each layer, fold them low -> high with `merge` (or `merge_narrowing_allowed` if
+you want to decide on narrowings yourself), then `finalize` once:
 
-- Parse files / env / CLI into dicts.
-- Own your schema or types. Serialize your config object to a dict *before* and re-parse
-  *after*; your type system re-coerces declared types.
-- Decide which fields behave specially -- that is encoded as suffixes/markers by the
-  consumer's own pre-processing.
-- Decide when to surface narrowing errors -- the lib reports; you raise.
+```python
+patch = lift(defaults_layer)
+for layer in (user_layer, project_layer, local_layer):
+    patch = merge(patch, lift(layer))   # or merge_narrowing_allowed
+result = finalize(patch)                # plain dict; re-parse into your own types
+```
+
+If you have a concrete runtime base, put it at the **bottom** with `lift_concrete` so a
+higher `Extend` extends it and a higher `Default` replaces (and is narrowing-checked)
+against it.
+
+### Deferred resolution against a runtime base
+
+`merge` is **associative**, so the base does not have to be present when you combine the
+static layers. If part of the base is only built at runtime, combine the static layers at
+load time, `lower` the combined patch back to a suffix-keyed dict to carry it as plain
+data, then `lift` it again and `merge` it onto the runtime base once that base exists.
+The result is identical to having merged everything in one pass -- a surviving `__extend`
+simply waits for its base and resolves when one finally appears.
 
 ## Properties
 
-- `merge` is **pure, deterministic, associative**.
+- `merge` is **pure, deterministic, and associative**.
 - Within-layer resolution is **order-independent** (safe for unordered sources).
-- **Dependency-free** (stdlib only).
-- **Total**: no escape hatches, hooks, or policy parameters -- all behavior lives in the
-  operator language, which makes it trivially testable in isolation.
+- **Dependency-free** (standard library only).
+- **Total**: no hooks, callbacks, or policy parameters. Every behavior is expressed in
+  the operator language, which makes the algebra trivially testable in isolation.
+
+## What it does NOT do (the consumer's job)
+
+- Parse files / env / CLI into dicts.
+- Own your schema or types -- serialize your config object to a dict *before* and
+  re-parse *after*; your own type system re-coerces declared types.
+- Decide which fields behave specially -- that is encoded as suffixes/markers by your own
+  pre-processing.
+- Decide when to surface narrowing errors -- the library reports, you raise.

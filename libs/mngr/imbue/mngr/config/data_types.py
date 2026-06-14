@@ -455,8 +455,7 @@ class AgentTypeConfig(FrozenModel):
         # assign-by-default (override's set fields win, base carries through),
         # SettingsPatchField fields accumulate via ``__extend`` (the combine_patches
         # branch), and the result re-parses into ``type(self)`` so a subclass stays
-        # its concrete class. See ``overlay_merge.merge_models_via_overlay`` and
-        # ``specs/whole-config-overlay-integration.md``.
+        # its concrete class. See ``overlay_merge.merge_models_via_overlay``.
         settings_patch_field_names = get_settings_patch_field_names(type(override))
         return merge_models_via_overlay(self, override, settings_patch_field_names=settings_patch_field_names)
 
@@ -730,8 +729,7 @@ class MngrConfig(FrozenModel):
         entry combined field-by-field = its own ``merge_with``); and container entry
         subclasses (e.g. ``ClaudeAgentConfig``) re-parse into their concrete class so
         subclass-only fields and ``SettingsPatchField`` accumulation survive. See
-        ``overlay_merge.merge_models_via_overlay`` and
-        ``specs/whole-config-overlay-integration.md``.
+        ``overlay_merge.merge_models_via_overlay``.
         """
         merged, _narrowings = self.merge_with_narrowings(override)
         return merged

@@ -113,8 +113,8 @@ def test_prevent_pandas_import() -> None:
 # strictly dependency-free library (stdlib only -- see README and pyproject
 # ``dependencies = []``), so pydantic is not an option. The typed-node model
 # (Default/Assign/Extend) needs lightweight frozen immutable value wrappers, which
-# frozen dataclasses provide from the stdlib; this is the design pinned in
-# specs/overlay-typed-nodes.md. A justified, isolated exception, not an evasion.
+# frozen dataclasses provide from the stdlib (see the ``nodes.py`` module docstring).
+# A justified, isolated exception, not an evasion.
 def test_prevent_dataclasses_import() -> None:
     rc.check_dataclasses_import(_DIR, snapshot(1))
 
