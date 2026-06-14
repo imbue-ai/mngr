@@ -12,6 +12,7 @@ from urllib.parse import urljoin
 from markdown_it.token import Token
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.padding import Padding
 
 
 def _rewrite_link_hrefs(tokens: list[Token], base_url: str) -> None:
@@ -32,17 +33,22 @@ def _rewrite_link_hrefs(tokens: list[Token], base_url: str) -> None:
             _rewrite_link_hrefs(token.children, base_url)
 
 
-def markdown_to_ansi(markdown: str, width: int, link_base: str | None = None) -> str:
+def markdown_to_ansi(markdown: str, width: int, link_base: str | None = None, indent: int = 0) -> str:
     """Render a markdown string to an ANSI-formatted string at the given width.
 
     When ``link_base`` is given, relative and anchor links are rewritten to
     absolute URLs (resolved against it) before rendering, so the terminal
     hyperlinks rich emits are clickable rather than dead relative targets.
+
+    When ``indent`` is greater than zero, every rendered line is left-padded by
+    that many spaces. The content is wrapped to ``width`` minus the indent so the
+    padded text still fits, matching the man-page-style indentation used for the
+    DESCRIPTION and other prose sections of command help.
     """
     buffer = StringIO()
     console = Console(file=buffer, force_terminal=True, width=width, color_system="standard")
     rendered = Markdown(markdown)
     if link_base is not None:
         _rewrite_link_hrefs(rendered.parsed, link_base)
-    console.print(rendered)
+    console.print(Padding(rendered, (0, 0, 0, indent)) if indent else rendered)
     return buffer.getvalue()

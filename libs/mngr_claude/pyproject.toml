@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-claude"
-version = "0.2.12"
+version = "0.2.13"
 description = "Claude agent type plugin for mngr"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "imbue-mngr==0.2.12",
+    "imbue-mngr==0.2.13",
     # anthropic: keep UNPINNED and bump often. Imported for its typed stream-event
     # models, whose `ty` exhaustiveness check only flags new variants on upgrade.
     "anthropic",
@@ -13,7 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "imbue-mngr-modal==0.2.12",
+    "imbue-mngr-modal==0.2.13",
 ]
 
 [project.entry-points.mngr]

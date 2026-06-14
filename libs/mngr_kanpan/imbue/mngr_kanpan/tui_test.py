@@ -96,6 +96,7 @@ from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
+from imbue.mngr_kanpan.tui import resolve_board_layout
 
 # =============================================================================
 # Helpers
@@ -528,6 +529,28 @@ def test_build_data_source_column_defs_deduplicates() -> None:
     defs = _build_data_source_column_defs([_MockDataSource(), _MockDataSource()])
     names = [d.name for d in defs]
     assert names.count("mock_field") == 1
+
+
+def test_resolve_board_layout_default_order() -> None:
+    columns, section_order = resolve_board_layout([_MockDataSource()], KanpanPluginConfig())
+    keys = [key for key, _header in columns]
+    # Builtins come first, then the data source's columns appended (default order).
+    assert keys[:2] == ["name", "state"]
+    assert "mock_field" in keys
+    # Headers are stripped of the TUI's display padding.
+    assert ("name", "NAME") in columns
+    assert ("mock_field", "MOCK") in columns
+    assert section_order == BOARD_SECTION_ORDER
+
+
+def test_resolve_board_layout_respects_configured_order() -> None:
+    config = KanpanPluginConfig(
+        column_order=["state", "name", "mock_field"],
+        section_order=[BoardSection.MUTED, BoardSection.PR_MERGED],
+    )
+    columns, section_order = resolve_board_layout([_MockDataSource()], config)
+    assert [key for key, _header in columns] == ["state", "name", "mock_field"]
+    assert section_order == (BoardSection.MUTED, BoardSection.PR_MERGED)
 
 
 # =============================================================================

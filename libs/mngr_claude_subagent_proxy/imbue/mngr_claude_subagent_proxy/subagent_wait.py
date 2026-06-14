@@ -14,6 +14,7 @@ from loguru import logger
 
 from imbue.mngr.api.preservation import get_preserved_agent_dir
 from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
@@ -67,7 +68,7 @@ class AgentLocation:
 
     @property
     def state_dir(self) -> Path:
-        return self.host_dir / "agents" / self.agent_id
+        return get_agents_root_dir(self.host_dir) / self.agent_id
 
     @property
     def claude_projects_dir(self) -> Path:

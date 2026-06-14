@@ -284,11 +284,11 @@ def test_close_closes_docker_client(temp_mngr_ctx: MngrContext) -> None:
 def test_read_only_construction_is_empty_and_creates_no_state_container(temp_mngr_ctx: MngrContext) -> None:
     """Building the docker provider for a read-only op must not create the state container.
 
-    Mirrors the Modal backend: when nothing has been created yet and
-    is_for_host_creation is False, build_provider_instance raises
-    ProviderEmptyError (so the provider loader skips docker) instead of lazily
-    materializing the singleton state container -- which is what caused
-    read-only commands like `mngr list` to leak state containers.
+    Mirrors the Modal backend: when nothing has been created yet,
+    build_provider_instance raises ProviderEmptyError (so the provider loader
+    skips docker) instead of lazily materializing the singleton state container
+    -- which is what caused read-only commands like `mngr list` to leak state
+    containers.
     """
     config = DockerProviderConfig(isolate_host_volumes=False)
     user_id = str(temp_mngr_ctx.get_profile_user_id())
@@ -301,7 +301,6 @@ def test_read_only_construction_is_empty_and_creates_no_state_container(temp_mng
                 name=ProviderInstanceName("docker"),
                 config=config,
                 mngr_ctx=temp_mngr_ctx,
-                is_for_host_creation=False,
             )
         # The read-only construction must not have created the state container.
         with pytest.raises(docker.errors.NotFound):
@@ -309,6 +308,48 @@ def test_read_only_construction_is_empty_and_creates_no_state_container(temp_mng
     finally:
         # Defensive: if the assertion above regresses and a container WAS
         # created, remove it so this test does not itself leak.
+        try:
+            client.containers.get(container_name).remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        client.close()
+
+
+@pytest.mark.docker_sdk
+def test_bootstrap_for_host_creation_creates_state_container(temp_mngr_ctx: MngrContext) -> None:
+    """The create path bootstraps the state container so build then succeeds.
+
+    bootstrap_for_host_creation is the create-path counterpart to the read-only
+    emptiness guard: it creates the singleton state container up front so the
+    subsequent build_provider_instance call passes the guard instead of raising
+    ProviderEmptyError.
+    """
+    config = DockerProviderConfig(isolate_host_volumes=False)
+    user_id = str(temp_mngr_ctx.get_profile_user_id())
+    container_name = state_container_name(temp_mngr_ctx.config.prefix, user_id)
+
+    client = create_docker_client()
+    instance: DockerProviderInstance | None = None
+    try:
+        DockerProviderBackend.bootstrap_for_host_creation(
+            name=ProviderInstanceName("docker"),
+            config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        # Bootstrap created the state container...
+        assert client.containers.get(container_name) is not None
+        # ...so a subsequent read-only build no longer raises ProviderEmptyError.
+        built = DockerProviderBackend.build_provider_instance(
+            name=ProviderInstanceName("docker"),
+            config=config,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        assert isinstance(built, DockerProviderInstance)
+        instance = built
+        assert instance.host_dir == Path("/mngr")
+    finally:
+        if instance is not None:
+            instance.close()
         try:
             client.containers.get(container_name).remove(force=True)
         except docker.errors.NotFound:

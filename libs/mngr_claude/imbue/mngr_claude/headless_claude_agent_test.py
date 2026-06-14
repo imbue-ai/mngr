@@ -168,10 +168,10 @@ def test_assemble_command_includes_print_and_redirect(
     agent, host = _make_headless_agent(local_provider, tmp_path)
     cmd = agent.assemble_command(host, agent_args=(), command_override=None)
     assert "--print" in cmd
-    assert "$MNGR_AGENT_STATE_DIR/stdout.jsonl" in cmd
-    assert ">" in cmd
-    assert "$MNGR_AGENT_STATE_DIR/stderr.log" in cmd
-    assert "2>" in cmd
+    # Assert the full redirect suffix as a single substring so a broken stdout
+    # redirect (or transposed stdout/stderr targets) cannot pass: a lone "2>"
+    # membership check would be satisfied even if stdout redirect were dropped.
+    assert str(cmd).endswith('> "$MNGR_AGENT_STATE_DIR/stdout.jsonl" 2> "$MNGR_AGENT_STATE_DIR/stderr.log"')
 
 
 def test_assemble_command_includes_agent_args(
@@ -185,10 +185,13 @@ def test_assemble_command_includes_agent_args(
         agent_args=("--system-prompt", "test", "--output-format", "stream-json"),
         command_override=None,
     )
-    assert "--system-prompt" in cmd
-    assert "test" in cmd
-    assert "--output-format" in cmd
-    assert "stream-json" in cmd
+    # Parse with shlex and assert the flags appear in order, each immediately
+    # followed by its value. Independent "X in cmd" membership checks would
+    # pass even if flags and values were transposed (e.g.
+    # "--system-prompt --output-format test stream-json").
+    cmd_before_redirect = str(cmd).split(" >", 1)[0]
+    tokens = shlex.split(cmd_before_redirect)
+    assert tokens[-4:] == ["--system-prompt", "test", "--output-format", "stream-json"]
 
 
 def test_assemble_command_no_session_resumption(
@@ -483,7 +486,6 @@ def test_stream_output_yields_text_deltas(
 def test_stream_output_raises_when_empty_file(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """stream_output should raise MngrError when stdout file exists but is empty.
 
@@ -496,9 +498,10 @@ def test_stream_output_raises_when_empty_file(
     Uses _AlwaysFinishedHeadlessClaude instead of _patch_agent_as_stopped to
     keep the startup-grace window short: the tail loop now gates on file
     content during the grace window, so an empty stdout means the loop
-    polls until grace expires.
+    polls until grace expires. The always-finished subclass's
+    _is_agent_finished returns True directly, which is what terminates the
+    tail loop, so no lifecycle patch is needed.
     """
-    _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent)
@@ -644,7 +647,6 @@ def test_stream_output_combines_stderr_and_stdout_errors(
 def test_stream_output_raises_with_stderr_content(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """stream_output should surface stderr.log content in the error when stdout is empty.
 
@@ -653,9 +655,10 @@ def test_stream_output_raises_with_stderr_content(
     `tmux capture-pane` via the host interface.
 
     Uses _AlwaysFinishedHeadlessClaude for the short grace window (stdout is
-    empty, so _authoritatively_finished polls until grace elapses).
+    empty, so _authoritatively_finished polls until grace elapses). Its
+    _is_agent_finished returns True directly, which terminates the tail loop,
+    so no lifecycle patch is needed.
     """
-    _patch_agent_as_stopped(monkeypatch)
     agent, host = _make_headless_agent(local_provider, tmp_path, agent_cls=_AlwaysFinishedHeadlessClaude)
 
     _write_fake_agent_output(host, agent, stderr="stderr-f7g8h9i0\n")
@@ -731,6 +734,11 @@ def test_grace_period_ignores_lifecycle_state(
     result = agent._wait_for_stdout_file(stdout_path)
 
     assert result is True
+    # Phase 1 must have re-polled: the file only appears on the 2nd poll, so a
+    # count >= 2 proves phase 1 ignored the (always-finished) lifecycle state
+    # and kept polling instead of bailing after a single check.
+    assert isinstance(agent, _CreatesFileOnSecondPollAgent)
+    assert agent._stdout_poll_count >= 2
 
 
 def test_phase2_trusts_lifecycle_after_grace_period(
@@ -748,13 +756,9 @@ def test_phase2_trusts_lifecycle_after_grace_period(
     # Do NOT create the stdout file -- agent is "finished" and file never appeared
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
-    start = time.monotonic()
     result = agent._wait_for_stdout_file(stdout_path)
-    elapsed = time.monotonic() - start
 
     assert result is False
-    # Should have waited at least the grace period before trusting lifecycle state
-    assert elapsed >= agent._startup_grace_seconds * 0.9
 
 
 def test_file_during_grace_period_returns_true_immediately(

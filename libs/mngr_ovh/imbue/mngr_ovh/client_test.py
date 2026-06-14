@@ -193,7 +193,7 @@ class TestOvhVpsClientLifecycle:
     def test_create_instance_raises_not_implemented(self) -> None:
         client = _client_with_call(lambda *a, **k: None)
         with pytest.raises(NotImplementedError):
-            client.create_instance(label="x", region="r", plan="p", os_id=0, user_data="", ssh_key_ids=[], tags=[])
+            client.create_instance(label="x", region="r", plan="p", user_data="", ssh_key_ids=[], tags={})
 
 
 class TestOvhVpsClientTask:

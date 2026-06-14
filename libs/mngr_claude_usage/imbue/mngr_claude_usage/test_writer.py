@@ -6,34 +6,16 @@ properly-shaped JSONL events to the per-agent usage events file.
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-
-from imbue.mngr_claude_usage import resources as _resources
-
-WRITER_SCRIPT_NAME = "claude_usage_writer.sh"
-
-
-@pytest.fixture
-def writer_path(tmp_path: Path) -> Path:
-    """Stage the writer script onto disk with execute bit, ready for subprocess."""
-    src = importlib.resources.files(_resources).joinpath(WRITER_SCRIPT_NAME)
-    dst = tmp_path / WRITER_SCRIPT_NAME
-    dst.write_bytes(src.read_bytes())
-    dst.chmod(0o755)
-    return dst
-
-
-@pytest.fixture
-def events_file(tmp_path: Path) -> Path:
-    return tmp_path / "events" / "claude" / "usage" / "events.jsonl"
 
 
 def _has_jq() -> bool:
@@ -79,8 +61,16 @@ def test_writer_emits_event_with_rate_limits(writer_path: Path, events_file: Pat
     assert event["source"] == "claude/usage"
     assert event["type"] == "cost_snapshot"
     assert event["event_id"].startswith("evt-")
-    # ISO 8601 timestamps always contain a 'T' separator
-    assert "T" in event["timestamp"]
+    # The event timestamp is canonical UTC ISO 8601 with a fixed 9-digit
+    # fractional part (the writer emits `<date>T<time>.000000000Z`). The regex
+    # pins the full shape, including the trailing `Z` that anchors it to UTC.
+    # The regex alone can't tell that the calendar fields name a real instant
+    # (it would accept month 13), so also strptime the seconds-resolution `[:19]`
+    # prefix -- sliced to 19 chars because strptime's `%f` only parses 1-6
+    # fractional digits and would choke on the 9-digit fraction.
+    timestamp = event["timestamp"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}Z", timestamp), timestamp
+    datetime.strptime(timestamp[:19], "%Y-%m-%dT%H:%M:%S")
     # session_id and cost are passed through unchanged. They let downstream
     # consumers correlate a cost reading to the session it accumulated in.
     assert event["session_id"] == "abc"
@@ -189,8 +179,10 @@ def test_writer_appends_one_event_per_render(writer_path: Path, events_file: Pat
 
 
 def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path) -> None:
-    """Concurrent renders must end with a parsable events file -- short lines are
-    atomic on append, so we don't need flock; we just check no torn JSON."""
+    """Concurrent renders must end with an events file in which every distinct
+    event survives exactly once -- short lines are atomic on append, so we don't
+    need flock. We check both that no output is torn and that no event is dropped
+    or duplicated."""
     payloads = [
         json.dumps({"rate_limits": {"five_hour": {"used_percentage": float(i), "resets_at": 1700000000 + i}}})
         for i in range(20)
@@ -202,9 +194,11 @@ def test_writer_handles_concurrent_appends(writer_path: Path, events_file: Path)
             assert r.returncode == 0, r.stderr
     lines = [line for line in events_file.read_text().splitlines() if line.strip()]
     assert len(lines) == 20
-    for line in lines:
-        # All lines must be parseable -- no torn output from the concurrent appends.
-        json.loads(line)
+    # Every distinct submitted event must survive exactly once: reconstructing the
+    # set of used_percentage values confirms none was dropped or duplicated (a count
+    # check alone would not), and json.loads on each line fails on any torn output.
+    seen_percentages = {json.loads(line)["rate_limits"]["five_hour"]["used_percentage"] for line in lines}
+    assert seen_percentages == {float(i) for i in range(20)}
 
 
 def test_writer_errors_when_no_path_resolution_possible(writer_path: Path, tmp_path: Path) -> None:
