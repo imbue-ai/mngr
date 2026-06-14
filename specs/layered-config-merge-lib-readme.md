@@ -183,3 +183,36 @@ mngr's current `_walk_to_field` special-case compensates for).
    serialize/re-parse around the lib call.
 4. Leave pydantic-model resolution, schema, and file/env parsing in mngr. The library stays a
    dict→dict algebra.
+
+### Status and what gates step 3
+
+Steps 1-2 are **done**: the library exists (`libs/overlay`), `__assign` / `merge` / `finalize`
+landed, and the typed-node algebra (`Default`/`Assign`/`Extend`; see
+[overlay-typed-nodes.md](./overlay-typed-nodes.md)) is the enabling core. Today mngr routes only
+a few things through overlay -- `resolve_extends` (raw-dict `__extend` resolution against the
+model base), the `settings_overrides` `SettingsPatchField` combine, and the provision-time
+`_build_settings_json` fold. The *rest* of config merging (cross-scope `merge_with`, `parent_type`
+inheritance) is still pydantic-model field-by-field assignment that `model_dump`s only to read
+values; it does **not** round-trip the whole config through overlay.
+
+Step 3 -- routing the **whole** config merge through overlay (serialize → pre-process → merge →
+re-parse) -- is the remaining work. Nothing is a hard technical blocker, but it is gated on:
+
+- **The narrowing-policy decision (Stage 2 in [config-merge-operators.md](./config-merge-operators.md)).**
+  The unified path runs every field through overlay's narrowing, so the flag / raise-immediately /
+  aggregate / `__assign` policy must be settled first or the integration is built on shifting ground.
+- **`model_fields_set` fidelity (the subtle correctness risk).** The model-level merge applies only
+  *explicitly-set* fields so an untouched field is not clobbered. A dict round-trip must preserve this
+  via `model_dump(exclude_unset=True)`, reproducing the loader's nuanced None-handling ("parse_config
+  sets every kwarg, often to None, so `model_fields_set` over-reports"). This is the trickiest part.
+- **A config-shaped serializer that flattens transparent wrappers** (`CommandDefaults.defaults` /
+  `CreateTemplate.options`) so override paths line up with base paths -- what `_walk_to_field`
+  special-cases today.
+- **Writing the pre-processing passes** (`mark_subtree_extend` for container fields,
+  `settings_overrides`, re-wrapping `StringDerivedTuple`/`Static*`), since those markers/semantics do
+  not survive `model_dump`.
+- **Blast radius**: it rewrites the core config-load path everything depends on -- gated on appetite,
+  not feasibility.
+
+When this lands, the `merge_with` / `_apply_custom_overrides_to_parent_config` duplication (noted in
+config-merge-operators.md) disappears wholesale rather than being DRY'd into an mngr-level helper.

@@ -111,6 +111,32 @@ flag, make `merge`'s callers raise on the spot (the flag is the only reason aggr
 exists), update the few configs/tests/e2e that set the flag to use `__assign`. Until then the
 flag and `__assign` coexist per "Coexistence" above.
 
+Two related items belong with this same decision (they share the flag / aggregation / `__assign`
+policy and should land coherently, not piecemeal):
+
+- **Surface the cross-scope `settings_overrides` narrowings that are currently discarded.**
+  `AgentTypeConfig.merge_with` (cross config scope) and
+  `_apply_custom_overrides_to_parent_config` (`parent_type` inheritance) combine the
+  `SettingsPatchField` `settings_overrides` via `merge(...)` / `combine_patches(...)[0]` and
+  **throw away the returned narrowing paths**. The `SettingsPatchField` exemption assumes an
+  accumulating field is "always a superset," but a higher/child scope with a **bare** key can
+  still drop a lower/parent scope's entries -- that's real narrowing, and for ordinary
+  (non-patch) fields it *is* raised. It is dropped today because (1) raising inline in those
+  `@pure` model functions would bypass the flag and the cross-layer aggregation, and (2) it is
+  the same narrowing-policy question. The clean fix routes those narrowings into the loader's
+  `_collect_layer_narrowing` aggregation (flag-gated, raised once) rather than discarding them.
+  The provision fold still catches the most impactful case (dropping a *home* `settings.json`
+  value); what is currently silent is dropping a *parent-scope* override key absent from home
+  settings.
+- **De-duplicate the per-field merge rule.** The rule "assign-by-default, but a
+  `SettingsPatchField` accumulates via the combine" is implemented twice -- in
+  `AgentTypeConfig.merge_with` (scope layering) and `_apply_custom_overrides_to_parent_config`
+  (`parent_type` inheritance). These should not stay duplicated. The *strategy* depends on the
+  decisions above and on the "Future direction" integration below: if the whole config-merge
+  unifies onto the overlay algebra, the duplication disappears wholesale; if not, it collapses
+  into one mngr-level helper ("merge two models field-by-field honouring `SettingsPatchField`").
+  Pick the strategy once the narrowing policy and the integration scope are settled.
+
 ## Future direction: typed node wrappers instead of string suffixes
 
 **Now designed** in [overlay-typed-nodes.md](./overlay-typed-nodes.md) (approved in
