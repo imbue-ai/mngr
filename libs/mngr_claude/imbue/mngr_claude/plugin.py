@@ -16,6 +16,7 @@ from datetime import datetime
 from datetime import timezone
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import Callable
 from typing import ClassVar
@@ -46,9 +47,10 @@ from imbue.mngr.api.preservation import preserve_agent_data
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver import is_extend_key
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import AgentStartError
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import NoCommandDefinedError
@@ -312,12 +314,13 @@ class ClaudeAgentConfig(AgentTypeConfig):
         description="When True, adds a PermissionRequest hook that auto-allows all permission dialogs. "
         "This means Claude Code will never pause for permission approval.",
     )
-    settings_overrides: dict[str, Any] = Field(
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(
         default_factory=dict,
         description="A patch merged onto your home Claude settings at provisioning: a bare key "
         "replaces (and warns if it drops a sibling aggregate); `key__extend` merges; nest "
-        "`__extend` to merge deeper. Cross-config-scope `__extend` accumulation is not supported "
-        "(a higher scope's settings_overrides replaces a lower scope's). "
+        "`__extend` to merge deeper. Accumulates across config scopes and `parent_type` "
+        "inheritance: a lower/parent scope's `settings_overrides` is combined with (not replaced "
+        "by) a higher/child scope's, per-key, with `__extend` markers combined. "
         "Example: {'model': 'opus[1m]', 'permissions__extend': {'allow__extend': ['Bash(npm *)']}}. "
         "Not applied in use_env_config_dir mode (there is no per-agent settings.json to merge into).",
     )

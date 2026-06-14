@@ -10,12 +10,12 @@ from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import CreateTemplateName
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
-from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import combine_patches
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
+from imbue.mngr.config.key_resolver_primitives import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver_primitives import bare_key
+from imbue.mngr.config.key_resolver_primitives import combine_patches
+from imbue.mngr.config.key_resolver_primitives import is_extend_key
+from imbue.mngr.config.key_resolver_primitives import parse_scalar_value
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.primitives import AgentTypeName
 

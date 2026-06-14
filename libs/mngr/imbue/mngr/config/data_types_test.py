@@ -1,6 +1,8 @@
 """Tests for config data types."""
 
 from pathlib import Path
+from typing import Annotated
+from typing import Any
 
 import pytest
 from pydantic import Field
@@ -18,6 +20,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
 from imbue.mngr.config.data_types import ScalarTuple
+from imbue.mngr.config.data_types import SettingsPatchField
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
@@ -41,6 +44,62 @@ class _TestAgentTypeConfig(AgentTypeConfig):
     """Test subclass with an extra field for testing subclass-specific field handling."""
 
     custom_flag: bool = Field(default=False)
+
+
+class _PatchFieldAgentConfig(AgentTypeConfig):
+    """Test subclass with a ``SettingsPatchField``-marked dict (accumulates across
+    layers) and a plain dict (assign-by-default), to exercise marker-aware merge."""
+
+    settings_overrides: Annotated[dict[str, Any], SettingsPatchField()] = Field(default_factory=dict)
+    plain_map: dict[str, Any] = Field(default_factory=dict)
+
+
+def test_merge_with_combines_settings_patch_field_same_key_extend() -> None:
+    """Two scopes both extending the same nested key accumulate (not clobber)."""
+    base = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"permissions__extend": {"allow__extend": ["A"]}},
+    )
+    override = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"permissions__extend": {"allow__extend": ["B"]}},
+    )
+    merged = base.merge_with(override)
+    assert merged.settings_overrides == {"permissions__extend": {"allow__extend": ["A", "B"]}}
+
+
+def test_merge_with_combines_settings_patch_field_disjoint_keys() -> None:
+    """Two scopes setting DIFFERENT keys both survive (no whole-dict replace)."""
+    base = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"permissions__extend": {"allow__extend": ["A"]}},
+    )
+    override = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"model": "opus"},
+    )
+    merged = base.merge_with(override)
+    assert merged.settings_overrides == {
+        "permissions__extend": {"allow__extend": ["A"]},
+        "model": "opus",
+    }
+
+
+def test_merge_with_assigns_unmarked_dict_field_by_default() -> None:
+    """A non-marked dict field still assigns by default (whole-dict replace)."""
+    base = _PatchFieldAgentConfig.model_construct(plain_map={"a": 1, "b": 2})
+    override = _PatchFieldAgentConfig.model_construct(plain_map={"c": 3})
+    merged = base.merge_with(override)
+    assert merged.plain_map == {"c": 3}
+
+
+def test_detect_settings_narrowing_exempts_settings_patch_field() -> None:
+    """A higher scope's ``settings_overrides`` is never flagged as narrowing -- it
+    accumulates (combine), so it cannot drop a lower scope's entries. Even an
+    apparent bare-drop is deferred to the provision fold rather than flagged here."""
+    base = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"permissions": {"allow": ["A"], "deny": ["B"]}},
+    )
+    override = _PatchFieldAgentConfig.model_construct(
+        settings_overrides={"permissions": {"allow": ["A"]}},
+    )
+    assert detect_settings_narrowing(base, override) == []
 
 
 def test_logging_config_merge_overrides_all_fields() -> None:

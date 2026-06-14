@@ -28,11 +28,11 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
+from imbue.mngr.config.key_resolver_primitives import bare_key
+from imbue.mngr.config.key_resolver_primitives import is_extend_key
+from imbue.mngr.config.key_resolver_primitives import parse_scalar_value
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.config.loader import parse_config

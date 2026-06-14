@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shlex
 from collections.abc import Mapping
+from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +26,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.key_resolver_primitives import combine_patches
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import ParseSpecError
 from imbue.mngr.primitives import AgentTypeName
@@ -54,6 +56,33 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 # === Helper Functions ===
 
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
+
+
+class SettingsPatchField:
+    """Marker attached (via ``Annotated[dict[str, Any], SettingsPatchField()]``) to
+    a dict field whose cross-layer merge **accumulates** as a settings *patch*
+    rather than assigning by default.
+
+    ``merge_with`` (config-scope merge) and ``_apply_custom_overrides_to_parent_config``
+    (agent-type ``parent_type`` inheritance) read this marker off the field's
+    ``model_fields[name].metadata``. A marked field is combined via
+    ``combine_patches`` (the four-rule, recursive, marker-preserving combine) so a
+    lower/parent layer's contribution is never dropped wholesale -- even for
+    non-overlapping keys, which an assign would clobber. Every other field stays
+    assign-by-default.
+
+    The field carrying this marker (``ClaudeAgentConfig.settings_overrides``) lives
+    on a plugin subclass; the base ``merge_with`` reads the marker generically, so
+    core never has to know the field's name. Because such a field accumulates
+    (combine, never assign), it is also exempt from the assign-narrowing detector
+    (``detect_settings_narrowing``): a higher layer that merely adds keys is a
+    superset and cannot narrow.
+    """
+
+
+def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
+    """Return True if a field's ``metadata`` contains a ``SettingsPatchField`` marker."""
+    return any(isinstance(item, SettingsPatchField) for item in metadata)
 
 
 class ScalarTuple(tuple):
@@ -263,6 +292,13 @@ def _walk_for_narrowing(
             # layer did not write the field, so it cannot narrow anything.
             if override_value is None:
                 continue
+            field_info = override.__class__.model_fields.get(field_name)
+            if field_info is not None and is_settings_patch_field(field_info.metadata):
+                # A ``SettingsPatchField`` accumulates (combine, never assign) across
+                # config layers, so a higher layer is always a superset and cannot
+                # narrow. Skip the assign-narrowing check entirely; any intentional
+                # bare drop is caught later by the provision fold against the base.
+                continue
             base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
             sub_path = path + (field_name,)
             if field_name in _CONTAINER_DICT_FIELDS:
@@ -465,6 +501,13 @@ class AgentTypeConfig(FrozenModel):
         value in the override replaces the base value entirely. Use the
         ``field__extend`` operator in TOML / ``--setting`` / env vars to get
         additive behavior.
+
+        Exception: a field marked ``SettingsPatchField`` (e.g.
+        ``ClaudeAgentConfig.settings_overrides``) is a settings *patch* that
+        **accumulates** across config scopes rather than assigning. Its base and
+        override values are combined per-key via ``combine_patches`` (preserving /
+        combining ``__extend`` markers, higher-bare-wins), so a lower scope's
+        contribution is never dropped wholesale -- not even non-overlapping keys.
         """
         # Allow override to be the same class or a base class of self (e.g., when
         # a secondary config file defines the same custom type without repeating
@@ -478,7 +521,16 @@ class AgentTypeConfig(FrozenModel):
             return self
 
         override_values = override.model_dump()
-        updates: list[tuple[str, Any]] = [(field_name, override_values[field_name]) for field_name in explicitly_set]
+        base_values = self.model_dump()
+        updates: list[tuple[str, Any]] = []
+        for field_name in explicitly_set:
+            field_info = override.__class__.model_fields.get(field_name)
+            if field_info is not None and is_settings_patch_field(field_info.metadata):
+                updates.append(
+                    (field_name, combine_patches(base_values.get(field_name) or {}, override_values[field_name]))
+                )
+            else:
+                updates.append((field_name, override_values[field_name]))
         return self.model_copy_update(*updates)
 
 

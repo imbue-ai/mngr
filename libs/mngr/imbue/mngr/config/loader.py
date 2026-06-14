@@ -38,12 +38,12 @@ from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import detect_settings_narrowing
 from imbue.mngr.config.data_types import split_cli_args_string
 from imbue.mngr.config.host_dir import read_default_host_dir
-from imbue.mngr.config.key_resolver import EXTEND_SUFFIX
-from imbue.mngr.config.key_resolver import bare_key
-from imbue.mngr.config.key_resolver import is_extend_key
-from imbue.mngr.config.key_resolver import parse_scalar_value
 from imbue.mngr.config.key_resolver import resolve_extends
 from imbue.mngr.config.key_resolver import set_at_path
+from imbue.mngr.config.key_resolver_primitives import EXTEND_SUFFIX
+from imbue.mngr.config.key_resolver_primitives import bare_key
+from imbue.mngr.config.key_resolver_primitives import is_extend_key
+from imbue.mngr.config.key_resolver_primitives import parse_scalar_value
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
 from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
