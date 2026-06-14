@@ -172,24 +172,51 @@ accumulates the paths, and raises its own `NarrowingError` once — which is wha
 does today via `_collect_layer_narrowing`. `NarrowingError` is an `OverlayError` subclass
 carrying the list of paths.
 
-## mngr integration (consumer side)
+## mngr integration (consumer side): the engine swap
 
-- **Lift at every parse boundary.** The env-var loader, `--setting`, `mngr config
-  set/extend`, and TOML parsing currently emit suffix-keyed dicts. Each layer is `lift`-ed
-  to a node patch before merging. `set_at_path` and friends stay (they build the suffix-keyed
-  dict); the lift sits just after.
-- **`resolve_extends` becomes node-aware.** It lifts the override, walks the pydantic/dict
-  base (`_walk_to_field`, unchanged — `CommandDefaults` / `CreateTemplate` transparent
-  wrappers), and resolves `Extend` nodes against the base value, **except** on deferred paths
-  (`is_deferred_extend_path`), where the `Extend` node is preserved for runtime resolution.
-  The deferred-path registry and matchers stay in mngr (consumer policy).
-- **`SettingsPatchField`** stays a mngr pydantic annotation; the marked field combines across
-  config scopes / `parent_type` inheritance via `combine` (node patches) instead of
-  assigning. `detect_settings_narrowing` / `_walk_for_narrowing` / `_check_narrowing` stay in
-  mngr (they walk pydantic models); they call the overlay value-level predicate.
-- **`_build_settings_json`** (mngr_claude) merges `settings_overrides` (a patch whose deferred
-  `Extend` nodes survived) onto the provision base `B` via `merge` / `merge_narrowing_allowed`
-  per the flag, then `finalize`s to a plain dict.
+mngr keeps its **suffix-keyed dict** as the storage / boundary representation everywhere
+(TOML, env, `--setting`, `mngr config`, and the stored `settings_overrides` /
+`create_templates.options` dicts -- all plain JSON-able data, no node objects in pydantic).
+The node algebra is the **internal engine**, bridged at the boundaries by `lift` (suffix dict
+-> node patch) and `lower` (node patch -> suffix dict). This is deliberate: an investigation
+confirmed mngr never serializes these dicts after load, but the plain-data contract is
+simpler and lower-risk than threading node objects through the schema, and the leak is fixed
+either way.
+
+**Why the leak is still fixed under the engine swap.** Within any single resolution pass,
+`lift` runs **once** (it strips only the outermost suffix into a node; an inner suffix stays a
+literal field-name character and is never re-parsed). `finalize` is only ever the **terminal**
+step. Deferred markers are carried across passes via `lower` (which re-emits each node's own
+suffix faithfully: `Assign` -> `key__assign`, `Extend` -> `key__extend`, `Default` -> bare),
+so a later `lift` reproduces the same nodes and never reactivates a stray suffix. (The old
+string algebra reactivated precisely at the terminal `finalize` on a stacked suffix; the node
+algebra lowers/re-lifts faithfully instead, so a stacked suffix at worst yields a harmless
+literal field name in the terminal output.) No stacked-suffix guard is needed.
+
+Touch points:
+
+- **`resolve_extends` (3 call sites: loader, `--setting`, `mngr config`)** becomes node-based:
+  `lift` the override, walk the pydantic/dict base (`_walk_to_field`, unchanged --
+  `CommandDefaults` / `CreateTemplate` transparent wrappers), resolve `Extend` nodes against
+  the base and `finalize` the non-deferred parts to plain values; on **deferred paths**
+  (`is_deferred_extend_path`) `lower` the surviving nodes back to suffix strings so provision
+  re-lifts them. The deferred-path registry/matchers stay in mngr (consumer policy).
+- **Deferred `__assign` fix.** Because deferred subtrees are now carried via `lower`, a
+  deferred `key__assign` survives as `key__assign` (re-lifted to an `Assign` at provision,
+  honoring the no-warn intent) instead of being collapsed to a narrowing-checked bare assign.
+  This corrects a latent inconsistency in the string-suffix path; it is a small, intentional
+  behavior change (tested).
+- **`SettingsPatchField` combine (2 sites: `merge_with`, `_apply_custom_overrides_to_parent_config`)**
+  combines two stored `settings_overrides` suffix dicts: `lift` both, `combine` (node patches),
+  `lower` back to a suffix dict for storage. The marker stays a mngr pydantic annotation.
+- **`detect_settings_narrowing` / `_walk_for_narrowing` / `_check_narrowing` stay in mngr**
+  (they walk pydantic models at config-load) and keep calling the overlay value-level
+  `would_assignment_narrow` at the leaves. The config-load narrowing aggregation
+  (`_collect_layer_narrowing`) and the `allow_settings_key_assignment_narrowing` flag are
+  unchanged.
+- **`_build_settings_json` (mngr_claude)** merges the stored `settings_overrides` suffix dict
+  onto the provision base `B`: `lift` the overrides, `lift_concrete(B)`, then `merge`
+  (or `merge_narrowing_allowed` when the flag allows it), and `finalize` to a plain dict.
 - **The flag stays for now.** Removing `allow_settings_key_assignment_narrowing` and switching
   to raise-immediately remains the deferred Stage 2 decision (see config-merge-operators.md);
   the new API supports both policies, so nothing forces that decision here.
