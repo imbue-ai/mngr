@@ -7,7 +7,7 @@ on:
     branches: ['**']
 
 jobs:
-  # Authoritative changelog gate. Runs on the orchestrator (not in an offload
+  # Changelog gate. Runs on the orchestrator (not in an offload
   # sandbox) because it diffs the PR branch against its real base branch, and
   # the sandbox has no base ref -- doing the diff there passes vacuously. Pure
   # stdlib, so no `uv sync`; just enough git history to compute the diff.

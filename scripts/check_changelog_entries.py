@@ -1,6 +1,6 @@
 """Enforce that a PR adds one changelog entry per project it touches.
 
-This is the authoritative changelog gate. It runs on the *orchestrator* (a
+This is the changelog gate. It runs on the *orchestrator* (a
 real local checkout, or the GitHub Actions runner) -- the only place a real
 base ref exists -- and never inside an offload sandbox. The offload sandbox
 does a fresh ``git init`` (so ``main == HEAD``) and never fetches ``origin``,

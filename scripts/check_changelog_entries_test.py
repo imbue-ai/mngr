@@ -1,8 +1,9 @@
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from imbue.mngr.utils.testing import init_git_repo
+from imbue.mngr.utils.testing import run_git_command
 from scripts.check_changelog_entries import changed_files_against_base
 from scripts.check_changelog_entries import find_missing_entries
 from scripts.check_changelog_entries import is_exempt_branch
@@ -11,39 +12,22 @@ from scripts.check_changelog_entries import projects_requiring_entry
 from scripts.check_changelog_entries import resolve_diff_base
 
 
-def _git(repo: Path, *args: str) -> str:
-    """Run a git command in ``repo`` and return its stdout (stripped)."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return result.stdout.strip()
-
-
 def _init_repo(tmp_path: Path) -> Path:
-    """Create a git repo with a single project skeleton and one commit on main.
+    """Create a git repo with a project skeleton committed on main.
 
-    Mirrors the real layout enough for the project-mapping helpers: a
+    Layout mirrors the real repo enough for the project-mapping helpers: a
     ``libs/mngr`` project with a ``pyproject.toml`` and a ``changelog/``
-    directory, plus the synthetic ``dev`` bucket directories.
+    directory, plus the synthetic ``dev`` bucket directories. Builds on the
+    shared ``init_git_repo`` helper (git config isolation, branch ``main``,
+    initial commit), then commits the skeleton on top.
     """
     repo = tmp_path / "repo"
-    repo.mkdir()
+    init_git_repo(repo, initial_commit=True)
     (repo / "libs" / "mngr" / "changelog").mkdir(parents=True)
     (repo / "libs" / "mngr" / "pyproject.toml").write_text("")
     (repo / "dev" / "changelog").mkdir(parents=True)
-    (repo / "README.md").write_text("base\n")
-
-    _git(repo, "-c", "init.defaultBranch=main", "init")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "base")
-    # Guarantee the branch is named 'main' regardless of the git default.
-    _git(repo, "branch", "-M", "main")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "project skeleton")
     return repo
 
 
@@ -55,11 +39,11 @@ def _clear_github_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_diff_base_rejects_base_equal_to_head(tmp_path: Path) -> None:
-    """The core regression: a single-commit repo where main == HEAD (the offload
-    sandbox shape) must NOT yield a usable base -- it must raise, not pass."""
+    """The core regression: a repo where main == HEAD (the offload sandbox
+    shape) must NOT yield a usable base -- it must raise, not pass."""
     repo = _init_repo(tmp_path)
     # Branch off without adding a commit: HEAD == main, exactly the sandbox case.
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
 
     with pytest.raises(RuntimeError, match="distinct from HEAD"):
         resolve_diff_base(repo)
@@ -67,20 +51,20 @@ def test_resolve_diff_base_rejects_base_equal_to_head(tmp_path: Path) -> None:
 
 def test_resolve_diff_base_returns_main_when_distinct(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
     (repo / "libs" / "mngr" / "thing.py").write_text("x = 1\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "change")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "change")
 
     assert resolve_diff_base(repo) == "main"
 
 
 def test_changed_files_detects_project_change(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
     (repo / "libs" / "mngr" / "thing.py").write_text("x = 1\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "change")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "change")
 
     changed = changed_files_against_base("main", repo)
     assert "libs/mngr/thing.py" in changed
@@ -89,10 +73,10 @@ def test_changed_files_detects_project_change(tmp_path: Path) -> None:
 
 def test_root_file_maps_to_dev(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
     (repo / "justfile").write_text("recipe:\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "root change")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "root change")
 
     changed = changed_files_against_base("main", repo)
     assert projects_requiring_entry(changed, repo) == {"dev"}
@@ -108,21 +92,21 @@ def test_find_missing_entries(tmp_path: Path) -> None:
 
 def test_main_fails_when_entry_missing(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
     (repo / "libs" / "mngr" / "thing.py").write_text("x = 1\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "change")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "change")
 
     assert main(repo) == 1
 
 
 def test_main_passes_when_entry_present(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
     (repo / "libs" / "mngr" / "thing.py").write_text("x = 1\n")
     (repo / "libs" / "mngr" / "changelog" / "feature.md").write_text("did a thing\n")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "change with entry")
+    run_git_command(repo, "add", "-A")
+    run_git_command(repo, "commit", "-m", "change with entry")
 
     assert main(repo) == 0
 
@@ -131,7 +115,7 @@ def test_main_errors_in_sandbox_shape(tmp_path: Path) -> None:
     """End-to-end: the offload-sandbox shape (main == HEAD) returns exit 2, the
     loud-failure code -- never a vacuous 0."""
     repo = _init_repo(tmp_path)
-    _git(repo, "checkout", "-b", "feature")
+    run_git_command(repo, "checkout", "-b", "feature")
 
     assert main(repo) == 2
 
