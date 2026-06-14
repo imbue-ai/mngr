@@ -23,9 +23,9 @@ from pydantic import BaseModel
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.config.data_types import would_assignment_narrow
-from imbue.mngr.config.key_resolver_primitives import _apply_extend
-from imbue.mngr.config.key_resolver_primitives import _extend_dict
+from imbue.mngr.config.key_resolver_primitives import apply_extend
 from imbue.mngr.config.key_resolver_primitives import bare_key
+from imbue.mngr.config.key_resolver_primitives import extend_dict
 from imbue.mngr.config.key_resolver_primitives import is_extend_key
 from imbue.mngr.errors import InvalidKeyPathError
 
@@ -145,7 +145,7 @@ def resolve_extends(
         if current is None and is_deferred_extend_path(path):
             result[key] = value
             continue
-        result[bare] = _apply_extend(current, value, field_path)
+        result[bare] = apply_extend(current, value, field_path)
     return result
 
 
@@ -168,7 +168,7 @@ def fold_settings_patch(
       depth**, including bare keys nested inside an ``__extend`` value.
     - **``key__extend``** -> extend ``base[key]``: a dict-vs-dict extend recurses
       (so nested bare assigns are themselves narrow-checked and their paths bubble
-      up); list concat / set union / extend-against-absent reuse ``_apply_extend``.
+      up); list concat / set union / extend-against-absent reuse ``apply_extend``.
       ``__extend`` merges never narrow (they are supersets).
 
     The result contains no ``__extend`` markers (every marker resolves against the
@@ -186,7 +186,7 @@ def fold_settings_patch(
         key_path = path + (key,)
         dotted = ".".join(key_path)
         if isinstance(value, Mapping):
-            assigned: Any = _extend_dict({}, value, dotted)
+            assigned: Any = extend_dict({}, value, dotted)
         else:
             assigned = value
         if would_assignment_narrow(base.get(key), assigned):
@@ -208,7 +208,7 @@ def fold_settings_patch(
             result[bare] = merged_sub
             narrowings.extend(sub_narrowings)
         else:
-            result[bare] = _apply_extend(current, value, ".".join(key_path))
+            result[bare] = apply_extend(current, value, ".".join(key_path))
     return result, narrowings
 
 

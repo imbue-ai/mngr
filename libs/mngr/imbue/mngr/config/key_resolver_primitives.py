@@ -56,7 +56,7 @@ def bare_key(extend_key: str) -> str:
     return extend_key[: -len(EXTEND_SUFFIX)]
 
 
-def _apply_extend(
+def apply_extend(
     current_value: Any,
     extend_value: Any,
     field_path: str,
@@ -88,7 +88,7 @@ def _apply_extend(
         # Extend-against-nothing acts as assign, but a dict value may still carry
         # nested markers that must resolve (against an empty base) so none leak.
         if isinstance(extend_value, Mapping):
-            return _extend_dict({}, extend_value, field_path)
+            return extend_dict({}, extend_value, field_path)
         return extend_value
     if isinstance(current_value, (list, tuple)):
         if not isinstance(extend_value, (list, tuple)):
@@ -112,14 +112,14 @@ def _apply_extend(
                 f"__extend on field '{field_path}' (dict) requires a JSON object value; "
                 f"got: {type(extend_value).__name__}"
             )
-        return _extend_dict(current_value, extend_value, field_path)
+        return extend_dict(current_value, extend_value, field_path)
     raise ConfigParseError(
         f"__extend on field '{field_path}' is not valid: target field is a scalar "
         f"({type(current_value).__name__}); use bare assignment instead."
     )
 
 
-def _extend_dict(
+def extend_dict(
     current_value: Mapping[str, Any],
     extend_value: Mapping[str, Any],
     field_path: str,
@@ -127,7 +127,7 @@ def _extend_dict(
     """Recursively apply a dict ``extend_value`` onto ``current_value``.
 
     Each key of ``extend_value`` is applied against the matching sub-value of
-    ``current_value``: a nested ``key__extend`` recurses via ``_apply_extend``
+    ``current_value``: a nested ``key__extend`` recurses via ``apply_extend``
     (extending ``current_value[key]``); a nested bare ``key`` assigns, replacing
     ``current_value[key]`` (a dict value is resolved against an empty base so any
     markers nested inside it collapse). Bare keys are applied before sibling
@@ -142,7 +142,7 @@ def _extend_dict(
         if is_extend_key(key):
             continue
         if isinstance(value, Mapping):
-            result[key] = _extend_dict({}, value, f"{field_path}.{key}")
+            result[key] = extend_dict({}, value, f"{field_path}.{key}")
         else:
             result[key] = value
     # Second pass: ``key__extend`` keys extend the (possibly just-assigned) value.
@@ -150,7 +150,7 @@ def _extend_dict(
         if not is_extend_key(key):
             continue
         bare = bare_key(key)
-        result[bare] = _apply_extend(result.get(bare), value, f"{field_path}.{bare}")
+        result[bare] = apply_extend(result.get(bare), value, f"{field_path}.{bare}")
     return result
 
 
@@ -179,7 +179,7 @@ def combine_patches(
       for the same key is dropped.
     - ``higher`` has ``f__extend``:
         * ``lower`` has a concrete bare ``f``: ``result[f]`` (bare) =
-          ``_apply_extend(lower[f], higher_value)`` -- extend the bare value; it
+          ``apply_extend(lower[f], higher_value)`` -- extend the bare value; it
           stays bare.
         * ``lower`` has ``f__extend``: ``result[f__extend]`` (still a marker) =
           the two marker values combined: ``combine_patches`` for dicts, list
@@ -193,25 +193,10 @@ def combine_patches(
 
     result: dict[str, Any] = {}
 
-    # Carry through lower keys, except those a higher bare key supersedes or that
-    # a higher marker combines into.
+    # Carry through lower keys, except those that ``higher`` overrides or combines
+    # into (those are produced from the ``higher`` side below).
     for key, value in lower.items():
-        if is_extend_key(key):
-            bare = bare_key(key)
-            if bare in higher_bare_keys:
-                # Higher bare wins -> drop the lower marker.
-                continue
-            if f"{bare}{EXTEND_SUFFIX}" in higher:
-                # Combined below from the higher side.
-                continue
-            result[key] = value
-        else:
-            if key in higher_bare_keys:
-                # Replaced by the higher bare value below.
-                continue
-            if f"{key}{EXTEND_SUFFIX}" in higher:
-                # Higher has a marker for this bare key -> handled below.
-                continue
+        if not _is_lower_key_overridden_by_higher(key, higher_bare_keys, higher):
             result[key] = value
 
     # Apply higher bare keys (bare wins; recurse a dict value against nothing so
@@ -234,7 +219,7 @@ def combine_patches(
         field_path = ".".join(path + (bare,))
         if bare in lower and not is_extend_key(bare):
             # Lower has a concrete bare value -> extend it; stays bare.
-            result[bare] = _apply_extend(lower[bare], value, field_path)
+            result[bare] = apply_extend(lower[bare], value, field_path)
         elif key in lower:
             # Lower has a marker for the same field -> combine the marker values.
             result[key] = _combine_marker_values(lower[key], value, field_path, path + (bare,))
@@ -242,6 +227,22 @@ def combine_patches(
             # Lower has neither -> preserve the higher marker verbatim.
             result[key] = value
     return result
+
+
+def _is_lower_key_overridden_by_higher(
+    key: str,
+    higher_bare_keys: set[str],
+    higher: dict[str, Any],
+) -> bool:
+    """Return True if a ``lower`` key is superseded or combined-into by ``higher``.
+
+    The corresponding ``result`` entry is then produced from the ``higher`` side
+    (a bare value that wins, or a combined marker), so the lower key is not carried
+    through verbatim. ``key`` may be bare or an ``__extend`` marker; in both cases
+    the comparison is on the bare field name.
+    """
+    bare = bare_key(key) if is_extend_key(key) else key
+    return bare in higher_bare_keys or f"{bare}{EXTEND_SUFFIX}" in higher
 
 
 def _combine_marker_values(
