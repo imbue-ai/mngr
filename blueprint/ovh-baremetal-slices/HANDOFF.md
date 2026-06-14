@@ -38,7 +38,7 @@ All in `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/` unless noted. Every modul
 - Networking: lima default per-VM user-mode NAT (no VM↔VM), two `0.0.0.0` port-forwards per slice — **guest 2200** → VM root sshd (lima reserves guest 22, so sshd also listens on 2200), **guest 2222** → inner container sshd. All other guest ports suppressed.
 - btrfs: lima `additionalDisk` mounted at `btrfs_mount_path` (`/mngr-btrfs`); the provider creates the per-host subvolume there (no loopback). Per-host-hex subvolume layout kept for parity.
 - On release: slice → destroy the lima VM + disk (free the slot); VPS → cancel OVH (unchanged). Manual-only server destroy; no `--force`; no auto failure recovery (app-level backups are the recovery path).
-- mngr-on-box model: the bake runs on the box (limactl is local there); `get_instance_ip` returns 127.0.0.1; the admin records the box's external address on the row.
+- Bake model (updated 2026-06-14, carve-over-SSH): a slice is provisioned + baked exactly like an OVH VPS, **from the operator's machine** -- NOT on the box. `LimaSliceVpsClient` drives `limactl` over SSH on the box to carve a bare Debian VM (the "OS reinstall" equivalent), then the shared `VpsDockerProvider` reaches the VM's box-forwarded ports to build the container. `get_instance_ip` returns the box's external address. The earlier "run the whole bake on the box" model (ship the monorepo + FCT, `uv sync`, `git init`, run `mngr create` there) is **gone** -- see "Carve-over-SSH refactor" below.
 
 ---
 
@@ -158,3 +158,13 @@ export POOL_SSH_PRIVATE_KEY="$(vault kv get -format=json -mount=secrets minds/de
 - Slices record the box's real region; the slow-path rebuild pins the outer host key (no certified-data warning) and is slice-aware (forwarded ports).
 - autofix found + fixed 3 MAJOR bugs: orphaned-VM rollback when a post-bake step or the create-JSON parse fails, and disjoint per-bake port windows so concurrent `--count N` bakes don't collide.
 - Connector release endpoint still needs a redeploy of the dev-josh-1 connector to exercise the slice-release fork live (the deployed connector predates it); teardown commands themselves are verified on the box.
+
+### Carve-over-SSH refactor (2026-06-14)
+The slice bake no longer runs on the box. It used to ship the monorepo + FCT to the box, `uv sync`, `git init`, and run `mngr create` there -- which was a near-verbatim duplicate of the OVH `admin pool create` bake (FCT templates, `system-services`, chat-agent teardown, sentinel, pool insert) living a second time inside the slice tooling.
+
+Now a slice is provisioned + baked **exactly like an OVH VPS, from the operator's machine**:
+- `LimaSliceVpsClient` drives `limactl` over SSH on the box (render YAML, ship it, carve/destroy/list remotely). Carving a bare Debian VM = the OVH "reinstall the OS" equivalent. Free box ports are probed over SSH (`ss -Htln`).
+- The slice provider's `create_host` carves, then runs the shared `vps_docker` container bake against the VM's box-forwarded ports (laptop -> `box:vm_port`) -- so the whole bake is off-box, identical in shape to OVH.
+- The FCT bake itself (create with the FCT templates + `--format json`, stop, sshd hardening, chat-agent teardown) now lives once in provider-generic `pool_bake.py`, shared by `cli/admin.py` (OVH) and `cli/server.py` (slices). OVH keeps ufw + management-key install + recycle + VPS cancel + OVH insert; slices keep server selection + sizing + carve config + slice insert + orphan-VM rollback.
+- `slice_bake.py` and the box-side rsync/`uv sync`/`git init` machinery are **deleted**. `allocate-slice` now just vendors mngr into the FCT workspace once (`sync_mngr_into_template`, local) and parallel-bakes `--count N` from here. `mngr create --format json` gained `ssh_key_path` so the shared bake resolves all host details from one create call.
+- The box must expose the slice port range externally (the connector already needs this for lease/release), which is also what lets the laptop-driven bake reach `box:vm_port`.
