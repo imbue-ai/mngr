@@ -828,8 +828,22 @@ class MngrConfig(FrozenModel):
         merged_commands = _merge_container_dict(self.commands, override.commands)
         merged_create_templates = _merge_container_dict(self.create_templates, override.create_templates)
 
-        merged_retry = self.retry.merge_with(override.retry) if override.retry is not None else self.retry
-        merged_logging = self.logging.merge_with(override.logging) if override.logging is not None else self.logging
+        # Merge the optional sub-models defensively: when the base is unset (None),
+        # the override wins outright -- there is nothing to merge into -- rather than
+        # calling ``.merge_with`` on ``None``. (In production the left operand is
+        # always the loader's defaulted accumulator, so the base is non-None and the
+        # plain merge path is taken; this guard matters for a raw ``parse_config``
+        # layer, which defaults retry/logging to ``None``.)
+        merged_retry = (
+            self.retry.merge_with(override.retry)
+            if self.retry is not None and override.retry is not None
+            else (override.retry if override.retry is not None else self.retry)
+        )
+        merged_logging = (
+            self.logging.merge_with(override.logging)
+            if self.logging is not None and override.logging is not None
+            else (override.logging if override.logging is not None else self.logging)
+        )
 
         return self.__class__(
             prefix=_assign_scalar(self.prefix, override.prefix),
