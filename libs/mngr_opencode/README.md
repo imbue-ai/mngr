@@ -118,15 +118,5 @@ Carried gaps (shared with `mngr_antigravity`): session preservation on destroy,
 scheduled-deploy contributions, the live streaming snapshot, and clone carrying
 the source conversation forward.
 
-## Not planned
-
-`waiting_reason` exists to work around the interactive permission prompting in
-claude and codex -- it surfaces *why* an agent is blocked on a tool-approval
-dialog. opencode has no such prompt to work around: permissions are an upfront
-config policy (`allow`/`deny`/`ask`) rather than an interactive event, and
-opencode emits no permission-request event when an `ask` policy blocks. The only
-reason that could be surfaced is `END_OF_TURN` (from the `active` marker), which
-adds no information over the existing RUNNING/WAITING lifecycle state.
-
 See the [mngr agent types documentation](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/concepts/agent_types.md)
 for more details.
