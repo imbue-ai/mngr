@@ -73,18 +73,12 @@ class UsagePluginConfig(PluginConfig):
         "Set to False to discard usage data on destroy.",
     )
 
-    def merge_with(self, override: PluginConfig) -> UsagePluginConfig:
-        """Merge with override config (FrozenModel-style)."""
-        if not isinstance(override, UsagePluginConfig):
-            return self
-        return UsagePluginConfig(
-            enabled=override.enabled if override.enabled is not None else self.enabled,
-            max_age_seconds=override.max_age_seconds if override.max_age_seconds is not None else self.max_age_seconds,
-            since_seconds=override.since_seconds if override.since_seconds is not None else self.since_seconds,
-            preserve_on_destroy=(
-                override.preserve_on_destroy if override.preserve_on_destroy is not None else self.preserve_on_destroy
-            ),
-        )
+    # Intentionally no ``merge_with`` override: ``PluginConfig.merge_with``
+    # already merges subclass fields correctly via ``model_fields_set`` (only
+    # fields a layer explicitly set win), which is exactly the layering
+    # semantics we want. A hand-rolled override here would have to re-derive
+    # that and is easy to get wrong (e.g. ``override.x if x is not None`` is a
+    # no-op for non-Optional fields, silently clobbering the base layer).
 
 
 class CostSnapshot(FrozenModel):

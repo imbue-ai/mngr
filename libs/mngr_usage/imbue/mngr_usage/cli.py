@@ -1010,6 +1010,14 @@ def _emit_match_state_change(result: WaitForUsageResult, output_format: OutputFo
 
 def _output_wait_result(result: WaitForUsageResult, output_format: OutputFormat) -> None:
     """Render the final wait result. JSON/JSONL emit one final record; human writes a summary line."""
+    # ``wait_for_usage`` always returns with exactly one of is_matched / is_timed_out true.
+    # Check the invariant once, format-independently, so the impossible "neither" state crashes
+    # loudly for machine consumers (JSON/JSONL) too -- not only in the HUMAN branch below.
+    if not result.is_matched and not result.is_timed_out:
+        raise MngrError(
+            f"wait_for_usage returned both is_matched=False and is_timed_out=False "
+            f"(elapsed={result.elapsed_seconds:.2f}s)"
+        )
     payload = {
         "is_matched": result.is_matched,
         "is_timed_out": result.is_timed_out,
