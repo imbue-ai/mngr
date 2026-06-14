@@ -19,11 +19,15 @@ class StaticTuple(tuple):
     rather than *narrow*. ``ScalarTuple`` (a scalar-shaped tuple, e.g. a value
     written as a single string and coerced into a tuple) is a ``StaticTuple``.
 
-    A consumer that re-parses merge output through its own type system should treat
-    the marker as advisory: it survives construction paths that bypass validation
-    but is not preserved through serialization or the merge itself; that is enough
-    because narrowing detection always compares a freshly-marked layer against the
-    already-merged base.
+    **Purity requirement.** Every ``Static*`` marker is a *pure* subclass of its
+    builtin aggregate: it adds the atomic / narrowing-exempt semantics but **no**
+    state beyond the underlying tuple/list/dict. Consequently a marker round-trips
+    losslessly by *re-marking* -- re-wrapping the plain (serialized) form in the same
+    ``Static*`` type reproduces the value (``StaticList(list(x)) == x``). A consumer
+    that runs narrowing detection over serialized dicts (where ``model_dump`` has
+    stripped the subclass back to a plain aggregate) relies on this: it records which
+    paths held a marker on the live value, then re-marks the plain value at each path.
+    Do not add instance state to these markers, or that re-marking stops being a no-op.
     """
 
 
