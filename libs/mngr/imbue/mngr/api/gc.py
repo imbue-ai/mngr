@@ -22,12 +22,17 @@ from imbue.mngr.api.discovery_events import emit_host_destroyed
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostOfflineError
+from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderInstanceNotFoundError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.common import get_seconds_since_last_activity
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import WorkDirInfo
@@ -229,7 +234,13 @@ def _gc_single_host_work_dir(
                     result.work_dirs_destroyed.append(work_dir_info)
                 except MngrError as e:
                     error_msg = f"Failed to clean {work_dir_info.path}: {e}"
-                    result.errors.append(error_msg)
+                    result.failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                            message=error_msg,
+                            host_id=host.id,
+                        )
+                    )
                     _handle_error(error_msg, error_behavior, exc=e)
 
             # Source dirs (e.g. mngr-managed clones from --source <url>) are tracked
@@ -257,7 +268,13 @@ def _gc_single_host_work_dir(
                         result.source_dirs_destroyed.append(source_dir_info)
                     except MngrError as e:
                         error_msg = f"Failed to clean source dir {source_dir_info.path}: {e}"
-                        result.errors.append(error_msg)
+                        result.failures.append(
+                            CleanupFailure(
+                                category=CleanupFailureCategory.LOCAL_STATE_REMAINS,
+                                message=error_msg,
+                                host_id=host.id,
+                            )
+                        )
                         _handle_error(error_msg, error_behavior, exc=e)
 
 
@@ -425,10 +442,9 @@ def _gc_single_host(
                 provider.destroy_host(host)
             except CleanupFailedGroup as group:
                 with results_lock:
-                    result.errors.extend(
-                        f"Host {host_ref.host_id} left a resource behind during GC: {failure.message}"
-                        for failure in group.failures
-                    )
+                    # These already carry the correct categories/host_id from destroy_host;
+                    # preserve them as-is rather than re-wrapping or stringifying.
+                    result.failures.extend(group.failures)
             mngr_ctx.pm.hook.on_host_destroyed(host=host, mngr_ctx=mngr_ctx)
             emit_host_destroyed(mngr_ctx.config, host_ref.host_id, [])
 
@@ -437,8 +453,24 @@ def _gc_single_host(
 
     except MngrError as e:
         error_msg = f"Failed to check/destroy host {host_ref.host_id}: {e}"
+        category = (
+            CleanupFailureCategory.PROVIDER_INACCESSIBLE
+            if isinstance(
+                e,
+                (
+                    HostNotFoundError,
+                    ProviderInstanceNotFoundError,
+                    ProviderUnavailableError,
+                    LocalHostNotDestroyableError,
+                    NotImplementedError,
+                ),
+            )
+            else CleanupFailureCategory.OTHER
+        )
         with results_lock:
-            result.errors.append(error_msg)
+            result.failures.append(
+                CleanupFailure(category=category, message=error_msg, host_id=host_ref.host_id)
+            )
         _handle_error(error_msg, error_behavior, exc=e)
 
 
@@ -504,12 +536,18 @@ def gc_snapshots(
 
                 except MngrError as e:
                     error_msg = f"Failed to cleanup snapshots for host {host_ref.host_id}: {e}"
-                    result.errors.append(error_msg)
+                    result.failures.append(
+                        CleanupFailure(
+                            category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                            message=error_msg,
+                            host_id=host_ref.host_id,
+                        )
+                    )
                     _handle_error(error_msg, error_behavior, exc=e)
 
         except MngrError as e:
             error_msg = f"Failed to process snapshots for provider {provider.name}: {e}"
-            result.errors.append(error_msg)
+            result.failures.append(CleanupFailure(category=CleanupFailureCategory.OTHER, message=error_msg))
             _handle_error(error_msg, error_behavior, exc=e)
 
 
@@ -551,7 +589,9 @@ def gc_volumes(
 
                 except MngrError as e:
                     error_msg = f"Failed to delete volume {volume.name}: {e}"
-                    result.errors.append(error_msg)
+                    result.failures.append(
+                        CleanupFailure(category=CleanupFailureCategory.HOST_RESOURCE_REMAINS, message=error_msg)
+                    )
                     _handle_error(error_msg, error_behavior, exc=e)
 
         except ProviderUnavailableError as e:
@@ -560,7 +600,7 @@ def gc_volumes(
             continue
         except MngrError as e:
             error_msg = f"Failed to process volumes for provider {provider.name}: {e}"
-            result.errors.append(error_msg)
+            result.failures.append(CleanupFailure(category=CleanupFailureCategory.OTHER, message=error_msg))
             _handle_error(error_msg, error_behavior, exc=e)
 
 
@@ -628,7 +668,9 @@ def gc_logs(
 
         except MngrError as e:
             error_msg = f"Failed to delete log {log_file}: {e}"
-            result.errors.append(error_msg)
+            result.failures.append(
+                CleanupFailure(category=CleanupFailureCategory.LOCAL_STATE_REMAINS, message=error_msg)
+            )
             _handle_error(error_msg, error_behavior, exc=e)
 
 
@@ -692,7 +734,9 @@ def gc_build_cache(
 
             except MngrError as e:
                 error_msg = f"Failed to delete cache entry {cache_entry}: {e}"
-                result.errors.append(error_msg)
+                result.failures.append(
+                    CleanupFailure(category=CleanupFailureCategory.LOCAL_STATE_REMAINS, message=error_msg)
+                )
                 _handle_error(error_msg, error_behavior, exc=e)
 
 

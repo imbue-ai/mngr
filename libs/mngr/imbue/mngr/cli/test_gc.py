@@ -1,6 +1,7 @@
 """Integration tests for the gc CLI command."""
 
 import json
+import os
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -9,6 +10,8 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.mngr.cli.exit_codes import EXIT_CODE_LOCAL_STATE_REMAINS
+from imbue.mngr.cli.exit_codes import EXIT_CODE_PROVIDER_INACCESSIBLE
 from imbue.mngr.cli.gc import GcCliOptions
 from imbue.mngr.cli.gc import _get_selected_providers
 from imbue.mngr.cli.gc import gc
@@ -222,11 +225,12 @@ def test_gc_exits_non_zero_when_explicit_provider_is_unavailable(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """`mngr gc --provider X` with X unavailable exits non-zero.
+    """`mngr gc --provider X` with X unavailable exits with the PROVIDER_INACCESSIBLE code.
 
     The skipped provider's error message is surfaced in the summary so the user
     can see what was not gc'd. gc still runs against any other providers, but
-    the overall command fails so the explicit request is not silently dropped.
+    the overall command fails with the cause-specific exit code (6,
+    PROVIDER_INACCESSIBLE) so the explicit request is not silently dropped.
     Empty providers (whose state is known to be empty) take the symmetric
     silent-success path and are exercised by
     test_get_selected_providers_skips_empty_silently_and_records_unavailable.
@@ -244,6 +248,49 @@ def test_gc_exits_non_zero_when_explicit_provider_is_unavailable(
         del _backend_registry[_FakeUnavailableBackend.get_name()]
         del _provider_config_registry[_FakeUnavailableBackend.get_name()]
 
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == EXIT_CODE_PROVIDER_INACCESSIBLE, result.output
     assert "fake-unavailable-backend" in result.output
     assert "unavailable" in result.output
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="Root bypasses the read-only-dir permission check used to force the failure")
+@pytest.mark.allow_warnings(match=r"Failed to clean")
+def test_gc_exits_with_cause_specific_code_when_work_dir_cleanup_fails(
+    cli_runner: CliRunner,
+    temp_host_dir: Path,
+    per_host_dir: Path,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """A failed work-dir deletion yields the LOCAL_STATE_REMAINS exit code (4).
+
+    Previously gc exited 0 even when a resource could not be deleted; now the
+    failure is recorded as a structured, categorized failure and surfaced both in
+    the ``--format json`` ``failures`` key and via a cause-specific exit code. The deletion is
+    forced to fail by making the orphaned work dir's parent read-only so ``rm -rf``
+    cannot remove it.
+    """
+    parent_dir = temp_host_dir / "worktrees" / "locked-parent"
+    orphaned_dir = parent_dir / "orphaned-agent-789"
+    orphaned_dir.mkdir(parents=True)
+
+    # Register the orphan as a generated work dir for the local host so gc tries to delete it.
+    _write_certified_data(per_host_dir, temp_host_dir, (str(orphaned_dir),))
+
+    # Make the parent read-only so `rm -rf` of the orphan fails (the entry cannot be unlinked).
+    parent_dir.chmod(0o500)
+    try:
+        result = cli_runner.invoke(
+            gc,
+            ["--on-error", "continue", "--format", "json"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    finally:
+        # Restore write permission so pytest can clean up the temp dir.
+        parent_dir.chmod(0o700)
+
+    assert result.exit_code == EXIT_CODE_LOCAL_STATE_REMAINS, result.output
+    summary = json.loads(result.output.strip().splitlines()[-1])
+    assert summary["failures"], summary
+    assert summary["failures"][0]["category"] == "LOCAL_STATE_REMAINS"
+    assert "Failed to clean" in summary["failures"][0]["message"]

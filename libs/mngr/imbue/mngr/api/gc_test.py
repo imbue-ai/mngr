@@ -2422,8 +2422,12 @@ def test_gc_machines_records_leaked_resource_but_continues_when_destroy_host_rai
     # The host is gone (destroy attempted), so it still counts as destroyed...
     assert provider.destroyed_hosts == [host.id]
     assert len(result.machines_destroyed) == 1
-    # ...but the leak is recorded rather than swallowed or allowed to abort the sweep.
+    # ...but the leak is recorded as a structured failure (preserving the category and
+    # host_id from destroy_host) rather than swallowed or allowed to abort the sweep.
     assert any("droplet could not be destroyed" in error for error in result.errors)
+    assert len(result.failures) == 1
+    assert result.failures[0].category == CleanupFailureCategory.HOST_RESOURCE_REMAINS
+    assert result.failures[0].host_id == host.id
 
 
 @pytest.mark.allow_warnings(match=r"^Failed to authenticate with host")

@@ -105,10 +105,15 @@ class GcResult(MutableModel):
         default_factory=list,
         description="Build cache entries that were destroyed",
     )
-    errors: list[str] = Field(
+    failures: list[CleanupFailure] = Field(
         default_factory=list,
-        description="Errors encountered during garbage collection",
+        description="Real failures (resources left behind / not collected) encountered during garbage collection",
     )
+
+    @property
+    def errors(self) -> list[str]:
+        """Formatted failure messages, for human output and legacy string consumers."""
+        return [f"[{failure.category}] {failure.message}" for failure in self.failures]
 
 
 class CleanupResult(MutableModel):
