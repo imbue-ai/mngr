@@ -527,7 +527,10 @@ def _build_mngr_create_command(
 
     DOCKER mode: --template main --template docker (runs in Docker container)
     LIMA mode: --template main --template lima (runs in Lima VM)
-    CLOUD mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
+    AWS mode: --new-host on the aws-<region> provider, --template main
+        --template aws (runs in a runsc Docker container on an EC2 instance;
+        the region-specific provider block is written by minds at startup)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
@@ -564,8 +567,16 @@ def _build_mngr_create_command(
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.docker"
         case LaunchMode.LIMA:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.lima"
-        case LaunchMode.CLOUD:
+        case LaunchMode.VULTR:
             address = f"{_DEFAULT_AGENT_NAME}@{host_name}.vultr"
+        case LaunchMode.AWS:
+            # AWS is region-locked per provider instance (EC2's API is
+            # per-region), so minds writes one ``[providers.aws-<region>]``
+            # block per configured region at startup and the create address
+            # selects the region-specific provider. The region is required.
+            if not region:
+                raise MngrCommandError("AWS mode requires a region")
+            address = f"{_DEFAULT_AGENT_NAME}@{host_name}.aws-{region}"
         case LaunchMode.IMBUE_CLOUD:
             if not imbue_cloud_account:
                 raise MngrCommandError("IMBUE_CLOUD mode requires imbue_cloud_account")
@@ -657,7 +668,7 @@ def _build_mngr_create_command(
         case LaunchMode.LIMA:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "lima"])
             mngr_command.extend(_remote_host_env_flags())
-        case LaunchMode.CLOUD:
+        case LaunchMode.VULTR:
             mngr_command.extend(["--new-host", "--template", "main", "--template", "vultr"])
             mngr_command.extend(_remote_host_env_flags())
             # The user always picks a Vultr region in the create form (advanced
@@ -665,6 +676,15 @@ def _build_mngr_create_command(
             # in exactly this region.
             if region:
                 mngr_command.extend(["-b", f"--vultr-region={region}"])
+        case LaunchMode.AWS:
+            mngr_command.extend(["--new-host", "--template", "main", "--template", "aws"])
+            mngr_command.extend(_remote_host_env_flags())
+            # The create address already selects the ``aws-<region>`` provider
+            # (whose block is pinned to this region). Pass the matching
+            # ``--aws-region`` build arg too so intent is explicit and the
+            # provider's cross-region guard confirms the placement.
+            if region:
+                mngr_command.extend(["-b", f"--aws-region={region}"])
         case LaunchMode.IMBUE_CLOUD:
             # imbue_cloud follows the same shape as the other modes: the
             # ``main`` + ``imbue_cloud`` templates set ``idle_mode = disabled``
@@ -947,6 +967,47 @@ def run_mngr_create(
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
     return capture.canonical_agent_id, canonical_host_id
+
+
+def run_mngr_aws_prepare(
+    region: str,
+    on_output: OutputCallback | None = None,
+    *,
+    parent_cg: ConcurrencyGroup | None = None,
+) -> None:
+    """Ensure the AWS security group for ``region`` exists before an AWS create.
+
+    Runs ``mngr aws prepare --provider aws-<region> --region <region>``, which is
+    read-only-first: when the ``mngr-aws`` security group already exists with the
+    required SSH ingress it issues no write call, so this succeeds even with an
+    AWS key that only has ``ec2:DescribeSecurityGroups``. It only attempts the
+    privileged create/authorize when the group (or a rule) is missing.
+
+    ``AwsProvider.create_host`` refuses to launch an instance when the security
+    group is absent (it looks it up read-only), so minds runs this first for the
+    chosen region. Failures -- missing credentials, or a missing group the key
+    cannot create -- raise ``MngrCommandError`` so the creation flow surfaces a
+    clear message on the creating page rather than a deferred opaque create
+    failure.
+    """
+    provider_name = f"aws-{region}"
+    command = [MNGR_BINARY, "aws", "prepare", "--provider", provider_name, "--region", region]
+    logger.info("Running: {}", " ".join(command))
+    cg = _make_child_cg("mngr-aws-prepare", parent_cg)
+    with cg:
+        result = cg.run_process_to_completion(
+            command=command,
+            is_checked_after=False,
+            on_output=on_output,
+        )
+    if result.returncode != 0:
+        raise MngrCommandError(
+            "mngr aws prepare failed for region {} (exit code {}):\n{}".format(
+                region,
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            )
+        )
 
 
 class _MngrCreateAttemptParams(FrozenModel):
@@ -1507,6 +1568,14 @@ class AgentCreator(MutableModel):
                 # recover by fixing the latchkey installation and
                 # re-creating the agent.
                 latchkey_setup = self._prepare_latchkey_or_warn(log_queue)
+
+                # AWS hosts need the region's security group to exist before
+                # ``mngr create`` (the provider looks it up read-only and
+                # refuses to launch without it). prepare is read-only-first, so
+                # this is a no-op describe when the region is already prepared.
+                if launch_mode is LaunchMode.AWS:
+                    log_queue.put(f"[minds] Ensuring AWS security group is ready in {region}...")
+                    run_mngr_aws_prepare(region, on_output=emit_log, parent_cg=self.root_concurrency_group)
 
                 parsed_host = HostName(host_name)
                 log_queue.put("[minds] Creating workspace '{}' (mode: {})...".format(host_name, launch_mode.value))

@@ -247,8 +247,8 @@ def test_render_create_form_selects_lima_by_default_without_account() -> None:
 def test_render_create_form_selects_specified_launch_mode() -> None:
     # CLOUD instead of the default LIMA so the "selection honored over the
     # default" assertion is meaningful.
-    html = render_create_form(launch_mode=LaunchMode.CLOUD)
-    assert 'value="CLOUD" selected' in html
+    html = render_create_form(launch_mode=LaunchMode.VULTR)
+    assert 'value="VULTR" selected' in html
     assert 'value="LIMA" selected' not in html
 
 

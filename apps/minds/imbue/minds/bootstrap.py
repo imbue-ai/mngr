@@ -13,11 +13,14 @@ import os
 import re
 import shutil
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 import tomlkit
 from loguru import logger
+
+from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
@@ -138,6 +141,56 @@ def mngr_prefix_for(root_name: str) -> str:
     return "{}-".format(root_name)
 
 
+def _aws_credentials_plausibly_configured() -> bool:
+    """Cheap heuristic for whether boto3 would find AWS credentials, without importing boto3.
+
+    Mirrors the legs of boto3's default credential chain that apply on a
+    developer laptop (``AWS_*`` env vars, ``AWS_PROFILE``, ``~/.aws`` files) --
+    minds runs on the user's machine, not on EC2, so the IMDS leg is
+    irrelevant. Gates whether the per-region ``[providers.aws-<region>]`` blocks
+    are written: writing them with no credentials present would make every
+    ``mngr list`` fan out to dead AWS providers and log a provider-unavailable
+    error per region.
+    """
+    if os.environ.get("AWS_ACCESS_KEY_ID") or os.environ.get("AWS_PROFILE"):
+        return True
+    aws_dir = Path.home() / ".aws"
+    return (aws_dir / "credentials").is_file() or (aws_dir / "config").is_file()
+
+
+def _desired_aws_provider_names() -> tuple[str, ...]:
+    """Return the ``aws-<region>`` provider names minds should configure, or () when AWS is unconfigured."""
+    if not _aws_credentials_plausibly_configured():
+        return ()
+    return tuple(f"{_AWS_PROVIDER_NAME_PREFIX}{region}" for region in CONFIGURED_AWS_REGIONS)
+
+
+def _existing_aws_provider_names(providers_mapping: Mapping[str, object]) -> set[str]:
+    """Return the set of ``aws-<region>`` provider names currently present in a providers mapping."""
+    return {name for name in providers_mapping if name.startswith(_AWS_PROVIDER_NAME_PREFIX)}
+
+
+def _write_aws_provider_blocks(providers_section: tomlkit.items.Table, desired_names: tuple[str, ...]) -> None:
+    """Rewrite the ``[providers.aws-<region>]`` blocks so they exactly match ``desired_names``.
+
+    Removes any stale ``aws-<region>`` blocks (AWS credentials removed, or
+    ``CONFIGURED_AWS_REGIONS`` changed) and (re)writes one block per desired
+    name, pinning the backend to ``aws``, the region to the name's suffix, and
+    the gVisor/runsc hardening knobs that mirror the ovh/vultr bake settings.
+    """
+    for name in tuple(providers_section):
+        if name.startswith(_AWS_PROVIDER_NAME_PREFIX):
+            del providers_section[name]
+    for name in desired_names:
+        region = name[len(_AWS_PROVIDER_NAME_PREFIX) :]
+        block = tomlkit.table()
+        block["backend"] = _AWS_BACKEND_NAME
+        block["default_region"] = region
+        block["install_gvisor_runtime"] = _AWS_INSTALL_GVISOR_RUNTIME
+        block["docker_runtime"] = _AWS_DOCKER_RUNTIME
+        providers_section[name] = block
+
+
 def _ensure_mngr_settings(root_name: str) -> None:
     """Ensure the mngr settings.toml has minds-side overrides configured.
 
@@ -186,6 +239,10 @@ def _ensure_mngr_settings(root_name: str) -> None:
         return
     settings_path = settings_dir / "settings.toml"
 
+    # The per-region AWS provider blocks minds should currently have configured
+    # (one per region when AWS credentials are present, none otherwise).
+    desired_aws_names = _desired_aws_provider_names()
+
     if settings_path.exists():
         existing = tomllib.loads(settings_path.read_text())
         providers = existing.get("providers", {})
@@ -197,6 +254,7 @@ def _ensure_mngr_settings(root_name: str) -> None:
             and "ssh" not in providers
             and default_imbue_cloud.get("backend") == _IMBUE_CLOUD_BACKEND_NAME
             and default_imbue_cloud.get("is_enabled") is False
+            and _existing_aws_provider_names(providers) == set(desired_aws_names)
         ):
             # Already in the desired shape -- recursive disabled, no stale
             # ssh provider section, default imbue_cloud instance suppressed --
@@ -224,6 +282,13 @@ def _ensure_mngr_settings(root_name: str) -> None:
     default_block["backend"] = _IMBUE_CLOUD_BACKEND_NAME
     default_block["is_enabled"] = False
     providers_section[_IMBUE_CLOUD_BACKEND_NAME] = default_block
+
+    # Write one ``[providers.aws-<region>]`` block per configured region (when
+    # AWS credentials are present), so ``mngr create @host.aws-<region>`` and
+    # ``mngr list`` discovery both resolve the region-specific provider. When no
+    # AWS credentials are configured, ``desired_aws_names`` is empty and any
+    # stale blocks are removed.
+    _write_aws_provider_blocks(providers_section, desired_aws_names)
 
     plugins_section = doc.setdefault("plugins", tomlkit.table())
     recursive_block = tomlkit.table()
@@ -448,6 +513,19 @@ _IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 _IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
 _IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 _IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
+
+# Backend name + container-hardening knobs written into each per-region
+# ``[providers.aws-<region>]`` block. The AWS provider is region-locked per
+# instance (EC2's API is per-region), so minds writes one block per
+# ``CONFIGURED_AWS_REGIONS`` entry and the create address selects the right one.
+# The gVisor/runsc settings mirror the forever-claude-template ``[providers.ovh]``
+# / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a
+# runsc-hardened container; the matching ``docker run`` start args live in the
+# template ``[create_templates.aws]``.
+_AWS_BACKEND_NAME: Final[str] = "aws"
+_AWS_DOCKER_RUNTIME: Final[str] = "runsc"
+_AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+_AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 
 
 class BootstrapError(ValueError):
