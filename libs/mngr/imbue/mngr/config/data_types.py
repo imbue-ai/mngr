@@ -150,20 +150,17 @@ def split_cli_args_string(cli_args: str) -> tuple[str, ...]:
     return tuple(lexer)
 
 
-# The fully-qualified paths of ``MngrConfig``'s top-level container dict fields, whose
-# cross-scope merge is per-key (instead of assign-by-default). Specified as *paths*
-# rather than bare field names so the narrowing walker matches only the actual
-# top-level field and never a same-named field nested inside a sub-model (e.g. a plugin
-# config's own ``commands`` dict, which must be narrowing-checked as a leaf aggregate,
-# not per-key-recursed -- a bare-name match silently skipped its dropped keys).
-_CONTAINER_DICT_FIELD_PATHS: Final[frozenset[tuple[str, ...]]] = frozenset(
-    {("agent_types",), ("providers",), ("plugins",), ("commands",), ("create_templates",)}
+# ``MngrConfig``'s top-level container dict fields, whose cross-scope merge is per-key
+# (instead of assign-by-default). These count as containers *only* at the top level of
+# ``MngrConfig``: a same-named field nested inside a sub-model (e.g. a plugin config's
+# own ``commands`` dict) is an ordinary aggregate, narrowing-checked as a leaf -- not
+# per-key-recursed (which would silently skip its dropped keys). The narrowing walker
+# therefore guards the match with a depth check (top level only); the overlay merge only
+# ever marks the outermost ``MngrConfig`` dict, so a name match there is already
+# unambiguous.
+_CONTAINER_DICT_FIELDS: Final[frozenset[str]] = frozenset(
+    {"agent_types", "providers", "plugins", "commands", "create_templates"}
 )
-# The bare top-level field names, derived from the paths. Used by the overlay merge,
-# which only ever inspects the top-level ``MngrConfig`` dict (it never recurses into a
-# sub-model), so a name match there is unambiguous. All container paths are single
-# segment (top level), so the first element is the field name.
-_CONTAINER_DICT_FIELD_NAMES: Final[frozenset[str]] = frozenset(path[0] for path in _CONTAINER_DICT_FIELD_PATHS)
 
 
 def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
@@ -230,13 +227,14 @@ def _walk_for_narrowing(
                 continue
             base_value = getattr(base, field_name, None) if isinstance(base, BaseModel) else None
             sub_path = path + (field_name,)
-            if sub_path in _CONTAINER_DICT_FIELD_PATHS:
+            if not path and field_name in _CONTAINER_DICT_FIELDS:
                 # Per-key recurse for MngrConfig's top-level container dicts (agent_types,
-                # providers, plugins, commands, create_templates). Matched on the *full
-                # path*, so a same-named field nested inside a sub-model (e.g. a plugin
-                # config's own ``commands`` dict, whose path is deeper) is narrowing-checked
-                # as a leaf aggregate instead of being mis-treated as a container (which
-                # per-key recurses and silently skips dropped keys).
+                # providers, plugins, commands, create_templates). The ``not path`` guard
+                # scopes this to the *top level*: a same-named field nested inside a
+                # sub-model (e.g. a plugin config's own ``commands`` dict, whose path is
+                # non-empty) is narrowing-checked as a leaf aggregate instead of being
+                # mis-treated as a container (which per-key recurses and silently skips
+                # dropped keys).
                 _walk_for_narrowing(base_value, override_value, sub_path, violations)
                 continue
             _check_narrowing(base_value, override_value, sub_path, violations)
@@ -717,7 +715,7 @@ class MngrConfig(FrozenModel):
             override,
             settings_patch_field_names=settings_patch_field_names,
             serialize_as_any=True,
-            container_dict_field_names=_CONTAINER_DICT_FIELD_NAMES,
+            container_dict_field_names=_CONTAINER_DICT_FIELDS,
             drop_none_values=True,
             settings_patch_field_names_for_class=get_settings_patch_field_names,
         )

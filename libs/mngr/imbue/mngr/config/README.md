@@ -112,8 +112,8 @@ dropping a non-empty aggregate from a lower layer):
 - **Assign-by-default fields** -- `detect_settings_narrowing` (`data_types.py`) walks
   the merged models. A `ScalarTuple` / `StringDerivedTuple` (a string-shaped TOML
   value coerced to a tuple) is a scalar, not an aggregate, so replacing it is exempt;
-  container dict fields are matched by **fully-qualified path** (not bare name) so a
-  same-named field nested in a sub-model is checked as a leaf.
+  the container dict fields count as containers only at the **top level** of
+  `MngrConfig`, so a same-named field nested in a sub-model is checked as a leaf.
 - **`SettingsPatchField` fields** -- exempt from the walker above (they accumulate),
   so their cross-scope narrowings come from the overlay merge instead:
   `merge_models_via_overlay_with_narrowings` returns the settings-patch narrowing

@@ -863,10 +863,10 @@ class _OuterWithNested(FrozenModel):
 
 def test_detect_settings_narrowing_flags_drop_in_nested_container_named_field() -> None:
     """A sub-model field named like a top-level container dict (``commands``) is
-    narrowing-checked as a leaf aggregate at its full path -- not mis-treated as a
-    top-level container (which per-key recurses and silently skips dropped keys). The
-    ``_CONTAINER_DICT_FIELD_PATHS`` match is on the full path, so only the actual
-    top-level field qualifies."""
+    narrowing-checked as a leaf aggregate -- not mis-treated as a top-level container
+    (which per-key recurses and silently skips dropped keys). The container match is
+    guarded by a top-level depth check, so only an actual top-level field qualifies; a
+    nested namesake (non-empty path) falls through to the leaf check."""
     base = _OuterWithNested(nested=_NestedContainerNamed(commands={"a": "x"}))
     override = _OuterWithNested(nested=_NestedContainerNamed(commands={"b": "y"}))
     assert detect_settings_narrowing(base, override) == ["nested.commands"]
