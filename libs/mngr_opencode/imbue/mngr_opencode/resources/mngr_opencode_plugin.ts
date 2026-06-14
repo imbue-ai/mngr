@@ -29,10 +29,11 @@
 //      RUNNING -> WAITING and `mngr list` can report a PERMISSIONS reason. Cleared
 //      as a safety net on root idle (a prompt stranded without a reply). The marker
 //      is independent of the active recompute -- the session stays busy (active
-//      present) the whole time a prompt is open. (The running 1.16.2 binary emits
-//      `permission.asked` with a `requestID` on the reply; the @opencode-ai/sdk
-//      type stubs disagree, naming them `permission.updated`/`permissionID`. The two
-//      handlers accept either, since opencode self-upgrades.)
+//      present) the whole time a prompt is open. (The running binary emits
+//      `permission.asked` carrying `id`, and `permission.replied` carrying `requestID`
+//      -- verified against 1.16.2 and 1.17.7. The @opencode-ai/sdk type stubs disagree,
+//      naming them `permission.updated`/`permissionID`. The two handlers accept either,
+//      since opencode self-upgrades.)
 //
 //   2. Raw transcript. Each message.updated / message.part.updated event is
 //      appended verbatim (as {type, properties}) to

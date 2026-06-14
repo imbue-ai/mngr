@@ -998,8 +998,12 @@ Extra plugin-namespaced fields surfaced in `mngr list`, online and offline.
   wiring against the binary. (Caveat / **revisit**: the `@opencode-ai/sdk` type stubs are out of sync
   with the shipped binary -- they name the events `permission.updated`/`permissionID`, but the
   running server emits `permission.asked`/`requestID`, verified by inspecting the binary at **both**
-  1.16.2 and 1.17.7. The plugin accepts **both** names since opencode self-upgrades; once the sdk and
-  binary reconverge -- or opencode documents which is canonical -- the dead branch can be dropped.)
+  1.16.2 and 1.17.7. This is a known class of opencode bug -- the SDK permission types drifted from
+  the binary in the permissions rework, e.g. opencode issue #7006 (a `permission.ask` plugin hook
+  defined in the SDK but never triggered at runtime) -- and community plugins consume
+  `permission.asked`/`permission.replied`, matching the binary, not the SDK's `permission.updated`.
+  The plugin accepts **both** names since opencode self-upgrades; once the SDK and binary reconverge
+  -- or opencode documents which is canonical -- the dead `permission.updated` branch can be dropped.)
   No upstream change was required.
 - **codex** -- **status: implemented** (both `PERMISSIONS` and `END_OF_TURN`), via
   `agent_field_generators`. `PermissionRequest` touches a `permissions_waiting` marker (inline
