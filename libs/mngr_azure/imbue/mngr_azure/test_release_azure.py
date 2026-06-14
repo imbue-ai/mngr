@@ -21,10 +21,13 @@ picture): each test's ``finally`` calls ``mngr destroy --force``; the
 ``shutdown -P +N`` (best-effort -- on Azure a stopped VM still bills compute, so
 the session-end scanner is the real backstop).
 
-Run manually:
+Run manually (the suite takes ~13 minutes, so the duration budget is raised
+above ``just test``'s 600s default to avoid a spurious session-time failure):
 
     AZURE_SUBSCRIPTION_ID=... MNGR_AZURE_RELEASE_TESTS=1 \\
-        just test libs/mngr_azure/imbue/mngr_azure/test_release_azure.py
+        PYTEST_MAX_DURATION_SECONDS=1200 uv run pytest --no-cov --cov-fail-under=0 \\
+        -n 0 -m release \\
+        libs/mngr_azure/imbue/mngr_azure/test_release_azure.py
 """
 
 import os
