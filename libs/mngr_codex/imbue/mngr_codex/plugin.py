@@ -290,10 +290,9 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         cleared on ``PostToolUse``). The base state reads only the ``active`` marker,
         which stays present during a dialog (the root turn has not stopped), so on
         its own it would report RUNNING. Promote RUNNING -> WAITING while the agent
-        is blocked, since it cannot progress without user intervention -- mirroring
-        ``mngr_claude``. The promotion rule itself lives in
-        ``_resolve_lifecycle_state_for_permission`` so it can be unit-tested without
-        a live tmux pane.
+        is blocked, since it cannot progress without user intervention. The promotion
+        rule itself lives in ``_resolve_lifecycle_state_for_permission`` so it can be
+        unit-tested without a live tmux pane.
         """
         base_state = super().get_lifecycle_state()
         is_blocked_on_permission = self._check_file_exists(self._get_agent_dir() / PERMISSIONS_WAITING_FILENAME)

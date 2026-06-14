@@ -137,8 +137,8 @@ ACTIVE_MARKER_FILENAME: str = "active"
 # end) remove it. ``CodexAgent.get_lifecycle_state`` promotes RUNNING -> WAITING
 # while it is present, and ``_waiting_reason`` reports ``PERMISSIONS``. Unlike the
 # ``active`` marker it is a plain touch/remove flag, not part of the lock-guarded
-# recompute: it tracks a single blocking dialog, not concurrent activity. Name
-# kept in sync with the literal the hook commands and the shared helper reference.
+# recompute: it tracks a single blocking dialog, not concurrent activity. This name
+# is also hardcoded as a literal in ``codex_marker_state.sh``; keep the two in sync.
 PERMISSIONS_WAITING_FILENAME: str = "permissions_waiting"
 
 # Per-agent file (in ``$MNGR_AGENT_STATE_DIR``) recording the *root* codex
