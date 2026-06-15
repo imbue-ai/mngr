@@ -74,11 +74,14 @@ _POWER_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 # 32-hex host-id suffix (+ separating dash) for uniqueness, leaving this many
 # characters for the human-readable stem.
 _MAX_VM_NAME_LENGTH: Final[int] = 64
+_MAX_LINUX_HOSTNAME_LENGTH: Final[int] = 63
 _INVALID_NAME_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9-]")
 _VM_NAME_STEM_LENGTH: Final[int] = _MAX_VM_NAME_LENGTH - 33
 # The shape ``_make_vm_name`` produces: lowercase alphanumerics and dashes, not
 # starting or ending with a dash, 1-64 chars. A subset of what Azure accepts for
-# a Linux VM resource name, but the only shape the coercion ever emits.
+# a Linux VM resource name, but the only shape the coercion ever emits. The same
+# shape is a valid Linux hostname (within its tighter length cap), so
+# ``LinuxHostname`` reuses it.
 _AZURE_VM_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
@@ -104,16 +107,37 @@ class AzureVmName(NonEmptyStr):
         return super().__new__(cls, candidate)
 
 
+class LinuxHostname(NonEmptyStr):
+    """A Linux computer-name: non-empty, ``[a-z0-9-]``, no leading/trailing dash, at most 63 chars.
+
+    Codifies the hostname charset and the <= 63 char cap for the value written to
+    a VM's ``os_profile.computer_name``. ``_computer_name`` derives it from an
+    ``AzureVmName`` (truncating to length), and the constructor re-asserts the
+    result is a valid hostname -- so a regression in that derivation fails fast
+    here rather than as an opaque Azure API error.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        candidate = value.strip()
+        if not _AZURE_VM_NAME_RE.match(candidate) or len(candidate) > _MAX_LINUX_HOSTNAME_LENGTH:
+            raise InvalidAzureIdentifierError(
+                f"{candidate!r} is not a valid Linux hostname "
+                f"([a-z0-9-], no leading/trailing dash, at most {_MAX_LINUX_HOSTNAME_LENGTH} chars)"
+            )
+        return super().__new__(cls, candidate)
+
+
 # How long to wait for a resource-provider registration to flip to "Registered".
 _PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
 _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
 
 # Minimum age before an unattached NIC / public IP is eligible for reclaim by the
-# next create. Azure reserves a NIC for its would-be VM for 180s after a failed
-# create, so a younger unattached NIC is either still reserved (delete would
-# fail) or belongs to a create that is mid-flight on another machine -- this
-# margin keeps the self-healing sweep from ever deleting an in-flight create's
-# NIC.
+# next create. Every healthy create leaves its NIC briefly unattached (between
+# creating it and the VM associating it), so the age gate is what keeps the sweep
+# from racing an in-flight create -- whether that create is in this process, on
+# this machine, or on another machine sharing the resource group. The window sits
+# above Azure's 180s post-failure NIC reservation, so a younger orphan's delete
+# would fail anyway.
 _ORPHAN_RECLAIM_MIN_AGE_SECONDS: Final[float] = 240.0
 
 
@@ -136,13 +160,15 @@ def _make_vm_name(label: str, tags: Mapping[str, str]) -> AzureVmName:
     return AzureVmName(f"{stem}-{suffix}"[:_MAX_VM_NAME_LENGTH].rstrip("-"))
 
 
-def _computer_name(vm_name: str) -> str:
+def _computer_name(vm_name: AzureVmName) -> LinuxHostname:
     """Derive a Linux computer-name (hostname) from the VM name.
 
-    Linux hostnames are <= 64 chars; we cap at 63 and strip trailing dashes so
-    the value is always a valid hostname even after truncation.
+    The input is an ``AzureVmName`` (charset ``[a-z0-9-]``, no edge dashes) -- a
+    subset of valid hostnames -- so truncation to the 63-char cap (then stripping
+    any trailing dash that truncation exposes) is the only step needed to keep the
+    result a valid hostname.
     """
-    return vm_name[:63].rstrip("-")
+    return LinuxHostname(vm_name[:_MAX_LINUX_HOSTNAME_LENGTH].rstrip("-"))
 
 
 class AzureNetworkPrepareResult(FrozenModel):
@@ -203,10 +229,10 @@ class AzureVpsClient(VpsClientInterface):
         default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the NSG created by "
-            "ensure_network. Default ('0.0.0.0/0',) allows any IP (fail-open, like AWS/GCP); set to "
-            "e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no SSH allow rule (the NSG "
-            "default-deny then leaves instances unreachable from outside the vnet). A warning is logged "
-            "when the effective range is 0.0.0.0/0 or empty."
+            "ensure_network. Default ('0.0.0.0/0',) allows any IP; set to e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or () for no SSH allow rule (the NSG default-deny then leaves "
+            "instances unreachable from outside the vnet). A warning is logged when the effective range "
+            "is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched VMs")
@@ -582,7 +608,7 @@ class AzureVpsClient(VpsClientInterface):
 
     def _build_vm_model(
         self,
-        vm_name: str,
+        vm_name: AzureVmName,
         plan: str,
         user_data: str,
         public_key: str,
