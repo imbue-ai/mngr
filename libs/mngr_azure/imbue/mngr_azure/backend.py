@@ -490,17 +490,21 @@ class AzureProvider(VpsDockerProvider):
         assignment degrades gracefully when the operator lacks
         roleAssignments/write (see ``AzureVpsClient.assign_self_deallocate_role``).
         """
-        instance = self._find_instance_for_host(host_id)
-        if instance is not None:
-            try:
+        # The base contract says this hook MUST NOT raise, so guard the whole
+        # role-assignment path: _find_instance_for_host raises MngrError on an
+        # ambiguous host-id match, and assign_self_deallocate_role surfaces Azure
+        # API failures as VpsApiError (a MngrError, not an AzureError).
+        try:
+            instance = self._find_instance_for_host(host_id)
+            if instance is not None:
                 self.azure_client.assign_self_deallocate_role(str(instance["id"]))
-            except AzureError as e:
-                logger.warning(
-                    "Could not assign the self-deallocate role for host {} ({}); idle self-deallocate "
-                    "is disabled for this host, but `mngr stop` still works",
-                    host_id,
-                    e,
-                )
+        except (MngrError, AzureError) as e:
+            logger.warning(
+                "Could not assign the self-deallocate role for host {} ({}); idle self-deallocate "
+                "is disabled for this host, but `mngr stop` still works",
+                host_id,
+                e,
+            )
         try:
             self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:
