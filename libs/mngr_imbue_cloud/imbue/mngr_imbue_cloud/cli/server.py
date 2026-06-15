@@ -502,6 +502,7 @@ def _bake_one_slice(
     database_url: str,
     port_range_start: int,
     port_range_end: int,
+    is_deferred_install_wait_skipped: bool,
 ) -> dict[str, Any]:
     """Bake one slice (laptop-driven ``mngr create`` against the slice provider) + insert its pool row.
 
@@ -546,8 +547,17 @@ def _bake_one_slice(
                 )
             finalize_baked_pool_host(_slice_run_in_container, baked, host_name=host_name)
             # Let the FCT deferred-install (heavy apt + browser download) finish before we stop the
-            # services agent: stopping mid-apt corrupts dpkg (see wait_for_deferred_install).
-            wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
+            # services agent: stopping mid-apt corrupts dpkg (see wait_for_deferred_install). Dev
+            # bakes may skip this wait to save the few minutes; the tradeoff is the baked container's
+            # deferred-install can be left incomplete/corrupt (acceptable for slow-path dev bakes,
+            # whose container is rebuilt on lease anyway).
+            if is_deferred_install_wait_skipped:
+                logger.warning(
+                    "Skipping deferred-install wait for slice {} (dev bake); its baked deferred-install may be incomplete",
+                    host_name,
+                )
+            else:
+                wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
             # Stop the services agent so it lands in the pool STOPPED, exactly like an
             # OVH pool host (which ``_create_single_pool_host`` stops via local mngr).
             # The fast-path lease then *starts* the adopted agent, which re-runs the
@@ -625,6 +635,7 @@ def _bake_into_outcomes(
     database_url: str,
     port_range_start: int,
     port_range_end: int,
+    is_deferred_install_wait_skipped: bool,
     outcomes: list[dict[str, Any]],
     outcomes_lock: "threading.Lock",
 ) -> None:
@@ -640,6 +651,7 @@ def _bake_into_outcomes(
         database_url=database_url,
         port_range_start=port_range_start,
         port_range_end=port_range_end,
+        is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
     )
     with outcomes_lock:
         outcomes.append(outcome)
@@ -654,6 +666,7 @@ def allocate_slices(
     mngr_source: str | None,
     database_url: str,
     is_dry_run: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Bake ``count`` slices onto a single ready bare-metal server and insert their pool rows.
 
@@ -742,6 +755,7 @@ def allocate_slices(
                     database_url=database_url,
                     port_range_start=port_windows[idx][0],
                     port_range_end=port_windows[idx][1],
+                    is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
                     outcomes=outcomes,
                     outcomes_lock=outcomes_lock,
                 ),

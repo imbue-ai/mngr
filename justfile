@@ -824,6 +824,7 @@ bake-pool-host-dev region workspace_dir="$HOME/project/forever-claude-template" 
         --count "{{count}}" \
         --region "{{region}}" \
         --workspace-dir "{{workspace_dir}}" \
+        --skip-deferred-install-wait \
         {{extra_args}}
 
 # Production OVH-VPS pool bake from an exact FCT tag (strict; see bake-pool-host-dev).

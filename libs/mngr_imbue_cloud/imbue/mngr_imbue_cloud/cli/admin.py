@@ -277,6 +277,7 @@ def _create_single_pool_host(
     region: str,
     extra_tags: tuple[str, ...],
     is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> bool:
     """Create a single OVH pool host. Returns True on success.
 
@@ -323,8 +324,16 @@ def _create_single_pool_host(
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
     # Let the FCT deferred-install (heavy apt + browser download, kicked off at boot)
-    # finish before we stop the services agent: stopping mid-apt corrupts dpkg.
-    wait_for_deferred_install(_ovh_run_in_container, baked, host_name=host_name)
+    # finish before we stop the services agent: stopping mid-apt corrupts dpkg. Dev bakes
+    # may skip this wait to save a few minutes (the tradeoff is a possibly-incomplete baked
+    # deferred-install -- fine for throwaway dev hosts).
+    if is_deferred_install_wait_skipped:
+        logger.warning(
+            "Skipping deferred-install wait for {} (dev bake); its baked deferred-install may be incomplete",
+            host_name,
+        )
+    else:
+        wait_for_deferred_install(_ovh_run_in_container, baked, host_name=host_name)
     # Stop the freshly-baked services agent (it boots during create); the user's
     # lease re-starts it, which re-runs the FCT bootstrap and re-creates the chat
     # agent under the lease's workspace name. (Slices do the equivalent stop inside
@@ -496,6 +505,18 @@ def _create_single_pool_host(
     default=False,
     help="[slice only] Report placement + per-slice sizing; do not bake.",
 )
+@click.option(
+    "--skip-deferred-install-wait",
+    "is_deferred_install_wait_skipped",
+    is_flag=True,
+    default=False,
+    help=(
+        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) to "
+        "finish before stopping the baked services agent. Saves a few minutes per bake, but the baked "
+        "container's deferred-install may be left incomplete (stopping mid-apt can corrupt dpkg). Safe "
+        "for dev/throwaway bakes; NEVER use for production pool hosts."
+    ),
+)
 def pool_create(
     count: int,
     backend: str,
@@ -511,6 +532,7 @@ def pool_create(
     mngr_source: str | None,
     is_recycle_enabled: bool,
     is_dry_run: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
 
@@ -569,6 +591,7 @@ def pool_create(
                     mngr_source=mngr_source,
                     database_url=resolved_database_url,
                     is_dry_run=is_dry_run,
+                    is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
                 )
             else:
                 # The ovh_vps branch above already rejected a missing key; assert it
@@ -584,6 +607,7 @@ def pool_create(
                     database_url=resolved_database_url,
                     mngr_source=mngr_source,
                     is_recycle_enabled=is_recycle_enabled,
+                    is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
                 )
     except (BakeSourceError, RepoIdentityError) as exc:
         fail_with_json(str(exc), error_class="UsageError")
@@ -614,6 +638,7 @@ def _create_ovh_vps_pool_hosts(
     database_url: str,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Bake ``count`` OVH-VPS pool hosts from ``workspace_dir`` with the derived attributes."""
     management_public_key = Path(management_public_key_file).read_text().strip()
@@ -644,6 +669,7 @@ def _create_ovh_vps_pool_hosts(
                 region=region,
                 extra_tags=tags,
                 is_recycle_enabled=is_recycle_enabled,
+                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
             )
         except (ConcurrencyGroupError, PoolBakeError, psycopg2.Error, OSError) as exc:
             logger.warning("[{}] Failed: {}", i, exc)

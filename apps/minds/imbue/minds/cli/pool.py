@@ -112,6 +112,7 @@ def build_create_admin_args(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> list[str]:
     """Compose the ``mngr imbue_cloud admin pool create`` argv from minds-side inputs.
 
@@ -160,6 +161,8 @@ def build_create_admin_args(
         args.extend(["--mngr-source", mngr_source])
     if not is_recycle_enabled:
         args.append("--no-recycle")
+    if is_deferred_install_wait_skipped:
+        args.append("--skip-deferred-install-wait")
     return args
 
 
@@ -542,6 +545,17 @@ def pool() -> None:
         "Useful for testing the fresh-provision path. Forwarded to the admin command as --no-recycle."
     ),
 )
+@click.option(
+    "--skip-deferred-install-wait",
+    "is_deferred_install_wait_skipped",
+    is_flag=True,
+    default=False,
+    help=(
+        "[dev only] Don't wait for the FCT deferred-install (heavy apt + Playwright/Chromium) before "
+        "stopping the baked services agent. Faster, but the baked container's deferred-install may be "
+        "incomplete. Never use for production hosts."
+    ),
+)
 def pool_create(
     count: int,
     region: str,
@@ -554,6 +568,7 @@ def pool_create(
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
+    is_deferred_install_wait_skipped: bool,
 ) -> None:
     """Create pool hosts for the activated minds env (OVH-backed via admin).
 
@@ -590,6 +605,7 @@ def pool_create(
                 database_url=effective_database_url,
                 mngr_source=mngr_source,
                 is_recycle_enabled=is_recycle_enabled,
+                is_deferred_install_wait_skipped=is_deferred_install_wait_skipped,
             )
             _raise_on_failure("create", _run_admin_command(args, extra_env=ovh_env))
     except VaultReadError as exc:
