@@ -25,7 +25,6 @@ the fresh snapshot automatically, so this consumer no longer sends ``SIGHUP``.
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import threading
 from collections.abc import Callable
@@ -52,6 +51,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.errors import EnvelopeStreamConsumerError
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
 from imbue.mngr.api.discovery_events import AgentDiscoveryEvent
@@ -176,7 +176,7 @@ class EnvelopeStreamConsumer(MutableModel):
         dispatched against an empty callback list.
         """
         if self._process is not None:
-            raise RuntimeError("EnvelopeStreamConsumer.attach already called")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.attach already called")
         self._process = process
 
     def start(self, concurrency_group: ConcurrencyGroup) -> None:
@@ -186,7 +186,7 @@ class EnvelopeStreamConsumer(MutableModel):
         need to see the very first envelope have been registered.
         """
         if self._process is None:
-            raise RuntimeError("EnvelopeStreamConsumer.start called before attach")
+            raise EnvelopeStreamConsumerError("EnvelopeStreamConsumer.start called before attach")
         concurrency_group.start_new_thread(
             target=self._read_stdout_loop,
             name="mngr-forward-stdout-reader",
@@ -678,10 +678,9 @@ def start_mngr_forward(
     would be dispatched against an empty callback list and silently
     dropped.
     """
-    binary = _resolve_mngr_binary(config.mngr_binary)
     preauth_cookie = secrets.token_urlsafe(_PREAUTH_TOKEN_LENGTH)
     command: list[str] = [
-        binary,
+        config.mngr_binary,
         "forward",
         "--host",
         "127.0.0.1",
@@ -719,17 +718,6 @@ def start_mngr_forward(
     )
     consumer.attach(process)
     return consumer, preauth_cookie
-
-
-def _resolve_mngr_binary(candidate: str) -> str:
-    """Resolve the mngr binary, falling back to PATH lookup if the candidate is just 'mngr'."""
-    if "/" in candidate:
-        return candidate
-    resolved = shutil.which(candidate)
-    if resolved is None:
-        # Best-effort: trust the bare name. Popen will raise if it's missing.
-        return candidate
-    return resolved
 
 
 def _redact_secrets(command: list[str]) -> list[str]:

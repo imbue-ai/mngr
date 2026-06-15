@@ -16,6 +16,9 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 # -- Helpers --
 
@@ -182,7 +185,8 @@ def test_empty_input_file_produces_no_output(tmp_path: Path, stub_mngr_log_sh: s
 
 def test_converts_user_text_message(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
+    user_uuid = uuid4().hex
+    runner.write_input([_make_user_event(user_uuid, "2026-01-01T00:00:00Z", text="Hello")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -191,13 +195,14 @@ def test_converts_user_text_message(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert len(events) == 1
     assert events[0]["type"] == "user_message"
     assert events[0]["content"] == "Hello"
-    assert events[0]["event_id"] == "uuid-1-user"
+    assert events[0]["event_id"] == f"{user_uuid}-user"
     assert events[0]["source"] == "claude/common_transcript"
 
 
 def test_converts_assistant_message(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.write_input([_make_assistant_event("uuid-2", "2026-01-01T00:00:01Z", text="Hi there!")])
+    assistant_uuid = uuid4().hex
+    runner.write_input([_make_assistant_event(assistant_uuid, "2026-01-01T00:00:01Z", text="Hi there!")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -207,19 +212,20 @@ def test_converts_assistant_message(tmp_path: Path, stub_mngr_log_sh: str) -> No
     assert events[0]["type"] == "assistant_message"
     assert events[0]["text"] == "Hi there!"
     assert events[0]["model"] == "claude-opus-4.6"
-    assert events[0]["event_id"] == "uuid-2-assistant"
+    assert events[0]["event_id"] == f"{assistant_uuid}-assistant"
     assert events[0]["stop_reason"] == "end_turn"
     assert events[0]["usage"]["input_tokens"] == 100
 
 
 def test_converts_tool_calls(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
     runner.write_input(
         [
             _make_assistant_event(
-                "uuid-3",
+                uuid4().hex,
                 "2026-01-01T00:00:02Z",
-                tool_calls=[{"id": "toolu_1", "name": "Read", "input": {"file": "test.txt"}}],
+                tool_calls=[{"id": tool_call_id, "name": "Read", "input": {"file": "test.txt"}}],
                 stop_reason="tool_use",
             )
         ]
@@ -232,21 +238,22 @@ def test_converts_tool_calls(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert len(events) == 1
     assert len(events[0]["tool_calls"]) == 1
     assert events[0]["tool_calls"][0]["tool_name"] == "Read"
-    assert events[0]["tool_calls"][0]["tool_call_id"] == "toolu_1"
+    assert events[0]["tool_calls"][0]["tool_call_id"] == tool_call_id
 
 
 def test_converts_tool_results(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
     assistant = _make_assistant_event(
-        "uuid-4",
+        uuid4().hex,
         "2026-01-01T00:00:03Z",
-        tool_calls=[{"id": "toolu_2", "name": "Bash"}],
+        tool_calls=[{"id": tool_call_id, "name": "Bash"}],
         stop_reason="tool_use",
     )
     user = _make_user_event(
-        "uuid-5",
+        uuid4().hex,
         "2026-01-01T00:00:04Z",
-        tool_results=[{"tool_use_id": "toolu_2", "content": "output text", "is_error": False}],
+        tool_results=[{"tool_use_id": tool_call_id, "content": "output text", "is_error": False}],
     )
     runner.write_input([assistant, user])
 
@@ -257,7 +264,7 @@ def test_converts_tool_results(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert len(events) == 2
     tool_results = [e for e in events if e["type"] == "tool_result"]
     assert len(tool_results) == 1
-    assert tool_results[0]["tool_call_id"] == "toolu_2"
+    assert tool_results[0]["tool_call_id"] == tool_call_id
     assert tool_results[0]["tool_name"] == "Bash"
     assert tool_results[0]["output"] == "output text"
     assert tool_results[0]["is_error"] is False
@@ -265,12 +272,13 @@ def test_converts_tool_results(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 
 def test_deduplicates_by_event_id(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
+    user_uuid = uuid4().hex
+    runner.write_input([_make_user_event(user_uuid, "2026-01-01T00:00:00Z", text="Hello")])
 
     # Pre-populate output with the same event_id
     runner.output_file.parent.mkdir(parents=True, exist_ok=True)
     runner.output_file.write_text(
-        json.dumps({"event_id": "uuid-1-user", "type": "user_message", "content": "Hello"}) + "\n"
+        json.dumps({"event_id": f"{user_uuid}-user", "type": "user_message", "content": "Hello"}) + "\n"
     )
 
     result = runner.run_single_pass()
@@ -282,25 +290,33 @@ def test_deduplicates_by_event_id(tmp_path: Path, stub_mngr_log_sh: str) -> None
 
 
 def test_skips_progress_events(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A progress event is dropped while a sibling user message in the same input survives."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     progress = json.dumps(
         {
             "type": "progress",
-            "uuid": "prog-1",
+            "uuid": uuid4().hex,
             "timestamp": "2026-01-01T00:00:00Z",
             "data": {"type": "bash_progress"},
         }
     )
-    runner.write_input([progress])
+    good_uuid = uuid4().hex
+    good = _make_user_event(good_uuid, "2026-01-01T00:00:01Z", text="kept")
+    runner.write_input([progress, good])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert runner.get_output_events() == []
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "kept"
+    assert events[0]["event_id"] == f"{good_uuid}-user"
 
 
 def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    valid = _make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="valid")
+    valid = _make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="valid")
     runner.write_input(["not json", valid])
 
     result = runner.run_single_pass()
@@ -312,34 +328,64 @@ def test_handles_malformed_json(tmp_path: Path, stub_mngr_log_sh: str) -> None:
 
 
 def test_skips_events_without_uuid(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """An event missing uuid is dropped while a sibling valid event survives."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     no_uuid = json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00Z", "message": {"content": "hi"}})
-    runner.write_input([no_uuid])
+    good_uuid = uuid4().hex
+    good = _make_user_event(good_uuid, "2026-01-01T00:00:01Z", text="kept")
+    runner.write_input([no_uuid, good])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert runner.get_output_events() == []
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "kept"
+    assert events[0]["event_id"] == f"{good_uuid}-user"
+
+
+def test_skips_events_without_timestamp(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """An event missing timestamp is dropped while a sibling valid event survives.
+
+    This exercises the timestamp branch of the `if not uuid or not timestamp` guard.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    no_timestamp = json.dumps({"type": "user", "uuid": uuid4().hex, "message": {"content": "hi"}})
+    good_uuid = uuid4().hex
+    good = _make_user_event(good_uuid, "2026-01-01T00:00:01Z", text="kept")
+    runner.write_input([no_timestamp, good])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "user_message"
+    assert events[0]["content"] == "kept"
+    assert events[0]["event_id"] == f"{good_uuid}-user"
 
 
 def test_user_with_text_and_tool_results(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """A user message with both text and tool results should emit both."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
     assistant = _make_assistant_event(
-        "uuid-a",
+        uuid4().hex,
         "2026-01-01T00:00:01Z",
-        tool_calls=[{"id": "toolu_3", "name": "Edit"}],
+        tool_calls=[{"id": tool_call_id, "name": "Edit"}],
         stop_reason="tool_use",
     )
     user = json.dumps(
         {
             "type": "user",
-            "uuid": "uuid-u",
+            "uuid": uuid4().hex,
             "timestamp": "2026-01-01T00:00:02Z",
             "message": {
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Continue please"},
-                    {"type": "tool_result", "tool_use_id": "toolu_3", "content": "done", "is_error": False},
+                    {"type": "tool_result", "tool_use_id": tool_call_id, "content": "done", "is_error": False},
                 ],
             },
         }
@@ -362,9 +408,9 @@ def test_truncates_tool_input_preview(tmp_path: Path, stub_mngr_log_sh: str) -> 
     runner.write_input(
         [
             _make_assistant_event(
-                "uuid-long",
+                uuid4().hex,
                 "2026-01-01T00:00:00Z",
-                tool_calls=[{"id": "toolu_long", "name": "Read", "input": long_input}],
+                tool_calls=[{"id": f"toolu_{uuid4().hex}", "name": "Read", "input": long_input}],
             )
         ]
     )
@@ -375,22 +421,52 @@ def test_truncates_tool_input_preview(tmp_path: Path, stub_mngr_log_sh: str) -> 
     events = runner.get_output_events()
     assert len(events) == 1
     input_preview = events[0]["tool_calls"][0]["input_preview"]
-    assert len(input_preview) <= 203
+    # Production truncates the compact JSON serialization to exactly _MAX_INPUT_PREVIEW_LENGTH
+    # (200) chars and appends "..." -> 203 chars total.
+    expected_full = json.dumps(long_input, separators=(",", ":"))
+    assert len(input_preview) == 203
+    assert input_preview.endswith("...")
+    assert input_preview[:200] == expected_full[:200]
+
+
+def test_does_not_truncate_short_tool_input_preview(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A short tool input is emitted verbatim with no truncation marker."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    short_input = {"file": "test.txt"}
+    runner.write_input(
+        [
+            _make_assistant_event(
+                uuid4().hex,
+                "2026-01-01T00:00:00Z",
+                tool_calls=[{"id": f"toolu_{uuid4().hex}", "name": "Read", "input": short_input}],
+            )
+        ]
+    )
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    input_preview = events[0]["tool_calls"][0]["input_preview"]
+    assert input_preview == json.dumps(short_input, separators=(",", ":"))
+    assert not input_preview.endswith("...")
 
 
 def test_truncates_long_tool_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
     assistant = _make_assistant_event(
-        "uuid-tr",
+        uuid4().hex,
         "2026-01-01T00:00:01Z",
-        tool_calls=[{"id": "toolu_tr", "name": "Read"}],
+        tool_calls=[{"id": tool_call_id, "name": "Read"}],
         stop_reason="tool_use",
     )
     long_output = "x" * 5000
     user = _make_user_event(
-        "uuid-tr2",
+        uuid4().hex,
         "2026-01-01T00:00:02Z",
-        tool_results=[{"tool_use_id": "toolu_tr", "content": long_output, "is_error": False}],
+        tool_results=[{"tool_use_id": tool_call_id, "content": long_output, "is_error": False}],
     )
     runner.write_input([assistant, user])
 
@@ -399,29 +475,61 @@ def test_truncates_long_tool_output(tmp_path: Path, stub_mngr_log_sh: str) -> No
 
     events = runner.get_output_events()
     tool_results = [e for e in events if e["type"] == "tool_result"]
-    assert len(tool_results[0]["output"]) <= 2003
+    output = tool_results[0]["output"]
+    # Production truncates to exactly _MAX_OUTPUT_LENGTH (2000) chars plus "..." -> 2003.
+    assert len(output) == 2003
+    assert output.endswith("...")
+    assert output[:2000] == long_output[:2000]
+
+
+def test_does_not_truncate_short_tool_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A short tool output is emitted verbatim with no truncation marker."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
+    assistant = _make_assistant_event(
+        uuid4().hex,
+        "2026-01-01T00:00:01Z",
+        tool_calls=[{"id": tool_call_id, "name": "Read"}],
+        stop_reason="tool_use",
+    )
+    short_output = "all good"
+    user = _make_user_event(
+        uuid4().hex,
+        "2026-01-01T00:00:02Z",
+        tool_results=[{"tool_use_id": tool_call_id, "content": short_output, "is_error": False}],
+    )
+    runner.write_input([assistant, user])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    tool_results = [e for e in events if e["type"] == "tool_result"]
+    assert tool_results[0]["output"] == short_output
+    assert not tool_results[0]["output"].endswith("...")
 
 
 def test_tool_result_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Tool result content can be a list of text blocks."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    tool_call_id = f"toolu_{uuid4().hex}"
     assistant = _make_assistant_event(
-        "uuid-lc",
+        uuid4().hex,
         "2026-01-01T00:00:01Z",
-        tool_calls=[{"id": "toolu_lc", "name": "Read"}],
+        tool_calls=[{"id": tool_call_id, "name": "Read"}],
         stop_reason="tool_use",
     )
     user = json.dumps(
         {
             "type": "user",
-            "uuid": "uuid-lc2",
+            "uuid": uuid4().hex,
             "timestamp": "2026-01-01T00:00:02Z",
             "message": {
                 "role": "user",
                 "content": [
                     {
                         "type": "tool_result",
-                        "tool_use_id": "toolu_lc",
+                        "tool_use_id": tool_call_id,
                         "content": [{"type": "text", "text": "part 1"}, {"type": "text", "text": "part 2"}],
                         "is_error": False,
                     }
@@ -442,8 +550,8 @@ def test_tool_result_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) ->
 def test_sorts_by_timestamp(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Events should be output sorted by timestamp."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    later = _make_user_event("uuid-later", "2026-01-01T00:00:02Z", text="Later")
-    earlier = _make_user_event("uuid-earlier", "2026-01-01T00:00:01Z", text="Earlier")
+    later = _make_user_event(uuid4().hex, "2026-01-01T00:00:02Z", text="Later")
+    earlier = _make_user_event(uuid4().hex, "2026-01-01T00:00:01Z", text="Earlier")
     runner.write_input([later, earlier])
 
     result = runner.run_single_pass()
@@ -461,7 +569,7 @@ def test_cache_read_and_write_tokens(tmp_path: Path, stub_mngr_log_sh: str) -> N
     runner.write_input(
         [
             _make_assistant_event(
-                "uuid-cache",
+                uuid4().hex,
                 "2026-01-01T00:00:00Z",
                 text="Hello",
                 usage={
@@ -487,9 +595,9 @@ def test_unknown_tool_name_defaults(tmp_path: Path, stub_mngr_log_sh: str) -> No
     """Tool results for unknown tool_call_ids should get tool_name='unknown'."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     user = _make_user_event(
-        "uuid-unk",
+        uuid4().hex,
         "2026-01-01T00:00:01Z",
-        tool_results=[{"tool_use_id": "toolu_unknown", "content": "result", "is_error": False}],
+        tool_results=[{"tool_use_id": f"toolu_{uuid4().hex}", "content": "result", "is_error": False}],
     )
     runner.write_input([user])
 
@@ -504,7 +612,7 @@ def test_unknown_tool_name_defaults(tmp_path: Path, stub_mngr_log_sh: str) -> No
 def test_output_writes_to_correct_path(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Output should go to events/claude/common_transcript/events.jsonl."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="Hello")])
+    runner.write_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="Hello")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -522,10 +630,11 @@ def test_meta_user_message_classified_as_meta(tmp_path: Path, stub_mngr_log_sh: 
     human typed it.
     """
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    meta_uuid = uuid4().hex
     feedback = (
         "Stop hook feedback:\n[./scripts/main_claude_stop_hook.sh]: Everything up-to-date\nERROR: Some checks failed"
     )
-    runner.write_input([_make_meta_event("uuid-stop", "2026-01-01T00:00:00Z", text=feedback)])
+    runner.write_input([_make_meta_event(meta_uuid, "2026-01-01T00:00:00Z", text=feedback)])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -534,16 +643,16 @@ def test_meta_user_message_classified_as_meta(tmp_path: Path, stub_mngr_log_sh: 
     assert len(events) == 1
     assert events[0]["type"] == "tool_result"
     assert events[0]["tool_name"] == "meta"
-    assert events[0]["tool_call_id"] == "meta-uuid-stop"
+    assert events[0]["tool_call_id"] == f"meta-{meta_uuid}"
     assert events[0]["output"] == feedback
     assert events[0]["is_error"] is False
-    assert events[0]["event_id"] == "uuid-stop-meta"
+    assert events[0]["event_id"] == f"{meta_uuid}-meta"
 
 
 def test_meta_user_message_truncates_long_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
     feedback = "Stop hook feedback:\n" + "x" * 5000
-    runner.write_input([_make_meta_event("uuid-stop2", "2026-01-01T00:00:00Z", text=feedback)])
+    runner.write_input([_make_meta_event(uuid4().hex, "2026-01-01T00:00:00Z", text=feedback)])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
@@ -551,7 +660,27 @@ def test_meta_user_message_truncates_long_output(tmp_path: Path, stub_mngr_log_s
     events = runner.get_output_events()
     assert len(events) == 1
     assert events[0]["type"] == "tool_result"
-    assert len(events[0]["output"]) <= 2003
+    output = events[0]["output"]
+    # Production truncates to exactly _MAX_OUTPUT_LENGTH (2000) chars plus "..." -> 2003.
+    assert len(output) == 2003
+    assert output.endswith("...")
+    assert output[:2000] == feedback[:2000]
+
+
+def test_meta_user_message_does_not_truncate_short_output(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A short meta message is emitted verbatim with no truncation marker."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    feedback = "Stop hook feedback:\nEverything up-to-date"
+    runner.write_input([_make_meta_event(uuid4().hex, "2026-01-01T00:00:00Z", text=feedback)])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    events = runner.get_output_events()
+    assert len(events) == 1
+    assert events[0]["type"] == "tool_result"
+    assert events[0]["output"] == feedback
+    assert not events[0]["output"].endswith("...")
 
 
 def test_meta_user_message_with_list_content(tmp_path: Path, stub_mngr_log_sh: str) -> None:
@@ -560,7 +689,7 @@ def test_meta_user_message_with_list_content(tmp_path: Path, stub_mngr_log_sh: s
     user = json.dumps(
         {
             "type": "user",
-            "uuid": "uuid-stop-list",
+            "uuid": uuid4().hex,
             "timestamp": "2026-01-01T00:00:00Z",
             "isMeta": True,
             "message": {
@@ -617,7 +746,7 @@ def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path:
     runner.write_input(
         [
             _make_user_event(
-                "uuid-quote",
+                uuid4().hex,
                 "2026-01-01T00:00:00Z",
                 text="Stop hook feedback:\nplease explain what this means",
             )
@@ -632,17 +761,49 @@ def test_user_text_quoting_stop_hook_marker_without_is_meta_stays_user(tmp_path:
     assert events[0]["type"] == "user_message"
 
 
+def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Every record claude's converter emits must validate against the shared envelope schema.
+
+    Guards against the claude emitter (common_transcript.sh) and the canonical schema
+    (imbue.mngr.agents.common_transcript_records) drifting apart. Drives all three record
+    types and asserts each emitted record conforms.
+    """
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    assistant = _make_assistant_event(
+        "uuid-assistant",
+        "2026-01-01T00:00:01Z",
+        text="hi there",
+        tool_calls=[{"id": "toolu_1", "name": "Bash", "input": {"command": "ls"}}],
+        stop_reason="tool_use",
+    )
+    user = _make_user_event(
+        "uuid-user",
+        "2026-01-01T00:00:02Z",
+        text="hello",
+        tool_results=[{"tool_use_id": "toolu_1", "content": "file.txt", "is_error": False}],
+    )
+    runner.write_input([assistant, user])
+
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+
+    records = runner.get_output_events()
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
+
+
 def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """Running twice with new input should append without duplicates."""
     runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    runner.write_input([_make_user_event("uuid-1", "2026-01-01T00:00:00Z", text="First")])
+    runner.write_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:00Z", text="First")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert len(runner.get_output_events()) == 1
 
     # Append a new event to input
-    runner.append_input([_make_user_event("uuid-2", "2026-01-01T00:00:01Z", text="Second")])
+    runner.append_input([_make_user_event(uuid4().hex, "2026-01-01T00:00:01Z", text="Second")])
 
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"

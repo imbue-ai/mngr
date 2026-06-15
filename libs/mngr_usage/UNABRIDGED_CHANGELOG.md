@@ -4,6 +4,14 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-12
+
+Internal: import `get_agent_state_dir_path` from its new canonical location `imbue.mngr.hosts.common` (relocated there from `imbue.mngr.hosts.host` to avoid circular-import issues). No behavior change.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 80% to 90% to match the coverage CI already measures (~93%).
+
 ## 2026-06-09
 
 Fixed a type error introduced when an older branch merged into main: `mngr_usage`'s usage-preservation code referenced `VolumeFileType`, which had been renamed to `FileType` in `imbue.mngr.interfaces.data_types`. Updated the import and references to use `FileType`.

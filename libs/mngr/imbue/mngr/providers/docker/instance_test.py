@@ -4,12 +4,17 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 
+import docker
+import docker.errors
+import docker.models.containers
 import pytest
 
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -336,6 +341,45 @@ def test_build_docker_run_command_omits_runtime_by_default(temp_mngr_ctx: MngrCo
         start_args=(),
     )
     assert "--runtime" not in cmd
+
+
+def _make_unknown_runtime_process_error(runtime: str) -> ProcessError:
+    """Build a `ProcessError` mirroring Docker's unregistered-runtime failure."""
+    return ProcessError(
+        command=("docker", "run", "--runtime", runtime, "debian:bookworm-slim"),
+        stdout="",
+        stderr=f"docker: Error response from daemon: unknown or invalid runtime name: {runtime}\n",
+        returncode=125,
+    )
+
+
+def test_runtime_not_registered_error_maps_unknown_runtime_process_error(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    error = provider._runtime_not_registered_error_or_none(_make_unknown_runtime_process_error("runsc"))
+    assert isinstance(error, DockerRuntimeNotRegisteredError)
+    assert error.runtime_name == "runsc"
+    # The message names the runtime and the help text offers the runc escape hatch.
+    assert "runsc" in str(error)
+    assert error.user_help_text is not None
+    assert "runc" in error.user_help_text
+
+
+def test_runtime_not_registered_error_ignores_unrelated_process_error(temp_mngr_ctx: MngrContext) -> None:
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime="runsc")
+    unrelated = ProcessError(
+        command=("docker", "run", "--runtime", "runsc", "debian:bookworm-slim"),
+        stdout="",
+        stderr="docker: Error response from daemon: pull access denied for debian\n",
+        returncode=125,
+    )
+    assert provider._runtime_not_registered_error_or_none(unrelated) is None
+
+
+def test_runtime_not_registered_error_none_when_runtime_unset(temp_mngr_ctx: MngrContext) -> None:
+    # With the default runtime there is no `--runtime` flag, so even an output
+    # carrying the marker is not attributable to a configured runtime.
+    provider = _make_docker_provider_with_runtime(temp_mngr_ctx, docker_runtime=None)
+    assert provider._runtime_not_registered_error_or_none(_make_unknown_runtime_process_error("runsc")) is None
 
 
 def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx: MngrContext) -> None:
@@ -687,19 +731,87 @@ def test_docker_client_error_is_mngr_error_subclass(temp_mngr_ctx: MngrContext) 
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts gracefully returns [] when Docker is unreachable."""
+def test_discover_hosts_raises_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts raises ProviderUnavailableError (not []) when Docker is unreachable.
+
+    Returning [] would let garbage collection treat an unreachable daemon as
+    "this provider has zero hosts" and delete every host's volume data. Raising
+    lets multi-provider callers (GC, listing) skip just this provider, the same
+    way the Modal and Imbue Cloud providers behave.
+    """
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
-    assert result == []
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
 @pytest.mark.docker_sdk
-def test_discover_hosts_and_agents_returns_empty_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
-    """discover_hosts_and_agents gracefully returns {} when Docker is unreachable."""
+def test_discover_hosts_and_agents_raises_when_daemon_offline(temp_mngr_ctx: MngrContext) -> None:
+    """discover_hosts_and_agents raises ProviderUnavailableError when Docker is unreachable."""
     provider = make_offline_docker_provider(temp_mngr_ctx)
-    result = provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
-    assert result == {}
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+
+class _ContainersRaising:
+    """Stand-in for ``client.containers`` whose ``list`` always raises."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def list(self, **kwargs: object) -> list[docker.models.containers.Container]:
+        raise self._error
+
+
+class _FakeDockerClient:
+    """Already-constructed Docker client whose container listing fails.
+
+    Lets tests exercise the post-construction failure paths (daemon dies after
+    the client was built, or the daemon responds with an API error) without a
+    real daemon. The offline-provider helper only covers construction-time
+    failure, which surfaces differently (a DockerException, not a raw transport
+    error).
+    """
+
+    def __init__(self, error: Exception) -> None:
+        self.containers = _ContainersRaising(error)
+
+
+@pytest.mark.docker_sdk
+def test_discover_hosts_raises_provider_unavailable_when_daemon_dies_after_connect(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A connection drop on an already-built client is treated as unavailable.
+
+    When the daemon goes away after the client was constructed (e.g. a daemon
+    restart mid-operation), ``containers.list()`` raises a raw
+    ``requests.exceptions.ConnectionError`` -- not a ``DockerException``. This
+    must still surface as ProviderUnavailableError so GC skips the provider
+    rather than crashing or deleting its volumes.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    # A version-pinned client skips the daemon ping at construction, so it builds
+    # successfully even though the socket is dead -- mirroring a client that was
+    # built while the daemon was up and is used after it went away.
+    provider.__dict__["_docker_client"] = docker.DockerClient(
+        base_url="unix:///nonexistent/docker.sock", version="1.40"
+    )
+    with pytest.raises(ProviderUnavailableError, match="not available"):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
+
+
+def test_discover_hosts_propagates_api_error_without_marking_unavailable(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A responsive daemon that returns an API error is not mistaken for unavailable.
+
+    ``docker.errors.APIError`` means the daemon was reached and answered with an
+    error. Mislabeling it ProviderUnavailableError would make GC silently skip a
+    healthy provider; the error must propagate so the failure is surfaced.
+    """
+    provider = make_docker_provider(temp_mngr_ctx)
+    provider.__dict__["_docker_client"] = _FakeDockerClient(docker.errors.APIError("boom"))
+    with pytest.raises(docker.errors.APIError):
+        provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
 # =========================================================================
