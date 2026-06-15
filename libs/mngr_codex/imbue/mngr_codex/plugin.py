@@ -104,6 +104,7 @@ from imbue.mngr_codex import resources as _codex_resources
 from imbue.mngr_codex.codex_config import ACTIVE_MARKER_FILENAME
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import CLEAR_ACTIVE_MARKER_SCRIPT_NAME
+from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import COMMON_TRANSCRIPT_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import MARKER_LOCK_DIRNAME
 from imbue.mngr_codex.codex_config import MARKER_STATE_LIB_SCRIPT_NAME
@@ -304,8 +305,11 @@ class CodexAgent(InteractiveTuiAgent[CodexAgentConfig], HasCommonTranscriptMixin
         return {RAW_TRANSCRIPT_SCRIPT_NAME: _load_codex_resource_script(RAW_TRANSCRIPT_SCRIPT_NAME)}
 
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
-        """Return the codex common-transcript converter."""
-        return {COMMON_TRANSCRIPT_SCRIPT_NAME: _load_codex_resource_script(COMMON_TRANSCRIPT_SCRIPT_NAME)}
+        """Return the codex common-transcript converter shell script and its python module."""
+        return {
+            name: _load_codex_resource_script(name)
+            for name in (COMMON_TRANSCRIPT_SCRIPT_NAME, COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME)
+        }
 
     def _get_codex_home(self) -> Path:
         """Per-agent ``CODEX_HOME`` (under the agent state dir)."""

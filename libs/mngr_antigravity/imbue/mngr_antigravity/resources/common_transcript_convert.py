@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Common-transcript converter for antigravity agents (invoked by common_transcript.sh).
+
+Reads the raw antigravity transcript (``logs/antigravity_transcript/events.jsonl``,
+produced by stream_transcript.sh with each event augmented to carry
+``_mngr_conv_id``) and appends semantically important events in the
+agent-agnostic common format to ``events/antigravity/common_transcript/events.jsonl``.
+
+It emits:
+  USER_EXPLICIT/USER_INPUT     -> user_message  (agy's clean typed text)
+  MODEL/PLANNER_RESPONSE       -> assistant_message  (tool_calls attached)
+  MODEL/CODE_ACTION            -> tool_result  (paired with the most recent
+                                    PLANNER_RESPONSE tool_call in the conversation)
+  everything else              -> dropped (bookkeeping / forward-compat)
+
+Tool-call ids are synthetic ("<conv_id>-<step_index>-tc<idx>") since agy's
+transcript carries no id on tool_calls. Event ids are deterministic, so
+re-processing the same input never produces duplicates (dedup against the set of
+event_ids already in the output file).
+
+Invoked as ``python3 common_transcript_convert.py`` with the input/output paths
+passed via the ``_INPUT_FILE`` / ``_OUTPUT_FILE`` environment variables that
+common_transcript.sh sets; it writes nothing to stdout (the shell reports how
+many events were appended by diffing the output file's line count). Split out of
+the shell script (it used to be an inline ``python3`` heredoc) so the logic is
+lintable, type-checked, and unit-testable directly rather than only through a
+subprocess.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from typing import Any
+
+_MAX_INPUT_PREVIEW_LENGTH = 200
+_MAX_OUTPUT_LENGTH = 2000
+
+
+def _extract_user_text(content: Any, conv_id: str, step_index: Any) -> str | None:
+    """Return the user's typed text from a USER_INPUT record.
+
+    agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
+    directly in ``CortexStepUserInput.query``, so ``content`` is already the user's message --
+    we only strip surrounding whitespace. A non-string content is a real schema break, so we
+    log it and drop the event.
+    """
+    if not isinstance(content, str):
+        logging.warning("USER_INPUT content is not a string for conv=%s step=%s; dropping event", conv_id, step_index)
+        return None
+    return content.strip()
+
+
+def _short_value(value: Any) -> str:
+    """Render an arbitrary JSON value as a short string for an input preview."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _tool_call_id(conv_id: str, step_index: Any, idx: int) -> str:
+    return f"{conv_id}-{step_index}-tc{idx}"
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _load_existing_ids(output_file: str) -> set[str]:
+    ids: set[str] = set()
+    if not os.path.isfile(output_file):
+        return ids
+    with open(output_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ids.add(json.loads(line)["event_id"])
+            except (json.JSONDecodeError, KeyError) as exc:
+                logging.warning("skipping unreadable common-transcript output line: %s", exc)
+                continue
+    return ids
+
+
+def convert(input_file: str, output_file: str) -> int:
+    """Append new common-transcript events from ``input_file`` to ``output_file``; return the count."""
+    existing_ids = _load_existing_ids(output_file)
+    if not os.path.isfile(input_file):
+        return 0
+
+    new_events: list[tuple[str, dict[str, Any]]] = []
+    # Track the last assistant tool call we emitted, per conversation, so
+    # CODE_ACTION events can be paired with their originating tool call.
+    last_tool_call_by_conv: dict[str, dict[str, Any]] = {}
+
+    with open(input_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logging.warning("skipping malformed antigravity transcript line: %s", exc)
+                continue
+            if not isinstance(raw, dict):
+                continue
+
+            conv_id = raw.get("_mngr_conv_id", "")
+            if not conv_id:
+                continue
+            step_index = raw.get("step_index")
+            if step_index is None:
+                continue
+            timestamp = raw.get("created_at", "")
+            source = raw.get("source", "")
+            type_ = raw.get("type", "")
+
+            if source == "USER_EXPLICIT" and type_ == "USER_INPUT":
+                event_id = f"{conv_id}-{step_index}-user"
+                if event_id in existing_ids:
+                    continue
+                text = _extract_user_text(raw.get("content"), conv_id, step_index)
+                # _extract_user_text returns the stripped typed text, or None (already logged)
+                # when content is not a string. Empty results -- a None or otherwise empty
+                # content -- are dropped here as they carry no signal.
+                if not text:
+                    continue
+                new_events.append(
+                    (
+                        timestamp,
+                        {
+                            "timestamp": timestamp,
+                            "type": "user_message",
+                            "event_id": event_id,
+                            "source": "antigravity/common_transcript",
+                            "role": "user",
+                            "content": text,
+                            "conversation_id": conv_id,
+                            "step_index": step_index,
+                        },
+                    )
+                )
+
+            elif source == "MODEL" and type_ == "PLANNER_RESPONSE":
+                text = raw.get("content", "")
+                raw_tool_calls = raw.get("tool_calls") or []
+                tool_calls = []
+                for idx, tc in enumerate(raw_tool_calls):
+                    if not isinstance(tc, dict):
+                        continue
+                    name = tc.get("name", "")
+                    args = tc.get("args", {})
+                    input_preview = _truncate(_short_value(args), _MAX_INPUT_PREVIEW_LENGTH)
+                    call_id = _tool_call_id(conv_id, step_index, idx)
+                    tool_calls.append(
+                        {
+                            "tool_call_id": call_id,
+                            "tool_name": name,
+                            "input_preview": input_preview,
+                        }
+                    )
+
+                event_id = f"{conv_id}-{step_index}-assistant"
+                if event_id not in existing_ids:
+                    new_events.append(
+                        (
+                            timestamp,
+                            {
+                                "timestamp": timestamp,
+                                "type": "assistant_message",
+                                "event_id": event_id,
+                                "source": "antigravity/common_transcript",
+                                "role": "assistant",
+                                "model": None,
+                                "text": text if isinstance(text, str) else "",
+                                "tool_calls": tool_calls,
+                                "stop_reason": None,
+                                "usage": None,
+                                "conversation_id": conv_id,
+                                "step_index": step_index,
+                            },
+                        )
+                    )
+                if tool_calls:
+                    last_tool_call_by_conv[conv_id] = tool_calls[-1]
+
+            elif source == "MODEL" and type_ == "CODE_ACTION":
+                pending = last_tool_call_by_conv.pop(conv_id, None)
+                if pending is None:
+                    continue
+                event_id = f"{conv_id}-{step_index}-tool_result"
+                if event_id in existing_ids:
+                    continue
+                output = _truncate(raw.get("content", ""), _MAX_OUTPUT_LENGTH)
+                new_events.append(
+                    (
+                        timestamp,
+                        {
+                            "timestamp": timestamp,
+                            "type": "tool_result",
+                            "event_id": event_id,
+                            "source": "antigravity/common_transcript",
+                            "tool_call_id": pending["tool_call_id"],
+                            "tool_name": pending["tool_name"],
+                            "output": output,
+                            "is_error": raw.get("status", "DONE") != "DONE",
+                            "conversation_id": conv_id,
+                            "step_index": step_index,
+                        },
+                    )
+                )
+
+            else:
+                # Bookkeeping (SYSTEM/CONVERSATION_HISTORY) and any future agy
+                # source/type combination we don't recognize: dropped best-effort.
+                continue
+
+    if not new_events:
+        return 0
+
+    new_events.sort(key=lambda x: x[0])
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    with open(output_file, "a") as f:
+        for _, event in new_events:
+            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+    return len(new_events)
+
+
+if __name__ == "__main__":
+    # The caller (common_transcript.sh) tracks how many events were appended by
+    # diffing the output file's line count, so nothing is written to stdout here.
+    convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])
