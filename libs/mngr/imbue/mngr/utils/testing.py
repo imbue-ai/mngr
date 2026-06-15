@@ -1502,6 +1502,19 @@ def local_sshd(
     authorized_keys_path = sshd_dir / "authorized_keys"
     authorized_keys_path.write_text(authorized_keys_content)
 
+    # Isolate git's global/system config for sessions on this sshd. mngr runs
+    # `git config --global ...` over SSH when preparing a remote target (e.g.
+    # `git config --global --add safe.directory <target>` in
+    # Host._transfer_git_repo and add_safe_directory_on_remote). That command
+    # runs inside the SSH login, which sees the real user's $HOME -- the
+    # HOME-redirection done by isolate_home()/setup_git_config cannot reach
+    # across the SSH hop, so without this those writes would land in the
+    # developer's real ~/.gitconfig. Point GIT_CONFIG_GLOBAL at a throwaway file
+    # inside the sshd sandbox and GIT_CONFIG_SYSTEM at /dev/null so the session
+    # git is fully isolated from the host's real config.
+    git_global_config_path = sshd_dir / "git_global_config"
+    git_global_config_path.touch()
+
     # Create sshd_config
     sshd_config_path = etc_dir / "sshd_config"
     current_user = os.environ.get("USER", "root")
@@ -1518,6 +1531,7 @@ PidFile {run_dir}/sshd.pid
 StrictModes no
 Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
+SetEnv GIT_CONFIG_GLOBAL={git_global_config_path} GIT_CONFIG_SYSTEM=/dev/null
 """
     sshd_config_path.write_text(sshd_config)
 
