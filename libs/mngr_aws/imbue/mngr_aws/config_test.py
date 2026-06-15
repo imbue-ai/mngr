@@ -85,6 +85,17 @@ def test_resolve_state_bucket_name_derives_from_account_and_region() -> None:
         assert config.resolve_state_bucket_name(session) == "mngr-state-123456789012-us-west-2"
 
 
+def test_resolve_state_bucket_name_region_override_matches_bucket_location() -> None:
+    """A region override embeds that region in the derived name (so the operator CLI's
+    name and the bucket's actual region agree when ``--region`` differs from default)."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        config = AwsProviderConfig(default_region="us-east-1")
+        assert config.resolve_state_bucket_name(session, "us-west-2") == "mngr-state-123456789012-us-west-2"
+        # No override falls back to default_region (the runtime path).
+        assert config.resolve_state_bucket_name(session) == "mngr-state-123456789012-us-east-1"
+
+
 def test_build_state_bucket_returns_bucket_when_resolvable() -> None:
     """``build_state_bucket`` returns an S3StateBucket bound to the derived name/region."""
     with mock_aws():

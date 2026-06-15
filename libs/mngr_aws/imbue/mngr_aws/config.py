@@ -234,7 +234,7 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "Debian AMI finder at https://wiki.debian.org/Cloud/AmazonEC2Image)."
         )
 
-    def resolve_state_bucket_name(self, session: boto3.Session) -> str | None:
+    def resolve_state_bucket_name(self, session: boto3.Session, region: str | None = None) -> str | None:
         """Return the effective state-bucket name, or None when it can't be resolved.
 
         ``state_bucket_name`` wins when set. Otherwise derive
@@ -242,13 +242,18 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         the account id from ``sts:GetCallerIdentity`` (cached). Returns None when
         the account id can't be fetched (e.g. missing STS permission) so callers
         degrade to the no-bucket path rather than failing.
+
+        ``region`` overrides the region embedded in the derived name (the runtime
+        path passes nothing and uses ``default_region``); the operator CLI passes
+        the same ``effective_region`` it builds the bucket in, so the name and the
+        bucket's actual region always agree.
         """
         if self.state_bucket_name:
             return self.state_bucket_name
         account_id = self._resolve_account_id(session)
         if account_id is None:
             return None
-        return f"mngr-state-{account_id}-{self.default_region}".lower()
+        return f"mngr-state-{account_id}-{region or self.default_region}".lower()
 
     def _resolve_account_id(self, session: boto3.Session) -> str | None:
         """Return the AWS account id (cached), or None when STS can't be reached."""

@@ -170,7 +170,7 @@ def _build_state_bucket(base: AwsProviderConfig, region: str | None) -> S3StateB
     """
     session = base.get_session()
     effective_region = region or base.default_region
-    bucket_name = base.resolve_state_bucket_name(session)
+    bucket_name = base.resolve_state_bucket_name(session, effective_region)
     if bucket_name is None:
         return None
     return S3StateBucket(session=session, region=effective_region, bucket_name=bucket_name)
@@ -211,7 +211,7 @@ def _build_host_identity(base: AwsProviderConfig, region: str | None) -> S3State
     """Build the bucket-write IAM host identity for the operator commands, or None when unresolvable."""
     session = base.get_session()
     effective_region = region or base.default_region
-    bucket_name = base.resolve_state_bucket_name(session)
+    bucket_name = base.resolve_state_bucket_name(session, effective_region)
     if bucket_name is None:
         return None
     return S3StateHostIdentity(session=session, region=effective_region, bucket_name=bucket_name)
