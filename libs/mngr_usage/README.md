@@ -55,9 +55,10 @@ Sessions whose last event is older than `--since` are dropped from
 freshest reading across all agents -- they track an account-level counter, so
 there's no older reading to drop.
 
-`--max-age` is **not** an age filter: it's only the stale-warning threshold
-for the snapshot file (controls whether the human output prints a "snapshot
-last updated X ago" warning). It does not change which events are aggregated.
+`--stale-after` is **not** an age filter: it's only the stale-warning
+threshold for the snapshot file (controls whether the human output prints a
+"snapshot last updated X ago" warning). It does not change which events are
+aggregated.
 
 ## Output formats
 

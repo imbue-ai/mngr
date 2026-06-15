@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr usage [--max-age DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]
+mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]
 ```
 
 Show rolling-window usage / quota data from agent statusline events.
@@ -56,7 +56,7 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
+| `--stale-after` | text | Warn when the snapshot file is older than this (e.g. '300', '5m', '2h'). Display warning only -- it does not change which events are aggregated (use --since for that). Default: from plugin config. | None |
 | `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost lines (human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown for terseness; the per-mode cost lines and window lines are unchanged. | `False` |
 
 ## Filtering
@@ -260,7 +260,7 @@ $ mngr usage --since 7d
 **Treat the snapshot as stale after 60s (warning only)**
 
 ```bash
-$ mngr usage --max-age 60
+$ mngr usage --stale-after 60
 ```
 
 **Per-session breakdown (human + JSON, mode-tagged)**
