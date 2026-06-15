@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.app import _landing_agent_ids_to_display
 from imbue.minds.desktop_client.app import _resolve_destroying_for_landing
 from imbue.mngr.primitives import AgentId
 
@@ -66,3 +67,27 @@ def test_resolve_destroying_finalizes_done_when_agent_gone(tmp_path: Path) -> No
     marker = _resolve_destroying_for_landing(paths, ())
     assert marker == {}
     assert not dir_path.exists()
+
+
+def test_display_ids_passes_through_discovered_agents_with_no_destroy() -> None:
+    a, b = AgentId.generate(), AgentId.generate()
+    assert _landing_agent_ids_to_display((a, b), {}) == (a, b)
+
+
+def test_display_ids_does_not_duplicate_a_discovered_agent_being_destroyed() -> None:
+    a = AgentId.generate()
+    assert _landing_agent_ids_to_display((a,), {str(a): "running"}) == (a,)
+
+
+def test_display_ids_surfaces_failed_orphan_not_in_resolver() -> None:
+    # A failed destroy whose agent discovery no longer lists must still
+    # appear, so a still-billing host can't become invisible.
+    discovered = AgentId.generate()
+    orphan = AgentId.generate()
+    result = _landing_agent_ids_to_display((discovered,), {str(orphan): "failed"})
+    assert result == (discovered, orphan)
+
+
+def test_display_ids_surfaces_orphan_when_nothing_discovered() -> None:
+    orphan = AgentId.generate()
+    assert _landing_agent_ids_to_display((), {str(orphan): "failed"}) == (orphan,)

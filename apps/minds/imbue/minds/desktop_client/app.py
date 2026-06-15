@@ -330,14 +330,15 @@ def _handle_landing_page(
     all_agent_ids = backend_resolver.list_known_workspace_ids()
     paths: WorkspacePaths | None = request.app.state.api_v1_paths
     destroying_status_by_agent_id = _resolve_destroying_for_landing(paths, all_agent_ids)
+    display_agent_ids = _landing_agent_ids_to_display(all_agent_ids, destroying_status_by_agent_id)
 
-    if all_agent_ids:
+    if display_agent_ids:
         telegram_orchestrator: TelegramSetupOrchestrator | None = request.app.state.telegram_orchestrator
         telegram_status: dict[str, bool] | None = None
         if telegram_orchestrator is not None:
-            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in all_agent_ids}
+            telegram_status = {str(aid): telegram_orchestrator.agent_has_telegram(aid) for aid in display_agent_ids}
         agent_names: dict[str, str] = {}
-        for aid in all_agent_ids:
+        for aid in display_agent_ids:
             ws_name = backend_resolver.get_workspace_name(aid)
             if ws_name:
                 agent_names[str(aid)] = ws_name
@@ -345,7 +346,7 @@ def _handle_landing_page(
                 info = backend_resolver.get_agent_display_info(aid)
                 agent_names[str(aid)] = info.agent_name if info else str(aid)
         html = render_landing_page(
-            accessible_agent_ids=all_agent_ids,
+            accessible_agent_ids=display_agent_ids,
             mngr_forward_origin=_get_mngr_forward_origin(request),
             telegram_status_by_agent_id=telegram_status,
             agent_names=agent_names,
@@ -992,6 +993,28 @@ def _resolve_destroying_for_landing(
             continue
         marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
     return marker
+
+
+def _landing_agent_ids_to_display(
+    all_agent_ids: tuple[AgentId, ...],
+    destroying_status_by_agent_id: dict[str, str],
+) -> tuple[AgentId, ...]:
+    """Discovered agents, plus any agent that still has a destroy record.
+
+    A failed destroy must stay visible even after the resolver drops the
+    agent (or before discovery has populated on a fresh open), so a host
+    whose teardown failed can never become an invisible, still-billing
+    orphan. Discovered agents keep their order; destroy-only agents are
+    appended in a stable order.
+    """
+    discovered = frozenset(all_agent_ids)
+    extra: list[AgentId] = []
+    for aid in destroying_status_by_agent_id:
+        agent_id = AgentId(aid)
+        if agent_id not in discovered:
+            extra.append(agent_id)
+    extra.sort(key=str)
+    return (*all_agent_ids, *extra)
 
 
 async def _handle_destroy_agent_api(
