@@ -1029,9 +1029,7 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
 
 
 # Deterministic sync test, but the setup spins up fresh ConcurrencyGroups and a
-# recording http-server fixture, which can exceed the default 10s pytest-timeout
-# when offload sandboxes are contended. Give it a real budget rather than relying
-# on flaky retries (matching its litellm-key siblings).
+# recording http-server fixture, which can exceed the default 10s pytest-timeout.
 @pytest.mark.timeout(30)
 def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
