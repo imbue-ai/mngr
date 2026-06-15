@@ -42,6 +42,24 @@ agent's accumulated cost and rate-limit history still counts toward the totals.
 Pass `--no-preserved` (on `mngr usage` and `mngr usage wait`) to consider only
 live agents.
 
+## Filtering by event age
+
+Pass `--since DURATION` (e.g. `--since 1h`, `--since 7d`) on `mngr usage` or
+`mngr usage wait` to restrict the per-session cost aggregation by age.
+Sessions whose last event is older than `--since` are dropped from
+`sessions[]` and from the per-mode aggregates (`subscription_cost.*` /
+`api_cost.*`) computed off them. Default is 24h, configurable via the
+`since_seconds` option on the `usage` plugin config.
+
+`--since` only shapes the cost surface. Rate-limit windows always reflect the
+freshest reading across all agents -- they track an account-level counter, so
+there's no older reading to drop.
+
+`--stale-after` is **not** an age filter: it's only the stale-warning
+threshold for the snapshot file (controls whether the human output prints a
+"snapshot last updated X ago" warning). It does not change which events are
+aggregated.
+
 ## Output formats
 
 - `mngr usage` (human summary: per-mode cost line(s) + window lines)

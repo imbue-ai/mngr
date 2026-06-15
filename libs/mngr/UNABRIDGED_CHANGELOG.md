@@ -4,6 +4,217 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+- Changed: `mngr extras` status (`_print_extras_status`) now accepts an injectable `claude_status_fn` (mirroring the existing `status_fn` seam on the `_install_*` helpers), so its test can skip shelling out to the `claude` CLI. This removes the slow, variable Node-process startup that made `test_print_extras_status_runs_without_error` flaky under the offload timeout. Internal/test-only; default behavior is unchanged.
+
+Fixed `mngr clone` failing with "destination path ... already exists and is not an empty directory" when cloning a remote agent to a local target (e.g. `mngr clone <agent> <name> --provider local`). The git-mirror transfer initializes a bare repo at the target before fetching, but the remote-source-to-local-target path used `git clone --mirror`, which refuses a non-empty destination. It now performs a mirror-style `git fetch` into the existing bare repo instead.
+
+User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the colored `ERROR:` prefix already used for `logger.error`. Previously click printed the line in the default terminal color, so an actionable failure (for example, "run `mngr gcp prepare` first" before the firewall rule exists) was visually indistinguishable from normal output. Coloring is gated on the same policy as other mngr output: it is suppressed when stderr is not a TTY or when `NO_COLOR` is set, so piped/captured output stays plain. Exit semantics are unchanged (still a clean exit 1, never a traceback).
+
+Fix the "branch already checked out" error from `mngr create` to suggest the correct flag. It previously pointed users at `--in-place`, which no longer exists (it was consolidated into `--transfer`); it now suggests `--transfer=none`.
+
+Fixed `mngr clone` (and any agent creation) failing when transferring a git repo from one remote host to another remote host. Previously the git push was run directly on the remote source host but pointed at the target's SSH key and known_hosts files, which only exist on the local orchestrator machine -- producing errors like "Identity file ... not accessible" and "Host key verification failed". The transfer now relays through a local bare mirror: it pulls from the source using the source's credentials, then pushes to the target using the target's, both run locally where those files exist. This matches the existing remote-to-remote handling already used for rsync transfers.
+
+Fixed the SSH-backed-host test fixture (`local_sshd`) leaking `git config --global` writes into the developer's real `~/.gitconfig`. Tests that exercise remote git transfers run `git config --global --add safe.directory ...` over the SSH connection, where the test's HOME-redirection fixtures cannot reach; the fake sshd now sets `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` for its sessions so those writes stay inside the test sandbox.
+
+## 2026-06-13
+
+Fixed a data-loss bug in volume garbage collection and made discovery fail
+loudly (instead of silently skipping) when a provider's backend is unreachable.
+
+The data-loss bug: when the Docker daemon became briefly unavailable during a
+`mngr` operation that runs GC (e.g. a Docker daemon restart), the Docker
+provider's `discover_hosts` swallowed the failure and returned an empty host
+list. GC then treated every volume as orphaned and deleted it -- wiping the
+per-host data of still-live hosts, so their containers could no longer be
+restarted. The Docker provider's `discover_hosts` now raises
+`ProviderUnavailableError` when the daemon is unreachable instead of returning
+`[]`, so an unreachable daemon can no longer be mistaken for "this provider has
+zero hosts". GC skips an unavailable provider at its own boundary (it must not
+delete volumes it cannot verify).
+
+"Unreachable" is judged by the transport, not by the exception base class: a
+dropped connection or timeout (including the daemon disappearing mid-operation,
+which surfaces as a raw `requests` connection error rather than a
+`DockerException`) maps to `ProviderUnavailableError`, while a
+`docker.errors.APIError` -- meaning the daemon was reached and answered with an
+error -- propagates as a real fault. This keeps a healthy-but-erroring daemon
+from being silently treated as offline (and its provider wrongly skipped by GC).
+
+Discovery no longer hides an unreachable provider. Previously, multi-provider
+discovery silently skipped a provider whose backend was down. That meant a
+command could quietly do a partial job -- e.g. `mngr message my-agent`, intended
+to reach every instance of `my-agent`, could miss an instance on a down provider
+without telling you. Now `discover_hosts_and_agents` propagates
+`ProviderUnavailableError`, so commands that scan every provider (`message`,
+`limit`, `snapshot`, `create`) fail loudly rather than silently omit agents on
+the unreachable provider.
+
+Targeted commands now scope discovery so an *unrelated* down provider can't fail
+them. `mngr rsync`, `mngr git push`/`pull`, and `mngr event <host>` now resolve
+only the provider(s) that could actually hold the target -- via the `.PROVIDER`
+qualifier and/or the agent name (resolved through the discovery event stream) --
+instead of blindly scanning every provider. So `mngr rsync ./x agent@host.local`
+keeps working when an unrelated Docker daemon is down (Docker is never queried),
+while a command whose target really is on the down provider fails with a clear
+"provider is not available" error.
+
+- `mngr snapshot create`, `mngr snapshot list`, and `mngr snapshot destroy` now take agent and host targets as a single positional list. The `--agent`/`--host` flags have been removed; write `agent`, `agent@host[.provider]`, `@host[.provider]`, or a bare `host-...` ID instead.
+- `mngr event @host[.provider]` now narrows discovery to the pinned provider, matching the agent path's behavior.
+
+- `mngr message` (alias `msg`) no longer accepts `--provider`. The set of providers to query during discovery is now derived from the agent addresses themselves: the union of providers named by the addresses, or a full scan if any address omits its provider. Previously the discovery call ignored the providers named by the addresses and only honored `--provider`, so e.g. `mngr msg agent@host.provider_a --provider provider_b` would query the wrong provider and report the agent missing.
+- Internally, `mngr message` now routes through `find_all_agents` like the other agent-address subcommands instead of running its own CEL-filter pipeline. The `send_message_to_agents` API now accepts a pre-resolved `Sequence[AgentMatch]` instead of CEL `include_filters` / `exclude_filters` / `all_agents` / `provider_names`. No behavioral change for users beyond the `--provider` removal above.
+
+Fixed the DESCRIPTION (and other prose) sections of `mngr <command> --help` to be indented to the man-page depth of seven spaces in an interactive terminal (the pager / rich path). Previously these sections rendered flush-left, unlike the piped/plain output and the surrounding sections.
+
+## 2026-06-12
+
+Updated the auto-generated `mngr create` docs for the `--adopt-session` option: a bare session ID is now searched in the current and user-scope Claude config dirs, every live local mngr agent, and preserved sessions from destroyed agents.
+
+Internal: added `get_agents_root_dir(host_dir)` as the single source of truth for the agents-state root directory, defined alongside `get_agent_state_dir_path` in `imbue.mngr.hosts.common` (a low-level module importable without circular-import issues). Consolidated the previously hand-written `host_dir / "agents"[ / str(agent_id)]` path constructions across the codebase to route through these two helpers. No behavior change.
+
+Added support for agent-type aliases and made disabled-plugin errors name the real owning plugin.
+
+- Plugins can now register short alternate names for the agent types they provide via the new `register_agent_aliases` hook. An alias is accepted anywhere its canonical type is and resolves to the same agent (e.g. `mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`). Aliases are a name-resolution layer above the agent-type registries: an alias is not itself a distinct agent type, so it does not appear in `mngr plugin list --kind agent-type`, but it is tab-completable for `--type` and the persisted agent records the canonical type name. If you define a custom `[agent_types.X]` block whose name matches a built-in alias, your custom type takes precedence: the alias is dropped (with a warning) and the name resolves to your custom type.
+
+- mngr now records which plugin registered each agent type, so the "plugin is disabled, enable it with `mngr plugin enable ...`" message names the actual registering plugin instead of assuming the plugin name equals the agent-type name. This fixes the message for types whose name differs from their plugin's entry-point name (e.g. the `pi-coding` type registered by the `pi_coding` plugin).
+
+Tab completion now completes the `-S`/`--setting` config override (`KEY=VALUE`) on every command.
+
+- Pressing TAB after `-S` (or `--setting`) completes the config KEY against the same catalog of keys behind `mngr config set` (e.g. `mngr create -S head<TAB>` -> `headless=`). Keys with a constrained value set (booleans, enums like log levels, provider/agent-type names) insert `KEY=` and then list the allowed values on the next TAB; free-form keys complete to the bare key name.
+
+- Values complete too: `mngr create -S logging.console_level=<TAB>` lists `TRACE`/`DEBUG`/... and `mngr create -S headless=<TAB>` lists `true`/`false`. Works in both zsh and bash (which tokenize `KEY=VALUE` differently).
+
+- Fixed a related completion bug: short value-taking options (`-S`, `-m`, `-b`, `-l`, `-n`, `-t`, `-o`, `-i`, `-s`, `-w`) were not recognized as consuming their value, so their argument was miscounted as a positional. This could suppress completion of a later positional argument on commands with a fixed argument count (e.g. after `-S KEY=VALUE`). Long and short option forms are now classified uniformly (this also fixes the same miscount for the long `--verbose` count option), and the bash `=`-word-break splitting of `KEY=VALUE` values is handled so the value pieces are not miscounted.
+
+- `agent_types.*` keys now complete for builtin/registered agent types (e.g. `agent_types.claude.*`, `agent_types.codex.*`), not just the custom agent types defined in your config. These are derived from each agent type's config schema, so every settable field is offered (including container fields like `config_overrides` that have no value set yet), and constrained fields complete their values (`parent_type` -> agent type names, boolean fields -> `true`/`false`).
+
+- Config keys now complete one dotted segment at a time instead of dumping every fully-qualified key at once. For both `-S`/`--setting` and `mngr config get`/`set`/`unset`, the first TAB shows the top-level keys (with deeper keys collapsed to a `section.` branch, e.g. `agent_types.`, `logging.`), and each further TAB drills into the next segment. The trailing `.` on a branch is inserted with no following space so you can keep typing the next segment (in zsh and bash). For `-S`, a key with a constrained value set is completed to `KEY=` the same way -- its allowed values are deferred to the next TAB rather than listed as soon as the key prefix matches.
+
+- Shell completion now installs as a small, stable shim in your rc that sources a managed completion file (`~/.mngr/completions/mngr.{zsh,bash}`) which mngr keeps up to date. This means completion improvements (like the segment-at-a-time drilling above) apply automatically when you upgrade mngr -- no need to re-edit your rc file. The managed files are refreshed automatically in the background (e.g. on `mngr list`) and by `mngr extras completion`.
+
+- If you have an older self-contained completion function in your rc (from before the shim), tab completion now prints a nudge (rate-limited to at most once a day, and only while the install is out of date) to run `mngr extras completion` to switch to the managed shim. `mngr extras completion` recognizes an outdated install (rather than treating any existing completion as already-configured), installs the up-to-date shim, and **removes the old self-contained completion block** when it byte-for-byte matches a form mngr generated (a hand-edited or unrecognized block is left untouched). So migrating is a single command with no leftover cruft. After installing, it prints the exact `source` command to activate completion in your current shell without opening a new one.
+
+Fixed environment-variable forwarding for remote streaming SSH commands
+(`OuterHost.execute_streaming_command` with `env=...`). The streaming path
+prepended env vars as a bare `KEY=VAL command` prefix, which in the shell only
+applies to the single simple command it precedes -- so for a compound command
+like `install && tool ...` the var was gone by the time the second command ran.
+It now uses `export KEY=VAL && command` (mirroring the non-streaming pyinfra
+path), so the var is set in the shell environment for the whole command. This is
+what made remote `depot build` fail with "missing API token" even though
+`DEPOT_TOKEN` was supplied via `env`. Extracted the prefixing into a pure
+`_prepend_env_exports` helper with unit tests.
+
+Also fixed provider-config parsing to coerce field types. `_parse_providers` used
+`model_construct`, which stored raw TOML scalars without coercion -- so an enum
+field like `builder = "DEPOT"` stayed the string `"DEPOT"` and a `tuple` field
+stayed a list. That tripped pydantic serializer warnings on `model_dump` and, for
+a provider block defined in a single config layer (no merge to re-coerce it),
+broke identity checks like `builder is DockerBuilder.DEPOT` (silently falling
+back to the non-depot path). It now uses `model_validate`, which coerces while
+still recording only the provided keys in `model_fields_set` so per-field
+config-layer merging is unaffected. This also coerces nested-model provider
+fields (e.g. SSH static `hosts` tables to `SSHHostConfig`), subsuming the
+dedicated post-`model_construct` coercion helper that previously handled only
+that case.
+
+Added a `ScalarTuple` marker type (and the `ScalarStrTuple` annotated alias) for
+tuple-typed settings fields that are semantically a single scalar value -- a
+higher-precedence config layer that sets one replaces the whole value rather
+than tripping the settings-narrowing guard. `StringDerivedTuple` (string-shaped
+TOML values like `cli_args = "..."`) is now a specialization of it. This lets a
+field like the AWS provider's `allowed_ssh_cidrs` be tightened in a developer's
+`settings.local.toml` without the guard rejecting it as "dropping" the committed
+default -- combining CIDRs across config layers is never the intent. The marker
+is applied by `model_validate` (via the after-validator), so it relies on the
+provider-parsing switch to `model_validate` described above.
+
+## AWS provider support: shared layer changes
+
+The `mngr_aws` plugin lands as a new provider backend. The shared `mngr` layer picks up the following supporting changes:
+
+- New `resolve_backend_and_config(provider_name, mngr_ctx)` helper on `mngr/providers/registry.py`. Both `get_provider_instance` and the `mngr create` bootstrap path use it, replacing duplicated "configured-instance vs. bare-backend-name fallback" logic.
+- `is_for_host_creation` removed from `ProviderBackendInterface` (Modal-specific flag was being `del`'d by every other backend); replaced with a default-no-op `bootstrap_for_host_creation(name, config, mngr_ctx)` method that Modal overrides and that `mngr create` invokes before `build_provider_instance`.
+- The Docker state-container leak fix (read-only commands like `mngr list`/`gc` no longer lazily create the singleton state container) is carried into this new shape: the Docker backend's `build_provider_instance` now unconditionally raises `ProviderEmptyError` when the state container is missing (it is always read-only), and the Docker backend overrides `bootstrap_for_host_creation` to create the container on the `mngr create` path. This replaces main's `is_for_host_creation`-gated version of the same fix.
+- `mngr/api/create.py`'s host-creation bootstrap helper is now public as `bootstrap_backend_for_host_creation(provider_name, mngr_ctx)` so other entry points (e.g. `mngr_tmr`'s snapshot path) can trigger the same one-time bootstrap before calling `get_provider_instance`.
+- `aws` added to the remote-backend list and `mngr` plugin catalog.
+- `mngr create` CLI markdown docs regenerated to include the AWS provider's build-args help.
+- `test_cleanup_stop_action_with_real_agent` and `test_list_command_with_running_filter_alias` marked `@pytest.mark.flaky` after observing intermittent 10s-timeout failures on loaded offload sandboxes; pass locally in <3s.
+- `_is_transient_ssh_error` (in both `hosts/host.py` and `hosts/outer_host.py`) now treats Python's built-in `TimeoutError` as transient. pyinfra's `read_output_buffers` raises a bare `TimeoutError` when an SSH command's response doesn't arrive within its per-command read timeout (e.g. when the remote sshd is reloaded mid-read during cloud-init bootstrap); the retry loop now picks it up rather than letting it escape host creation.
+- `_run_shell_command`, `_get_file`, `_put_file`, and `execute_streaming_command` on `OuterHost` (and `Host._run_shell_command`) now catch the post-retry `TimeoutError` and surface it as a structured `HostConnectionError`. Their inner retry handlers also disconnect on `TimeoutError` so retries rebuild the SSH connection rather than reusing the dead channel.
+
+- Resizing the terminal while attached to a remote agent (AWS or any SSH-backed provider) now reflows correctly instead of showing a field of padding dots once the window grew past a fixed size. The post-attach step previously ran `tmux resize-window -A`, which has a documented side effect of switching the window's `window-size` option to `manual` -- pinning the window at its attach-time size so it no longer tracked the client. It now only sends `SIGWINCH` to the pane processes (to prompt a redraw), leaving `window-size` at tmux's default `latest` so the window resizes with the client on every change.
+
+- **De-duplicated the SSH error-translation chain in `OuterHost`.** The identical `except TimeoutError / OSError "Socket is closed" / EOFError,SSHException -> HostConnectionError` block that was copy-pasted across `_run_shell_command`, `_get_file`, `_put_file`, `execute_streaming_command`, and `list_directory` is now a single `_translate_ssh_errors(...)` context manager parameterized by the per-operation messages. No behavior change (the list-directory path still lets a raw `TimeoutError` propagate via the optional `timed_out` arg).
+
+Regenerated the `mngr schedule` CLI reference docs to include the new
+`--timezone` option on `schedule add` (added in the mngr-schedule plugin),
+which pins the IANA timezone the `--schedule` cron expression is interpreted in.
+
+Moved the built-in `codex` agent type out of mngr core into the external `imbue-mngr-codex` plugin (added to the plugin catalog as a recommended INDEPENDENT-tier agent type); removed the in-core `codex_agent` stub and its direct registration.
+
+Updated the codex tutorial e2e tests (`test_create_basic.py`, `test_agent_types.py`) to match: codex is now a real agent-type plugin rather than a command-driven stub, so the tests create it with `--no-auto-start` (the real codex run is covered by the `mngr_codex` plugin's own release test) instead of faking it with a `command` override. Two of them were also dropped from `@pytest.mark.modal`: real codex can't run on the throwaway Modal hosts (no binary/auth), which is exactly what the old `sleep` fake worked around; Modal-path coverage of the create mechanism remains in the other (non-codex) tutorial tests. Also fixed a pre-existing duplicate `type = "claude"` key in the e2e test fixture's `settings.local.toml` template, which the old codex tests had been masking by rewriting the file via `mngr config set`.
+
+Added `mngr list --schema`, a machine- and human-readable catalog of every field you can reference in `--include`/`--exclude`, `--sort`, and `--fields`/`--format`.
+
+- `mngr list --schema` lists each referenceable field with its type, description, and the contexts it works in: `cel` (usable in `--include`/`--exclude` and `--sort`, which share one evaluation context) and `template` (also usable in `--fields`/`--format`). It composes with `--format json`, `--format jsonl`, and `--format` template strings, and is rejected (with a clear error) if combined with any agent-selection option since the catalog is static.
+
+- The catalog is derived live from the real data shape (`AgentDetails`/`HostDetails`), so it always reflects the actual models -- including deeply nested fields like `host.resource.cpu.count` and `host.ssh.host`. The non-model fields (the computed `age`/`runtime`/`idle`, the `host.provider`/`project` aliases, and dynamic patterns like `labels.$KEY`) are listed explicitly and pinned to the real computation/alias tables by tests.
+
+- The `project` field is now usable in CEL filters and sorts (e.g. `--include 'project == "mngr"'`, `--sort project`), mirroring the existing `host.provider` alias and the `--project` flag; previously it only worked in `--fields`/`--format` templates.
+
+- The `mngr list` help "Available Fields" section (and the generated `docs/commands/primary/list.md` on GitHub) is now rendered from this same catalog, so the documented fields can no longer drift from the models.
+
+Marked the `pi-coding` agent type plugin (`imbue-mngr-pi-coding`) as recommended
+in the plugin catalog, so `mngr extras` offers it by default alongside the other
+agent types (claude, opencode, antigravity) now that it has real lifecycle
+support.
+
+Added reusable gitignore-status helpers (with a `GitignoreStatus` result) to `mngr.api.git`. Given a host, a repo path, and any repo-relative path (which need not exist yet), they report whether that path is gitignored -- resolving symlinks anywhere along the path (e.g. `.claude -> .agents`) first so `git check-ignore` doesn't choke with "beyond a symbolic link":
+
+- `check_path_gitignore_status` -- ignored by any rule (returns `SKIP` / `IGNORED` / `NOT_IGNORED`).
+
+- `check_path_repo_gitignore_status` -- same, but a path ignored only by the user's global excludes returns `ONLY_GLOBAL` rather than `IGNORED` (for preflight checks whose result must also hold on a remote host / fresh clone, which has no global excludes).
+
+Plugins use these to guard files they write into an agent worktree against showing up as untracked changes.
+
+Added a canonical schema for the agent-agnostic common-transcript envelope
+(`imbue.mngr.agents.common_transcript_records`). It is the single source of truth
+for the `user_message` / `assistant_message` / `tool_result` records every agent
+plugin emits into the stream `mngr transcript` reads, with a validator and a
+conformance test asserting that all five emitters -- claude, antigravity,
+opencode, pi-coding, and codex -- produce records matching it, so the
+independently written emitters cannot silently drift on the shared fields.
+A meta-test discovers every registered agent type that emits a common transcript
+and fails if any lacks such a conformance test, so the requirement is enforced
+rather than relying on convention -- a new agent plugin cannot merge without one.
+
+Added a shared agent release-lifecycle harness
+(`imbue.mngr.agents.agent_release_testing`) that drives the common create -> WAITING ->
+message -> transcript -> stop/start resume -> destroy arc with per-agent profiles, so
+each plugin's release test is a thin profile and every agent is held to the same
+lifecycle and the same canonical-transcript contract.
+
+## 2026-06-11
+
+Replaced direct built-in exception raises (ValueError/RuntimeError) in config key resolution, docker provider config validation, and agent discovery with dedicated custom exception types.
+
+Added an `OPT_IN_PLUGINS` set to the config pre-reader (`config/pre_readers.py`) for plugins that are **disabled by default** and must be explicitly enabled with `[plugins.<name>] enabled = true`. This inverts the normal default (plugins load unless explicitly disabled) for the listed plugins, reusing the same `enabled` config key. The first opt-in plugin is `claude_subagent_proxy`, which is very experimental and breaks other tooling.
+
+The docker provider now raises a typed, actionable `DockerRuntimeNotRegisteredError`
+when the configured `docker_runtime` (e.g. `runsc` for gVisor) is not registered
+with the Docker daemon, instead of letting Docker's raw exit-125 `ProcessError`
+propagate. The old behavior surfaced the entire `docker run` command line with the
+real cause ("unknown or invalid runtime name: runsc") buried inside it and no
+guidance. The new error renders as a clean message naming the runtime and provider,
+with `user_help_text` pointing at the fix (install the runtime, or set
+`docker_runtime=runc` via `mngr config set` / the
+`MNGR__PROVIDERS__<NAME>__DOCKER_RUNTIME` env var). Because it is an `MngrError`
+subclass, `mngr create --format jsonl` now emits `error_class:
+"DockerRuntimeNotRegisteredError"` so callers can branch on the type.
+
 ## 2026-06-10
 
 Added the `log_warnings` loguru-capture fixture to the shared plugin test helper (`register_plugin_test_fixtures` in `imbue.mngr.utils.plugin_testing`), so plugin test suites that register the standard fixtures can assert on emitted warnings without defining their own copy. The capture logic lives in a single `capture_log_warnings()` context manager in `imbue.mngr.utils.testing`, which both that fixture and mngr's own `conftest.py` `log_warnings` fixture delegate to. (Affects test infrastructure only.)

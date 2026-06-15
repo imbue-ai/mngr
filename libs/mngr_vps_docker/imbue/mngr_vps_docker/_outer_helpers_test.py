@@ -35,6 +35,7 @@ from imbue.mngr_vps_docker.container_setup import commit_container
 from imbue.mngr_vps_docker.container_setup import create_bind_volume_on_outer
 from imbue.mngr_vps_docker.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps_docker.container_setup import docker_inspect_running
+from imbue.mngr_vps_docker.container_setup import ensure_depot_token_available
 from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import get_outer_free_disk_gb
 from imbue.mngr_vps_docker.container_setup import install_btrfs_progs_on_outer
@@ -380,6 +381,29 @@ def test_build_image_on_outer_raises_on_build_failure() -> None:
         )
 
 
+def test_ensure_depot_token_available_raises_for_depot_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_raises_for_depot_with_empty_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "")
+    with pytest.raises(MngrError, match="DEPOT_TOKEN"):
+        ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_passes_for_depot_with_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DEPOT_TOKEN", "tok-123")
+    ensure_depot_token_available(DockerBuilder.DEPOT)
+
+
+def test_ensure_depot_token_available_is_noop_for_docker_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The DOCKER builder never needs a token, even when DEPOT_TOKEN is absent.
+    monkeypatch.delenv("DEPOT_TOKEN", raising=False)
+    ensure_depot_token_available(DockerBuilder.DOCKER)
+
+
 def test_build_image_on_outer_with_depot_requires_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEPOT_TOKEN", raising=False)
     outer = _outer()
@@ -410,8 +434,14 @@ def test_build_image_on_outer_with_depot_uses_depot_build(monkeypatch: pytest.Mo
     )
     assert tag == "depot-image"
     cmd = _stub(outer).recorded[0].command
-    # Depot install + depot build, with --load (so the image lands on the daemon)
-    assert "depot build --load -t depot-image" in cmd
+    # depot build runs with --load so the image lands on the daemon, invoked via
+    # the resolved $DEPOT_BIN rather than a bare `depot`.
+    assert '"$DEPOT_BIN" build --load -t depot-image' in cmd
+    # Resolution prefers a depot already on PATH, falling back to the installer's
+    # off-PATH default ($HOME/.depot/bin/depot); the install check is idempotent
+    # against whichever path was resolved.
+    assert 'command -v depot || echo "$HOME/.depot/bin/depot"' in cmd
+    assert 'test -x "$DEPOT_BIN"' in cmd
     # Secret must NOT be inlined into the command string -- it goes via env.
     assert "my-secret-token" not in cmd
 

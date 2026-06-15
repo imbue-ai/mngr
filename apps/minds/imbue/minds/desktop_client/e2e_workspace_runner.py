@@ -36,6 +36,7 @@ from typing import IO
 import httpx
 from loguru import logger
 from playwright.sync_api import Browser
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -85,6 +86,7 @@ _CDP_READY_TIMEOUT_SECONDS: Final[int] = 120
 _BACKEND_READY_TIMEOUT_SECONDS: Final[int] = 120
 _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 600
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
+_CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # The onboarding wizard's screen-advance is driven by creating.js, a deferred
 # script that attaches its ``.js-next`` click handlers after the page renders.
@@ -266,6 +268,23 @@ def _checkout_best_effort(repo: Path, ref: str) -> None:
         capture_output=True,
         text=True,
         timeout=60,
+    )
+    # Point FETCH_HEAD at the same commit we just checked out. The minds create
+    # flow runs ``git checkout -B <ref> FETCH_HEAD`` in this clone; with HEAD
+    # already on <ref>, making FETCH_HEAD == HEAD turns that into a true no-op
+    # that preserves the uncommitted ``is_allowed_in_pytest`` opt-in the test
+    # writes into ``.mngr/settings.toml``. Without this, FETCH_HEAD still points
+    # at the branch tip left by the earlier ``fetch --tags`` (a different
+    # commit, whose ``.mngr/settings.toml`` differs from the tag's), so the
+    # downstream checkout tries to switch content and aborts on the dirty file
+    # ("Your local changes ... would be overwritten by checkout"). Fetching from
+    # ``.`` is local-only (no network).
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
 
 
@@ -651,6 +670,61 @@ def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | No
         )
 
 
+class WorkspaceCreationFailedError(RuntimeError):
+    """Raised when the Electron create flow surfaces its failure view.
+
+    Carries the human-readable text minds rendered into the loading
+    screen's ``#error-message`` element (whatever ``mngr create`` reported)
+    so a creation failure fails the run *fast* with the real cause, instead
+    of blocking until the full create-form navigation budget elapses. The
+    silent-hang this prevents is what turned a one-line "unknown runtime
+    'runsc'" docker error into an opaque 10-minute Playwright timeout.
+    """
+
+
+def _read_failure_message(page: Page) -> str:
+    """Return the text minds rendered into the failure view's '#error-message' element."""
+    message_element = page.query_selector("#error-message")
+    if message_element is None:
+        return "unknown error: the '#error-message' element was not present"
+    message = message_element.inner_text().strip()
+    return message or "unknown error: the '#error-message' element was empty"
+
+
+def _wait_for_workspace_ready_or_failure(page: Page, timeout_seconds: int) -> None:
+    """Block until the create flow reaches the workspace or reports failure.
+
+    The minds create flow has two mutually exclusive terminal states after
+    the onboarding questions: a redirect to the ``agent-<id>.localhost``
+    workspace URL (success), or the loading screen's failure sub-view
+    (``#failure-view``) becoming visible (failure -- ``creating.js``'s
+    ``showFailure()`` un-hides it once the status poll/SSE reports FAILED).
+
+    Polls both rather than only waiting for the success URL (the old
+    behavior), so a creation failure raises ``WorkspaceCreationFailedError``
+    with the surfaced error text immediately instead of hanging until
+    ``timeout_seconds`` expires. Raises ``PlaywrightTimeoutError`` if neither
+    state is reached within the budget.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _AGENT_SUBDOMAIN_PATTERN.search(page.url):
+            return
+        try:
+            failure_is_visible = page.is_visible("#failure-view")
+        except PlaywrightError:
+            # A redirect to the workspace can destroy the execution context
+            # mid-check; loop so the next iteration re-reads page.url, which
+            # will match the success pattern and return.
+            failure_is_visible = False
+        if failure_is_visible:
+            raise WorkspaceCreationFailedError(f"Workspace creation failed: {_read_failure_message(page)}")
+        page.wait_for_timeout(_CREATE_OUTCOME_POLL_INTERVAL_MS)
+    raise PlaywrightTimeoutError(
+        f"Workspace neither became ready nor reported failure within {timeout_seconds}s (last URL: {page.url!r})"
+    )
+
+
 def create_workspace_via_electron(
     fct_path: Path,
     workspace_name: str,
@@ -722,18 +796,20 @@ def create_workspace_via_electron(
                 # screen; confirm each advance (retrying the click) to absorb
                 # the creating.js handler-attach race. The final (q3) Next runs
                 # finishQuestions(), which shows the loading screen or redirects
-                # straight to the workspace -- the wait_for_url below covers that
-                # transition, and by q3 creating.js has long since loaded.
+                # straight to the workspace -- the workspace-ready-or-failure wait
+                # below covers that transition (and the failure case), and by q3
+                # creating.js has long since loaded.
                 _advance_onboarding_screen(page, "q1")
                 _advance_onboarding_screen(page, "q2")
                 q3_next_button = '[data-screen="q3"] .js-next'
                 page.wait_for_selector(q3_next_button, state="visible", timeout=10_000)
                 page.click(q3_next_button)
 
-                page.wait_for_url(
-                    _AGENT_SUBDOMAIN_PATTERN,
-                    timeout=_CREATE_FORM_TIMEOUT_SECONDS * 1000,
-                )
+                # Race the workspace-ready redirect against the create flow's
+                # failure view, so a `mngr create` failure (e.g. an unregistered
+                # docker runtime) fails this run fast with the surfaced error
+                # rather than blocking the whole navigation budget.
+                _wait_for_workspace_ready_or_failure(page, _CREATE_FORM_TIMEOUT_SECONDS)
                 logger.info("Workspace ready at {}", page.url)
 
                 page.wait_for_selector(

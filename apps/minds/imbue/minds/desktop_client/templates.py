@@ -86,7 +86,13 @@ _INPUT_BASE: Final[str] = (
 # stroke-linejoin=round). The dict is the single source of truth -- to
 # add or swap an icon, edit one entry here.
 _ICONS_24: Final[Mapping[str, str]] = {
-    "sidebar": '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/>',
+    # lucide ``menu`` (Figma node 559-5101): three horizontal lines, used by
+    # the titlebar button that opens the floating workspace menu.
+    "menu": (
+        '<line x1="4" y1="6" x2="20" y2="6"/>'
+        '<line x1="4" y1="12" x2="20" y2="12"/>'
+        '<line x1="4" y1="18" x2="20" y2="18"/>'
+    ),
     "home": '<path d="M3 12L12 3l9 9"/><path d="M5 10v10a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V10"/>',
     "back": '<polyline points="15 18 9 12 15 6"/>',
     "forward": '<polyline points="9 6 15 12 9 18"/>',
@@ -110,6 +116,12 @@ _ICONS_24: Final[Mapping[str, str]] = {
         '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>'
         '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>'
     ),
+    # Figma "Space switcher menu" open-in-new arrow (node 560-5109): a bare
+    # diagonal arrow-up-right for the "open in new window" affordance on
+    # workspace rows. Mirrors the sidebar's open-in-new glyph (8x8 in a 16px
+    # frame) scaled to this 24px viewBox (span 6-18); the shaft runs
+    # corner-to-corner while the arrowhead legs stop short (7/8 of the span).
+    "arrow-up-right": '<path d="M18 16.5V6H7.5"/><path d="M18 6L6 18"/>',
 }
 
 # 12x12 chrome glyph path data (minimize / maximize / close). Title-bar
@@ -169,6 +181,7 @@ def render_landing_page(
     agent_accents: dict[str, str] | None = None,
     shutdown_capable_agent_ids: Sequence[AgentId] | None = None,
     mind_liveness_by_agent_id: dict[str, str] | None = None,
+    agent_providers: dict[str, str] | None = None,
 ) -> str:
     """Render the landing page listing accessible workspaces.
 
@@ -219,6 +232,7 @@ def render_landing_page(
         destroying_status_by_agent_id=destroying_status_by_agent_id or {},
         shutdown_capable_agent_ids=shutdown_capable_agent_id_strings,
         mind_liveness_by_agent_id=mind_liveness_by_agent_id or {},
+        agent_providers=agent_providers or {},
     )
 
 
@@ -1080,7 +1094,8 @@ def render_chrome_page(
     workspace links that target the plugin's port directly.
 
     In Electron mode, the iframe and browser sidebar are hidden via JS; the content
-    and sidebar are handled by separate WebContentsViews.
+    is handled by a separate WebContentsView, and the sidebar page is loaded into
+    the shared modal WebContentsView when opened.
     """
     return CATALOG.render(
         "pages.Chrome",
@@ -1092,18 +1107,41 @@ def render_chrome_page(
 
 
 @pure
-def render_sidebar_page(mngr_forward_origin: str = "") -> str:
-    """Render the standalone sidebar page for the Electron sidebar WebContentsView.
+def render_sidebar_page(
+    mngr_forward_origin: str = "",
+    trigger_x: int = 0,
+    trigger_y: int = 0,
+    trigger_w: int = 0,
+    trigger_h: int = 38,
+    offset_x: int = -2,
+    offset_y: int = 2,
+) -> str:
+    """Render the standalone sidebar page loaded into the shared modal WebContentsView.
 
     This page shows the workspace list and subscribes to SSE updates. In Electron,
     clicking a workspace sends an IPC message via the preload bridge to navigate
     the content WebContentsView. ``mngr_forward_origin`` is exposed via
     ``data-mngr-forward-origin`` so sidebar.js can build the cross-origin
     ``/goto/<agent>/`` URL the plugin serves.
+
+    Position is driven entirely by the caller. The chrome view (which owns the
+    trigger button) passes the button's viewport-relative rect (``trigger_x``,
+    ``trigger_y``, ``trigger_w``, ``trigger_h``) plus a caller-chosen offset
+    (``offset_x``, ``offset_y``). The menu's top-left lands at the trigger's
+    bottom-left + offset. The chrome view and the modal view share window
+    coordinate space, so the rect translates directly. Defaults (no query
+    params) anchor a 38px-tall element at the top-left of the window,
+    nudged 2px left and 2px below it -- right for the titlebar's first button.
     """
     return CATALOG.render(
         "pages.Sidebar",
         mngr_forward_origin=mngr_forward_origin,
+        trigger_x=trigger_x,
+        trigger_y=trigger_y,
+        trigger_w=trigger_w,
+        trigger_h=trigger_h,
+        offset_x=offset_x,
+        offset_y=offset_y,
     )
 
 

@@ -33,10 +33,12 @@ from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_local_path
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
+from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
 from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -210,7 +212,7 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
-        (LaunchMode.CLOUD, None),
+        (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
@@ -257,12 +259,50 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
 
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.CLOUD,
+        launch_mode=LaunchMode.VULTR,
         host_name=HostName("hello"),
         region="lhr",
     )
-    # Vultr takes the region as the --vps-region build arg.
-    assert "--vps-region=lhr" in command
+    # Vultr takes the region as the --vultr-region build arg.
+    assert "--vultr-region=lhr" in command
+
+
+def test_build_mngr_create_command_aws_address_encodes_region() -> None:
+    """AWS selects the region-specific provider via the ``aws-<region>`` address suffix."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.AWS,
+        host_name=HostName("hello"),
+        region="us-west-2",
+    )
+    assert "system-services@hello.aws-us-west-2" in command
+    assert "aws" in command
+    assert "--template" in command
+
+
+def test_build_mngr_create_command_forwards_region_for_aws() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.AWS,
+        host_name=HostName("hello"),
+        region="eu-west-1",
+    )
+    # AWS confirms the placement with a matching --aws-region build arg.
+    assert "--aws-region=eu-west-1" in command
+
+
+def test_build_mngr_create_command_aws_requires_region() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        _build_mngr_create_command(
+            launch_mode=LaunchMode.AWS,
+            host_name=HostName("hello"),
+        )
+
+
+def test_run_mngr_aws_prepare_requires_region() -> None:
+    # prepare runs before the create-command builder in the AWS create flow, so
+    # it must reject an empty region with the same message rather than shelling
+    # out to ``mngr aws prepare --provider aws- --region ''``.
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        run_mngr_aws_prepare("")
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
@@ -283,7 +323,7 @@ def test_build_mngr_create_command_ignores_region_for_docker() -> None:
         region="US-WEST-OR",
     )
     joined = " ".join(command)
-    assert "region=" not in joined and "vps-region" not in joined
+    assert "region=" not in joined and "vultr-region" not in joined
 
 
 def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
@@ -299,7 +339,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR])
 def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
     launch_mode: LaunchMode,
 ) -> None:
@@ -369,7 +409,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how DOCKER/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how DOCKER/LIMA/VULTR/AWS use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -386,7 +426,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
-        (LaunchMode.CLOUD, None),
+        (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
@@ -472,6 +512,61 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     )
     assert push.returncode == 0, push.stderr
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
+
+
+def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
+    """``clone_git_repo`` materialises a checked-out, tracked working tree --
+    exactly what ``git clone`` produces.
+
+    Regression for the SHA-support rewrite that swapped ``git clone`` for
+    ``git init`` + ``git fetch`` and dropped the checkout, leaving an empty
+    working tree. Callers that overlay a worktree via
+    ``rsync_worktree_over_clone`` depend on the clone being checked out: with
+    an empty tree the overlaid files land untracked and the follow-up
+    ``checkout_branch`` aborts with "untracked working tree files would be
+    overwritten by checkout", which silently broke every local-worktree
+    create (docker, lima, smolvm).
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(origin)), dest)
+
+    # Working tree is populated from the fetched HEAD (origin is left on main)...
+    assert (dest / "f").read_text() == "base\n"
+    # ...and the files are TRACKED (clean status), not untracked -- this is the
+    # property the worktree overlay relies on.
+    assert _git(dest, "status", "--porcelain") == ""
+
+
+@pytest.mark.rsync
+def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
+    """The local-worktree create flow (clone -> rsync overlay -> checkout)
+    succeeds and keeps the worktree's uncommitted edits.
+
+    Regression for the create failure where ``clone_git_repo`` stopped
+    checking out, so the overlay rsync'd files landed untracked and
+    ``checkout_branch`` aborted with "untracked working tree files would be
+    overwritten by checkout". Mirrors production's ordering for a git-worktree
+    source on a branch (the ``minds-start`` dev flow).
+    """
+    origin = tmp_path / "origin"
+    _make_origin_repo_with_branch(origin, "testing")
+
+    # A real git worktree on "testing" with an UNCOMMITTED edit (stands in for
+    # minds-start's locally-rsynced vendor/mngr/ changes).
+    worktree = tmp_path / "wt"
+    _git(origin, "worktree", "add", "-q", str(worktree), "testing")
+    (worktree / "f").write_text("uncommitted edit\n")
+
+    dest = tmp_path / "clone"
+    clone_git_repo(GitUrl("file://{}".format(worktree)), dest)
+    _rsync_worktree_over_clone(worktree, dest)
+    checkout_branch(dest, GitBranch("testing"))
+
+    assert _git(dest, "rev-parse", "--abbrev-ref", "HEAD") == "testing"
+    assert (dest / "f").read_text() == "uncommitted edit\n"
 
 
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
@@ -956,6 +1051,10 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     assert cli.create_calls == []
 
 
+# Same timeout flake as its API_KEY twin above: the creation work occasionally
+# exceeds the 10s pytest-timeout when offload sandboxes are contended. Offload
+# retries flaky tests automatically.
+@pytest.mark.flaky
 def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""

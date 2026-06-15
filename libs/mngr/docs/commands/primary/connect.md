@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [connect|conn] [OPTIONS] [AGENT]
+mngr [connect|conn] [AGENT] [--agent <AGENT>] [--[no-]start] [--connect-command <CMD>] [--[no-]allow-unknown-host]
 ```
 
 Connect to an existing agent via the terminal.

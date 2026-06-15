@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -58,11 +58,22 @@
     window.landingRowClick = function (event, row) {
       var agentId = row.dataset.agentId;
       var status = healthStatusByAgent[agentId];
+      var ret = row.dataset.defaultHref || '';
       if (status === 'stuck' || status === 'restarting' || status === 'restart_failed') {
-        var ret = row.dataset.defaultHref || '';
         window.location = '/agents/' + encodeURIComponent(agentId) + '/recovery?return_to=' + encodeURIComponent(ret);
+      } else if (mindLivenessByAgent[agentId] === 'STOPPED') {
+        // The mind's container is stopped, so loading the workspace directly would
+        // strand the user on the loader for the full HEALTHY->STUCK probe-failure
+        // threshold before any restart is dispatched. We already know it's down, so
+        // route straight to the recovery page, which confirms host_offline via its
+        // probe and cold-boots the host immediately. ``intent=restart`` is required:
+        // the health tracker has never probed this stopped mind so it still reports
+        // HEALTHY, and without the intent the recovery handler would 302 us right
+        // back to the loader instead of dispatching the restart.
+        window.location = '/agents/' + encodeURIComponent(agentId)
+          + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
       } else {
-        window.location = row.dataset.defaultHref;
+        window.location = ret;
       }
     };
 
@@ -73,6 +84,22 @@
       var ret = row.dataset.defaultHref || '';
       window.location = '/agents/' + encodeURIComponent(agentId)
         + '/recovery?return_to=' + encodeURIComponent(ret) + '&intent=restart';
+    };
+
+    window.landingOpenInNewWindow = function (button) {
+      var row = button.closest('[data-agent-id]');
+      if (!row) return;
+      var agentId = row.dataset.agentId;
+      if (isElectronShell) {
+        // Route through the content relay -> main process, which opens (or
+        // focuses) a dedicated window for this workspace. Same channel the
+        // sidebar's open-in-new arrow uses.
+        window.postMessage({ type: 'minds:open-workspace-in-new-window', agentId: agentId }, '*');
+      } else {
+        // Plain browser: no native windows, so open the workspace URL in a
+        // new tab instead.
+        window.open(row.dataset.defaultHref, '_blank', 'noopener');
+      }
     };
 
     // -- Mind Start / Stop controls --
@@ -265,7 +292,7 @@
         // handle the tight padding + flex layout. Keep this string in
         // sync with Card.jinja's class output when extending the
         // primitive.
-        row.className = 'minds-card flex items-center gap-3 px-4 py-2.5';
+        row.className = 'minds-card flex items-center gap-1.5 px-4 py-2.5';
         row.dataset.providerName = entry.name;
 
         var nameEl = document.createElement('span');
@@ -570,6 +597,10 @@
                   :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              {% set provider_label = agent_providers.get(agent_id | string, "") %}
+              {% if provider_label %}
+                <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-zinc-100 text-zinc-500">{{ provider_label }}</span>
+              {% endif %}
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium" style="display:none"></span>
@@ -604,6 +635,12 @@
                   <Icon24 name="restart" />
                 </Button>
               {% endif %}
+              <Button variant="ghost" size="icon"
+                      onclick="event.stopPropagation(); window.landingOpenInNewWindow(this)"
+                      title="Open in new window"
+                      aria-label="Open workspace in new window">
+                <Icon24 name="arrow-up-right" />
+              </Button>
               <Button variant="ghost" size="icon"
                       onclick={{ "event.stopPropagation(); window.location='/workspace/" ~ agent_id ~ "/settings'" }}
                       title="Settings"

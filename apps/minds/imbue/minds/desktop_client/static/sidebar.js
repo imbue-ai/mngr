@@ -1,6 +1,8 @@
-// Electron sidebar WebContentsView: renders the workspace list and wires
-// clicks + context menus through window.minds IPC. In browser mode the
-// chrome.js embedded sidebar handles the same job instead.
+// Electron sidebar page: loaded into the shared modal WebContentsView when
+// the user opens the sidebar. Renders the floating menu (workspace list +
+// "New workspace" + "Manage account(s)"). Clicks + context menus go through
+// window.minds IPC. In browser mode the chrome.js embedded sidebar handles
+// the same job inline instead.
 (function () {
   var isElectron = !!window.minds;
   var currentWorkspaceId = null;
@@ -10,14 +12,21 @@
   // Workspace links go to the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
-  // Per-workspace accent comes from the SSE ``workspaces`` payload's
-  // ``accent`` (#rrggbb) field, which the server always populates
-  // (stored color label, or the default for label-less workspaces).
-  // The skip-when-missing branch below is defensive only; rows
-  // without an inline style fall back to the CSS default.
+  // The floating sidebar auto-closes after the user makes a selection
+  // (workspace row, settings gear, "New workspace", "Manage account(s)" /
+  // "Log in", and "Open in new window"). The close happens entirely on the
+  // main process side: `navigate-content` and `open-workspace-in-new-window`
+  // in apps/minds/electron/main.js both call closeModal(bundle) before
+  // returning, so the renderer must NOT also send a `toggle-sidebar` IPC
+  // here. IPCs from a single renderer are processed FIFO; a follow-up
+  // toggle would see the already-closed modal and re-open it.
+  function navigate(url) {
+    if (isElectron) window.minds.navigateContent(url);
+    else window.location = url;
+  }
 
   function selectWorkspace(agentId) {
-    if (isElectron) window.minds.navigateContent(mngrForwardOrigin + '/goto/' + agentId + '/');
+    navigate(mngrForwardOrigin + '/goto/' + agentId + '/');
   }
 
   function openInNewWindow(agentId) {
@@ -26,29 +35,14 @@
     }
   }
 
-  function buildOpenNewBtn(agentId) {
-    var btn = document.createElement('button');
-    btn.className = 'sidebar-open-new hidden items-center justify-center bg-transparent border-none p-1 cursor-pointer text-zinc-400 rounded-md hover:text-zinc-200 hover:bg-white/5';
-    btn.title = 'Open in new window';
-    btn.tabIndex = -1;
-    btn.setAttribute('data-open-new', agentId);
-    btn.innerHTML =
-      '<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-      '<path d="M14 3h7v7"/><path d="M10 14L21 3"/>' +
-      '<path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>';
-    return btn;
+  function openWorkspaceSettings(agentId) {
+    navigate('/workspace/' + agentId + '/settings');
   }
 
   function renderWorkspaces(workspaces) {
     var container = document.getElementById('sidebar-workspaces');
     container.textContent = '';
-    if (!workspaces || workspaces.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'px-4 py-6 text-sm text-zinc-400 text-center';
-      empty.textContent = 'No projects';
-      container.appendChild(empty);
-      return;
-    }
+    if (!workspaces || workspaces.length === 0) return;
     var groups = {};
     workspaces.forEach(function (w) {
       var key = w.account || 'Private';
@@ -60,40 +54,24 @@
       if (b === 'Private') return 1;
       return a.localeCompare(b);
     });
-    keys.forEach(function (key) {
-      var header = document.createElement('div');
-      header.className = 'px-3 pt-2 pb-0.5 text-[11px] text-zinc-400 tracking-wider';
-      header.textContent = key === 'Private' ? 'PRIVATE' : key;
-      container.appendChild(header);
+    keys.forEach(function (key, keyIdx) {
+      if (keyIdx > 0 || keys.length > 1) {
+        var header = document.createElement('div');
+        header.className = 'px-2 pt-2 pb-1 text-[10px] text-white/40 uppercase tracking-wider';
+        header.textContent = key === 'Private' ? 'Private' : key;
+        container.appendChild(header);
+      }
       groups[key].forEach(function (w) {
-        var row = document.createElement('div');
-        var isCurrent = w.id === currentWorkspaceId;
-        row.className = 'sidebar-item group cursor-pointer text-sm font-medium text-zinc-200 rounded-md mx-1.5 my-0.5 py-2.5 pl-4 pr-9 flex items-center justify-between gap-2 transition-colors hover:bg-white/5'
-          + (isCurrent ? ' is-current bg-white/5' : '');
-        row.setAttribute('data-agent-id', w.id);
-        var label = document.createElement('span');
-        label.className = 'flex-1 whitespace-nowrap overflow-hidden text-ellipsis';
-        label.textContent = w.name || w.id;
-        row.appendChild(label);
-        // Retained-but-unverified workspace (its provider's last discovery poll
-        // errored): show an amber dot. The row stays fully clickable.
-        if (w.is_stale) {
-          row.classList.add('is-stale');
-          var staleDot = document.createElement('span');
-          staleDot.className = 'sidebar-stale-dot inline-block w-1.5 h-1.5 rounded-full bg-amber-400/80 shrink-0';
-          staleDot.title = "This workspace's provider had a discovery error; its status is unverified (still usable).";
-          row.appendChild(staleDot);
-        }
-        var btn = buildOpenNewBtn(w.id);
-        // Show the "open in new window" icon on hover (or focus-within).
-        // Tailwind's `group` class on the row + `group-hover:inline-flex`
-        // can't flip to inline-flex from hidden directly, so we toggle it
-        // via a tiny delegated handler below.
-        row.appendChild(btn);
-        if (typeof w.accent === 'string') {
-          row.style.setProperty('--workspace-accent', w.accent);
-        }
-        container.appendChild(row);
+        // The row markup lives in the shared builder; this view passes
+        // withOpenNew:true (Electron supports multi-window) and lets the
+        // parent container's flex gap own the spacing. Clicks / hover /
+        // context-menu are handled by the delegated document listeners below.
+        container.appendChild(
+          window.mindsSidebarRow.buildRow(w, {
+            isCurrent: w.id === currentWorkspaceId,
+            withOpenNew: true,
+          }),
+        );
       });
     });
   }
@@ -101,29 +79,22 @@
   function handleRowClick(target) {
     var row = target.closest('.sidebar-item');
     if (!row) return;
-    var openNewBtn = target.closest('.sidebar-open-new');
     var agentId = row.getAttribute('data-agent-id');
     if (!agentId) return;
-    if (openNewBtn) { openInNewWindow(agentId); return; }
+    if (target.closest('[data-open-new]')) { openInNewWindow(agentId); return; }
+    if (target.closest('[data-open-settings]')) { openWorkspaceSettings(agentId); return; }
     selectWorkspace(agentId);
   }
-  document.addEventListener('click', function (e) { handleRowClick(e.target); });
-
-  // Flip the hover affordance on the open-in-new button. Using delegated
-  // listeners instead of CSS groups so we don't need Tailwind to generate
-  // obscure group-hover:inline-flex-on-hidden rules.
-  document.addEventListener('mouseover', function (e) {
-    var row = e.target.closest('.sidebar-item');
-    if (!row || row.classList.contains('is-current')) return;
-    var btn = row.querySelector('.sidebar-open-new');
-    if (btn) { btn.classList.remove('hidden'); btn.classList.add('inline-flex'); }
-  });
-  document.addEventListener('mouseout', function (e) {
-    var row = e.target.closest('.sidebar-item');
-    if (!row) return;
-    if (e.relatedTarget && row.contains(e.relatedTarget)) return;
-    var btn = row.querySelector('.sidebar-open-new');
-    if (btn) { btn.classList.add('hidden'); btn.classList.remove('inline-flex'); }
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#sidebar-new-workspace')) {
+      navigate('/create');
+      return;
+    }
+    if (e.target.closest('#sidebar-account')) {
+      navigate(signedIn ? '/accounts' : '/auth/login');
+      return;
+    }
+    handleRowClick(e.target);
   });
 
   document.addEventListener('contextmenu', function (e) {
@@ -137,11 +108,59 @@
     }
   });
 
+  // -- Modal dismissal: backdrop click -------------------------------------
+  //
+  // The sidebar runs inside the shared modal WebContentsView; the body is a
+  // transparent backdrop with the floating panel pinned at top-left. Clicks
+  // anywhere outside the panel dismiss the modal via the same IPC the
+  // inbox X button uses. Escape is handled by the main process's modal
+  // before-input-event listener (see openModal in electron/main.js), so we
+  // don't need a JS Escape handler here.
+  function dismissModal() {
+    if (isElectron && window.minds.closeModal) window.minds.closeModal();
+  }
+  document.addEventListener('click', function (e) {
+    if (e.target.closest('#sidebar-menu')) return;
+    dismissModal();
+  });
+
   if (isElectron && window.minds.onCurrentWorkspaceChanged) {
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       currentWorkspaceId = agentId || null;
       renderWorkspaces(lastWorkspaces);
     });
+  }
+
+  // -- Auth status ----------------------------------------------------------
+  //
+  // The /_chrome/events SSE stream pushes workspace updates but not auth
+  // transitions, so we poll /auth/api/status on load (and whenever the
+  // workspace content URL changes, since a sign-in / sign-out happens in
+  // that view). Mirrors chrome.js's behavior for the browser-mode chrome.
+  var signedIn = false;
+  function updateAccountUI(data) {
+    var label = document.getElementById('sidebar-account-label');
+    var btn = document.getElementById('sidebar-account');
+    if (!label || !btn) return;
+    if (data && data.signedIn) {
+      signedIn = true;
+      label.textContent = 'Manage account(s)';
+      btn.title = data.email || 'Manage accounts';
+    } else {
+      signedIn = false;
+      label.textContent = 'Log in';
+      btn.title = 'Sign in to your account';
+    }
+  }
+  function refreshAuthStatus() {
+    fetch('/auth/api/status')
+      .then(function (r) { return r.json(); })
+      .then(updateAccountUI)
+      .catch(function () {});
+  }
+  refreshAuthStatus();
+  if (isElectron && window.minds.onContentURLChange) {
+    window.minds.onContentURLChange(refreshAuthStatus);
   }
 
   function handleChromeEvent(data) {

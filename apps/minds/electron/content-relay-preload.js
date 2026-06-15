@@ -49,6 +49,16 @@ window.addEventListener('message', (event) => {
     ipcRenderer.send('confirm-stop-mind', agentId, name);
     return;
   }
+  // Landing-page "open in new window" button: ask the main process to open
+  // (or focus) a dedicated window for this workspace. Same IPC channel the
+  // sidebar uses; the agent id is validated to the server-issued shape so a
+  // foreign page can't smuggle path/query chars into the URL main builds.
+  if (data.type === 'minds:open-workspace-in-new-window') {
+    const agentId = data.agentId;
+    if (typeof agentId !== 'string' || !AGENT_ID_PATTERN.test(agentId)) return;
+    ipcRenderer.send('open-workspace-in-new-window', agentId);
+    return;
+  }
   // Settings-page color picker: paint the chrome titlebar optimistically
   // *in this bundle's chrome view* so the user sees the picked color
   // immediately, without waiting for the POST -> mngr label subprocess

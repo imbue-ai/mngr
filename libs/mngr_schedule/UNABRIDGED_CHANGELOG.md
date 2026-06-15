@@ -4,6 +4,27 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+- Fixed: `mngr schedule remove` (and the redeploy path that calls it) now passes `--yes` when stopping a schedule's Modal app, so it no longer aborts with "no interactive terminal detected" under newer Modal CLIs when run non-interactively (e.g. from a deploy script).
+
+## 2026-06-12
+
+Added a `--timezone` option to `mngr schedule add` that pins the IANA timezone
+in which the `--schedule` cron expression is interpreted (e.g.
+`--timezone America/Los_Angeles`).
+
+Previously the cron was always interpreted in the deploying machine's local
+timezone, so the same schedule could fire at different wall-clock times
+depending on where it was deployed from. Pinning `--timezone` makes the fire
+time deterministic. The value is validated against the IANA timezone database
+at deploy time. The option is only supported for the modal provider; passing it
+with `--provider local` is an error.
+
+## 2026-06-11
+
+Replaced direct ValueError raises in modal deploy upload-spec parsing with a dedicated UploadSpecError exception type.
+
 ## 2026-06-08
 
 - Now auto-discovered as a publishable package by the release tooling. This also fixes a latent bug: `imbue-mngr-schedule` is already listed in the mngr install catalog, so the wizard offered it even though it had never been published (a user picking it hit a PyPI 404). It will be offered for first publication on the next release. Its previously-unpinned internal deps (`imbue-mngr`, `imbue-common`, `imbue-mngr-modal`) are now pinned with `==` to their current workspace versions. No runtime change.
