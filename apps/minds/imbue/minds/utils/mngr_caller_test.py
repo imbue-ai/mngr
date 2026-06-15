@@ -1,6 +1,31 @@
+import multiprocessing.forkserver
+import multiprocessing.resource_tracker
+from collections.abc import Iterator
+
+import pytest
+
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import _coerce_exit_code
+
+
+@pytest.fixture(autouse=True)
+def _stop_forkserver_after_test() -> Iterator[None]:
+    """Tear down the multiprocessing forkserver + resource_tracker after each test.
+
+    A real :meth:`MngrCaller.call` starts a process-lifetime forkserver (and
+    multiprocessing starts a resource_tracker alongside it). In production these
+    are reaped at interpreter exit / on parent death, but the per-session leak
+    checker runs earlier and would flag them, so tests that start a real
+    forkserver must stop it explicitly. Both ``_stop`` calls are safe no-ops
+    when nothing was started.
+    """
+    yield
+    # ``_stop`` is the real reset mechanism (multiprocessing itself calls it at
+    # exit); it resets internal state so a later call restarts cleanly. It is
+    # absent from typeshed, hence the ignores.
+    multiprocessing.forkserver._forkserver._stop()  # ty: ignore[unresolved-attribute]
+    multiprocessing.resource_tracker._resource_tracker._stop()  # ty: ignore[unresolved-attribute]
 
 
 def test_coerce_exit_code_none_is_success() -> None:
