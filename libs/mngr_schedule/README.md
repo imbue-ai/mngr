@@ -15,6 +15,11 @@ This is useful for autonomous agents that should run on a recurring schedule -- 
 # Add a nightly agent that runs at 2am in modal
 mngr schedule add --command create --args "--type claude --message 'review recent PRs' --provider modal" --schedule "0 2 * * *" --provider modal
 
+# Pin the timezone the cron is interpreted in (modal only). Without --timezone,
+# the schedule uses the deploying machine's local timezone, so the fire time
+# depends on where you deployed from.
+mngr schedule add --command create --args "..." --schedule "0 0 * * *" --timezone America/Los_Angeles --provider modal
+
 # Add a named trigger that runs locally
 mngr schedule add nightly-test-checker --command create --args "--message 'make sure all tests are passing'" --schedule "0 3 * * *" --provider local
 

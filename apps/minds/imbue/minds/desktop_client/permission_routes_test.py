@@ -20,6 +20,8 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.config.data_types import WorkspacePaths
+from imbue.minds.desktop_client.app import _build_requests_payload
+from imbue.minds.desktop_client.app import _displayable_pending_requests
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -31,8 +33,6 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSe
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicePermissionInfo
-from imbue.minds.desktop_client.latchkey.services_catalog import ServicesCatalog
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
 from imbue.minds.desktop_client.request_events import REQUESTS_EVENT_SOURCE_NAME
 from imbue.minds.desktop_client.request_events import RequestEvent
@@ -46,6 +46,8 @@ from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
+from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
@@ -185,11 +187,10 @@ def _make_recording_handler(
 ) -> _RecordingHandler:
     """Build a ``_RecordingHandler`` with stub probes that won't be exercised in routing tests."""
     gateway_client = build_fake_gateway_client()
-    gateway_client.available_services_payload = dict(_TEST_SERVICES_CATALOG_PAYLOAD)
     return _RecordingHandler(
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary="/nonexistent"),
-        services_catalog=ServicesCatalog(gateway_client=gateway_client),
+        services_catalog=ServicesCatalog.from_catalog_payload(_TEST_SERVICES_CATALOG_PAYLOAD),
         mngr_message_sender=MngrMessageSender(mngr_binary="/nonexistent"),
         gateway_client=gateway_client,
         grant_outcome=grant_outcome,
@@ -338,6 +339,75 @@ def test_inbox_page_renders_as_modal(tmp_path: Path) -> None:
     # Backdrop click and Escape are wired to the same dismissal helper.
     assert "onBackdropClick" in body
     assert 'e.key === "Escape"' in body
+
+
+def test_inbox_page_hides_requests_whose_host_cannot_be_resolved(tmp_path: Path) -> None:
+    """A pending request from an agent the resolver no longer knows is hidden.
+
+    When a workspace is stopped, its agent drops out of discovery, so the
+    backend resolver can no longer map the agent to a host/workspace. The
+    inbox would otherwise fall back to rendering the raw agent id (a
+    meaningless 16-char hex string). Such requests are filtered out of the
+    inbox list -- only the request whose agent is still resolvable shows.
+    """
+    known_agent = AgentId()
+    stopped_agent = AgentId()
+    visible_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(known_agent),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="visible",
+    )
+    hidden_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(stopped_agent),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="hidden",
+    )
+    inbox = RequestInbox().add_request(visible_request).add_request(hidden_request)
+    handler = _make_recording_handler(tmp_path)
+    # The resolver knows only ``known_agent``; ``stopped_agent`` resolves to None.
+    client = _build_authenticated_client(tmp_path, handler, inbox, agent_id=known_agent)
+
+    response = client.get("/inbox")
+
+    assert response.status_code == 200
+    body = response.text
+    assert str(visible_request.event_id) in body
+    assert str(hidden_request.event_id) not in body
+
+
+def test_requests_payload_excludes_unresolvable_hosts(tmp_path: Path) -> None:
+    """The SSE badge payload counts only requests whose host is resolvable.
+
+    The badge count and the rendered cards are driven off the same filter,
+    so a request from a since-stopped workspace neither inflates the badge
+    nor appears in the panel.
+    """
+    known_agent = AgentId()
+    stopped_agent = AgentId()
+    visible_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(known_agent),
+        scope="slack-api",
+        rationale="visible",
+    )
+    hidden_request = create_latchkey_predefined_permission_request_event(
+        agent_id=str(stopped_agent),
+        scope="slack-api",
+        rationale="hidden",
+    )
+    inbox = RequestInbox().add_request(visible_request).add_request(hidden_request)
+    backend_resolver = _HostKnownStaticResolver(
+        url_by_agent_and_service={},
+        fixed_host_id=HostId(),
+        known_agent_ids=(known_agent,),
+    )
+
+    displayable = _displayable_pending_requests(inbox, backend_resolver)
+    payload = _build_requests_payload(inbox, backend_resolver)
+
+    assert [str(req.event_id) for req in displayable] == [str(visible_request.event_id)]
+    assert payload == {"count": 1, "request_ids": [str(visible_request.event_id)]}
 
 
 def test_get_permission_request_page_shows_descriptions_when_present(tmp_path: Path) -> None:

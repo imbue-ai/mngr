@@ -45,12 +45,15 @@ def test_synthesizer_opens_framing_then_emits_text_delta() -> None:
     assert all(event.session_id == "sess-1" for event in events)
     assert all(event.uuid != "" for event in events)
     # message_start envelope conforms to claude's shape, with a zeroed usage stub and the caller model.
+    # The payload is dumped from anthropic's models, so usage also carries the API's optional
+    # cache/detail fields (all null); we assert only the token counts we populate.
     message = events[0].event["message"]
     assert message["role"] == "assistant"
     assert message["model"] == "haiku"
     assert message["content"] == []
     assert message["stop_reason"] is None
-    assert message["usage"] == {"input_tokens": 0, "output_tokens": 0}
+    assert message["usage"]["input_tokens"] == 0
+    assert message["usage"]["output_tokens"] == 0
     # The delta carries the complete line as a text_delta.
     assert events[2].event == {
         "type": "content_block_delta",
