@@ -97,7 +97,17 @@ class _ProbeAgent(BaseAgent[AgentTypeConfig]):
 
 
 class _RecorderHost(pydantic.BaseModel):
-    """In-memory host stub: records each command and returns a configurable result."""
+    """Deliberate minimal command recorder for exercising the send-Enter strategies.
+
+    This is intentionally *not* an ``OnlineHostInterface`` subclass: the strategy
+    functions under test reach the host only through ``execute_stateful_command``,
+    so implementing the full interface (60+ abstract methods) would add noise
+    without testing anything those functions touch. This is therefore not a
+    host-contract fake -- it will not catch drift in unrelated host methods, only
+    in the one method the strategies actually call (kept signature-compatible
+    below). The same deliberate-stub pattern is used by ``_StubHost`` in
+    ``base_agent_test.py``.
+    """
 
     captured: list[str] = pydantic.Field(default_factory=list)
     succeed: bool = True
