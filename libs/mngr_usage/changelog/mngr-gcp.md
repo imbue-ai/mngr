@@ -1,0 +1,3 @@
+## wait_for_usage: own daemon poll loop instead of injected sleep
+
+- `wait_for_usage` no longer takes injected `monotonic_fn` / `sleep_fn` callables (which had aliased `time.sleep` to dodge the `time_sleep` ratchet while still sleeping for real). It now owns a real `time.sleep` directly -- the single sanctioned sleep in this package -- because it is a background/daemon wait that deliberately supports `timeout_seconds=None` (run indefinitely until the usage predicate flips). That no-timeout case is why it does not use the shared `poll_until`, which requires an explicit timeout on purpose. `now_fn` (the wall-clock value fed into the CEL context) is unchanged. No behavior change for callers; purely internal.

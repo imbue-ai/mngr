@@ -10,12 +10,17 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import emit_docker_build_output
 from imbue.mngr_vps_docker.container_setup import is_retryable_rsync_error
 from imbue.mngr_vps_docker.container_setup import redact_secret_env
@@ -27,6 +32,7 @@ from imbue.mngr_vps_docker.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps_docker.instance import build_vps_tags
 from imbue.mngr_vps_docker.instance import extract_presence_flag
 from imbue.mngr_vps_docker.instance import parse_vps_build_args
+from imbue.mngr_vps_docker.vps_client import ExternallyManagedVpsClient
 
 _DEFAULT_REGION = "ewr"
 _DEFAULT_PLAN = "vc2-1c-1gb"
@@ -490,25 +496,6 @@ def _scripted_outer(responder: Callable[[str], CommandResult]) -> tuple[OuterHos
     return cast(OuterHostInterface, stub), stub
 
 
-class _VirtualClock(MutableModel):
-    """Injectable clock/sleeper pair backed by a single float counter.
-
-    ``now()`` returns the current virtual time. ``sleep(seconds)`` advances
-    virtual time by ``seconds`` (clamped to a positive minimum so timeouts
-    are still reached when callers pass ``0.0``). Combined, these let tests
-    fully control the elapsed-time logic of poll loops without any real
-    sleeps.
-    """
-
-    elapsed_seconds: float = Field(default=0.0, description="Current virtual time in seconds")
-
-    def now(self) -> float:
-        return self.elapsed_seconds
-
-    def sleep(self, seconds: float) -> None:
-        self.elapsed_seconds += max(seconds, 0.001)
-
-
 def test_wait_for_cloud_init_marker_returns_when_marker_appears() -> None:
     """Returns immediately on the first poll where /var/run/mngr-ready exists."""
 
@@ -516,14 +503,7 @@ def test_wait_for_cloud_init_marker_returns_when_marker_appears() -> None:
         return CommandResult(stdout="", stderr="", success=True)
 
     outer, stub = _scripted_outer(responder)
-    clock = _VirtualClock()
-    _wait_for_cloud_init_marker(
-        outer,
-        timeout_seconds=10.0,
-        poll_interval_seconds=0.0,
-        clock=clock.now,
-        sleeper=clock.sleep,
-    )
+    _wait_for_cloud_init_marker(outer, timeout_seconds=10.0, poll_interval_seconds=0.0)
     assert stub.call_count == 1
 
 
@@ -538,25 +518,18 @@ def test_wait_for_cloud_init_marker_keeps_polling_while_marker_missing() -> None
         return CommandResult(stdout="", stderr="", success=success)
 
     outer, stub = _scripted_outer(responder)
-    clock = _VirtualClock()
-    _wait_for_cloud_init_marker(
-        outer,
-        timeout_seconds=10.0,
-        poll_interval_seconds=0.0,
-        clock=clock.now,
-        sleeper=clock.sleep,
-    )
+    _wait_for_cloud_init_marker(outer, timeout_seconds=10.0, poll_interval_seconds=0.0)
     assert stub.call_count == 3
 
 
 def test_wait_for_cloud_init_marker_swallows_transient_connection_errors() -> None:
     """Per-poll ``HostConnectionError`` must NOT abort the wait loop.
 
-    Regression test for the cloud-init bootstrap reliability fix: while
-    cloud-init restarts sshd to apply the MaxSessions/MaxStartups tuning,
-    an in-flight ``execute_idempotent_command`` can surface as
-    ``HostConnectionError``. The wait loop should swallow it, sleep, and
-    retry until the marker appears or ``timeout_seconds`` is exhausted.
+    Regression test for the bootstrap reliability fix: while the bootstrap
+    restarts sshd to apply the MaxSessions/MaxStartups tuning, an in-flight
+    ``execute_idempotent_command`` can surface as ``HostConnectionError``. The
+    poll treats it as "not ready yet" and retries until the marker appears or
+    ``timeout_seconds`` is exhausted.
     """
     poll_count = 0
 
@@ -570,14 +543,7 @@ def test_wait_for_cloud_init_marker_swallows_transient_connection_errors() -> No
         return CommandResult(stdout="", stderr="", success=True)
 
     outer, stub = _scripted_outer(responder)
-    clock = _VirtualClock()
-    _wait_for_cloud_init_marker(
-        outer,
-        timeout_seconds=10.0,
-        poll_interval_seconds=0.0,
-        clock=clock.now,
-        sleeper=clock.sleep,
-    )
+    _wait_for_cloud_init_marker(outer, timeout_seconds=10.0, poll_interval_seconds=0.0)
     assert stub.call_count == 3
 
 
@@ -588,16 +554,8 @@ def test_wait_for_cloud_init_marker_raises_mngr_error_on_timeout() -> None:
         return CommandResult(stdout="", stderr="", success=False)
 
     outer, stub = _scripted_outer(responder)
-    clock = _VirtualClock()
     with pytest.raises(MngrError, match="Cloud-init did not complete"):
-        _wait_for_cloud_init_marker(
-            outer,
-            timeout_seconds=10.0,
-            poll_interval_seconds=1.0,
-            clock=clock.now,
-            sleeper=clock.sleep,
-        )
-    # The virtual clock advances by 1.0s per sleep, so the loop runs ~10 times.
+        _wait_for_cloud_init_marker(outer, timeout_seconds=0.0, poll_interval_seconds=0.0)
     assert stub.call_count >= 1
 
 
@@ -613,13 +571,47 @@ def test_wait_for_cloud_init_marker_raises_on_persistent_connection_error() -> N
         raise HostConnectionError("sshd never recovered")
 
     outer, stub = _scripted_outer(responder)
-    clock = _VirtualClock()
     with pytest.raises(MngrError, match="Cloud-init did not complete"):
-        _wait_for_cloud_init_marker(
-            outer,
-            timeout_seconds=10.0,
-            poll_interval_seconds=1.0,
-            clock=clock.now,
-            sleeper=clock.sleep,
-        )
+        _wait_for_cloud_init_marker(outer, timeout_seconds=0.05, poll_interval_seconds=0.01)
     assert stub.call_count >= 2
+
+
+# =========================================================================
+# create_host runs pre-create validation before any provider write
+# =========================================================================
+
+
+class _ValidateRaisesProvider(MinimalVpsDockerProvider):
+    """MinimalVpsDockerProvider whose pre-create validation always raises.
+
+    Used to assert that ``create_host`` calls ``_validate_provider_args_for_create``
+    before the first provider write (the SSH key upload), so a failed precondition
+    aborts cleanly with no leaked resources.
+    """
+
+    def _validate_provider_args_for_create(self) -> None:
+        raise MngrError("SENTINEL: pre-create validation ran")
+
+
+def test_create_host_runs_pre_create_validation_before_any_provider_write(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A failing ``_validate_provider_args_for_create`` aborts ``create_host`` before upload_ssh_key.
+
+    This guards the onboarding UX motivating the GCP firewall pre-flight: a
+    provider precondition (e.g. a missing ``mngr gcp prepare`` firewall rule)
+    must fail before any SSH key upload or instance creation, not mid-create
+    under a "Host creation failed, attempting cleanup..." path.
+    ``ExternallyManagedVpsClient`` raises on ``upload_ssh_key``; if validation
+    did NOT run first, we would see that error (a different message) instead of
+    the sentinel.
+    """
+    provider = _ValidateRaisesProvider(
+        name=ProviderInstanceName("test-vps-docker"),
+        host_dir=temp_mngr_ctx.config.default_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        config=VpsDockerProviderConfig(backend=ProviderBackendName("test-vps-docker")),
+        vps_client=ExternallyManagedVpsClient(),
+    )
+    with pytest.raises(MngrError, match="SENTINEL: pre-create validation ran"):
+        provider.create_host(HostName("test-host"))

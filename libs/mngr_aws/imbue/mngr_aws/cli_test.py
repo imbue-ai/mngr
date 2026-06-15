@@ -13,6 +13,8 @@ Splits the test surface into two layers:
   stub; the no-credentials path; ``prepare --help``).
 """
 
+import json
+
 import boto3
 import click
 import pluggy
@@ -24,13 +26,17 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
+from imbue.mngr_aws.cli import _output_cleanup_result
+from imbue.mngr_aws.cli import _output_prepare_result
 from imbue.mngr_aws.cli import _perform_cleanup
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
+from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
@@ -78,9 +84,11 @@ def test_prepare_logic_creates_sg_when_missing() -> None:
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-new123"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-new123"
+    assert result.was_created is True
 
 
 def test_prepare_logic_reuses_sg_when_present() -> None:
@@ -95,9 +103,11 @@ def test_prepare_logic_reuses_sg_when_present() -> None:
     stubber.add_response("authorize_security_group_ingress", {})
     stubber.activate()
     try:
-        assert client.ensure_security_group() == "sg-reused"
+        result = client.ensure_security_group()
     finally:
         stubber.deactivate()
+    assert result.security_group_id == "sg-reused"
+    assert result.was_created is False
 
 
 def test_cleanup_logic_deletes_sg_when_no_instances() -> None:
@@ -187,6 +197,51 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
         stubber.assert_no_pending_responses()
     finally:
         stubber.deactivate()
+
+
+# =============================================================================
+# format-aware output (prepare / cleanup respect --format)
+# =============================================================================
+
+
+def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
+    _output_prepare_result(result, "us-east-1", OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert captured.out == "Prepared AWS security group sg-new123 in region us-east-1\n"
+
+
+def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON mode emits a structured object including the created signal."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-reused", was_created=False)
+    _output_prepare_result(result, "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": "sg-reused", "region": "us-east-1", "created": False}
+
+
+def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSONL mode emits a ``prepared`` event with the same fields."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
+    _output_prepare_result(result, "us-east-1", OutputFormat.JSONL)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["event"] == "prepared"
+    assert payload["created"] is True
+    assert payload["security_group_id"] == "sg-new123"
+
+
+def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=True when an SG was removed."""
+    _output_cleanup_result("sg-gone", "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": "sg-gone", "region": "us-east-1", "deleted": True}
+
+
+def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
+    """JSON cleanup output reports deleted=False on the idempotent no-op path."""
+    _output_cleanup_result(None, "us-east-1", OutputFormat.JSON)
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {"security_group_id": None, "region": "us-east-1", "deleted": False}
 
 
 def test_cleanup_command_help_is_reachable() -> None:
