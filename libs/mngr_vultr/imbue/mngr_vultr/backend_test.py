@@ -30,7 +30,7 @@ def _client_returning_instances(instances: list[dict[str, Any]], api_key: str = 
         response.headers["content-type"] = "application/json"
         return response
 
-    return VultrVpsClient(api_key=SecretStr(api_key), request_func=_transport)
+    return VultrVpsClient(api_key=SecretStr(api_key), os_id=2136, request_func=_transport)
 
 
 def _vultr_provider(client: VultrVpsClient, mngr_ctx: MngrContext) -> VultrProvider:
@@ -67,9 +67,8 @@ def test_backend_config_class() -> None:
 
 def test_backend_build_args_help() -> None:
     help_text = VultrProviderBackend.get_build_args_help()
-    assert "--vps-region" in help_text
-    assert "--vps-plan" in help_text
-    assert "--vps-os" in help_text
+    assert "--vultr-region" in help_text
+    assert "--vultr-plan" in help_text
 
 
 def test_backend_start_args_help() -> None:

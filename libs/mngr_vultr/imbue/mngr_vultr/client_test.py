@@ -75,7 +75,7 @@ def _response(
 
 def _client_with(responses: list[requests.Response | Exception]) -> tuple[VultrVpsClient, _RecordingTransport]:
     transport = _RecordingTransport(responses)
-    client = VultrVpsClient(api_key=SecretStr("test-api-key"), request_func=transport)
+    client = VultrVpsClient(api_key=SecretStr("test-api-key"), os_id=2136, request_func=transport)
     return client, transport
 
 
@@ -140,10 +140,9 @@ def test_create_instance_base64_encodes_user_data_and_posts_full_body() -> None:
         label="agent-label",
         region="ewr",
         plan="vc2-1c-1gb",
-        os_id=2136,
         user_data="cloud-config-payload",
         ssh_key_ids=["key1", "key2"],
-        tags=["mngr-provider=vultr"],
+        tags={"mngr-provider": "vultr"},
     )
     assert instance_id == VpsInstanceId("inst-abc123")
 
@@ -164,23 +163,6 @@ def test_create_instance_base64_encodes_user_data_and_posts_full_body() -> None:
     assert body["backups"] == "disabled"
 
 
-def test_create_instance_rejects_non_int_os_id() -> None:
-    # The client deliberately validates os_id at the boundary; a str must be
-    # rejected before any request is made.
-    client, transport = _client_with([])
-    with pytest.raises(VpsProvisioningError, match="must be an int"):
-        client.create_instance(
-            label="test",
-            region="ewr",
-            plan="vc2-1c-1gb",
-            os_id="2136",
-            user_data="test",
-            ssh_key_ids=[],
-            tags=[],
-        )
-    assert transport.calls == []
-
-
 def test_create_instance_missing_instance_in_response_raises() -> None:
     client, _ = _client_with([_response(json_body={})])
     with pytest.raises(VpsProvisioningError):
@@ -188,10 +170,9 @@ def test_create_instance_missing_instance_in_response_raises() -> None:
             label="test",
             region="ewr",
             plan="vc2-1c-1gb",
-            os_id=2136,
             user_data="test",
             ssh_key_ids=[],
-            tags=[],
+            tags={},
         )
 
 

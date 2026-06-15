@@ -1,1 +1,0 @@
-Removed a stale `[tool.coverage.report]` comment that attributed coverage oscillation to test nondeterminism. The underlying offload bug that caused the oscillation has since been fixed, so coverage is deterministic; the floor is left unchanged at 75% (CI measures ~79%).

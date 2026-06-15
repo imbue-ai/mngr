@@ -1,1 +1,0 @@
-Fixed the e2e test fixture (`imbue/mngr/e2e/conftest.py`) that wrote a duplicate `type = "claude"` key under `[commands.create]` in the generated `settings.local.toml`. The duplicate key caused TOML parsing to fail with "Cannot overwrite a value", breaking e2e tutorial tests including `test_create_with_custom_branch_pattern`.

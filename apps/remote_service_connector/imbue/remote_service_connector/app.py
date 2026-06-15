@@ -308,6 +308,10 @@ class PoolHostCleanupError(RuntimeError):
     """
 
 
+class MissingAuthWebsiteDomainError(RuntimeError):
+    """Raised when the required AUTH_WEBSITE_DOMAIN secret is not set."""
+
+
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
@@ -3827,7 +3831,7 @@ def _get_auth_website_domain() -> str:
     """
     value = os.environ.get("AUTH_WEBSITE_DOMAIN")
     if not value:
-        raise RuntimeError(
+        raise MissingAuthWebsiteDomainError(
             "AUTH_WEBSITE_DOMAIN is not set. Populate it in the "
             f"`supertokens-{_DEPLOY_ENV}-{_MINDS_DEPLOY_ID}` Modal secret (the deploy script "
             "pushes it from the tier's Vault entry)."

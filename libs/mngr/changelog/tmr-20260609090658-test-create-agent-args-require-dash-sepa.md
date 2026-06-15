@@ -1,1 +1,0 @@
-Fixed the e2e test fixture (`conftest.py`) which wrote a duplicate `type = "claude"` key into the generated `settings.local.toml`, causing all e2e tutorial tests to fail config parsing ("Cannot overwrite a value"). Also tightened `test_create_agent_args_require_dash_separator` to assert on the specific unrecognized-option failure mode.

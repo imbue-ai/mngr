@@ -1,1 +1,0 @@
-Fixed the e2e test fixture (`libs/mngr/imbue/mngr/e2e/conftest.py`) that wrote an invalid `settings.local.toml`: a merge artifact had duplicated the `type = "claude"` key inside the `[commands.create]` table, causing every `mngr` command in e2e tests to fail with `Failed to parse config file ...: Cannot overwrite a value`. Removed the duplicate key.
