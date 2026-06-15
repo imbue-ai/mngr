@@ -250,6 +250,10 @@ Provider: imbue_cloud
   Build args constrain which pool host the connector leases for this `mngr create`. Recognized keys (see LeaseAttributes): repo_url, repo_branch_or_tag, cpus, memory_gb, gpu_count. Unknown keys are rejected. Example: `mngr create my-agent@my-host.imbue_cloud_alice --new-host -b cpus=4 -b repo_branch_or_tag=v1.2.3`.
   Start args are not used by the imbue_cloud provider.
 
+Provider: imbue_cloud_slice
+  Slice args are passed through to the shared vps_docker bake (e.g. --file=Dockerfile, the build context).
+  Start args are passed directly to 'docker run' inside the slice VM.
+
 Provider: lima
   Supported build arguments for the lima provider:
     --file PATH           Path to a Lima YAML config file for full VM customization.
