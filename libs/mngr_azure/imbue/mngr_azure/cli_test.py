@@ -18,18 +18,23 @@ from imbue.mngr_azure.cli import _ensure_state_bucket_best_effort
 from imbue.mngr_azure.cli import _output_cleanup_result
 from imbue.mngr_azure.cli import _output_prepare_result
 from imbue.mngr_azure.cli import _perform_cleanup
+from imbue.mngr_azure.cli import _perform_host_identity_cleanup
 from imbue.mngr_azure.cli import _perform_state_bucket_cleanup
+from imbue.mngr_azure.cli import _provision_host_identity
 from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
+from imbue.mngr_azure.testing import FakeManagedServiceIdentityClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
 
 
 def _stubbed_bucket(backend: FakeBlobStorageBackend) -> _StubbedBlobStateBucket:
@@ -196,6 +201,54 @@ def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[s
     assert payload["deleted"] is False
     assert payload["resource_group"] is None
     assert payload["state_storage_account_deleted"] is None
+
+
+# =============================================================================
+# host-dir identity provisioning (prepare --host-dir-identity tri-state)
+# =============================================================================
+
+
+def _stubbed_identity(*, exists: bool = False) -> _StubbedBlobStateHostIdentity:
+    msi = FakeManagedServiceIdentityClient()
+    msi.user_assigned_identities.exists = exists
+    return _StubbedBlobStateHostIdentity(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group="mngr",
+        region="westus",
+        account_name="mngrstabc123",
+        fake_msi_client=msi,
+        fake_authorization_client=FakeAuthorizationClient(),
+    )
+
+
+def test_provision_host_identity_skip_does_nothing() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, "skip") is None
+    assert identity.host_identity_exists() is False
+
+
+def test_provision_host_identity_auto_creates_identity() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, "auto") == identity.identity_name
+    assert identity.host_identity_exists() is True
+
+
+def test_provision_host_identity_require_creates_identity() -> None:
+    identity = _stubbed_identity()
+    assert _provision_host_identity(identity, "require") == identity.identity_name
+
+
+def test_perform_host_identity_cleanup_deletes_then_is_idempotent() -> None:
+    identity = _stubbed_identity()
+    identity.ensure_host_identity()
+    assert _perform_host_identity_cleanup(identity) == identity.identity_name
+    # Now absent: a second cleanup is a no-op (returns None).
+    assert _perform_host_identity_cleanup(identity) is None
+
+
+def test_perform_host_identity_cleanup_noop_when_absent() -> None:
+    assert _perform_host_identity_cleanup(_stubbed_identity(exists=False)) is None
 
 
 def test_prepare_command_fails_clearly_without_subscription(

@@ -10,15 +10,19 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_azure.backend import AzureProvider
 from imbue.mngr_azure.config import AzureProviderConfig
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
+from imbue.mngr_azure.testing import FakeManagedServiceIdentityClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
 from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+from imbue.mngr_azure.testing import _StubbedBlobStateHostIdentity
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 
 _ACCOUNT_NAME = "mngrststateacct1234"
@@ -198,3 +202,150 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
     provider.persist_agent_data(host_id, {"id": str(agent_id), "name": "alpha", "type": "claude"})
     # The legacy tag path ran: a server-side tag Merge patch was recorded.
     assert len(resource.tags.updates) == 1
+
+
+# =============================================================================
+# Offline host_dir volume (get_volume_for_host / get_volume_reference_for_host)
+# =============================================================================
+
+
+class _IdentityInjectingAzureProvider(AzureProvider):
+    """AzureProvider whose ``_host_identity`` returns a test-injected stubbed identity."""
+
+    injected_host_identity: BlobStateHostIdentity | None = None
+
+    def _host_identity(self) -> BlobStateHostIdentity | None:
+        return self.injected_host_identity
+
+
+def _build_provider_with_identity(
+    mngr_ctx: MngrContext,
+    *,
+    is_host_dir_synced_to_bucket: bool = True,
+    identity_exists: bool = True,
+    compute: FakeComputeClient | None = None,
+) -> tuple[_IdentityInjectingAzureProvider, FakeComputeClient]:
+    """Build a bucket-mode provider with a fake-backed (optionally provisioned) host identity."""
+    config = AzureProviderConfig(
+        subscription_id="sub-123",
+        auto_shutdown_seconds=3600,
+        state_storage_account_name=_ACCOUNT_NAME,
+        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
+    )
+    compute = compute or FakeComputeClient()
+    client = _StubbedAzureVpsClient(
+        credential=object(),
+        subscription_id="sub-123",
+        region=config.default_region,
+        resource_group=config.resource_group,
+        stubbed_compute_client=compute,
+        stubbed_network_client=FakeNetworkClient(),
+        stubbed_resource_client=FakeResourceClient(),
+        stubbed_authorization_client=FakeAuthorizationClient(),
+    )
+    msi = FakeManagedServiceIdentityClient()
+    identity = _StubbedBlobStateHostIdentity(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group=config.resource_group,
+        region=config.default_region,
+        account_name=_ACCOUNT_NAME,
+        fake_msi_client=msi,
+        fake_authorization_client=FakeAuthorizationClient(),
+    )
+    if identity_exists:
+        identity.ensure_host_identity()
+    provider = _IdentityInjectingAzureProvider(
+        name=ProviderInstanceName("azure-test"),
+        host_dir=config.host_dir,
+        mngr_ctx=mngr_ctx,
+        config=config,
+        vps_client=client,
+        azure_client=client,
+        azure_config=config,
+        injected_host_identity=identity,
+    )
+    backend = FakeBlobStorageBackend()
+    bucket = _StubbedBlobStateBucket(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group=config.resource_group,
+        region=config.default_region,
+        account_name=_ACCOUNT_NAME,
+        fake_backend=backend,
+    )
+    bucket.ensure_bucket()
+    provider._state_bucket_cache = bucket
+    return provider, compute
+
+
+def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(temp_mngr_ctx: MngrContext) -> None:
+    """The reference getter returns a host_dir-scoped volume with no probe."""
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
+    host_id = HostId.generate()
+    bucket = provider._state_bucket()
+    assert bucket is not None
+    bucket.fake_backend.blobs_by_name[f"hosts/{host_id.get_uuid().hex}/host_dir/events/e.jsonl"] = b"evt"
+    reference = provider.get_volume_reference_for_host(host_id)
+    assert reference is not None
+    assert reference.volume.read_file("events/e.jsonl") == b"evt"
+
+
+def test_get_volume_for_host_returns_volume_when_objects_present(temp_mngr_ctx: MngrContext) -> None:
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
+    host_id = HostId.generate()
+    bucket = provider._state_bucket()
+    assert bucket is not None
+    bucket.fake_backend.blobs_by_name[f"hosts/{host_id.get_uuid().hex}/host_dir/logs/a.log"] = b"a"
+    volume = provider.get_volume_for_host(host_id)
+    assert volume is not None
+    assert volume.volume.read_file("logs/a.log") == b"a"
+
+
+def test_get_volume_for_host_returns_none_when_prefix_empty(temp_mngr_ctx: MngrContext) -> None:
+    """An empty host_dir prefix yields None (the diagnostic runs, non-fatally)."""
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx)
+    host_id = HostId.generate()
+    # No VM matches the host id, so the diagnostic returns early (no identity probe).
+    assert provider.get_volume_for_host(host_id) is None
+
+
+def test_get_volume_for_host_warns_when_vm_has_no_managed_identity(temp_mngr_ctx: MngrContext) -> None:
+    """Empty host_dir + a VM with no user-assigned identity -> a 're-run prepare' WARNING (non-fatal)."""
+    compute = FakeComputeClient()
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, compute=compute)
+    host_id = HostId.generate()
+    # A matching VM with NO user-assigned identity (only system-assigned).
+    compute.virtual_machines.list_result = [
+        SimpleNamespace(name="vm-1", tags={"mngr-provider": "azure-test", "mngr-host-id": str(host_id)})
+    ]
+    compute.virtual_machines.get_result = SimpleNamespace(identity=SimpleNamespace(user_assigned_identities=None))
+    with capture_log_warnings() as warnings:
+        assert provider.get_volume_for_host(host_id) is None
+    assert any("no attached user-assigned managed identity" in message for message in warnings)
+
+
+def test_get_volume_reference_is_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    assert provider.get_volume_reference_for_host(HostId.generate()) is None
+    assert provider.get_volume_for_host(HostId.generate()) is None
+
+
+def test_host_dir_sync_identity_resource_id_returned_when_identity_exists(temp_mngr_ctx: MngrContext) -> None:
+    """The create path attaches the provisioned identity's resource id when it exists."""
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, identity_exists=True)
+    resource_id = provider._host_dir_sync_identity_resource_id()
+    assert resource_id is not None
+    assert resource_id.endswith(f"/userAssignedIdentities/mngrid-{_ACCOUNT_NAME}")
+
+
+def test_host_dir_sync_identity_resource_id_none_when_identity_absent(temp_mngr_ctx: MngrContext) -> None:
+    provider, _compute = _build_provider_with_identity(temp_mngr_ctx, identity_exists=False)
+    assert provider._host_dir_sync_identity_resource_id() is None
+
+
+def test_host_dir_sync_identity_resource_id_none_when_feature_disabled(temp_mngr_ctx: MngrContext) -> None:
+    provider, _compute = _build_provider_with_identity(
+        temp_mngr_ctx, is_host_dir_synced_to_bucket=False, identity_exists=True
+    )
+    assert provider._host_dir_sync_identity_resource_id() is None
