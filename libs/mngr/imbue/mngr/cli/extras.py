@@ -525,8 +525,16 @@ def _install_default_agent_type(
 # -- Status display --
 
 
-def _print_extras_status() -> None:
-    """Print the status of all extras."""
+def _print_extras_status(
+    *,
+    claude_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+) -> None:
+    """Print the status of all extras.
+
+    ``claude_status_fn`` is injectable (mirroring the ``status_fn`` seam on the
+    ``_install_*`` helpers) so tests can avoid shelling out to the ``claude``
+    CLI -- a Node process whose startup is the slow, variable part of this call.
+    """
     write_human_line("Extras")
     write_human_line("")
 
@@ -542,7 +550,7 @@ def _print_extras_status() -> None:
         write_human_line("  completion       not configured")
 
     # Claude Code plugins
-    claude_available, installed_by_name = _claude_plugin_status()
+    claude_available, installed_by_name = claude_status_fn()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
     else:

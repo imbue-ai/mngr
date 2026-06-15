@@ -10,6 +10,7 @@ from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from typing import cast
 
 import pytest
 from pydantic import TypeAdapter
@@ -68,6 +69,7 @@ from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
+from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
@@ -83,10 +85,11 @@ from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
+from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _resolve_section_order
-from imbue.mngr_kanpan.tui import _restore_footer
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
@@ -373,11 +376,93 @@ def test_show_transient_message() -> None:
     assert state.footer_left_text.text == "  Test message"
 
 
-def test_restore_footer() -> None:
+def test_transient_message_expires_to_steady() -> None:
     state = _make_state()
+    state.loop = _make_mock_loop()
     state.steady_footer_text = "  Steady"
-    _restore_footer(state)
+    _show_transient_message(state, "  Test message")
+    assert state.footer_left_text.text == "  Test message"
+    _on_transient_expire(state.loop, state)
+    assert state.transient_message is None
     assert state.footer_left_text.text == "  Steady"
+
+
+class _RecordingLoop:
+    """Mock loop that hands out real alarm handles and records cancellations.
+
+    Lets us exercise the transient-message debounce, where a second message must
+    cancel the first message's pending expiry alarm so it cannot clear the new one.
+    """
+
+    def __init__(self) -> None:
+        self.next_handle = 0
+        self.removed: list[int] = []
+
+    def set_alarm_in(self, _seconds: float, _callback: Any, _data: Any = None) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        return handle
+
+    def remove_alarm(self, handle: int) -> None:
+        self.removed.append(handle)
+
+
+def test_show_transient_message_cancels_previous_alarm() -> None:
+    state = _make_state()
+    loop = _RecordingLoop()
+    state.loop = cast(Any, loop)
+    _show_transient_message(state, "  First")
+    first_handle = state.transient_alarm
+    _show_transient_message(state, "  Second")
+    # The first message's expiry alarm was cancelled so it cannot clear the second.
+    assert loop.removed == [first_handle]
+    assert state.transient_alarm != first_handle
+    assert state.footer_left_text.text == "  Second"
+
+
+def test_footer_priority_action_wins_over_refresh() -> None:
+    # Regression: a refresh and a user action (e.g. delete) overlapping must not
+    # flicker. The single-owner footer shows the action label, not "Refreshing".
+    state = _make_state()
+    # A stand-in object for an in-flight refresh future.
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  [1/1] delete agent-a"
+    text, attr = _compute_footer_display(state)
+    assert text.startswith("  [1/1] delete agent-a")
+    assert "Refreshing" not in text
+    assert attr == "footer"
+
+
+def test_footer_priority_refresh_when_no_action() -> None:
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    text, _ = _compute_footer_display(state)
+    assert text.startswith("  Refreshing")
+
+
+def test_footer_transient_overrides_action_and_refresh() -> None:
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  [1/1] delete agent-a"
+    state.transient_message = "  Done"
+    text, attr = _compute_footer_display(state)
+    assert text == "  Done"
+    assert attr == "notification"
+
+
+def test_render_footer_is_single_writer_no_flicker() -> None:
+    # Both the refresh poll context and the action context render through the same
+    # function; the displayed text stays the action label across repeated renders.
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  Running deploy on agent-a"
+    _render_footer(state)
+    first = state.footer_left_text.text
+    state.spinner_index += 1
+    _render_footer(state)
+    second = state.footer_left_text.text
+    assert first.startswith("  Running deploy on agent-a")
+    assert second.startswith("  Running deploy on agent-a")
 
 
 def test_update_snapshot_mute() -> None:
