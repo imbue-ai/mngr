@@ -1041,6 +1041,29 @@ class AzureVpsClient(VpsClientInterface):
         """True when a role-assignment create failed only because the assignment already exists."""
         return error.status_code == 409 or "roleassignmentexists" in str(error).lower().replace(" ", "")
 
+    def get_instance_user_assigned_identity_ids(self, instance_id: VpsInstanceId) -> list[str]:
+        """Return the resource ids of the VM's attached user-assigned managed identities (empty if none).
+
+        Reads the VM's ``identity.user_assigned_identities`` map. Used by the
+        offline host_dir path to detect a VM that was never granted the
+        bucket-write identity (Decision 7), so it can tell the user to re-run
+        ``mngr azure prepare --host-dir-identity require``. Returns ``[]`` for a
+        nonexistent VM too (no identities to report). Mirrors AWS's
+        ``get_instance_iam_profile_arn``.
+        """
+        try:
+            with self._translate_azure_errors():
+                vm = self._compute().virtual_machines.get(self.resource_group, str(instance_id))
+        except VpsApiError as e:
+            if e.status_code == 404:
+                return []
+            raise
+        identity = vm.identity
+        if identity is None:
+            return []
+        user_assigned = identity.user_assigned_identities
+        return list(user_assigned.keys()) if user_assigned else []
+
     def get_instance_status(self, instance_id: VpsInstanceId) -> VpsInstanceStatus:
         try:
             with self._translate_azure_errors():

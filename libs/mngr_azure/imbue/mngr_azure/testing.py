@@ -18,10 +18,13 @@ from azure.core.exceptions import ResourceExistsError
 from azure.core.exceptions import ResourceNotFoundError
 from pydantic import Field
 
+from imbue.mngr.primitives import HostId
 from imbue.mngr_azure.client import AzureVpsClient
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
+from imbue.mngr_azure.state_bucket import BlobVolume
 
 # Optional prefix release tests use for their agent names so leaked VMs (should
 # the scanner ever fail) are still visually identifiable as mngr-created test
@@ -461,7 +464,13 @@ class _FakeBlobDownloader:
 
 
 class FakeContainerClient:
-    """Fake ``ContainerClient`` over a ``FakeBlobStorageBackend``."""
+    """Fake ``ContainerClient`` over a ``FakeBlobStorageBackend``.
+
+    ``list_blobs`` items carry ``size`` / ``last_modified`` so ``BlobVolume.listdir``
+    can read them. ``walk_blobs`` models the delimited walk the real SDK does:
+    blobs directly under the prefix are returned as themselves, and deeper blobs
+    collapse to a single ``BlobPrefix``-shaped entry whose name ends with ``/``.
+    """
 
     def __init__(self, backend: FakeBlobStorageBackend) -> None:
         self._backend = backend
@@ -472,7 +481,25 @@ class FakeContainerClient:
     def list_blobs(self, name_starts_with: str = "") -> Iterator[Any]:
         for name in sorted(self._backend.blobs_by_name):
             if name.startswith(name_starts_with):
-                yield SimpleNamespace(name=name)
+                data = self._backend.blobs_by_name[name]
+                yield SimpleNamespace(name=name, size=len(data), last_modified=None)
+
+    def walk_blobs(self, name_starts_with: str = "", delimiter: str = "/") -> Iterator[Any]:
+        seen_prefixes: set[str] = set()
+        for name in sorted(self._backend.blobs_by_name):
+            if not name.startswith(name_starts_with):
+                continue
+            remainder = name[len(name_starts_with) :]
+            head, sep, _tail = remainder.partition(delimiter)
+            if sep:
+                # A nested blob -> collapse to its immediate sub-"directory" prefix.
+                prefix = f"{name_starts_with}{head}{delimiter}"
+                if prefix not in seen_prefixes:
+                    seen_prefixes.add(prefix)
+                    yield SimpleNamespace(name=prefix)
+            else:
+                data = self._backend.blobs_by_name[name]
+                yield SimpleNamespace(name=name, size=len(data), last_modified=None)
 
     def upload_blob(self, name: str, data: bytes, overwrite: bool = False) -> None:
         if name in self._backend.blobs_by_name and not overwrite:
@@ -539,6 +566,15 @@ class FakeStorageManagementClient:
         self.storage_accounts = FakeStorageAccountsOperations(backend)
 
 
+class _StubbedBlobVolume(BlobVolume):
+    """Test-only ``BlobVolume`` whose data-plane client is a fake over a shared backend."""
+
+    fake_backend: Any = Field(default=None, description="Shared FakeBlobStorageBackend for the injected fake")
+
+    def _blob_service(self) -> Any:
+        return FakeBlobServiceClient(self.fake_backend)
+
+
 class _StubbedBlobStateBucket(BlobStateBucket):
     """Test-only ``BlobStateBucket`` that injects in-memory blob + storage clients.
 
@@ -556,3 +592,89 @@ class _StubbedBlobStateBucket(BlobStateBucket):
 
     def _storage_mgmt(self) -> Any:
         return FakeStorageManagementClient(self.fake_backend)
+
+    def volume_for_host(self, host_id: HostId) -> Any:
+        """Return a fake-backed ``BlobVolume`` scoped to the host's host_dir prefix.
+
+        Overrides the production builder so offline-read tests against a stubbed
+        bucket exercise ``BlobVolume`` over the same in-memory backend (the
+        production method would build a real credential-backed ``BlobVolume``).
+        """
+        host_dir_prefix = f"hosts/{host_id.get_uuid().hex}/host_dir"
+        return _StubbedBlobVolume(
+            credential=None,
+            account_name=self.account_name,
+            container_name=self.container_name,
+            fake_backend=self.fake_backend,
+        ).scoped(host_dir_prefix)
+
+
+class FakeUserAssignedIdentity:
+    """Minimal stand-in for a user-assigned managed-identity resource."""
+
+    def __init__(self, principal_id: str = "principal-1", client_id: str = "client-1") -> None:
+        self.principal_id = principal_id
+        self.client_id = client_id
+
+
+class FakeUserAssignedIdentitiesOperations:
+    """Fake ``ManagedServiceIdentityClient.user_assigned_identities`` over a backend flag.
+
+    Models a single identity per (resource group, name) that may or may not exist:
+    ``create_or_update`` creates it (and reports a principal/client id for the role
+    assignment), ``get`` raises 404 until it exists, and ``delete`` removes it.
+    """
+
+    def __init__(self) -> None:
+        self.exists: bool = False
+        self.created: list[str] = []
+        self.deleted: list[str] = []
+        self.create_error: Exception | None = None
+        self.principal_id: str = "principal-1"
+        self.client_id: str = "client-1"
+
+    def create_or_update(self, resource_group: str, name: str, parameters: Any) -> FakeUserAssignedIdentity:
+        del resource_group, parameters
+        if self.create_error is not None:
+            raise self.create_error
+        self.exists = True
+        self.created.append(name)
+        return FakeUserAssignedIdentity(self.principal_id, self.client_id)
+
+    def get(self, resource_group: str, name: str) -> FakeUserAssignedIdentity:
+        del resource_group
+        if not self.exists:
+            raise ResourceNotFoundError(message=f"identity {name} not found")
+        return FakeUserAssignedIdentity(self.principal_id, self.client_id)
+
+    def delete(self, resource_group: str, name: str) -> None:
+        del resource_group
+        if not self.exists:
+            raise ResourceNotFoundError(message=f"identity {name} not found")
+        self.exists = False
+        self.deleted.append(name)
+
+
+class FakeManagedServiceIdentityClient:
+    """Fake ``ManagedServiceIdentityClient`` bundling the ``user_assigned_identities`` operations."""
+
+    def __init__(self) -> None:
+        self.user_assigned_identities = FakeUserAssignedIdentitiesOperations()
+
+
+class _StubbedBlobStateHostIdentity(BlobStateHostIdentity):
+    """Test-only ``BlobStateHostIdentity`` that injects fake MSI + authorization clients.
+
+    Routes the lazily-built management clients to hand-written fakes so the
+    identity ensure/delete/exists logic (and its scoped role assignment) is
+    exercised without real Azure calls. Mirrors ``_StubbedBlobStateBucket``.
+    """
+
+    fake_msi_client: Any = Field(default=None, description="Fake ManagedServiceIdentityClient")
+    fake_authorization_client: Any = Field(default=None, description="Fake AuthorizationManagementClient")
+
+    def _msi(self) -> Any:
+        return self.fake_msi_client
+
+    def _authorization(self) -> Any:
+        return self.fake_authorization_client

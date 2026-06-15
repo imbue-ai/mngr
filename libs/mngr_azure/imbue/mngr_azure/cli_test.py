@@ -137,14 +137,14 @@ def test_cleanup_command_help_is_reachable() -> None:
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode emits one result sentence to stdout when the bucket setup is skipped."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
-    _output_prepare_result(result, None, False, OutputFormat.HUMAN)
+    _output_prepare_result(result, None, False, None, OutputFormat.HUMAN)
     assert capsys.readouterr().out == "Prepared Azure resource group mngr in region westus\n"
 
 
 def test_output_prepare_result_human_emits_bucket_line(capsys: pytest.CaptureFixture[str]) -> None:
     """HUMAN mode emits a second line for the state storage account when it was set up."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
-    _output_prepare_result(result, "mngrstabc123", True, OutputFormat.HUMAN)
+    _output_prepare_result(result, "mngrstabc123", True, None, OutputFormat.HUMAN)
     out = capsys.readouterr().out
     assert "Prepared Azure resource group mngr in region westus\n" in out
     assert "Created Azure state storage account mngrstabc123 in region westus\n" in out
@@ -153,7 +153,7 @@ def test_output_prepare_result_human_emits_bucket_line(capsys: pytest.CaptureFix
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON mode emits a structured object including the created + state-bucket signals."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=False)
-    _output_prepare_result(result, "mngrstabc123", False, OutputFormat.JSON)
+    _output_prepare_result(result, "mngrstabc123", False, "mngrid-mngrstabc123", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "resource_group": "mngr",
@@ -161,13 +161,14 @@ def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureF
         "created": False,
         "state_storage_account_name": "mngrstabc123",
         "state_bucket_created": False,
+        "host_identity_name": "mngrid-mngrstabc123",
     }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = AzureNetworkPrepareResult(resource_group="mngr", region="westus", was_created=True)
-    _output_prepare_result(result, None, False, OutputFormat.JSONL)
+    _output_prepare_result(result, None, False, None, OutputFormat.JSONL)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
@@ -176,7 +177,7 @@ def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.Capture
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when a resource group was removed."""
-    _output_cleanup_result("mngr", "sub-123", "westus", "mngrstabc123", OutputFormat.JSON)
+    _output_cleanup_result("mngr", "sub-123", "westus", "mngrstabc123", "mngrid-mngrstabc123", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload == {
         "resource_group": "mngr",
@@ -184,12 +185,13 @@ def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixtur
         "region": "westus",
         "deleted": True,
         "state_storage_account_deleted": "mngrstabc123",
+        "host_identity_deleted": "mngrid-mngrstabc123",
     }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "sub-123", "westus", None, OutputFormat.JSON)
+    _output_cleanup_result(None, "sub-123", "westus", None, None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["deleted"] is False
     assert payload["resource_group"] is None

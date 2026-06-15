@@ -389,7 +389,8 @@ class BlobStateHostIdentity(MutableModel):
         """The deterministic user-assigned managed-identity name for this state account."""
         return host_identity_name_for_account(self.account_name)
 
-    def _identity_resource_id(self) -> str:
+    def resource_id(self) -> str:
+        """ARM resource id of the user-assigned managed identity (for VM-create attachment)."""
         return (
             f"/subscriptions/{self.subscription_id}/resourceGroups/{self.resource_group}"
             f"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/{self.identity_name}"
@@ -456,7 +457,7 @@ class BlobStateHostIdentity(MutableModel):
             self.identity_name,
             self.account_name,
         )
-        return self._identity_resource_id()
+        return self.resource_id()
 
     def _ensure_blob_role_assignment(self, principal_id: str) -> None:
         """Assign Storage Blob Data Contributor to ``principal_id``, scoped to the state account.
