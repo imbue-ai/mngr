@@ -385,7 +385,7 @@ def _get_selected_providers(
 CommandHelpMetadata(
     key="gc",
     one_line_description="Garbage collect unused resources",
-    synopsis="mngr gc [OPTIONS]",
+    synopsis="mngr gc [--all-providers] [--provider <PROVIDER>] [--dry-run] [--on-error <MODE>]",
     description="""Automatically removes containers, old snapshots, unused hosts, cached images,
 and any resources that are associated with destroyed hosts and agents.
 

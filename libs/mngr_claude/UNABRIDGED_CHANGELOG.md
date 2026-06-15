@@ -4,6 +4,33 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+`mngr create --adopt-session` now validates the session ID up front, before any host or worktree is created. Passing an unknown (or ambiguous) session ID fails fast with a clean `Error: ...` message instead of crashing mid-provisioning with a full "Unexpected error" traceback.
+
+The "session not found" message is also concise now: it no longer enumerates every searched directory (which included one per local mngr agent, often hundreds of paths).
+
+Internal: the existence/ambiguity check (`_resolve_adopt_session`) now also runs in the `on_before_create` hook, which executes outside `provision_agent`'s `ConcurrencyGroup`. Previously the only check happened in `on_after_provisioning` (inside that group), where the group's exit wrapped the `UserInputError` in a `ConcurrencyExceptionGroup` -- no longer a `ClickException` -- so it was reported as an unexpected error. The session source is always local, so the early result matches the provision-time resolution.
+
+# Shared, typed Claude stream-json envelope
+
+Added `imbue.mngr_claude.stream_json`, a single typed boundary for the Claude partial-message
+stream-json envelope (`message_start` / `content_block_start` / `content_block_delta` /
+`text_delta` / `content_block_stop` / `message_delta` / `message_stop`, plus the `assistant`
+summary's inner message). It is defined against the `anthropic` SDK's discriminated
+`RawMessageStreamEvent` union and `anthropic.types.Message`, so the protocol vocabulary is owned
+upstream instead of hand-rolled as bare string literals. The consume side validates into the union
+and dispatches with an exhaustive `assert_never` match, so a future `anthropic` release that adds an
+event variant fails the type check and names exactly what we must handle.
+
+- `mngr ask`'s headless reader (`headless_claude_agent.py`) now parses partial-message events and
+  the `assistant` summary through this boundary. Behavior is unchanged for well-formed `claude`
+  output; an event variant or content-block type newer than the installed `anthropic` package
+  degrades gracefully (it is skipped / falls back to a lenient text scan rather than dropping the
+  response).
+- Added `anthropic` as a dependency (kept unpinned; imported for its typed models only -- mngr
+  still drives the `claude` CLI and makes no API calls).
+
 ## 2026-06-12
 
 `mngr create --adopt-session <session-id>` now resolves a bare session ID against more locations. In addition to the current and user-scope Claude config dirs (`$CLAUDE_CONFIG_DIR/projects/` and `~/.claude/projects/`), it now also searches every live local mngr agent's per-agent config dir and the preserved session files of destroyed agents (see `preserve_sessions_on_destroy`). Passing a full `.jsonl` path is unchanged. Only the local host dir is scanned for mngr agent and preserved sessions.

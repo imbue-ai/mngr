@@ -4,6 +4,20 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+- Changed: `mngr extras` status (`_print_extras_status`) now accepts an injectable `claude_status_fn` (mirroring the existing `status_fn` seam on the `_install_*` helpers), so its test can skip shelling out to the `claude` CLI. This removes the slow, variable Node-process startup that made `test_print_extras_status_runs_without_error` flaky under the offload timeout. Internal/test-only; default behavior is unchanged.
+
+Fixed `mngr clone` failing with "destination path ... already exists and is not an empty directory" when cloning a remote agent to a local target (e.g. `mngr clone <agent> <name> --provider local`). The git-mirror transfer initializes a bare repo at the target before fetching, but the remote-source-to-local-target path used `git clone --mirror`, which refuses a non-empty destination. It now performs a mirror-style `git fetch` into the existing bare repo instead.
+
+User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the colored `ERROR:` prefix already used for `logger.error`. Previously click printed the line in the default terminal color, so an actionable failure (for example, "run `mngr gcp prepare` first" before the firewall rule exists) was visually indistinguishable from normal output. Coloring is gated on the same policy as other mngr output: it is suppressed when stderr is not a TTY or when `NO_COLOR` is set, so piped/captured output stays plain. Exit semantics are unchanged (still a clean exit 1, never a traceback).
+
+Fix the "branch already checked out" error from `mngr create` to suggest the correct flag. It previously pointed users at `--in-place`, which no longer exists (it was consolidated into `--transfer`); it now suggests `--transfer=none`.
+
+Fixed `mngr clone` (and any agent creation) failing when transferring a git repo from one remote host to another remote host. Previously the git push was run directly on the remote source host but pointed at the target's SSH key and known_hosts files, which only exist on the local orchestrator machine -- producing errors like "Identity file ... not accessible" and "Host key verification failed". The transfer now relays through a local bare mirror: it pulls from the source using the source's credentials, then pushes to the target using the target's, both run locally where those files exist. This matches the existing remote-to-remote handling already used for rsync transfers.
+
+Fixed the SSH-backed-host test fixture (`local_sshd`) leaking `git config --global` writes into the developer's real `~/.gitconfig`. Tests that exercise remote git transfers run `git config --global --add safe.directory ...` over the SSH connection, where the test's HOME-redirection fixtures cannot reach; the fake sshd now sets `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` for its sessions so those writes stay inside the test sandbox.
+
 ## 2026-06-13
 
 Fixed a data-loss bug in volume garbage collection and made discovery fail
