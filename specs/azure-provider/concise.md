@@ -3,7 +3,7 @@
 ## Overview
 
 * One new package, `libs/mngr_azure/`, that adds an `azure` provider backend. It is a thin adapter over the existing `VpsDockerProvider` base in `mngr_vps_docker` -- the same pattern as `mngr_aws`, `mngr_gcp`, and `mngr_vultr`. Agents run in a Docker container on an Azure Linux VM; the VM stays up, the container is the mngr "host".
-* The only substantial new code is `AzureVpsClient` (implements the ~11-method `VpsClientInterface` against the Azure management SDK) plus a ~150-line `AzureProvider`/`AzureProviderBackend` and config/cli. Everything else (host lifecycle, SSH, cloud-init, discovery, listing, container snapshots, stop/start) is inherited unchanged.
+* The only substantial new code is `AzureVpsClient` (implements the ~7-method `VpsClientInterface` against the Azure management SDK) plus a ~150-line `AzureProvider`/`AzureProviderBackend` and config/cli. Everything else (host lifecycle, SSH, cloud-init, discovery, listing, container snapshots, stop/start) is inherited unchanged.
 * Auth via `azure-identity`'s `DefaultAzureCredential`, which transparently uses the developer's `az login` session locally and a service principal (`AZURE_*` env vars) in CI. Subscription id is the only required identifier in config; credentials are never stored in mngr config (matches the AWS/GCP convention).
 * SDK packages: `azure-mgmt-compute`, `azure-mgmt-network`, `azure-mgmt-resource`, `azure-identity`. The first three are not yet vendored; `azure-identity`/`azure-core` already are.
 
