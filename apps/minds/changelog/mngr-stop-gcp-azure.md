@@ -1,0 +1,1 @@
+Marked the desktop-client `test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key` test `@pytest.mark.flaky` (matching its already-marked sibling): it occasionally exceeds the 10s pytest-timeout when offload sandboxes are contended, so offload now retries it automatically. No behavior change.

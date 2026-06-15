@@ -1001,6 +1001,11 @@ def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadlin
     raise AssertionError(f"creation {creation_id} did not finish within {deadline_seconds}s")
 
 
+# Flaky under heavy CI load for the same reason as its sibling below: the setup
+# spins up fresh ConcurrencyGroups and a recording http-server fixture, which can
+# exceed the 10s pytest-timeout when offload sandboxes are contended. Offload
+# retries flaky tests automatically.
+@pytest.mark.flaky
 def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_path: Path) -> None:
     """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
