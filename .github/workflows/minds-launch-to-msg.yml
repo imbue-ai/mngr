@@ -649,21 +649,22 @@ jobs:
           # session for depth rather than spinning a separate workflow per
           # scenario.
           WORKSPACE_COUNT:    "2"
-          # Pin the FCT ref the binary creates against to the `template_ref`
-          # dispatch input. Without this, minds falls back to
-          # `FALLBACK_BRANCH = "v0.2.35"` (templates.py) regardless of what the
-          # workflow_dispatch input says, so a `template_ref=main` run silently
-          # exercises v0.2.35 instead.
+          # Pin the FCT ref the binary creates against to the SHA
+          # `check_should_run` resolved at workflow-start time. Passing
+          # the resolved 40-char SHA (not the raw input ref like `main`)
+          # FREEZES the value: the agent inside lima clones exactly the
+          # SHA that the cache marker + slack message are about to
+          # claim was tested. Without freezing, FCT main can move during
+          # the 20-25 min ToDesktop build and the agent ends up cloning
+          # a different commit than the marker records.
           # MINDS_WORKSPACE_BRANCH is gated by MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
-          # in templates._operator_workspace_default (an end-user `minds run` ignores
-          # a stray MINDS_WORKSPACE_* in the shell unless explicitly opted in).
-          # We pass the branch / tag name (not the resolved SHA) because the
-          # binary's `git clone --branch <ref>` only accepts branch names and
-          # tags. The resolved SHA is still recorded in the GHA step summary
-          # for audit. Moving refs (e.g. `main`) thus float between runs --
-          # the trade-off is "must clone-able" vs "must be byte-identical".
+          # in templates._operator_workspace_default (an end-user `minds run`
+          # ignores a stray MINDS_WORKSPACE_* in the shell unless explicitly
+          # opted in). Passing a SHA was unblocked by PR #2100: clone_git_repo
+          # + checkout_branch now go through git init + fetch + checkout
+          # rather than `git clone --branch <ref>`, which had rejected SHAs.
           MINDS_USE_LOCAL_WORKSPACE_DEFAULTS: "1"
-          MINDS_WORKSPACE_BRANCH: ${{ inputs.template_ref || 'main' }}
+          MINDS_WORKSPACE_BRANCH: ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           # pipefail is REQUIRED: without it, the pipeline below exits
           # with tee's status (always 0), so an e2e failure (exit 1) is
@@ -1009,13 +1010,16 @@ jobs:
     steps:
       - name: write marker file
         env:
-          PAIR_KEY: ${{ needs.check_should_run.outputs.pair_key }}
+          # The (mngr, FCT) pair we just verified green. Both SHAs are
+          # frozen at workflow-start time by `check_should_run`; the e2e
+          # exercises EXACTLY these SHAs (the SHA is passed to the .app
+          # via MINDS_WORKSPACE_BRANCH, which `clone_git_repo` accepts
+          # since PR #2100). No drift.
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
           FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           set -euo pipefail
           {
-            echo "pair_key: $PAIR_KEY"
             echo "mngr: $MNGR_SHA"
             echo "fct:  $FCT_SHA"
             echo "saved_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1027,12 +1031,15 @@ jobs:
           path: /tmp/launch-to-msg-marker.txt
           key: launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}
       - name: emit summary
+        env:
+          MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
         run: |
           {
             echo "## Marker updated"
-            echo "- cache key: \`launch-to-msg-green-mngr-${{ needs.check_should_run.outputs.mngr_sha }}-fct-${{ needs.check_should_run.outputs.fct_sha }}\`"
-            echo "- mngr: \`${{ needs.check_should_run.outputs.mngr_sha }}\`"
-            echo "- FCT:  \`${{ needs.check_should_run.outputs.fct_sha }}\`"
+            echo "- cache key: \`launch-to-msg-green-mngr-${MNGR_SHA}-fct-${FCT_SHA}\`"
+            echo "- mngr: \`${MNGR_SHA}\`"
+            echo "- FCT:  \`${FCT_SHA}\`"
             echo ""
             echo "**To inspect the latest green pair manually:**"
             echo ""
@@ -1061,6 +1068,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_RUN: ${{ needs.check_should_run.outputs.should_run }}
           MNGR_SHA: ${{ needs.check_should_run.outputs.mngr_sha }}
+          # FCT SHA frozen at workflow-start by `check_should_run` and
+          # passed verbatim to the .app via MINDS_WORKSPACE_BRANCH. No
+          # drift between what we report and what the e2e cloned.
           FCT_SHA:  ${{ needs.check_should_run.outputs.fct_sha }}
           BUILD_RESULT:         ${{ needs.build.result }}
           LAUNCH_TO_MSG_RESULT: ${{ needs.launch_to_msg.result }}
@@ -1079,6 +1089,11 @@ jobs:
           APP_ZIP_URL: ${{ needs.build.outputs.app_zip_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRIGGER: ${{ github.event_name }}
+          # Who/what initiated this run + which ref it ran on. For a
+          # workflow_dispatch this is the user; for schedule it's the
+          # github-actions[bot] (we hide that one for readability).
+          ACTOR:    ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [[ -z "$WEBHOOK" ]]; then
@@ -1177,12 +1192,22 @@ jobs:
           links_inner+=" | <https://github.com/imbue-ai/mngr/commit/${MNGR_SHA}|mngr commit>"
           links_inner+=" | <https://github.com/imbue-ai/forever-claude-template/commit/${FCT_SHA}|fct commit>"
           links_line="[${links_inner}]"
+          # Compose the "trigger=..." string. For the twice-daily cron
+          # show just `schedule on <ref>`; for a manual dispatch show
+          # who pressed the button and from which branch -- that's the
+          # signal you need to tell "running on main as a regular CI"
+          # apart from "weishi forced one to test branch X".
+          if [[ "$TRIGGER" == "schedule" ]]; then
+            trigger_str="schedule on ${REF_NAME}"
+          else
+            trigger_str="${TRIGGER} by @${ACTOR} on ${REF_NAME}"
+          fi
           # Assemble the final message. Line 1 is always present. Line 2
           # (SHAs) is always present. Line 3 (metrics) is omitted when we
           # have no values. Line 4 (links) is always present, though
           # `binary` falls out when build didn't produce one.
           line1=$(printf '%s *launch-to-msg* — %s in %s%s, _trigger=_ `%s`' \
-            "$emoji" "$verdict_word" "$duration" "$detail" "$TRIGGER")
+            "$emoji" "$verdict_word" "$duration" "$detail" "$trigger_str")
           line2="[_mngr_ \`${MNGR_SHORT}\` | _FCT_ \`${FCT_SHORT}\`]"
           if [[ -n "$metrics_line" ]]; then
             text=$(printf '%s\n%s\n%s\n%s' "$line1" "$line2" "$metrics_line" "$links_line")
