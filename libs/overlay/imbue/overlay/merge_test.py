@@ -1,97 +1,13 @@
-"""Unit tests for the leaf merge primitives: apply_extend/extend_dict and the
-narrowing predicate (``would_assignment_narrow`` / ``narrowing_paths``)."""
+"""Unit tests for the narrowing predicates (``would_assignment_narrow`` /
+``narrowing_paths``). The leaf-extend primitive (``extend_aggregate_leaf``) and the
+extend algebra are tested via ``node_merge_test`` (the single extend engine)."""
 
-import pytest
-
-from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import StaticDict
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
-from imbue.overlay.merge import apply_extend
-from imbue.overlay.merge import extend_dict
 from imbue.overlay.merge import narrowing_paths
 from imbue.overlay.merge import would_assignment_narrow
-
-# =============================================================================
-# apply_extend / extend_dict -- leaf and recursive resolution
-# =============================================================================
-
-
-def test_apply_extend_concats_lists() -> None:
-    assert apply_extend(["A"], ["B"], "f") == ["A", "B"]
-
-
-def test_apply_extend_concats_tuples_preserving_type() -> None:
-    assert apply_extend(("A",), ("B",), "f") == ("A", "B")
-    assert isinstance(apply_extend(("A",), ("B",), "f"), tuple)
-
-
-def test_apply_extend_unions_sets() -> None:
-    assert apply_extend({"A"}, ["B"], "f") == {"A", "B"}
-
-
-def test_apply_extend_unions_frozensets() -> None:
-    result = apply_extend(frozenset({"A"}), ["B"], "f")
-    assert result == frozenset({"A", "B"})
-    assert isinstance(result, frozenset)
-
-
-def test_apply_extend_recurses_into_dict() -> None:
-    base = {"defaultMode": "acceptEdits", "allow": ["old"]}
-    extend = {"allow__extend": ["new"]}
-    assert apply_extend(base, extend, "permissions") == {"defaultMode": "acceptEdits", "allow": ["old", "new"]}
-
-
-def test_apply_extend_against_none_assigns_aggregate() -> None:
-    assert apply_extend(None, ["A"], "f") == ["A"]
-
-
-def test_apply_extend_against_none_resolves_nested_markers() -> None:
-    assert apply_extend(None, {"allow__extend": ["X"]}, "f") == {"allow": ["X"]}
-
-
-def test_apply_extend_against_none_rejects_scalar() -> None:
-    with pytest.raises(OverlayError, match="requires a list, tuple, dict, or set value"):
-        apply_extend(None, "scalar", "f")
-
-
-def test_apply_extend_list_rejects_non_array() -> None:
-    with pytest.raises(OverlayError, match="requires a JSON array value"):
-        apply_extend(["A"], {"not": "array"}, "f")
-
-
-def test_apply_extend_set_rejects_non_array() -> None:
-    with pytest.raises(OverlayError, match="requires a JSON array value"):
-        apply_extend({"A"}, "scalar", "f")
-
-
-def test_apply_extend_dict_rejects_non_object() -> None:
-    with pytest.raises(OverlayError, match="requires a JSON object value"):
-        apply_extend({"a": 1}, ["not", "a", "dict"], "f")
-
-
-def test_apply_extend_rejects_extend_on_scalar() -> None:
-    with pytest.raises(OverlayError, match="target field is a scalar"):
-        apply_extend("base", "oops", "f")
-
-
-def test_extend_dict_assigns_before_extending_in_same_layer() -> None:
-    """Bare keys (assign-phase) apply before sibling ``__extend`` (extend-phase)."""
-    result = extend_dict({"f": ["BASE"]}, {"f": [], "f__extend": ["A"]}, "")
-    assert result == {"f": ["A"]}
-
-
-def test_extend_dict_nested_bare_key_replaces_preserving_siblings() -> None:
-    base = {"a": {"x": 1, "y": 2}}
-    result = extend_dict(base, {"a": {"x": 9}}, "")
-    assert result == {"a": {"x": 9}}
-
-
-def test_extend_dict_raises_on_conflicting_assign() -> None:
-    with pytest.raises(OverlayError, match="Conflicting assignment"):
-        extend_dict({}, {"f": 1, "f__assign": 2}, "")
-
 
 # =============================================================================
 # would_assignment_narrow -- value-level narrowing predicate

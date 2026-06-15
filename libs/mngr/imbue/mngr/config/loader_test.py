@@ -26,6 +26,7 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import get_or_create_user_id
 from imbue.mngr.config.loader import _FileSettingsSource
 from imbue.mngr.config.loader import _NarrowingViolation
+from imbue.mngr.config.loader import _SettingsSource
 from imbue.mngr.config.loader import _apply_plugin_overrides
 from imbue.mngr.config.loader import _collect_env_overrides
 from imbue.mngr.config.loader import _collect_narrowing
@@ -38,6 +39,7 @@ from imbue.mngr.config.loader import _parse_logging_config
 from imbue.mngr.config.loader import _parse_mngr_env_overrides
 from imbue.mngr.config.loader import _parse_plugins
 from imbue.mngr.config.loader import _parse_providers
+from imbue.mngr.config.loader import _record_provenance
 from imbue.mngr.config.loader import block_disabled_plugins
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
@@ -2410,12 +2412,13 @@ def test_collect_narrowing_attributes_highest_precedence_lower_layer() -> None:
     local_layer = MngrConfig(prefix="a-", commands={"create": CommandDefaults(defaults={"env": ["C"]})})
 
     narrowing_paths = base.merge_with_narrowings(local_layer)[1]
-    violations = _collect_narrowing(
-        narrowing_paths,
-        local_layer,
-        local_source,
-        [(user_source, user_layer), (project_source, project_layer)],
-    )
+    # Build the provenance map the loader threads through its fold: each prior layer's
+    # assigned paths, recorded in precedence order so the highest-precedence prior
+    # owner wins.
+    provenance: dict[str, _SettingsSource] = {}
+    _record_provenance(provenance, user_layer, user_source)
+    _record_provenance(provenance, project_layer, project_source)
+    violations = _collect_narrowing(narrowing_paths, local_source, provenance)
     assert violations == [
         _NarrowingViolation(
             key_path="commands.create.defaults.env",

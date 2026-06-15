@@ -13,6 +13,7 @@ from imbue.overlay.markers import StaticList
 from imbue.overlay.node_merge import apply_extend
 from imbue.overlay.node_merge import combine
 from imbue.overlay.node_merge import combine_extend_payloads
+from imbue.overlay.node_merge import extend_plain_value
 from imbue.overlay.node_merge import finalize
 from imbue.overlay.node_merge import finalize_payload
 from imbue.overlay.node_merge import lift
@@ -569,3 +570,52 @@ def test_merge_is_associative_under_finalize(
     lower_patch = lift(lower)
     higher_patch = lift(higher)
     assert _assoc_left(base_patch, lower_patch, higher_patch) == _assoc_right(base_patch, lower_patch, higher_patch)
+
+
+# =============================================================================
+# extend_plain_value -- plain-dict boundary into the node extend algebra
+# =============================================================================
+
+
+def test_extend_plain_value_concats_lists() -> None:
+    assert extend_plain_value(["A"], ["B"], "f") == ["A", "B"]
+
+
+def test_extend_plain_value_unions_sets() -> None:
+    assert extend_plain_value({"A"}, ["B"], "f") == {"A", "B"}
+
+
+def test_extend_plain_value_preserves_tuple_type() -> None:
+    result = extend_plain_value(("A",), ("B",), "f")
+    assert result == ("A", "B")
+    assert isinstance(result, tuple)
+
+
+def test_extend_plain_value_recurses_into_nested_extend() -> None:
+    """A nested ``key__extend`` extends the matching base sub-value."""
+    base = {"defaultMode": "acceptEdits", "allow": ["old"]}
+    extend = {"allow__extend": ["new"]}
+    assert extend_plain_value(base, extend, "permissions") == {
+        "defaultMode": "acceptEdits",
+        "allow": ["old", "new"],
+    }
+
+
+def test_extend_plain_value_nested_bare_key_assigns_replacing_its_subtree() -> None:
+    """A nested bare key assigns at its level, replacing that whole sub-dict; top-level
+    siblings of the assigned key are preserved."""
+    base = {"a": {"x": 1, "y": 2}, "keep": ["Z"]}
+    assert extend_plain_value(base, {"a": {"x": 9}}, "f") == {"a": {"x": 9}, "keep": ["Z"]}
+
+
+def test_extend_plain_value_against_none_assigns_aggregate() -> None:
+    assert extend_plain_value(None, ["A"], "f") == ["A"]
+
+
+def test_extend_plain_value_against_none_resolves_nested_markers() -> None:
+    assert extend_plain_value(None, {"allow__extend": ["X"]}, "f") == {"allow": ["X"]}
+
+
+def test_extend_plain_value_rejects_extend_on_scalar() -> None:
+    with pytest.raises(OverlayError, match="target field is a scalar"):
+        extend_plain_value("base", "oops", "f")

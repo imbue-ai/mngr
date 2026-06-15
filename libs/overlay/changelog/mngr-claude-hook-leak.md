@@ -31,6 +31,9 @@ unchanged -- only the path strings are more precise.
 Internal (no user-facing behavior change): the original string-suffix merge engine
 (`combine_patches`, the string-suffix `merge` / `finalize`, and their private helpers)
 is removed now that the typed-node algebra in `node_merge.py` is the sole engine. The
-`merge.py` module is now just the leaf primitives the node algebra reuses:
-`apply_extend` / `extend_dict` (single-`__extend` resolution) and the narrowing
-predicates `would_assignment_narrow` / `narrowing_paths`.
+parallel plain-dict extend recursion (`merge.py`'s `apply_extend` / `extend_dict`) is
+also removed: `node_merge.py` is now the single extend algebra, with a thin
+`extend_plain_value` adapter that lifts a plain resolved value into the node engine for
+the suffix-keyed-dict consumers (mngr's `key_resolver` / `common_opts`). The `merge.py`
+module is now just the leaf-extend primitive `extend_aggregate_leaf` and the narrowing
+predicates `would_assignment_narrow` / `narrowing_paths` that the node engine imports.

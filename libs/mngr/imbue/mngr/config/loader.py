@@ -1,6 +1,7 @@
 import os
 import re
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -215,10 +216,11 @@ def load_config(
     # value from a lower-precedence layer -- are collected as we go, then turned
     # into a single error after all layers are merged (when the final
     # ``allow_settings_key_assignment_narrowing`` resolves to False).
-    # ``processed_sources`` lets each violation be attributed to the specific
+    # ``provenance`` maps each assigned path to the highest-precedence source that
+    # has assigned it so far, so each violation can be attributed to the specific
     # lower-precedence layer whose value is being dropped.
     narrowing_violations: list[_NarrowingViolation] = []
-    processed_sources: list[tuple[_SettingsSource, MngrConfig]] = []
+    provenance: dict[str, _SettingsSource] = {}
     for scope, config_path, raw in loaded_layers:
         file_source = _FileSettingsSource(scope=scope, path=config_path)
         parsed_layer = _parse_config_with_extends(
@@ -229,8 +231,10 @@ def load_config(
             silent=silent_unknown_fields,
         )
         config, narrowing_paths = config.merge_with_narrowings(parsed_layer)
-        narrowing_violations.extend(_collect_narrowing(narrowing_paths, parsed_layer, file_source, processed_sources))
-        processed_sources.append((file_source, parsed_layer))
+        # Read provenance BEFORE this layer updates it: a dropped value belongs to
+        # a prior layer, so its source is whatever held the path before now.
+        narrowing_violations.extend(_collect_narrowing(narrowing_paths, file_source, provenance))
+        _record_provenance(provenance, parsed_layer, file_source)
 
     # Apply ``MNGR__*`` env-var overrides plus the preserved-alias env vars
     # (MNGR_PREFIX, MNGR_HOST_DIR, MNGR_HEADLESS). These all flow through the
@@ -248,10 +252,8 @@ def load_config(
             silent=silent_unknown_fields,
         )
         config, env_narrowing_paths = config.merge_with_narrowings(parsed_env_layer)
-        narrowing_violations.extend(
-            _collect_narrowing(env_narrowing_paths, parsed_env_layer, env_source, processed_sources)
-        )
-        processed_sources.append((env_source, parsed_env_layer))
+        narrowing_violations.extend(_collect_narrowing(env_narrowing_paths, env_source, provenance))
+        _record_provenance(provenance, parsed_env_layer, env_source)
 
     # Raise on collected narrowing assignments unless the user has opted in.
     # Done before further config_dict mutation so the error surfaces with the
@@ -365,42 +367,71 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
 # =============================================================================
 
 
-def _collect_narrowing(
-    narrowing_paths: Sequence[str],
+def _assigned_paths(parsed_layer: MngrConfig) -> list[str]:
+    """Return every dotted node-and-leaf path the layer assigns, in the same format
+    as the overlay merge's narrowing paths.
+
+    Derived from the layer's sparse dump (``exclude_unset=True``, ``serialize_as_any=True``)
+    -- the exact dump the merge lifts to compute narrowings -- so a narrowing path the
+    merge surfaces (which may be a field prefix for a whole-aggregate replacement or a
+    deep leaf for a same-keys nested drop; see ``overlay.merge.narrowing_paths``) is
+    always one of these paths. Recording every node and leaf, rather than only leaves,
+    is what lets a prefix-level narrowing path find its owner.
+    """
+    dumped = parsed_layer.model_dump(exclude_unset=True, serialize_as_any=True)
+    return list(_walk_dotted_paths(dumped, ()))
+
+
+def _walk_dotted_paths(value: Any, prefix: tuple[str, ...]) -> "Iterator[str]":
+    """Yield the dotted path of every node and leaf reachable in ``value``.
+
+    Recurses into dict values (the only mapping shape config dumps produce), yielding a
+    path for each nested dict node as well as its leaves; non-dict values are leaves.
+    The empty root path is not yielded.
+    """
+    if prefix:
+        yield ".".join(prefix)
+    if isinstance(value, dict):
+        for key, sub_value in value.items():
+            yield from _walk_dotted_paths(sub_value, prefix + (str(key),))
+
+
+def _record_provenance(
+    provenance: dict[str, _SettingsSource],
     parsed_layer: MngrConfig,
     source: _SettingsSource,
-    processed_sources: Sequence[tuple[_SettingsSource, MngrConfig]],
+) -> None:
+    """Mark ``source`` as the owner of every path this layer assigns.
+
+    Called after a layer is folded in (and after its narrowings are attributed against
+    the prior provenance), so each path maps to the highest-precedence source that has
+    assigned it so far.
+    """
+    for path in _assigned_paths(parsed_layer):
+        provenance[path] = source
+
+
+def _collect_narrowing(
+    narrowing_paths: Sequence[str],
+    source: _SettingsSource,
+    provenance: Mapping[str, _SettingsSource],
 ) -> list["_NarrowingViolation"]:
     """Build narrowing violations for the cross-scope bare-drops the overlay merge
     surfaced, attributing each side.
 
     ``narrowing_paths`` is the full list ``MngrConfig.merge_with_narrowings`` returned
-    for merging ``parsed_layer`` onto the accumulated config -- both assign-by-default
-    field drops and ``SettingsPatchField`` drops inside an accumulating patch.
-    ``source`` is the layer doing the assignment. The lower-precedence layer whose
-    value is dropped is attributed by re-running the narrowing-producing merge of
-    ``parsed_layer`` against each already-merged layer (highest precedence first):
-    because the merge is assign-by-default, the merged base value at any path equals
-    the value written by the highest-precedence layer that set it, so the
-    highest-precedence prior layer that ``parsed_layer`` narrows at a given path is the
-    one whose value is being dropped. ``dropped_from`` is ``None`` only if no
-    contributing layer is found (should not happen for a real violation, but keeps the
-    diagnostic robust).
+    for merging this layer onto the accumulated config -- both assign-by-default field
+    drops and ``SettingsPatchField`` drops inside an accumulating patch. ``source`` is the
+    layer doing the assignment. ``dropped_from`` is read from ``provenance`` (the
+    highest-precedence prior layer that assigned the path), which must reflect state
+    *before* this layer's own assignments are recorded -- the dropped value belongs to a
+    prior layer. ``dropped_from`` is ``None`` only if no prior layer owns the path (should
+    not happen for a real violation, but keeps the diagnostic robust).
     """
-    if not narrowing_paths:
-        return []
-    narrowed_paths_by_prior_source = [
-        (prior_source, set(prior_layer.merge_with_narrowings(parsed_layer)[1]))
-        for prior_source, prior_layer in reversed(processed_sources)
+    return [
+        _NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=provenance.get(key_path))
+        for key_path in narrowing_paths
     ]
-    violations: list[_NarrowingViolation] = []
-    for key_path in narrowing_paths:
-        dropped_from = next(
-            (prior_source for prior_source, paths in narrowed_paths_by_prior_source if key_path in paths),
-            None,
-        )
-        violations.append(_NarrowingViolation(key_path=key_path, assigned_by=source, dropped_from=dropped_from))
-    return violations
 
 
 def _display_path(path: Path) -> str:

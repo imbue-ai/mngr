@@ -1,11 +1,12 @@
 """The typed-node merge algebra: lift, combine, finalize, and the public API.
 
-This is the self-contained typed-node engine. ``merge.py`` holds the suffix-keyed-dict
-leaf resolver (``apply_extend`` / ``extend_dict``, used by mngr's ``key_resolver`` /
-``common_opts``) and the value-level narrowing predicates
-(``would_assignment_narrow`` / ``narrowing_paths``); this module imports only
-``narrowing_paths`` from there and otherwise owns its own ``apply_extend`` /
-``combine_extend_payloads``.
+This is the self-contained typed-node engine, and the single extend algebra. ``merge.py``
+holds only the leaf-extend primitive (``extend_aggregate_leaf``) and the value-level
+narrowing predicates (``would_assignment_narrow`` / ``narrowing_paths``); this module
+imports both from there and owns its own ``apply_extend`` / ``combine_extend_payloads``.
+``extend_plain_value`` is the mngr-boundary adapter that lifts a plain resolved value into
+this engine so the suffix-keyed-dict consumers (``key_resolver`` / ``common_opts``) share
+the one extend algebra rather than a parallel plain-dict recursion.
 
 The operator lives in the node *type* (``Default`` / ``Assign`` / ``Extend``), so
 the algebra dispatches on type and rewrites the outermost wrapper but never unwraps
@@ -24,6 +25,7 @@ Pipeline:
   ``_merge`` (combine + narrowing filter); ``merge`` raises ``NarrowingError``.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 from imbue.overlay.errors import NarrowingError
@@ -329,6 +331,27 @@ def finalize_payload(payload: Any) -> Any:
     if _is_patch_dict(payload):
         return finalize(payload)
     return payload
+
+
+# =============================================================================
+# extend_plain_value -- plain-dict boundary into the node extend algebra
+# =============================================================================
+
+
+def extend_plain_value(current: Any, extend: Any, field_path: str) -> Any:
+    """Apply a single ``__extend`` (``extend``) onto a plain resolved value (``current``).
+
+    The mngr-boundary plain-value entry into the node extend algebra: a thin
+    lift/finalize adapter so a suffix-keyed-dict consumer (``key_resolver`` /
+    ``common_opts``) shares the one node ``apply_extend`` rather than a parallel
+    plain-dict recursion. A dict ``current`` lifts as a concrete base and a dict
+    ``extend`` lifts as a patch (so nested ``key__extend`` recurses and a nested bare
+    key assigns); leaf values pass straight through to ``apply_extend``. ``current is
+    None`` makes the extend act as assign. ``OverlayError``s propagate (callers wrap).
+    """
+    cur = lift_concrete(current) if isinstance(current, Mapping) else current
+    ext = lift(extend) if isinstance(extend, Mapping) else extend
+    return finalize_payload(apply_extend(cur, ext, field_path))
 
 
 # =============================================================================

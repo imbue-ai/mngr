@@ -41,8 +41,8 @@ from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.overlay.errors import OverlayError
-from imbue.overlay.merge import apply_extend
 from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.node_merge import extend_plain_value
 from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import is_extend_key
 from imbue.overlay.operators import parse_scalar_value
@@ -846,10 +846,10 @@ def _apply_template_extend(
     param_name: str,
 ) -> Any:
     """Apply a single template's ``<key>__extend = ...`` against the existing
-    parameter value, delegating to the shared ``apply_extend`` algebra.
+    parameter value, delegating to the shared ``extend_plain_value`` algebra.
 
     Operates against in-flight click param values rather than parsed pydantic
-    models; ``apply_extend`` preserves tuple-ness when the base is a tuple, which
+    models; ``extend_plain_value`` preserves tuple-ness when the base is a tuple, which
     keeps the click-native tuple shape downstream code expects. The dict branch is
     recursive (a nested ``key__extend`` extends rather than replaces). Re-raise the
     overlay's ``OverlayError`` as a ``ConfigParseError`` so the template-specific
@@ -857,7 +857,7 @@ def _apply_template_extend(
     """
     field_path = f"create_templates.{template_name}.{param_name}__extend"
     try:
-        return apply_extend(existing_value, extend_value, field_path)
+        return extend_plain_value(existing_value, extend_value, field_path)
     except OverlayError as e:
         raise ConfigParseError(str(e)) from e
 

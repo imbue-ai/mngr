@@ -1,25 +1,18 @@
-"""The plain-dict leaf resolver and the shared narrowing predicates.
+"""The leaf-extend primitive and the shared narrowing predicates.
 
-Everything here operates purely on plain dicts/lists/sets/scalars plus the
-key-suffix operators and the ``Static*`` markers. ``apply_extend`` / ``extend_dict``
-resolve a single ``__extend`` against a concrete value; this is mngr's suffix-keyed-dict
-leaf resolver (its ``key_resolver`` / ``common_opts``), distinct from the node algebra's
-own ``apply_extend`` in ``node_merge.py``. ``would_assignment_narrow`` is the value-level
-narrowing predicate and ``narrowing_paths`` its path-collecting counterpart, reporting the
-specific narrowed leaf paths; ``node_merge.py`` imports ``narrowing_paths`` from here to
-expand its recorded assign drops.
+Everything here operates purely on plain dicts/lists/sets/scalars plus the ``Static*``
+markers. ``extend_aggregate_leaf`` is the shape-checked leaf branch of the extend algebra
+(list concat / set union / scalar error); ``node_merge.py`` -- the single extend engine --
+imports it. ``would_assignment_narrow`` is the value-level narrowing predicate and
+``narrowing_paths`` its path-collecting counterpart, reporting the specific narrowed leaf
+paths; ``node_merge.py`` imports ``narrowing_paths`` from here to expand its recorded
+assign drops.
 """
 
-from collections.abc import Mapping
 from typing import Any
 
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import is_static_marker
-from imbue.overlay.operators import assign_bare_key
-from imbue.overlay.operators import bare_key
-from imbue.overlay.operators import check_no_conflicting_assign
-from imbue.overlay.operators import is_assign_key
-from imbue.overlay.operators import is_extend_key
 
 
 def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
@@ -102,87 +95,3 @@ def extend_aggregate_leaf(current: Any, extend_payload: Any, field_path: str) ->
         f"__extend on field '{field_path}' is not valid: target field is a scalar "
         f"({type(current).__name__}); use bare assignment instead."
     )
-
-
-def apply_extend(
-    current_value: Any,
-    extend_value: Any,
-    field_path: str,
-) -> Any:
-    """Apply ``extend_value`` onto ``current_value`` and return the result.
-
-    The list/tuple/set/scalar branches operate only at the leaf field. The dict
-    branch is **recursive**: each key of ``extend_value`` is applied against the
-    matching sub-value of ``current_value`` -- a nested ``key__extend`` recurses
-    (extending ``current_value[key]``), while a nested bare ``key`` assigns
-    (replacing ``current_value[key]``). A bare value that is itself a dict is
-    resolved against an empty base so any markers nested inside it collapse
-    (extend-against-nothing = assign). Within a level, bare keys are applied
-    before sibling ``__extend`` keys.
-
-    This recursion is backward-compatible: an ``extend_value`` that nests no
-    ``__extend`` markers produces the same shallow ``{**current, **value}``
-    result (bare nested keys replace at their level, preserving siblings of the
-    extended dict).
-    """
-    if current_value is None:
-        # Field unset in base. Extend acts like assign, but the shape must
-        # still be an aggregate; scalars cannot be the value of ``__extend``.
-        if not isinstance(extend_value, (list, tuple, dict, set, frozenset)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' requires a list, tuple, dict, or set value; "
-                f"got: {type(extend_value).__name__}"
-            )
-        # Extend-against-nothing acts as assign, but a dict value may still carry
-        # nested markers that must resolve (against an empty base) so none leak.
-        if isinstance(extend_value, Mapping):
-            return extend_dict({}, extend_value, field_path)
-        return extend_value
-    if isinstance(current_value, Mapping):
-        if not isinstance(extend_value, Mapping):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (dict) requires a JSON object value; "
-                f"got: {type(extend_value).__name__}"
-            )
-        return extend_dict(current_value, extend_value, field_path)
-    return extend_aggregate_leaf(current_value, extend_value, field_path)
-
-
-def extend_dict(
-    current_value: Mapping[str, Any],
-    extend_value: Mapping[str, Any],
-    field_path: str,
-) -> dict[str, Any]:
-    """Recursively apply a dict ``extend_value`` onto ``current_value``.
-
-    Each key of ``extend_value`` is applied against the matching sub-value of
-    ``current_value``: a nested ``key__extend`` recurses via ``apply_extend``
-    (extending ``current_value[key]``); a nested bare ``key`` assigns, replacing
-    ``current_value[key]`` (a dict value is resolved against an empty base so any
-    markers nested inside it collapse). Bare keys are applied before sibling
-    ``__extend`` keys (the within-level assign-phase / extend-phase ordering).
-
-    The result starts as a shallow copy of ``current_value`` so sibling keys that
-    the patch does not mention are preserved.
-    """
-    check_no_conflicting_assign(extend_value, field_path)
-    result: dict[str, Any] = dict(current_value)
-    # First pass (assign-phase): bare and ``__assign`` keys assign (resolving
-    # nested markers against empty). ``__assign`` is value-identical to bare here;
-    # the suffix only suppresses narrowing, which this marker-free merge never tracks.
-    for key, value in extend_value.items():
-        if is_extend_key(key):
-            continue
-        bare = assign_bare_key(key) if is_assign_key(key) else key
-        if isinstance(value, Mapping):
-            result[bare] = extend_dict({}, value, f"{field_path}.{bare}")
-        else:
-            result[bare] = value
-    # Second pass (extend-phase): ``key__extend`` keys extend the (possibly
-    # just-assigned) value.
-    for key, value in extend_value.items():
-        if not is_extend_key(key):
-            continue
-        bare = bare_key(key)
-        result[bare] = apply_extend(result.get(bare), value, f"{field_path}.{bare}")
-    return result

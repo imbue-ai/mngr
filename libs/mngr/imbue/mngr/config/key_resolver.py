@@ -23,7 +23,7 @@ from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import InvalidKeyPathError
 from imbue.overlay.errors import OverlayError
-from imbue.overlay.merge import apply_extend
+from imbue.overlay.node_merge import extend_plain_value
 from imbue.overlay.operators import assign_bare_key
 from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import check_no_conflicting_assign
@@ -182,7 +182,7 @@ def _resolve_extends(
         if current is None and is_deferred_extend_path(path):
             result[key] = value
             continue
-        result[bare] = apply_extend(current, value, field_path)
+        result[bare] = extend_plain_value(current, value, field_path)
     return result
 
 
