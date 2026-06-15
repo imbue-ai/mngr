@@ -43,11 +43,13 @@ from imbue.imbue_common.frozen_model import FrozenModel
 BAKED_SERVICES_AGENT_NAME: Final[str] = "system-services"
 
 # The FCT create templates the container bake stacks: ``main`` (shared agent
-# config) + ``ovh`` (build the container from the workspace Dockerfile + run
-# fct-seed + runsc hardening). The ``ovh`` name is historical -- it is the
-# FCT's Dockerfile-build template, not anything OVH-specific -- and it is reused
-# verbatim for slices, which build the same container image.
-FCT_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "ovh")
+# config) + ``pool_host`` (build the container from the workspace Dockerfile + run
+# fct-seed + runsc hardening). ``pool_host`` is provider-agnostic -- it carries
+# only the FCT build recipe, not a provider -- so the same template bakes OVH
+# VPSes and lima slices alike; the provider is selected entirely by the create
+# address (``@host.ovh`` vs ``@host.imbue_cloud_slice``), matching how the
+# ``aws`` / ``imbue_cloud`` templates already work.
+FCT_BAKE_TEMPLATES: Final[tuple[str, ...]] = ("main", "pool_host")
 
 # Path inside the pool host's container of the FCT bootstrap's initial-chat
 # sentinel. The bootstrap writes it after creating the chat agent on first boot;
