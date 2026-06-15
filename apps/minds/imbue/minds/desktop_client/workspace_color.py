@@ -136,7 +136,7 @@ def pick_workspace_foreground(hex_color: str) -> str:
     The returned value is ``"0 0 0"`` (black) or ``"255 255 255"``
     (white), suitable for dropping into ``rgb(var(--titlebar-fg) / <alpha>)``.
     Chooses by WCAG relative luminance so the titlebar text stays legible
-    across the whole 12-color palette and any custom hex.
+    across the whole 10-color palette and any custom hex.
 
     ``hex_color`` must be a normalized lowercase ``#rrggbb`` hex string.
     Callers should pass values through ``normalize_workspace_color`` first.
