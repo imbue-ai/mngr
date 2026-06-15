@@ -19,18 +19,24 @@ import json
 import logging
 import os
 from typing import Any
+from typing import Union
+
+# A parsed-JSON value of unspecified shape. Stdlib-only (pydantic isn't importable
+# under the host's bare python3). Spelled with Union, not ``|``: this assignment runs
+# at import, and ``|`` on types needs python 3.10+. noqa stops ruff rewriting it.
+JsonValue = Union[str, int, float, bool, None, list, dict]  # noqa: UP007
 
 _SOURCE = "codex/usage"
 
 
-def _meta_value(obj: dict[str, Any], payload: Any, key: str) -> Any:
+def _meta_value(obj: dict[str, Any], payload: JsonValue, key: str) -> JsonValue:
     """Read ``key`` from the item's payload, falling back to the top-level object."""
     if isinstance(payload, dict) and payload.get(key) is not None:
         return payload.get(key)
     return obj.get(key)
 
 
-def _tokens_from_total_usage(total_usage: Any) -> dict[str, Any] | None:
+def _tokens_from_total_usage(total_usage: JsonValue) -> dict[str, Any] | None:
     """Map codex cumulative usage to the wire token buckets (input is cache-exclusive)."""
     if not isinstance(total_usage, dict):
         return None
@@ -50,7 +56,7 @@ def _tokens_from_total_usage(total_usage: Any) -> dict[str, Any] | None:
     }
 
 
-def _window(entry: Any) -> dict[str, Any] | None:
+def _window(entry: JsonValue) -> dict[str, Any] | None:
     """Map a codex rate-limit entry to the window schema; window_seconds from window_minutes."""
     if not isinstance(entry, dict):
         return None
@@ -63,7 +69,7 @@ def _window(entry: Any) -> dict[str, Any] | None:
     }
 
 
-def _rate_limits(raw_rate_limits: Any) -> dict[str, Any] | None:
+def _rate_limits(raw_rate_limits: JsonValue) -> dict[str, Any] | None:
     if not isinstance(raw_rate_limits, dict):
         return None
     windows: dict[str, Any] = {}

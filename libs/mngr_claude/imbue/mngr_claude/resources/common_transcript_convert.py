@@ -25,6 +25,12 @@ import json
 import logging
 import os
 from typing import Any
+from typing import Union
+
+# A parsed-JSON value of unspecified shape. Stdlib-only (pydantic isn't importable
+# under the host's bare python3). Spelled with Union, not ``|``: this assignment runs
+# at import, and ``|`` on types needs python 3.10+. noqa stops ruff rewriting it.
+JsonValue = Union[str, int, float, bool, None, list, dict]  # noqa: UP007
 
 # Maximum length for tool input preview and tool output
 _MAX_INPUT_PREVIEW_LENGTH = 200
@@ -37,7 +43,13 @@ _MAX_OUTPUT_LENGTH = 2000
 # typed them).
 
 
-def _extract_text_content(content: Any) -> str:
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
+def _extract_text_content(content: JsonValue) -> str:
     """Extract plain text from a message content field (string or list of blocks)."""
     if isinstance(content, str):
         return content
@@ -52,7 +64,7 @@ def _extract_text_content(content: Any) -> str:
     return "\n".join(parts)
 
 
-def _has_tool_results_only(content: Any) -> bool:
+def _has_tool_results_only(content: JsonValue) -> bool:
     """Check if a content list contains only tool_result blocks (no user text)."""
     if isinstance(content, str):
         return False
@@ -77,27 +89,26 @@ def _make_event_id(uuid: str, suffix: str) -> str:
     return f"{uuid}-{suffix}"
 
 
-def _existing_event_ids(output_file: str) -> set[str]:
-    """Collect event IDs already in the output file so we never re-append them."""
-    existing_ids: set[str] = set()
+def _load_existing_ids(output_file: str) -> set[str]:
+    ids: set[str] = set()
     if not os.path.isfile(output_file):
-        return existing_ids
+        return ids
     with open(output_file) as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                existing_ids.add(json.loads(line)["event_id"])
+                ids.add(json.loads(line)["event_id"])
             except (json.JSONDecodeError, KeyError) as exc:
                 logging.warning("skipping unreadable common-transcript output line: %s", exc)
                 continue
-    return existing_ids
+    return ids
 
 
 def convert(input_file: str, output_file: str) -> int:
     """Append new common-transcript events from ``input_file`` to ``output_file``; return the count."""
-    existing_ids = _existing_event_ids(output_file)
+    existing_ids = _load_existing_ids(output_file)
 
     if not os.path.isfile(input_file):
         return 0
@@ -154,9 +165,9 @@ def convert(input_file: str, output_file: str) -> int:
                         call_id = block.get("id", "")
                         tool_name = block.get("name", "")
                         tool_input = block.get("input", {})
-                        input_preview = json.dumps(tool_input, separators=(",", ":"))
-                        if len(input_preview) > _MAX_INPUT_PREVIEW_LENGTH:
-                            input_preview = input_preview[:_MAX_INPUT_PREVIEW_LENGTH] + "..."
+                        input_preview = _truncate(
+                            json.dumps(tool_input, separators=(",", ":")), _MAX_INPUT_PREVIEW_LENGTH
+                        )
 
                         # Track for tool result labeling
                         if call_id and tool_name:
@@ -212,9 +223,7 @@ def convert(input_file: str, output_file: str) -> int:
                         # reclassify as tool_result so it doesn't masquerade as user input.
                         event_id = _make_event_id(uuid, "meta")
                         if event_id not in existing_ids and text:
-                            output = text
-                            if len(output) > _MAX_OUTPUT_LENGTH:
-                                output = output[:_MAX_OUTPUT_LENGTH] + "..."
+                            output = _truncate(text, _MAX_OUTPUT_LENGTH)
                             event = {
                                 "timestamp": timestamp,
                                 "type": "tool_result",
@@ -257,11 +266,11 @@ def convert(input_file: str, output_file: str) -> int:
                         if event_id in existing_ids:
                             continue
 
-                        # Extract output text -- normalize to a single string.
-                        result_content = block.get("content", "")
-                        if isinstance(result_content, list):
+                        # Normalize the raw result content to a single output string.
+                        raw_result = block.get("content", "")
+                        if isinstance(raw_result, list):
                             parts = []
-                            for item in result_content:
+                            for item in raw_result:
                                 if isinstance(item, dict) and item.get("type") == "text":
                                     parts.append(item.get("text", ""))
                                 elif isinstance(item, str):
@@ -269,15 +278,13 @@ def convert(input_file: str, output_file: str) -> int:
                                 else:
                                     # Non-text result block (image, etc.): no text to extract.
                                     continue
-                            result_content = "\n".join(parts)
-                        elif isinstance(result_content, str):
-                            # Already a plain string; use as-is.
-                            pass
+                            output_text = "\n".join(parts)
+                        elif isinstance(raw_result, str):
+                            output_text = raw_result
                         else:
-                            result_content = str(result_content)
+                            output_text = str(raw_result)
 
-                        if len(result_content) > _MAX_OUTPUT_LENGTH:
-                            result_content = result_content[:_MAX_OUTPUT_LENGTH] + "..."
+                        output_text = _truncate(output_text, _MAX_OUTPUT_LENGTH)
 
                         tool_name = tool_name_by_call_id.get(tool_call_id, "unknown")
 
@@ -288,7 +295,7 @@ def convert(input_file: str, output_file: str) -> int:
                             "source": "claude/common_transcript",
                             "tool_call_id": tool_call_id,
                             "tool_name": tool_name,
-                            "output": result_content,
+                            "output": output_text,
                             "is_error": bool(block.get("is_error", False)),
                             "message_uuid": uuid,
                         }

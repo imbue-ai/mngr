@@ -35,6 +35,12 @@ import json
 import logging
 import os
 from typing import Any
+from typing import Union
+
+# A parsed-JSON value of unspecified shape. Stdlib-only (pydantic isn't importable
+# under the host's bare python3). Spelled with Union, not ``|``: this assignment runs
+# at import, and ``|`` on types needs python 3.10+. noqa stops ruff rewriting it.
+JsonValue = Union[str, int, float, bool, None, list, dict]  # noqa: UP007
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
@@ -47,7 +53,7 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "..."
 
 
-def _join_content_text(content: Any, item_type: str) -> str:
+def _join_content_text(content: JsonValue, item_type: str) -> str:
     """Join the .text of payload.content[] items whose type matches item_type."""
     if not isinstance(content, list):
         return ""
@@ -63,7 +69,7 @@ def _join_content_text(content: Any, item_type: str) -> str:
     return "".join(parts)
 
 
-def _stringify_output(output: Any) -> str:
+def _stringify_output(output: JsonValue) -> str:
     """Render function_call_output.output, which is a string OR a content array."""
     if isinstance(output, str):
         return output

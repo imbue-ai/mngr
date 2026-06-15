@@ -33,12 +33,18 @@ import json
 import logging
 import os
 from typing import Any
+from typing import Union
+
+# A parsed-JSON value of unspecified shape. Stdlib-only (pydantic isn't importable
+# under the host's bare python3). Spelled with Union, not ``|``: this assignment runs
+# at import, and ``|`` on types needs python 3.10+. noqa stops ruff rewriting it.
+JsonValue = Union[str, int, float, bool, None, list, dict]  # noqa: UP007
 
 _MAX_INPUT_PREVIEW_LENGTH = 200
 _MAX_OUTPUT_LENGTH = 2000
 
 
-def _extract_user_text(content: Any, conv_id: str, step_index: Any) -> str | None:
+def _extract_user_text(content: JsonValue, conv_id: str, step_index: JsonValue) -> str | None:
     """Return the user's typed text from a USER_INPUT record.
 
     agy's SQLite store (the decode_agy_transcript.py source) records the clean typed text
@@ -52,14 +58,14 @@ def _extract_user_text(content: Any, conv_id: str, step_index: Any) -> str | Non
     return content.strip()
 
 
-def _short_value(value: Any) -> str:
+def _short_value(value: JsonValue) -> str:
     """Render an arbitrary JSON value as a short string for an input preview."""
     if isinstance(value, str):
         return value
     return json.dumps(value, separators=(",", ":"))
 
 
-def _tool_call_id(conv_id: str, step_index: Any, idx: int) -> str:
+def _tool_call_id(conv_id: str, step_index: JsonValue, idx: int) -> str:
     return f"{conv_id}-{step_index}-tc{idx}"
 
 
