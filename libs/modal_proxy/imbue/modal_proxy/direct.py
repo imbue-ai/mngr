@@ -219,7 +219,9 @@ _DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=15)
 # not yet registered/propagated, so Modal raises NotFoundError when get_web_url
 # hydrates the object. The function shows up within a few seconds, so retry with
 # backoff. min=1/max=4 over 5 attempts gives ~11s of headroom, which keeps a
-# genuinely-missing function failing reasonably fast.
+# genuinely-missing function failing reasonably fast. The retry lives on
+# get_web_url rather than function_from_name because the latter is lazy: the
+# server lookup (and thus the NotFoundError) surfaces when get_web_url hydrates.
 _LOOKUP_RETRY = retry_if_exception_type(modal.exception.NotFoundError)
 _LOOKUP_STOP = stop_after_attempt(5)
 _LOOKUP_WAIT = wait_exponential(multiplier=1, min=1, max=4)
