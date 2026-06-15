@@ -1,0 +1,3 @@
+Fixed `mngr imbue_cloud admin server order` failing with "expected exactly one vrack option to auto-pick, got []" on bare-metal plans that do not offer a vrack option (e.g. the cheaper SK line such as `24sk602-v1-us`).
+
+The eco-cart option selection no longer hardcodes `(bandwidth, vrack)` as the auto-picked families. Instead it derives the auto-pick set from the catalog's own `mandatory` flags: the operator chooses memory + storage, and every *other* family OVH marks mandatory (e.g. bandwidth, and vrack only where the plan offers it) is auto-picked and must have exactly one offer. Optional add-on families (mandatory=false) are never silently added to the cart.

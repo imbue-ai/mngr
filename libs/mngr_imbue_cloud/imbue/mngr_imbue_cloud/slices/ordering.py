@@ -37,8 +37,13 @@ ECO_ORDER_REGION: Final[str] = "united_states"
 # Default OS template reinstalled onto a delivered box (matches the box already in the fleet).
 DEFAULT_REINSTALL_OS_TEMPLATE: Final[str] = "debian12_64"
 
-# Mandatory eco option families that have a single offer we auto-pick (the user only chooses memory + storage).
-_AUTO_PICKED_OPTION_FAMILIES: Final[tuple[str, ...]] = ("bandwidth", "vrack")
+# Eco option families the operator explicitly chooses. Every *other* family OVH
+# flags mandatory is auto-picked (and must have exactly one offer). Deriving the
+# auto-pick set from the catalog's own ``mandatory`` flags -- rather than a
+# hardcoded family list -- means a plan that omits a family entirely (e.g. the
+# cheaper SK line ships no ``vrack`` option) still orders cleanly, while optional
+# add-on families (``mandatory`` false, e.g. backups) are never silently added.
+_USER_SELECTED_OPTION_FAMILIES: Final[tuple[str, ...]] = ("memory", "storage")
 
 _DELIVERY_POLL_INTERVAL_SECONDS: Final[float] = 60.0
 _DELIVERY_TIMEOUT_SECONDS: Final[float] = 4 * 60 * 60.0
@@ -53,16 +58,21 @@ def select_eco_option_codes(
     memory_gb: int,
     storage_short: str,
 ) -> list[str]:
-    """Choose the eco cart option planCodes: the requested memory + storage, plus single-offer mandatory families.
+    """Choose the eco cart option planCodes: the requested memory + storage, plus every other mandatory family.
 
-    ``eco_options`` is the ``GET /order/cart/{id}/eco/options`` payload (each item has ``family`` and
-    ``planCode``). Memory is matched by parsed GB; storage by the availability short code (prefix). The
-    other mandatory families (bandwidth, vrack) must each have exactly one offer, which is auto-picked.
-    Raises ``BareMetalConfigError`` if a required choice can't be resolved.
+    ``eco_options`` is the ``GET /order/cart/{id}/eco/options`` payload (each item has ``family``,
+    ``planCode``, and ``mandatory``). Memory is matched by parsed GB; storage by the availability short
+    code (prefix). Every *other* family OVH flags mandatory (e.g. bandwidth, and vrack where offered) is
+    auto-picked and must have exactly one offer; optional families are skipped. Raises
+    ``BareMetalConfigError`` if a required choice can't be resolved.
     """
     codes_by_family: dict[str, list[str]] = defaultdict(list)
+    is_family_mandatory: dict[str, bool] = {}
     for option in eco_options:
-        codes_by_family[str(option["family"])].append(str(option["planCode"]))
+        family = str(option["family"])
+        codes_by_family[family].append(str(option["planCode"]))
+        # A family counts as mandatory if any of its offers is flagged mandatory.
+        is_family_mandatory[family] = is_family_mandatory.get(family, False) or bool(option.get("mandatory"))
 
     memory_code = next(
         (code for code in codes_by_family.get("memory", []) if parse_memory_gb(code) == memory_gb), None
@@ -84,8 +94,15 @@ def select_eco_option_codes(
             f"storage {storage_short!r} not offered for this plan; offered: {sorted(codes_by_family.get('storage', []))}"
         )
 
+    # Auto-pick the single offer for every other mandatory family (e.g. bandwidth,
+    # and vrack on the plans that include it); optional families are skipped.
     chosen = [memory_code, storage_code]
-    for family in _AUTO_PICKED_OPTION_FAMILIES:
+    auto_pick_families = sorted(
+        family
+        for family, is_mandatory in is_family_mandatory.items()
+        if is_mandatory and family not in _USER_SELECTED_OPTION_FAMILIES
+    )
+    for family in auto_pick_families:
         family_codes = codes_by_family.get(family, [])
         if len(family_codes) != 1:
             raise BareMetalConfigError(

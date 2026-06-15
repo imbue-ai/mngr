@@ -11,13 +11,13 @@ from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
 
 def _eco_options() -> list[dict]:
     return [
-        {"family": "bandwidth", "planCode": "bandwidth-1000-unguaranteed-rise-gen2-us"},
-        {"family": "vrack", "planCode": "vrack-bandwidth-1000-24rise01-v1-us"},
-        {"family": "memory", "planCode": "ram-32g-ecc-3200-24rise01-v1-us"},
-        {"family": "memory", "planCode": "ram-64g-ecc-3200-24rise01-v1-us"},
-        {"family": "memory", "planCode": "ram-128g-ecc-2933-24rise01-v1-us"},
-        {"family": "storage", "planCode": "softraid-2x512nvme-24rise01-v1-us"},
-        {"family": "storage", "planCode": "softraid-2x1920nvme-24rise01-v1-us"},
+        {"family": "bandwidth", "planCode": "bandwidth-1000-unguaranteed-rise-gen2-us", "mandatory": True},
+        {"family": "vrack", "planCode": "vrack-bandwidth-1000-24rise01-v1-us", "mandatory": True},
+        {"family": "memory", "planCode": "ram-32g-ecc-3200-24rise01-v1-us", "mandatory": True},
+        {"family": "memory", "planCode": "ram-64g-ecc-3200-24rise01-v1-us", "mandatory": True},
+        {"family": "memory", "planCode": "ram-128g-ecc-2933-24rise01-v1-us", "mandatory": True},
+        {"family": "storage", "planCode": "softraid-2x512nvme-24rise01-v1-us", "mandatory": True},
+        {"family": "storage", "planCode": "softraid-2x1920nvme-24rise01-v1-us", "mandatory": True},
     ]
 
 
@@ -42,9 +42,34 @@ def test_select_eco_option_codes_raises_for_unavailable_storage() -> None:
 
 
 def test_select_eco_option_codes_raises_when_mandatory_family_is_ambiguous() -> None:
-    options = _eco_options() + [{"family": "bandwidth", "planCode": "bandwidth-3000-unguaranteed-rise-gen2-us"}]
+    options = _eco_options() + [
+        {"family": "bandwidth", "planCode": "bandwidth-3000-unguaranteed-rise-gen2-us", "mandatory": True}
+    ]
     with pytest.raises(BareMetalConfigError):
         select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme")
+
+
+def test_select_eco_option_codes_handles_plan_without_vrack() -> None:
+    # The cheaper SK line (e.g. 24sk602-v1-us) ships no vrack family at all; ordering must still succeed.
+    options = [
+        {"family": "bandwidth", "planCode": "bandwidth-500-25sk-us", "mandatory": True},
+        {"family": "memory", "planCode": "ram-128g-ecc-2400-24sk60-us", "mandatory": True},
+        {"family": "memory", "planCode": "ram-256g-ecc-2400-24sk60-us", "mandatory": True},
+        {"family": "storage", "planCode": "softraid-2x8000sa-24sk60-us", "mandatory": True},
+    ]
+    codes = select_eco_option_codes(options, memory_gb=256, storage_short="softraid-2x8000sa")
+    assert set(codes) == {
+        "ram-256g-ecc-2400-24sk60-us",
+        "softraid-2x8000sa-24sk60-us",
+        "bandwidth-500-25sk-us",
+    }
+
+
+def test_select_eco_option_codes_skips_optional_addon_families() -> None:
+    # An optional (mandatory=False) single-offer add-on family must never be auto-picked into the cart.
+    options = _eco_options() + [{"family": "backup", "planCode": "backup-storage-500-us", "mandatory": False}]
+    codes = select_eco_option_codes(options, memory_gb=64, storage_short="softraid-2x512nvme")
+    assert "backup-storage-500-us" not in codes
 
 
 def test_extract_order_id_parses_int() -> None:
