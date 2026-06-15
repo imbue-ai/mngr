@@ -68,12 +68,27 @@ Modal's state volume.
 
 ### Locked (confirmed with the user)
 
-1. **The bucket is the canonical offline store for the full host record + agent metadata.** Write
-   the complete `VpsDockerHostRecord` and per-agent records to the bucket, keyed by host id. Keep
-   only **tiny discovery tags** on the instance (`mngr-host-id`, `mngr-provider`, `Name`) — needed
-   because instance enumeration + power-state still comes from `DescribeInstances` / VM list, which
-   must map instance <-> host. Everything that used to be crammed into agent tags moves to the
-   bucket. Fixes (a) and (b) together.
+1. **The bucket is the single, complete source of truth for state content.** Write the complete
+   `VpsDockerHostRecord` (which already contains host-id, provider, host name, `vps_instance_id`, and
+   all per-agent records) to the bucket, keyed by host id. **No information lives only in tags.** The
+   instance retains only a tiny, immutable **index** derived from the record — `mngr-host-id`,
+   `mngr-provider`, `Name` (console readability), and `mngr-created-at` — because instance
+   enumeration + power-state still comes from `DescribeInstances` / VM list (which returns tags, not
+   bucket contents) and must map instance <-> bucket object. These index tags are a strict subset
+   that never overflows; they are a foreign key, not a competing store. (A pure-bucket variant that
+   drops even `mngr-host-id` and joins the cloud instance list against bucket records on
+   `vps_instance_id` is possible; we keep the host-id index tag for robustness — an instance that
+   exists before its record lands is still identifiable.)
+1a. **When the bucket is present, drop the per-agent `mngr-agent-<id>-*` tags entirely.** The state
+   bucket is written by the mngr *host machine* with operator credentials, so it is available
+   whenever `prepare` created it — **independent of the (c) `host_dir`-sync toggle or any backup
+   setting**. Agent name/type/labels therefore live *only* in the bucket; we stop writing per-agent
+   tags. This removes both failure modes in today's code: the 256-char `labels` drop
+   (`mngr_aws/backend.py` `_agent_field_tags`) and the `TagLimitExceeded` ->
+   `NotImplementedError` at EC2's 50-tag ceiling (`persist_agent_data`). The legacy per-agent tag
+   mirror is retained **only as a fallback when no bucket is configured** (operator never ran
+   `prepare`, or an older `prepare`), so behavior degrades gracefully rather than regressing.
+   Fixes (a) and (b) together.
 2. **`host_dir` is synced to the bucket by the instance (instance-push)**, the Modal model: an
    on-box daemon syncs `host_dir` to the bucket periodically and on graceful stop; offline reads are
    served from the bucket via a new bucket-backed volume. **On by default** (matches Lima).
@@ -163,14 +178,19 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
 
 ### Component 2 — host record + agent metadata in the bucket (fixes a, b)
 
-- Replace the tag-mirror bodies of `persist_agent_data` / `list_persisted_agent_data_for_host` (and
-  the offline host-record reconstruction) in `mngr_aws` / `mngr_azure` backends with bucket reads /
-  writes via Component 1. Written by the **mngr host machine** (operator creds) on create and on
-  every host-record update (at minimum on stop), exactly when tags are written today.
-- Keep writing the **discovery tags** (`mngr-host-id`, `mngr-provider`, `Name`) so instance
-  enumeration + power-state detection are unchanged.
+- When a state bucket is configured, rewrite `persist_agent_data` / `remove_persisted_agent_data` /
+  `list_persisted_agent_data_for_host` (and the offline host-record reconstruction) in the
+  `mngr_aws` / `mngr_azure` backends to read / write the bucket via Component 1, written by the
+  **mngr host machine** (operator creds) on create and on every host-record update (at minimum on
+  stop), exactly when tags are written today. In this mode the per-agent `mngr-agent-<id>-*` tags
+  are **not written at all** (Decision 1a) — removing the 256-char drop and the 50-tag ceiling.
+- **Graceful fallback:** when no bucket is configured, keep today's per-agent tag mirror unchanged
+  (including its documented limits), so existing deployments that never ran the new `prepare` keep
+  working.
+- Keep writing the **index tags** (`mngr-host-id`, `mngr-provider`, `Name`, `mngr-created-at`) in
+  both modes so instance enumeration + power-state detection are unchanged.
 - Offline discovery reconstructs the full `OfflineHost` from `host_state.json` in the bucket (read
-  by host id resolved from the discovery tags), instead of the lossy tag subset. No 256-char limit.
+  by host id resolved from the index tags), instead of the lossy tag subset. No 256-char limit.
 
 ### Component 3 — `host_dir` offline volume (fixes c)
 
