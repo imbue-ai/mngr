@@ -1,7 +1,6 @@
 import base64
 import os
 import re
-import time
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -29,8 +28,13 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
+from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
+from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
+from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
+from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
@@ -70,11 +74,14 @@ _POWER_STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
 # 32-hex host-id suffix (+ separating dash) for uniqueness, leaving this many
 # characters for the human-readable stem.
 _MAX_VM_NAME_LENGTH: Final[int] = 64
+_MAX_LINUX_HOSTNAME_LENGTH: Final[int] = 63
 _INVALID_NAME_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9-]")
 _VM_NAME_STEM_LENGTH: Final[int] = _MAX_VM_NAME_LENGTH - 33
 # The shape ``_make_vm_name`` produces: lowercase alphanumerics and dashes, not
 # starting or ending with a dash, 1-64 chars. A subset of what Azure accepts for
-# a Linux VM resource name, but the only shape the coercion ever emits.
+# a Linux VM resource name, but the only shape the coercion ever emits. The same
+# shape is a valid Linux hostname (within its tighter length cap), so
+# ``LinuxHostname`` reuses it.
 _AZURE_VM_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
@@ -100,16 +107,37 @@ class AzureVmName(NonEmptyStr):
         return super().__new__(cls, candidate)
 
 
+class LinuxHostname(NonEmptyStr):
+    """A Linux computer-name: non-empty, ``[a-z0-9-]``, no leading/trailing dash, at most 63 chars.
+
+    Codifies the hostname charset and the <= 63 char cap for the value written to
+    a VM's ``os_profile.computer_name``. ``_computer_name`` derives it from an
+    ``AzureVmName`` (truncating to length), and the constructor re-asserts the
+    result is a valid hostname -- so a regression in that derivation fails fast
+    here rather than as an opaque Azure API error.
+    """
+
+    def __new__(cls, value: str) -> Self:
+        candidate = value.strip()
+        if not _AZURE_VM_NAME_RE.match(candidate) or len(candidate) > _MAX_LINUX_HOSTNAME_LENGTH:
+            raise InvalidAzureIdentifierError(
+                f"{candidate!r} is not a valid Linux hostname "
+                f"([a-z0-9-], no leading/trailing dash, at most {_MAX_LINUX_HOSTNAME_LENGTH} chars)"
+            )
+        return super().__new__(cls, candidate)
+
+
 # How long to wait for a resource-provider registration to flip to "Registered".
 _PROVIDER_REGISTRATION_TIMEOUT_SECONDS: Final[float] = 180.0
 _PROVIDER_REGISTRATION_POLL_SECONDS: Final[float] = 3.0
 
 # Minimum age before an unattached NIC / public IP is eligible for reclaim by the
-# next create. Azure reserves a NIC for its would-be VM for 180s after a failed
-# create, so a younger unattached NIC is either still reserved (delete would
-# fail) or belongs to a create that is mid-flight on another machine -- this
-# margin keeps the self-healing sweep from ever deleting an in-flight create's
-# NIC.
+# next create. Every healthy create leaves its NIC briefly unattached (between
+# creating it and the VM associating it), so the age gate is what keeps the sweep
+# from racing an in-flight create -- whether that create is in this process, on
+# this machine, or on another machine sharing the resource group. The window sits
+# above Azure's 180s post-failure NIC reservation, so a younger orphan's delete
+# would fail anyway.
 _ORPHAN_RECLAIM_MIN_AGE_SECONDS: Final[float] = 240.0
 
 
@@ -132,13 +160,15 @@ def _make_vm_name(label: str, tags: Mapping[str, str]) -> AzureVmName:
     return AzureVmName(f"{stem}-{suffix}"[:_MAX_VM_NAME_LENGTH].rstrip("-"))
 
 
-def _computer_name(vm_name: str) -> str:
+def _computer_name(vm_name: AzureVmName) -> LinuxHostname:
     """Derive a Linux computer-name (hostname) from the VM name.
 
-    Linux hostnames are <= 64 chars; we cap at 63 and strip trailing dashes so
-    the value is always a valid hostname even after truncation.
+    The input is an ``AzureVmName`` (charset ``[a-z0-9-]``, no edge dashes) -- a
+    subset of valid hostnames -- so truncation to the 63-char cap (then stripping
+    any trailing dash that truncation exposes) is the only step needed to keep the
+    result a valid hostname.
     """
-    return vm_name[:63].rstrip("-")
+    return LinuxHostname(vm_name[:_MAX_LINUX_HOSTNAME_LENGTH].rstrip("-"))
 
 
 class AzureNetworkPrepareResult(FrozenModel):
@@ -164,8 +194,9 @@ class AzureVpsClient(VpsClientInterface):
 
     The one-off infrastructure (resource group, vnet, subnet, NSG) is created by
     ``ensure_network`` (the privileged ``mngr azure prepare`` path); the hot
-    ``create_instance`` path is lookup-only (``resolve_subnet_id``) so a
-    restricted role with no network-write permission can still create VMs.
+    ``create_instance`` path only looks that infrastructure up
+    (``resolve_subnet_id``), so it needs VM/NIC/IP-create permissions but none of
+    the network-management permissions ``ensure_network`` uses.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -187,10 +218,10 @@ class AzureVpsClient(VpsClientInterface):
     vnet_address_prefix: str = Field(default="10.0.0.0/16", description="vnet CIDR address space")
     subnet_address_prefix: str = Field(default="10.0.0.0/24", description="subnet CIDR address range")
     vm_size: str = Field(default="Standard_B2s", description="Default VM size for instances created via this client")
-    image_publisher: str = Field(default="Canonical", description="Marketplace image publisher")
-    image_offer: str = Field(default="ubuntu-24_04-lts", description="Marketplace image offer")
-    image_sku: str = Field(default="server", description="Marketplace image SKU")
-    image_version: str = Field(default="latest", description="Marketplace image version")
+    image_publisher: str = Field(default=DEFAULT_IMAGE_PUBLISHER, description="Marketplace image publisher")
+    image_offer: str = Field(default=DEFAULT_IMAGE_OFFER, description="Marketplace image offer")
+    image_sku: str = Field(default=DEFAULT_IMAGE_SKU, description="Marketplace image SKU")
+    image_version: str = Field(default=DEFAULT_IMAGE_VERSION, description="Marketplace image version")
     admin_username: str = Field(default="azureuser", description="Admin user the SSH public key is attached to")
     os_disk_size_gb: int = Field(default=30, description="OS managed-disk size in GB")
     os_disk_type: str = Field(default="StandardSSD_LRS", description="OS managed-disk storage account type")
@@ -198,10 +229,10 @@ class AzureVpsClient(VpsClientInterface):
         default=("0.0.0.0/0",),
         description=(
             "CIDR blocks allowed inbound on tcp/22 and tcp/container_ssh_port of the NSG created by "
-            "ensure_network. Default ('0.0.0.0/0',) allows any IP (fail-open, like AWS/GCP); set to "
-            "e.g. ('203.0.113.4/32',) to restrict to your own IP, or () for no SSH allow rule (the NSG "
-            "default-deny then leaves instances unreachable from outside the vnet). A warning is logged "
-            "when the effective range is 0.0.0.0/0 or empty."
+            "ensure_network. Default ('0.0.0.0/0',) allows any IP; set to e.g. ('203.0.113.4/32',) to "
+            "restrict to your own IP, or () for no SSH allow rule (the NSG default-deny then leaves "
+            "instances unreachable from outside the vnet). A warning is logged when the effective range "
+            "is 0.0.0.0/0 or empty."
         ),
     )
     associate_public_ip: bool = Field(default=True, description="Assign a public IPv4 to launched VMs")
@@ -219,7 +250,11 @@ class AzureVpsClient(VpsClientInterface):
     _cached_resource_client: Any = PrivateAttr(default=None)
 
     # =========================================================================
-    # Lazily-built management clients (overridden in tests to inject fakes)
+    # Management clients
+    #
+    # Built lazily and cached on first use. Defined as methods (not inlined) so
+    # the test-only subclass in testing.py can override them to inject fakes --
+    # the same seam as the aws/gcp provider clients.
     # =========================================================================
 
     def _compute(self) -> Any:
@@ -276,19 +311,22 @@ class AzureVpsClient(VpsClientInterface):
                 self._resource().providers.register(namespace)
             self._wait_for_provider_registered(namespace)
 
+    def _is_provider_registered(self, namespace: str) -> bool:
+        with self._translate_azure_errors():
+            provider = self._resource().providers.get(namespace)
+        return bool(provider.registration_state == "Registered")
+
     def _wait_for_provider_registered(self, namespace: str) -> None:
-        start = time.monotonic()
-        while time.monotonic() - start < _PROVIDER_REGISTRATION_TIMEOUT_SECONDS:
-            with self._translate_azure_errors():
-                provider = self._resource().providers.get(namespace)
-            if provider.registration_state == "Registered":
-                return
-            time.sleep(_PROVIDER_REGISTRATION_POLL_SECONDS)
-        raise MngrError(
-            f"Azure resource provider {namespace!r} did not reach 'Registered' within "
-            f"{_PROVIDER_REGISTRATION_TIMEOUT_SECONDS:.0f}s. Register it manually with "
-            f"`az provider register --namespace {namespace}` and retry `mngr azure prepare`."
-        )
+        if not poll_until(
+            lambda: self._is_provider_registered(namespace),
+            timeout=_PROVIDER_REGISTRATION_TIMEOUT_SECONDS,
+            poll_interval=_PROVIDER_REGISTRATION_POLL_SECONDS,
+        ):
+            raise MngrError(
+                f"Azure resource provider {namespace!r} did not reach 'Registered' within "
+                f"{_PROVIDER_REGISTRATION_TIMEOUT_SECONDS:.0f}s. Register it manually with "
+                f"`az provider register --namespace {namespace}` and retry `mngr azure prepare`."
+            )
 
     def ensure_network(self) -> AzureNetworkPrepareResult:
         """Create the mngr resource group + vnet/subnet/NSG if absent. Returns a prepare result.
@@ -577,7 +615,7 @@ class AzureVpsClient(VpsClientInterface):
 
     def _build_vm_model(
         self,
-        vm_name: str,
+        vm_name: AzureVmName,
         plan: str,
         user_data: str,
         public_key: str,
@@ -618,8 +656,8 @@ class AzureVpsClient(VpsClientInterface):
                         ]
                     ),
                 ),
-                # Azure requires custom_data base64-encoded; the Ubuntu cloud-init
-                # Azure datasource decodes it and runs it as user-data on first boot.
+                # Azure requires custom_data base64-encoded; the cloud-init Azure
+                # datasource decodes it and runs it as user-data on first boot.
                 custom_data=base64.b64encode(user_data.encode("utf-8")).decode("ascii"),
             ),
             network_profile=compute_models.NetworkProfile(
@@ -826,18 +864,17 @@ class AzureVpsClient(VpsClientInterface):
         return [instance for instance in instances if wanted in instance["tags"]]
 
     def list_mngr_managed_vms(self) -> list[dict[str, Any]]:
-        """List VMs in the resource group carrying any ``mngr-provider`` tag.
+        """List VMs in the resource group tagged ``managed-by=mngr``.
 
-        Filters by tag-*key* presence (any value), so it spans every mngr
-        provider config bound to this resource group, not just one provider name.
-        Used by ``mngr azure cleanup`` to refuse deleting the shared resource
-        group while any mngr-managed agent still exists.
+        Filters on the single decisive ownership tag every mngr-created VM carries
+        (the same ``managed-by=mngr`` tag ``delete_managed_resource_group`` uses to
+        prove it owns the group), so it spans every mngr provider config bound to
+        this resource group regardless of provider name. Used by ``mngr azure
+        cleanup`` to refuse deleting the shared resource group while any
+        mngr-managed agent still exists.
         """
-        return [
-            instance
-            for instance in self._list_vms_with_ips()
-            if any(tag.startswith("mngr-provider=") for tag in instance["tags"])
-        ]
+        managed_by_tag = f"{AZURE_MANAGED_BY_TAG_KEY}={AZURE_MANAGED_BY_TAG_VALUE}"
+        return [instance for instance in self._list_vms_with_ips() if managed_by_tag in instance["tags"]]
 
     def delete_managed_resource_group(self) -> str | None:
         """Delete the mngr-owned resource group (and everything in it). Returns its name.

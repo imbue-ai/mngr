@@ -540,7 +540,7 @@ def test_schedule_run_local_nonexistent_trigger(
     assert "No local schedule record found" in result.output
 
 
-@pytest.mark.flaky
+@pytest.mark.timeout(30)
 def test_schedule_run_local_deployed_trigger(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

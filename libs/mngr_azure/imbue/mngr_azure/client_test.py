@@ -9,6 +9,8 @@ import pytest
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_azure.client import AzureVmName
+from imbue.mngr_azure.client import LinuxHostname
+from imbue.mngr_azure.client import _computer_name
 from imbue.mngr_azure.client import _make_vm_name
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -88,6 +90,29 @@ def test_azure_vm_name_rejects_invalid() -> None:
         AzureVmName("has space")
     with pytest.raises(InvalidAzureIdentifierError):
         AzureVmName("a" * 65)
+
+
+def test_computer_name_caps_at_63_and_strips_trailing_dash() -> None:
+    """_computer_name truncates a 64-char VM name to a valid 63-char LinuxHostname."""
+    computer_name = _computer_name(AzureVmName("a" * 64))
+    assert isinstance(computer_name, LinuxHostname)
+    assert len(computer_name) == 63
+    # Truncation that lands on a dash must not leave a trailing dash.
+    trimmed = _computer_name(AzureVmName("a" * 62 + "-b"))
+    assert trimmed == "a" * 62
+    assert not trimmed.endswith("-")
+
+
+def test_linux_hostname_rejects_invalid() -> None:
+    """The hostname type rejects empty, over-long, and out-of-charset strings."""
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("")
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("a" * 64)
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("ends-with-dash-")
+    with pytest.raises(InvalidAzureIdentifierError):
+        LinuxHostname("Has-Upper")
 
 
 # =========================================================================
@@ -458,14 +483,16 @@ def test_list_instances_empty_when_rg_missing() -> None:
 
 
 def test_list_mngr_managed_vms_spans_provider_names() -> None:
+    """Returns every managed-by=mngr VM across provider names, excluding untagged VMs."""
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure-west"}),
-        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr"}),
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}),
+        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}),
+        SimpleNamespace(name="vm-c", tags={"team": "infra"}),
     ]
     client = _make_client(compute=compute)
     managed = client.list_mngr_managed_vms()
-    assert [vm["id"] for vm in managed] == ["vm-a"]
+    assert sorted(vm["id"] for vm in managed) == ["vm-a", "vm-b"]
 
 
 # =========================================================================

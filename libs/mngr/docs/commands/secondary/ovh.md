@@ -19,6 +19,13 @@ mngr ovh list [OPTIONS]
 ```
 **Options:**
 
+## Provider
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (endpoint, credentials, ovh_subsidiary, project_id). When the block does not exist, OvhProviderConfig class defaults are used as the fallback; credentials still fall back to env / ~/.ovh.conf when unset. | `ovh` |
+| `--all` | boolean | List every VPS the account owns, not just those tagged for mngr. By default, only VPSes tagged with `mngr-provider` are shown. | `False` |
+
 ## Common
 
 | Name | Type | Description | Default |
@@ -33,10 +40,3 @@ mngr ovh list [OPTIONS]
 | `--plugin`, `--enable-plugin` | text | Enable a plugin [repeatable] | None |
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--provider` | text | Name of the [providers.NAME] block in settings.toml to read defaults from (endpoint, credentials, ovh_subsidiary, project_id). When the block does not exist, OvhProviderConfig class defaults are used as the fallback; credentials still fall back to env / ~/.ovh.conf when unset. | `ovh` |
-| `--all` | boolean | List every VPS the account owns, not just those tagged for mngr. By default, only VPSes tagged with `mngr-provider` are shown. | `False` |
