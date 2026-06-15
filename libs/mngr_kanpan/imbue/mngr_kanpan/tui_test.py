@@ -52,6 +52,7 @@ from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_REFRESH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_UNMARK
+from imbue.mngr_kanpan.tui import _BatchItemResult
 from imbue.mngr_kanpan.tui import _BatchWorkItem
 from imbue.mngr_kanpan.tui import _ColumnDef
 from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
@@ -266,6 +267,25 @@ def test_build_board_widgets_errors_displayed() -> None:
     texts = [w.text if hasattr(w, "text") else "" for w in walker]
     found_error = any("Error 1" in str(t) for t in texts)
     assert found_error
+
+
+def test_build_board_widgets_execute_errors_displayed() -> None:
+    snapshot = make_board_snapshot(entries=())
+    walker, _ = _build_board_widgets(
+        snapshot, _BUILTIN_COLUMN_DEFS, execute_errors=("delete foo: timed out after 60s",)
+    )
+    texts = [str(w.text) if hasattr(w, "text") else "" for w in walker]
+    assert any("delete foo: timed out after 60s" in t for t in texts)
+
+
+def test_build_board_widgets_execute_and_fetch_errors_share_one_block() -> None:
+    snapshot = make_board_snapshot(entries=(), errors=("fetch boom",))
+    walker, _ = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, execute_errors=("delete bar: failed",))
+    texts = [str(w.text) if hasattr(w, "text") else "" for w in walker]
+    # A single "Errors:" header covers both fetch and execution errors.
+    assert sum(1 for t in texts if t.strip() == "Errors:") == 1
+    assert any("fetch boom" in t for t in texts)
+    assert any("delete bar: failed" in t for t in texts)
 
 
 def test_build_board_widgets_groups_by_section() -> None:
@@ -1471,17 +1491,29 @@ def test_toggle_mark_push_no_work_dir_shows_message() -> None:
 def test_finish_batch_execution_all_ok() -> None:
     state = _make_state()
     state.executing = True
-    _finish_batch_execution(state, ["op1: ok", "op2: ok"])
+    _finish_batch_execution(
+        state,
+        [_BatchItemResult(label="op1", is_success=True), _BatchItemResult(label="op2", is_success=True)],
+    )
     assert state.executing is False
     assert "2" in state.footer_left_text.text
+    assert state.execute_errors == ()
 
 
 def test_finish_batch_execution_with_failures() -> None:
     state = _make_state()
     state.executing = True
-    _finish_batch_execution(state, ["op1: ok", "op2: failed (err)"])
+    _finish_batch_execution(
+        state,
+        [
+            _BatchItemResult(label="op1", is_success=True),
+            _BatchItemResult(label="op2", is_success=False, detail="boom"),
+        ],
+    )
     assert state.executing is False
-    assert "failed" in state.footer_left_text.text or "1 failed" in state.footer_left_text.text
+    assert "1 failed" in state.footer_left_text.text
+    # The failure detail is persisted for rendering at the bottom of the board.
+    assert state.execute_errors == ("op2: boom",)
 
 
 def test_finish_batch_execution_empty_results() -> None:
@@ -1489,6 +1521,7 @@ def test_finish_batch_execution_empty_results() -> None:
     state.executing = True
     _finish_batch_execution(state, [])
     assert state.executing is False
+    assert state.execute_errors == ()
 
 
 # =============================================================================
@@ -1535,9 +1568,36 @@ def test_on_batch_item_poll_future_done_failure() -> None:
     proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="something bad")
     future = _make_done_future(proc)
     mock_loop = _make_mock_loop()
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
-    assert any("failed" in r for r in results)
+    assert len(results) == 1
+    assert results[0].is_success is False
+    # The captured stderr is preserved as the failure detail.
+    assert results[0].detail == "something bad"
+
+
+def test_on_batch_item_poll_timeout_reports_clear_detail() -> None:
+    state = _make_state()
+    state.executing = True
+    item = _BatchWorkItem(
+        name=AgentName("agent-a"),
+        key="c",
+        cmd=CustomCommand(name="custom"),
+        entry=None,
+    )
+
+    def _raise_timeout() -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["mngr", "destroy"], timeout=60)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future: Future[subprocess.CompletedProcess[str]] = pool.submit(_raise_timeout)
+        future.exception()
+        mock_loop = _make_mock_loop()
+        results: list[_BatchItemResult] = []
+        _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
+    assert len(results) == 1
+    assert results[0].is_success is False
+    assert results[0].detail == "timed out after 60s"
 
 
 def test_on_batch_item_poll_future_done_batch_names() -> None:
@@ -1554,7 +1614,7 @@ def test_on_batch_item_poll_future_done_batch_names() -> None:
     proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     future = _make_done_future(proc)
     mock_loop = _make_mock_loop()
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
     assert AgentName("a") not in state.marks
     assert AgentName("b") not in state.marks
@@ -1675,9 +1735,9 @@ def test_execute_next_in_batch_skipped_item() -> None:
         cmd=CustomCommand(name="noop"),
         entry=None,
     )
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _execute_next_in_batch(state, [item], results, 0)
-    assert any("skipped" in r for r in results)
+    assert any("skipped" in r.detail for r in results)
     state.executor.shutdown(wait=False)
 
 
