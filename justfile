@@ -842,6 +842,15 @@ release *args:
 changelog-deploy:
     bash scripts/changelog_deploy.sh
 
+# Diffs against the real base branch, so it must run on a real checkout
+# (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
+# sandbox has no base ref and the check would pass vacuously. Bare `python`
+# (no `uv run`) because the gate is deliberately stdlib-only: no `uv sync`,
+# matching how the `check-changelog` CI job invokes it.
+# Check that this branch has a changelog entry per project it touches.
+check-changelog:
+    python -m scripts.check_changelog_entries
+
 # Opens a PR (which you can merge before re-running a blocked release) by
 # running the same agent the schedule runs nightly. Reads the provider +
 # plugin-disable args from scripts/changelog_schedule_utils.py; the trigger
