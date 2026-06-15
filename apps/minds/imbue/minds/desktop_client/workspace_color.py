@@ -1,9 +1,16 @@
 """Workspace color palette and pure helpers.
 
-The 12-color palette users can pick from (11 named entries from the Figma
-source at node 356:4113 plus literal ``#ffffff`` white), plus the WCAG
-luminance contrast picker and the lenient hex normalizer the picker UI
-needs.
+The 10-color palette users can pick from (the chromatic entries from the
+Figma source at node 356:4113), plus the WCAG luminance contrast picker
+and the lenient hex normalizer the picker UI needs.
+
+Pure black (``#000000``) and pure white (``#ffffff``) are intentionally
+*not* in the palette: non-workspace minds screens now paint themselves
+pure white (or pure black in dark mode) per the system theme, so a
+workspace whose accent was black or white would be indistinguishable
+from the neutral, workspace-less chrome. Users who really want one can
+still type it into the settings hex input; only the preset swatches and
+the auto-pick exclude them.
 
 This module sits below ``templates.py`` in the import graph -- it has
 no other minds imports -- so the ``BackendResolver`` (which is below
@@ -27,19 +34,16 @@ from typing import Final
 
 from imbue.imbue_common.pure import pure
 
-# Twelve user-pickable workspace colors. Eleven named entries come from
-# the Figma source (Minds Early IA Explorations, node 356:4113); the
-# twelfth ("white") is added so users have a neutral light option
-# distinct from the warm-cream Figma entries. Names are kebab-case and
-# are not surfaced visually in the UI today (the picker shows unlabeled
+# Ten user-pickable workspace colors, all from the Figma source (Minds
+# Early IA Explorations, node 356:4113). Names are kebab-case and are
+# not surfaced visually in the UI today (the picker shows unlabeled
 # swatches); they exist so code can refer to the default by name and as
 # the swatches' screen-reader labels (the ColorSwatch aria-label).
 #
 # Order matters: the picker renders swatches in this order and
 # ``pick_unused_create_color`` walks it to find the first free color.
-# The 10 chromatic entries come first so new workspaces get a real
-# color before falling back to the two achromatic neutrals
-# (``indifference`` = black, ``white``), which are grouped at the end.
+# ``confusion`` (the default) leads. The achromatic neutrals (pure black
+# and pure white) were removed deliberately -- see the module docstring.
 WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "confusion": "#0b292b",
     "courage": "#492222",
@@ -51,8 +55,6 @@ WORKSPACE_PALETTE: Final[Mapping[str, str]] = {
     "comfort": "#f5d6a0",
     "inspiration": "#e9ecd9",
     "clarity": "#fcefd4",
-    "indifference": "#000000",
-    "white": "#ffffff",
 }
 
 # Default workspace color: preselected on the create form when no other

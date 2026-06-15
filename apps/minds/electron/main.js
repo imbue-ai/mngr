@@ -148,21 +148,30 @@ function parseWorkspaceId(url) {
 
 // Wider than ``parseWorkspaceId`` -- also recognises the workspace-scoped
 // minds-backend routes (``/workspace/<id>/settings``, ``/workspace/<id>/
-// associate``, ``/sharing/<id>/<service>``, ...). Used ONLY to decide
-// which workspace's accent should tint the titlebar; deliberately not
-// fed into ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace``
-// because those drive workspace uniqueness, and we want the user to be
-// able to open ``/workspace/X/settings`` in one window while another
-// window holds the actual workspace X.
+// associate``, ``/sharing/<id>/<service>``, ``/destroying/<id>``,
+// ``/agents/<id>/recovery``). Used ONLY to decide which workspace's
+// accent should tint the titlebar; deliberately not fed into
+// ``bundle.currentWorkspaceId`` / ``findBundleForWorkspace`` because
+// those drive workspace uniqueness, and we want the user to be able to
+// open ``/workspace/X/settings`` in one window while another window
+// holds the actual workspace X.
+//
+// Returns null for every non-workspace minds screen (Home, Create,
+// accounts, inbox, auth, ...). That null is load-bearing: the
+// navigation handlers feed it straight into
+// ``updateBundleLastWorkspaceAgentId``, so leaving a workspace-scoped
+// screen clears the accent back to the neutral chrome rather than
+// stranding the previous workspace's color on a general screen.
 function parseAccentSourceAgentId(url) {
   if (!url) return null;
   try {
     const parsed = new URL(url);
     const hostMatch = parsed.hostname.match(/^(agent-[a-f0-9]+)\.localhost$/i);
     if (hostMatch) return hostMatch[1];
-    const pathMatch = parsed.pathname.match(
-      /^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i,
-    );
+    const pathMatch =
+      parsed.pathname.match(/^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      parsed.pathname.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      parsed.pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
     return pathMatch ? pathMatch[1] : null;
   } catch {
     return null;
@@ -636,10 +645,13 @@ function wireContentViewEvents(bundle, contentView) {
     // conceptually still "I'm working on workspace <id>", so the bar
     // should adopt that accent. Distinct from the narrower
     // ``parseWorkspaceId`` above which drives workspace uniqueness.
-    const accentAgentId = parseAccentSourceAgentId(url);
-    if (accentAgentId) {
-      updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
-    }
+    //
+    // A null result (any non-workspace minds screen -- Home, Create,
+    // accounts, ...) clears the accent back to the neutral chrome. We
+    // intentionally pass it through unconditionally rather than gating
+    // on truthiness: the accent should track the *current* screen, not
+    // persist the last workspace opened in this window.
+    updateBundleLastWorkspaceAgentId(bundle, parseAccentSourceAgentId(url));
     updateOsTitle(bundle);
     if (bundle.chromeView && !bundle.chromeView.webContents.isDestroyed()) {
       bundle.chromeView.webContents.send('content-url-changed', url);
@@ -1036,11 +1048,11 @@ function loadUrlIntoBundleContentView(bundle, url) {
   // Pre-stamp the accent source the same way, but on the wider
   // ``parseAccentSourceAgentId`` set -- workspace-scoped settings /
   // sharing routes paint the bar before their first did-navigate lands
-  // (so the user doesn't see a black flash before the accent applies).
-  const accentAgentId = parseAccentSourceAgentId(url);
-  if (accentAgentId) {
-    updateBundleLastWorkspaceAgentId(bundle, accentAgentId);
-  }
+  // (so the user doesn't see a neutral flash before the accent applies).
+  // A null result (a blank Home window, say) clears the accent to the
+  // neutral chrome; passed through unconditionally, matching
+  // ``onContentNavigate``.
+  updateBundleLastWorkspaceAgentId(bundle, parseAccentSourceAgentId(url));
   if (bundle.contentView && !bundle.contentView.webContents.isDestroyed() && url) {
     bundle.contentView.webContents.loadURL(url);
   }

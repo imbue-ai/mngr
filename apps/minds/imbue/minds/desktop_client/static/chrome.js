@@ -9,6 +9,23 @@
   // Workspace links (``/goto/<agent>/``) target the plugin, not minds.
   var mngrForwardOrigin = (document.body && document.body.dataset.mngrForwardOrigin) || '';
 
+  // Which workspace's accent (if any) a same-origin minds content path
+  // belongs to. Recognises the workspace-scoped backend routes
+  // (settings / sharing / destroying / recovery) plus ``/goto/<id>/``,
+  // and returns null for every general screen so the bar paints the
+  // neutral chrome there. Browser-mode mirror of
+  // ``parseAccentSourceAgentId`` in electron/main.js (path-only -- the
+  // poll reads ``location.pathname``; cross-origin workspace subdomains
+  // throw before this is reached, which the poll's try/catch swallows).
+  function accentSourceFromPath(pathname) {
+    if (!pathname) return null;
+    var m =
+      pathname.match(/^\/(?:goto|workspace|sharing)\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      pathname.match(/^\/destroying\/(agent-[a-f0-9]+)(?:\/|$)/i) ||
+      pathname.match(/^\/agents\/(agent-[a-f0-9]+)\/recovery(?:\/|$)/i);
+    return m ? m[1] : null;
+  }
+
   // -- Per-agent accent color ------------------------------------------------
   //
   // Each SSE ``workspaces`` payload carries a per-workspace ``accent``
@@ -108,9 +125,12 @@
   //   --titlebar-fg       an RGB triple ("0 0 0" | "255 255 255") for the
   //                       contrasting foreground; titlebar-* utility classes
   //                       compose this with per-element alpha for hierarchy
-  // Cleared back to defaults (dark bar, white foreground) when there's no
-  // active workspace, so a sign-out / workspace-delete / freshly-launched
-  // app renders the default zinc-900 chrome.
+  // Cleared back to the neutral chrome (pure-white bar via the Chrome.jinja
+  // fallback, dark "0 0 0" foreground via the tokens.css fallback) on any
+  // non-workspace minds screen -- so a sign-out / workspace-delete /
+  // freshly-launched app, and plain navigation to Home / Create / accounts,
+  // all render the neutral white chrome. (Light-mode default; dark-mode
+  // pure black is a deferred follow-up.)
   //
   // ``currentTitleAgentId`` tracks the workspace ACTUALLY DISPLAYED in this
   // window's content view -- it gates ``maybeRedirectToRecovery`` so a stuck
@@ -356,7 +376,13 @@
         // handleChromeEvent -> renderWorkspaces.
         var workspaceChanged = currentTitleAgentId !== derivedAgentId;
         setDisplayedWorkspaceAgentId(derivedAgentId);
-        applyTitleAccent(derivedAgentId);
+        // The titlebar accent tracks a WIDER set than the displayed
+        // workspace: the workspace-scoped minds screens (settings,
+        // sharing, ...) keep the workspace's color even though they're
+        // not the workspace itself, while every general screen (Home,
+        // Create, accounts, ...) resolves to null and paints the neutral
+        // chrome. Mirrors ``parseAccentSourceAgentId`` in electron/main.js.
+        applyTitleAccent(accentSourceFromPath(loc));
         if (workspaceChanged) renderWorkspaces(lastWorkspaces);
       } catch (e) {}
     }, 500);
