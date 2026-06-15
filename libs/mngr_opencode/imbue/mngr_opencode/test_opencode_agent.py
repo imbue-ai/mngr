@@ -87,8 +87,6 @@ class _OpenCodeReleaseProfile(AgentReleaseProfile):
 
 @pytest.mark.release
 @pytest.mark.tmux
-# The arc's destroy step preserves transcripts to the local preserved/ dir, which rsyncs
-# the transcript directories off the (local) host (the resource guard requires this marker).
 @pytest.mark.rsync
 @pytest.mark.timeout(1500)
 def test_opencode_agent_full_lifecycle(tmp_path: Path) -> None:

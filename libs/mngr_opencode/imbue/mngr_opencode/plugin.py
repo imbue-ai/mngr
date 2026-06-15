@@ -210,12 +210,8 @@ class OpenCodeAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description="Preserve this agent's transcripts locally before its state directory is "
-        "deleted on destroy. When enabled, the raw and common transcripts, the root session-id "
-        "history, and opencode's native session store (opencode.db + storage) are copied to "
-        "<local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the agent's state-directory "
-        "layout, so the session can be resumed/adopted. For remote agents, files are pulled to the "
-        "local machine so they survive host destruction. Set to False to discard transcript data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
