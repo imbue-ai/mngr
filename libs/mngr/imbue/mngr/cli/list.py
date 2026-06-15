@@ -7,6 +7,7 @@ from enum import Enum
 from threading import Lock
 from typing import Any
 from typing import Final
+from typing import assert_never
 
 import click
 from click_option_group import optgroup
@@ -23,6 +24,11 @@ from imbue.mngr.api.list import build_agent_cel_context
 from imbue.mngr.api.list import list_agents as api_list_agents
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.completion_install import write_managed_completion_scripts
+from imbue.mngr.cli.field_catalog import FieldContext
+from imbue.mngr.cli.field_catalog import build_list_field_catalog
+from imbue.mngr.cli.field_catalog import catalog_rows_as_dicts
+from imbue.mngr.cli.field_catalog import render_catalog_help_markdown
 from imbue.mngr.cli.filter_opts import AgentFilterCliOptions
 from imbue.mngr.cli.filter_opts import add_agent_filter_options
 from imbue.mngr.cli.filter_opts import build_agent_filter_cel
@@ -30,9 +36,11 @@ from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
 from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.output_helpers import AbortError
+from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.config.agent_alias_registry import list_agent_aliases
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -119,6 +127,7 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
 
     provider: tuple[str, ...]
     stdin: bool
+    schema_view: bool
     fields: str | None
     header: tuple[str, ...]
     sort: str
@@ -156,6 +165,14 @@ class ListCliOptions(AgentFilterCliOptions, CommonCliOptions):
     help="Print only agent addresses (name@host.provider), one per line",
 )
 @optgroup.option(
+    "--schema",
+    "schema_view",
+    is_flag=True,
+    default=False,
+    help="List the fields referenceable in --include/--exclude, --sort, and --fields/--format "
+    "(with their types and the contexts they work in), instead of listing agents.",
+)
+@optgroup.option(
     "--fields",
     help="Which fields to include (comma-separated)",
 )
@@ -191,6 +208,16 @@ def list_command(ctx: click.Context, **kwargs) -> None:
         ctx.exit(1)
 
 
+def _refresh_completion_artifacts(**kwargs: Any) -> None:
+    """Refresh the tab-completion cache and the managed completion script files.
+
+    Run in the background from ``list`` so an upgraded mngr keeps the installed
+    completion (which the rc shim sources) current without any manual steps.
+    """
+    write_cli_completions_cache(**kwargs)
+    write_managed_completion_scripts()
+
+
 def _list_impl(ctx: click.Context, **kwargs) -> None:
     """Implementation of list command (extracted for exception handling)."""
     mngr_ctx, output_opts, opts = setup_command_context(
@@ -200,16 +227,25 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         is_format_template_supported=True,
     )
 
+    # --schema dumps the static field catalog and ignores every agent-selection
+    # option, so reject those combinations rather than silently dropping them.
+    if opts.schema_view:
+        _reject_schema_conflicts(opts)
+        _emit_field_schema(output_opts)
+        return
+
     # Write the tab completion cache in the background so it doesn't block
     # the list output. The cache includes both static CLI structure and
     # dynamic values from the runtime context (agent types, templates, etc.).
     if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
         cli_group = ctx.parent.command
-        registered_agent_types = list_registered_agent_types()
+        # Include alias names so they are tab-completable for --type, even
+        # though they are not distinct agent types.
+        registered_agent_types = sorted(set(list_registered_agent_types()) | set(list_agent_aliases().keys()))
         topic_names = sorted(get_all_topics().keys())
         installed_plugin_packages = get_installed_plugin_package_names()
         mngr_ctx.concurrency_group.start_new_thread(
-            target=write_cli_completions_cache,
+            target=_refresh_completion_artifacts,
             kwargs={
                 "cli_group": cli_group,
                 "mngr_ctx": mngr_ctx,
@@ -921,6 +957,61 @@ def _sort_agents_by_cel(
     return [agent for agent, _ in paired]
 
 
+def _reject_schema_conflicts(opts: ListCliOptions) -> None:
+    """Raise a UsageError if --schema is combined with any agent-selection option.
+
+    The field catalog is static and independent of which agents exist, so any
+    filter, fan-out, or per-agent output-shaping option is meaningless alongside
+    it. Reject loudly so the user picks one rather than silently ignoring input.
+    """
+    conflicting = {
+        "--include": bool(opts.include),
+        "--exclude": bool(opts.exclude),
+        "--running": opts.running,
+        "--stopped": opts.stopped,
+        "--archived": opts.archived,
+        "--active": opts.active,
+        "--local": opts.local,
+        "--remote": opts.remote,
+        "--project": bool(opts.project),
+        "--label": bool(opts.label),
+        "--host-label": bool(opts.host_label),
+        "--provider": bool(opts.provider),
+        "--stdin": opts.stdin,
+        "--fields": opts.fields is not None,
+        "--header": bool(opts.header),
+        "--limit": opts.limit is not None,
+        "--ids": opts.ids,
+        "--addrs": opts.addrs,
+    }
+    used = [flag for flag, is_set in conflicting.items() if is_set]
+    if used:
+        raise click.UsageError(f"--schema lists fields and cannot be combined with: {', '.join(used)}")
+
+
+def _emit_field_schema(output_opts: OutputOptions) -> None:
+    """Emit the list field catalog in the requested output format."""
+    rows = catalog_rows_as_dicts()
+    if output_opts.format_template is not None:
+        emit_format_template_lines(output_opts.format_template, rows)
+        return
+    match output_opts.output_format:
+        case OutputFormat.JSON:
+            write_json_line({"schema": rows})
+        case OutputFormat.JSONL:
+            write_json_line({"event": "list_schema", "schema": rows})
+        case OutputFormat.HUMAN:
+            write_human_line(
+                "All fields are usable in --include/--exclude and --sort; "
+                "(cel only) marks fields not usable in --fields/--format:"
+            )
+            for row in build_list_field_catalog():
+                marker = "" if FieldContext.TEMPLATE in row.contexts else " (cel only)"
+                write_human_line("  {} : {}{} - {}", row.key, row.type, marker, row.description)
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _get_field_value(agent: AgentDetails, field: str) -> str:
     """Extract a field value from an AgentDetails object and return as string.
 
@@ -1053,73 +1144,7 @@ All agent fields from the "Available Fields" section can be used in filter expre
         ),
         (
             "Available Fields",
-            """The fields below use the same names across the three places they can appear:
-- CEL expressions for `--include`/`--exclude` (filtering)
-- CEL expressions for `--sort` (ordering)
-- `--fields` and `--format` template strings (selecting and formatting displayed data)
-
-Each subsection notes where its fields are available; agent and host fields work in all three contexts, while computed fields are only available in the CEL contexts.
-
-**Agent fields:**
-- `name` - Agent name
-- `id` - Agent ID
-- `type` - Agent type (claude, codex, etc.)
-- `command` - The command used to start the agent
-- `url` - URL where the agent can be accessed (if reported)
-- `work_dir` - Working directory for this agent
-- `initial_branch` - Git branch name created for this agent
-- `create_time` - Creation timestamp
-- `start_time` - Timestamp for when the agent was last started
-- `runtime_seconds` - How long the agent has been running
-- `user_activity_time` - Timestamp of the last user activity
-- `agent_activity_time` - Timestamp of the last agent activity
-- `idle_seconds` - How long since the agent was active
-- `idle_mode` - Idle detection mode
-- `idle_timeout_seconds` - Idle timeout before host stops
-- `activity_sources` - Activity sources used for idle detection
-- `start_on_boot` - Whether the agent is set to start on host boot
-- `state` - Agent lifecycle state (RUNNING, STOPPED, WAITING, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, DONE, UNKNOWN)
-- `labels` - Agent labels (key-value pairs, e.g., project=mngr)
-- `labels.$KEY` - Specific label value (e.g., `labels.project`)
-- `plugin.$PLUGIN_NAME.*` - Plugin-defined fields (e.g., `plugin.chat_history.messages`)
-
-**Computed fields** (derived from other fields, available in CEL filters and `--sort`):
-- `age` - Seconds since `create_time`
-- `runtime` - Alias for `runtime_seconds`
-- `idle` - Seconds since the most recent activity across `user_activity_time`, `agent_activity_time`, and `host.ssh_activity_time` (only present when at least one is set)
-
-**Host fields** (dot notation):
-- `host.name` - Host name
-- `host.id` - Host ID
-- `host.provider` - Host provider (local, docker, modal, etc.); also accessible as `host.provider_name`
-- `host.state` - Current host state (RUNNING, STOPPED, BUILDING, etc.)
-- `host.image` - Host image (Docker image name, Modal image ID, etc.)
-- `host.tags` - Host labels (metadata key-value pairs)
-- `host.ssh_activity_time` - Timestamp of the last SSH connection to the host
-- `host.boot_time` - When the host was last started
-- `host.uptime_seconds` - How long the host has been running
-- `host.resource` - Resource limits for the host
-  - `host.resource.cpu.count` - Number of CPUs
-  - `host.resource.cpu.frequency_ghz` - CPU frequency in GHz
-  - `host.resource.memory_gb` - Memory in GB
-  - `host.resource.disk_gb` - Disk space in GB
-  - `host.resource.gpu.count` - Number of GPUs
-  - `host.resource.gpu.model` - GPU model name
-  - `host.resource.gpu.memory_gb` - GPU memory in GB
-- `host.ssh` - SSH access details (remote hosts only)
-  - `host.ssh.command` - Full SSH command to connect
-  - `host.ssh.host` - SSH hostname
-  - `host.ssh.port` - SSH port
-  - `host.ssh.user` - SSH username
-  - `host.ssh.key_path` - Path to SSH private key
-- `host.snapshots` - List of available snapshots
-- `host.is_locked` - Whether the host is currently locked for an operation
-- `host.locked_time` - When the host was locked
-- `host.plugin.$PLUGIN_NAME.*` - Host plugin fields (e.g., `host.plugin.aws.iam_user`)
-
-**Notes:**
-- You can use Python-style list slicing for list fields (e.g., `host.snapshots[0]` for the first snapshot, `host.snapshots[:3]` for the first 3)
-""",
+            render_catalog_help_markdown(),
         ),
     ),
     see_also=(

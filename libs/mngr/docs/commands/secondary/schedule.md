@@ -45,6 +45,7 @@ mngr schedule add [OPTIONS] [POSITIONAL_NAME]
 | `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
+| `--timezone` | text | IANA timezone name (e.g. 'America/Los_Angeles') in which to interpret the --schedule cron expression. Defaults to the deploy machine's local timezone, so pin this explicitly to keep the fire time independent of where the deploy ran. Only supported for the modal provider. | None |
 
 ## Code Packaging
 
@@ -217,6 +218,7 @@ mngr schedule update [OPTIONS] [POSITIONAL_NAME]
 | `--command` | choice (`create` &#x7C; `start` &#x7C; `message` &#x7C; `exec`) | Which mngr command to run when triggered. | None |
 | `--args` | text | Arguments to pass to the mngr command (as a string). | None |
 | `--schedule` | text | Cron schedule expression defining when the command runs (e.g. '0 2 * * *'). | None |
+| `--timezone` | text | IANA timezone name (e.g. 'America/Los_Angeles') in which to interpret the --schedule cron expression. Defaults to the deploy machine's local timezone, so pin this explicitly to keep the fire time independent of where the deploy ran. Only supported for the modal provider. | None |
 
 ## Code Packaging
 

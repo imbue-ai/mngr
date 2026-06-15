@@ -1,1 +1,0 @@
-Fixed the e2e tutorial test fixture that generated an invalid `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`, which made every e2e tutorial test fail to create agents. Also added a 120s timeout to `test_exec_git_push_then_merge`, which exercises a slow `mngr exec`, so it no longer trips the default 10s pytest timeout.

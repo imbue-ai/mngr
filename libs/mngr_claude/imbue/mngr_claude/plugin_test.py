@@ -32,8 +32,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -59,6 +59,7 @@ from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -66,6 +67,7 @@ from imbue.mngr_claude.claude_config import ClaudeEffortCalloutNotDismissedError
 from imbue.mngr_claude.claude_config import build_credential_sync_hooks_config
 from imbue.mngr_claude.claude_config import build_readiness_hooks_config
 from imbue.mngr_claude.claude_config import encode_claude_project_dir_name
+from imbue.mngr_claude.plugin import CLAUDE_INSTALL_PATH
 from imbue.mngr_claude.plugin import ClaudeAgent
 from imbue.mngr_claude.plugin import ClaudeAgentConfig
 from imbue.mngr_claude.plugin import CostThresholdDialogIndicator
@@ -76,6 +78,7 @@ from imbue.mngr_claude.plugin import _build_settings_json
 from imbue.mngr_claude.plugin import _check_settings_local_gitignored
 from imbue.mngr_claude.plugin import _claude_json_has_primary_api_key
 from imbue.mngr_claude.plugin import _claude_preserved_items
+from imbue.mngr_claude.plugin import _compute_keychain_label_suffix
 from imbue.mngr_claude.plugin import _generate_installed_plugins_content
 from imbue.mngr_claude.plugin import _generate_known_marketplaces_content
 from imbue.mngr_claude.plugin import _get_claude_version
@@ -87,6 +90,7 @@ from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import _rewrite_known_marketplaces_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
+from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
@@ -332,6 +336,58 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
 # =============================================================================
 
 
+class _ParsedAssembleCommand:
+    """Structural view of an assembled claude command, parsed via shlex.
+
+    The assembled command has the shape::
+
+        <bg> <exports> && rm -rf .../session_started
+            && ( ( find ... | grep . ) && <base> --resume "$SID" <args> )
+            || <base> --session-id <uuid> <args>
+
+    shlex.split tokenizes shell operators (``&&``, ``||``) as their own tokens,
+    so we split on the single top-level ``||`` to separate the resume branch from
+    the create branch, then read the base command and trailing args from each.
+    This lets the assemble-command tests assert on meaningful tokens (which base
+    command, the resume/session-id flags, the trailing args) without pinning the
+    exact whitespace or ``&&`` chain layout.
+    """
+
+    def __init__(self, command: str) -> None:
+        self.tokens = shlex.split(command)
+        # The resume/create split is the LAST top-level `||`. (An earlier `||`
+        # appears inside the SID export's `... 2>/dev/null || true` fallback, so
+        # splitting on the first `||` would be wrong.)
+        split_idx = len(self.tokens) - 1 - self.tokens[::-1].index("||")
+        resume_tokens = self.tokens[:split_idx]
+        create_tokens = self.tokens[split_idx + 1 :]
+
+        # Resume branch: <base> --resume $MAIN_CLAUDE_SESSION_ID <args...>.
+        # The resume command is wrapped in a `( ... )` subshell, so a trailing
+        # `)` group token follows the args; drop it before reading the args.
+        resume_idx = resume_tokens.index("--resume")
+        self.resume_base = resume_tokens[resume_idx - 1]
+        assert resume_tokens[resume_idx + 1] == "$MAIN_CLAUDE_SESSION_ID"
+        resume_arg_tokens = resume_tokens[resume_idx + 2 :]
+        if resume_arg_tokens and resume_arg_tokens[-1] == ")":
+            resume_arg_tokens = resume_arg_tokens[:-1]
+        self.resume_args = resume_arg_tokens
+
+        # Create branch: <base> --session-id <uuid> <args...>
+        session_idx = create_tokens.index("--session-id")
+        self.create_base = create_tokens[session_idx - 1]
+        self.create_session_id = create_tokens[session_idx + 1]
+        self.create_args = create_tokens[session_idx + 2 :]
+
+    @property
+    def has_is_sandbox(self) -> bool:
+        return "IS_SANDBOX=1" in self.tokens
+
+    @property
+    def has_background_script(self) -> bool:
+        return any("claude_background_tasks.sh" in token for token in self.tokens)
+
+
 def test_claude_agent_assemble_command_with_no_args(
     local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -341,14 +397,15 @@ def test_claude_agent_assemble_command_with_no_args(
     command = agent.assemble_command(host=host, agent_args=(), command_override=None)
 
     uuid = agent.id.get_uuid()
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
-    sid_export = _sid_export_for(uuid)
+    parsed = _ParsedAssembleCommand(str(command))
+    assert parsed.has_background_script
+    assert parsed.resume_base == "claude"
+    assert parsed.resume_args == []
+    assert parsed.create_base == "claude"
+    assert parsed.create_session_id == str(uuid)
+    assert parsed.create_args == []
     # Local hosts should NOT have IS_SANDBOX set
-    assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" ) || claude --session-id {uuid}'
-    )
+    assert not parsed.has_is_sandbox
 
 
 def test_claude_agent_assemble_command_with_agent_args(
@@ -360,13 +417,13 @@ def test_claude_agent_assemble_command_with_agent_args(
     command = agent.assemble_command(host=host, agent_args=("--model", "opus"), command_override=None)
 
     uuid = agent.id.get_uuid()
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
-    sid_export = _sid_export_for(uuid)
-    assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || claude --session-id {uuid} --model opus'
-    )
+    parsed = _ParsedAssembleCommand(str(command))
+    # agent_args appended to both variants, in order.
+    assert parsed.resume_base == "claude"
+    assert parsed.resume_args == ["--model", "opus"]
+    assert parsed.create_base == "claude"
+    assert parsed.create_session_id == str(uuid)
+    assert parsed.create_args == ["--model", "opus"]
 
 
 def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
@@ -383,13 +440,11 @@ def test_claude_agent_assemble_command_with_cli_args_and_agent_args(
     command = agent.assemble_command(host=host, agent_args=("--model", "opus"), command_override=None)
 
     uuid = agent.id.get_uuid()
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
-    sid_export = _sid_export_for(uuid)
-    assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && claude --resume "$MAIN_CLAUDE_SESSION_ID" --verbose --model opus ) || claude --session-id {uuid} --verbose --model opus'
-    )
+    parsed = _ParsedAssembleCommand(str(command))
+    # cli_args precede agent_args in both variants.
+    assert parsed.resume_args == ["--verbose", "--model", "opus"]
+    assert parsed.create_session_id == str(uuid)
+    assert parsed.create_args == ["--verbose", "--model", "opus"]
 
 
 def test_claude_agent_assemble_command_with_command_override(
@@ -405,13 +460,13 @@ def test_claude_agent_assemble_command_with_command_override(
     )
 
     uuid = agent.id.get_uuid()
-    prefix = temp_mngr_ctx.config.prefix
-    session_name = f"{prefix}test-agent"
-    background_cmd = agent._build_background_tasks_command(session_name)
-    sid_export = _sid_export_for(uuid)
-    assert command == CommandString(
-        f'{background_cmd} {sid_export} && rm -rf $MNGR_AGENT_STATE_DIR/session_started && ( ( find "$CLAUDE_CONFIG_DIR" -name "$MAIN_CLAUDE_SESSION_ID.jsonl" | grep . ) && custom-claude --resume "$MAIN_CLAUDE_SESSION_ID" --model opus ) || custom-claude --session-id {uuid} --model opus'
-    )
+    parsed = _ParsedAssembleCommand(str(command))
+    # The override replaces the base command in both variants.
+    assert parsed.resume_base == "custom-claude"
+    assert parsed.resume_args == ["--model", "opus"]
+    assert parsed.create_base == "custom-claude"
+    assert parsed.create_session_id == str(uuid)
+    assert parsed.create_args == ["--model", "opus"]
 
 
 def test_claude_agent_assemble_command_raises_when_no_command(
@@ -594,8 +649,17 @@ def test_on_before_provisioning_skips_check_when_disabled(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    # Should not raise and should complete without error
+    # on_before_provisioning is a read-only preflight: it must not mutate the
+    # user's ~/.claude.json. Snapshot the config and assert it is byte-for-byte
+    # unchanged after the call (this is the strongest cleanly-observable effect
+    # for the disabled-check path; with check_installation=False the function
+    # returns before any install/version probe, leaving config untouched).
+    config_path = Path.home() / ".claude.json"
+    config_before = config_path.read_text()
+
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert config_path.read_text() == config_before
 
 
 def test_get_provision_file_transfers_returns_empty_when_no_local_settings(
@@ -1656,12 +1720,13 @@ def test_provision_does_not_extend_trust_for_non_worktree(
 
     # Trust was written by _write_all_dialogs_dismissed, but the provision could
     # not extend trust from a source directory because _find_git_source_path
-    # returns None (work_dir is not a git worktree).
-    # The global config should only contain what _write_all_dialogs_dismissed wrote.
+    # returns None (work_dir is not a git worktree). Assert the negative: the
+    # global config's projects must contain ONLY the pre-existing work_dir entry,
+    # so a regression that erroneously extended trust (adding the source path or
+    # other entries) would fail here.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
-    # Only the work_dir trust entry from _write_all_dialogs_dismissed should exist
-    assert str(agent.work_dir.resolve()) in config["projects"]
+    assert set(config["projects"].keys()) == {str(agent.work_dir.resolve())}
 
 
 def test_provision_does_not_extend_trust_when_no_git_options(
@@ -1676,11 +1741,12 @@ def test_provision_does_not_extend_trust_when_no_git_options(
 
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # Trust should NOT have been extended since no git options provided.
-    # The global config should only contain what _write_all_dialogs_dismissed wrote.
+    # Trust should NOT have been extended since no git options were provided.
+    # The projects map must contain ONLY the pre-existing work_dir entry; an extra
+    # key would mean provision wrongly extended trust.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
-    assert str(agent.work_dir.resolve()) in config["projects"]
+    assert set(config["projects"].keys()) == {str(agent.work_dir.resolve())}
 
 
 def test_provision_skips_trust_when_git_common_dir_is_none(
@@ -1695,10 +1761,10 @@ def test_provision_skips_trust_when_git_common_dir_is_none(
     agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
 
     # Trust should NOT have been extended from a source since there's no git common dir.
-    # The global config should only contain what _write_all_dialogs_dismissed wrote.
+    # The projects map must contain ONLY the pre-existing work_dir entry.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
-    assert str(agent.work_dir.resolve()) in config["projects"]
+    assert set(config["projects"].keys()) == {str(agent.work_dir.resolve())}
 
 
 def test_provision_trusts_working_directory_when_enabled(
@@ -1730,11 +1796,12 @@ def test_provision_does_not_auto_dismiss_dialogs_when_disabled(
 
     agent.provision(host=host, options=options, mngr_ctx=temp_mngr_ctx)
 
-    # The global config should only contain what _write_all_dialogs_dismissed wrote.
     # auto_dismiss_dialogs=False (default) means no additional trust was added.
+    # The projects map must contain ONLY the pre-existing work_dir entry; an extra
+    # key would mean a dialog/trust entry was auto-dismissed despite the flag.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
-    assert str(agent.work_dir.resolve()) in config["projects"]
+    assert set(config["projects"].keys()) == {str(agent.work_dir.resolve())}
 
 
 def test_auto_dismiss_dialogs_defaults_to_false() -> None:
@@ -1757,8 +1824,38 @@ def test_on_before_provisioning_validates_trust_for_worktree(
         is_source_trusted=True,
     )
 
-    # Should succeed without error because the source directory is trusted
+    # Should succeed without error because the source directory is trusted.
+    # The trust entry must survive (and remain the work_dir's source trust) --
+    # a non-interactive preflight that does not see trust would raise below.
     agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
+    config = json.loads((Path.home() / ".claude.json").read_text())
+    assert config["projects"][str(source_path.resolve())]["hasTrustDialogAccepted"] is True
+
+
+def test_on_before_provisioning_rejects_untrusted_worktree(
+    local_provider: LocalProviderInstance,
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    setup_git_config: None,
+) -> None:
+    """on_before_provisioning must reject an untrusted worktree in non-interactive mode.
+
+    Sibling to test_on_before_provisioning_validates_trust_for_worktree: the
+    trusted case proves the happy path doesn't raise, and this case proves the
+    gate actually fires (raising ClaudeDirectoryNotTrustedError) when the source
+    directory has no trust entry.
+    """
+    source_path, worktree_path, agent, host = _setup_worktree_agent(
+        local_provider,
+        tmp_path,
+        temp_mngr_ctx,
+        is_source_trusted=False,
+    )
+
+    with pytest.raises(ClaudeDirectoryNotTrustedError) as exc_info:
+        agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
+    # The error must name the specific untrusted source directory (not the worktree).
+    assert str(source_path.resolve()) in str(exc_info.value)
 
 
 def test_on_before_provisioning_skips_dialog_check_when_interactive(
@@ -1774,8 +1871,17 @@ def test_on_before_provisioning_skips_dialog_check_when_interactive(
         interactive_mngr_ctx,
     )
 
-    # Should NOT raise even though dialogs are not dismissed -- interactive defers to provision()
+    # No ~/.claude.json was written, so the source is NOT trusted and no dialogs
+    # are dismissed. A non-interactive preflight would raise here; the interactive
+    # path defers to provision() and must NOT raise.
+    config_path = Path.home() / ".claude.json"
+    assert not config_path.exists()
+
     agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
+
+    # The read-only preflight must not have written/dismissed anything in the
+    # interactive path (provision() owns that). The user's config stays absent.
+    assert not config_path.exists()
 
 
 def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
@@ -1786,8 +1892,15 @@ def test_on_before_provisioning_skips_trust_check_when_git_common_dir_is_none(
     agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
     _write_all_dialogs_dismissed(agent.work_dir)
 
-    # Should succeed without error because find_git_common_dir returns None
+    # find_git_common_dir returns None, so the trust check falls back to work_dir,
+    # which _write_all_dialogs_dismissed already trusts -- so the preflight passes.
+    # It is read-only, so the config must be byte-for-byte unchanged afterward.
+    config_path = Path.home() / ".claude.json"
+    config_before = config_path.read_text()
+
     agent.on_before_provisioning(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=temp_mngr_ctx)
+
+    assert config_path.read_text() == config_before
 
 
 def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
@@ -1804,12 +1917,18 @@ def test_on_before_provisioning_shared_mode_succeeds_without_dialog_checks(
         temp_mngr_ctx,
         agent_config=ClaudeAgentConfig(check_installation=False, use_env_config_dir=True),
     )
-    # Deliberately leave ~/.claude.json with no dialogs dismissed -- a non-shared
-    # agent would fail here.
+    # Deliberately leave ~/.claude.json absent (no dialogs dismissed, no trust) --
+    # a non-shared agent would raise during the dialog-dismissal check here.
+    config_path = Path.home() / ".claude.json"
+    assert not config_path.exists()
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    # Shared mode skips the dialog check entirely and writes nothing to the user's
+    # config, so the file must still be absent.
+    assert not config_path.exists()
 
 
 def test_on_before_provisioning_shared_mode_raises_for_remote_host(
@@ -1855,8 +1974,14 @@ def test_on_before_provisioning_shared_mode_passes_when_env_unset(
 
     options = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
-    # Should not raise.
+    # Shared mode does not touch the user's config; with no ~/.claude.json present
+    # it must neither raise nor create one (the "don't touch the config" path).
+    config_path = Path.home() / ".claude.json"
+    assert not config_path.exists()
+
     agent.on_before_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert not config_path.exists()
 
 
 def test_on_destroy_removes_trust(
@@ -2059,10 +2184,14 @@ def test_on_destroy_still_calls_keychain_cleanup_in_default_mode(
     ):
         agent.on_destroy(host)
 
-    # Two labels: API key and OAuth credentials.
-    assert len(delete_calls) == 2
-    assert any(label.startswith("Claude Code-") for label in delete_calls)
-    assert any(label.startswith("Claude Code-credentials-") for label in delete_calls)
+    # User-visible effect: both per-agent credential kinds (API key and OAuth
+    # credentials) are targeted for deletion under the suffix Claude Code derives
+    # from the per-agent config dir. We assert the exact target labels (rather
+    # than a raw call count) because they form the OS-keychain contract that must
+    # match what Claude Code itself wrote -- a wrong suffix or kind would leave a
+    # stale credential behind.
+    suffix = _compute_keychain_label_suffix(agent.get_claude_config_dir())
+    assert set(delete_calls) == {f"Claude Code{suffix}", f"Claude Code-credentials{suffix}"}
 
 
 @pytest.mark.rsync
@@ -2156,17 +2285,16 @@ def test_provision_prompts_for_all_dialogs_when_interactive(
         interactive_mngr_ctx,
     )
 
-    with _mock_all_dialog_prompts() as mocks:
+    with _mock_all_dialog_prompts():
         agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
 
-    mocks["trust"].assert_called_once_with(source_path)
-    mocks["effort"].assert_called_once()
-    mocks["onboarding"].assert_called_once()
-
-    # Verify dialogs were resolved in the global config (user intent)
+    # Verify dialogs were resolved in the global config (user intent). We assert
+    # on the on-disk end state rather than the internal prompt-call counts so a
+    # behavior-preserving refactor (e.g. consolidating the three prompts) doesn't
+    # break the test; the declined-prompt cases are covered separately.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
-    assert str(source_path.resolve()) in config["projects"]
+    assert config["projects"][str(source_path.resolve())]["hasTrustDialogAccepted"] is True
     assert config["effortCalloutDismissed"] is True
     assert config["hasCompletedOnboarding"] is True
 
@@ -2470,13 +2598,22 @@ def test_has_api_credentials_returns_false_primary_api_key_remote_no_sync(
     )
 
 
+_NO_CREDENTIALS_WARNING_SUBSTRING = "No API credentials detected for Claude Code"
+
+
 @pytest.mark.usefixtures("_no_api_key_in_env")
 def test_on_before_provisioning_does_not_raise_when_no_credentials(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """on_before_provisioning should not raise when no API credentials are detected."""
+    """on_before_provisioning should warn (not raise) when no API credentials are detected.
+
+    The autouse env isolation redirects HOME to a temp dir (so no ~/.claude.json or
+    credentials file exists) and the _no_api_key_in_env fixture clears the env var, so
+    the real _has_api_credentials_available genuinely returns False here -- the same
+    setup the direct test_has_api_credentials_returns_false_when_no_credentials relies on.
+    """
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
@@ -2485,8 +2622,12 @@ def test_on_before_provisioning_does_not_raise_when_no_credentials(
     )
     _write_all_dialogs_dismissed(agent.work_dir)
 
-    # Should complete without raising (logs a warning instead)
-    agent.on_before_provisioning(host=host, options=_DEFAULT_CREDENTIAL_CHECK_OPTIONS, mngr_ctx=temp_mngr_ctx)
+    with capture_loguru() as log_output:
+        agent.on_before_provisioning(host=host, options=_DEFAULT_CREDENTIAL_CHECK_OPTIONS, mngr_ctx=temp_mngr_ctx)
+
+    # It must not raise, and it must emit the missing-credentials warning so the
+    # user is told the agent may fail to start.
+    assert _NO_CREDENTIALS_WARNING_SUBSTRING in log_output.getvalue()
 
 
 def test_on_before_provisioning_succeeds_with_credentials(
@@ -2495,7 +2636,7 @@ def test_on_before_provisioning_succeeds_with_credentials(
     temp_mngr_ctx: MngrContext,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """on_before_provisioning should succeed without warning when credentials are available."""
+    """on_before_provisioning should succeed WITHOUT the missing-credentials warning when creds exist."""
     agent, host = make_claude_agent(
         local_provider,
         tmp_path,
@@ -2506,7 +2647,12 @@ def test_on_before_provisioning_succeeds_with_credentials(
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
 
-    agent.on_before_provisioning(host=host, options=_DEFAULT_CREDENTIAL_CHECK_OPTIONS, mngr_ctx=temp_mngr_ctx)
+    with capture_loguru() as log_output:
+        agent.on_before_provisioning(host=host, options=_DEFAULT_CREDENTIAL_CHECK_OPTIONS, mngr_ctx=temp_mngr_ctx)
+
+    # With a real credential available, the missing-credentials warning must NOT
+    # be emitted (a flipped warn/no-warn branch would be caught here).
+    assert _NO_CREDENTIALS_WARNING_SUBSTRING not in log_output.getvalue()
 
 
 # =============================================================================
@@ -2631,16 +2777,15 @@ def test_provision_prompts_for_dialog_dismissal_when_interactive(
     # Write trust but without effortCalloutDismissed or hasCompletedOnboarding
     _write_claude_trust_without_dialog_dismissed(source_path)
 
-    with _mock_all_dialog_prompts() as mocks:
+    with _mock_all_dialog_prompts():
         agent.provision(host=host, options=_WORKTREE_OPTIONS, mngr_ctx=interactive_mngr_ctx)
 
-    # Trust was already set, so trust prompt should not fire
-    mocks["trust"].assert_not_called()
-    mocks["effort"].assert_called_once()
-    mocks["onboarding"].assert_called_once()
-
+    # Assert on the on-disk end state: the previously-undismissed dialogs are now
+    # dismissed, while the already-set trust entry is preserved. This captures the
+    # real effect without coupling to which/how-many prompt helpers were invoked.
     config_path = Path.home() / ".claude.json"
     config = json.loads(config_path.read_text())
+    assert config["projects"][str(source_path.resolve())]["hasTrustDialogAccepted"] is True
     assert config["effortCalloutDismissed"] is True
     assert config["hasCompletedOnboarding"] is True
 
@@ -3159,37 +3304,34 @@ def _make_command_tracking_host() -> tuple[OnlineHostInterface, list[str]]:
 
 def test_get_claude_version_returns_version_on_success() -> None:
     """_get_claude_version should return the version string when claude --version succeeds."""
-    host = cast(
-        OnlineHostInterface,
-        SimpleNamespace(
-            execute_idempotent_command=lambda cmd, *args, **kwargs: SimpleNamespace(
-                success=True,
-                stdout="2.1.50 (Claude Code)\n",
-                stderr="",
-            ),
-        ),
-    )
+    issued_commands: list[str] = []
+
+    def _execute(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
+        issued_commands.append(cmd)
+        return SimpleNamespace(success=True, stdout="2.1.50 (Claude Code)\n", stderr="")
+
+    host = cast(OnlineHostInterface, SimpleNamespace(execute_idempotent_command=_execute))
 
     assert _get_claude_version(host) == "2.1.50"
+    # The version must be probed via `claude --version`; a bug invoking a
+    # different command (e.g. `claude --ver`) would otherwise go undetected.
+    assert issued_commands == ["claude --version"]
 
 
 def test_get_claude_version_returns_none_on_failure() -> None:
     """_get_claude_version should return None when claude --version fails."""
-    host = cast(
-        OnlineHostInterface,
-        SimpleNamespace(
-            execute_idempotent_command=lambda cmd, *args, **kwargs: SimpleNamespace(
-                success=False,
-                stdout="",
-                stderr="command not found",
-            ),
-        ),
-    )
+    issued_commands: list[str] = []
+
+    def _execute(cmd: str, *args: object, **kwargs: object) -> SimpleNamespace:
+        issued_commands.append(cmd)
+        return SimpleNamespace(success=False, stdout="", stderr="command not found")
+
+    host = cast(OnlineHostInterface, SimpleNamespace(execute_idempotent_command=_execute))
 
     assert _get_claude_version(host) is None
+    assert issued_commands == ["claude --version"]
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_provision_raises_on_version_mismatch(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -3213,6 +3355,18 @@ def test_provision_raises_on_version_mismatch(
         )
 
         # Simulate a host where claude is installed but at a different version.
+        # FakeHost executes commands as real subprocesses, so it cannot return a
+        # canned `claude --version`; we keep a SimpleNamespace for the controlled
+        # version output but give write_file a real implementation that writes to
+        # disk. This lets the background-script provisioning threads (which call
+        # host.write_file) complete cleanly instead of silently swallowing the
+        # write, which previously left a thread raising an unhandled exception
+        # (the reason the PytestUnhandledThreadExceptionWarning filter was needed).
+        def _real_write_file(path: Path, content: bytes, mode: str | None = None) -> None:
+            del mode
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
         host_with_wrong_version = cast(
             OnlineHostInterface,
             SimpleNamespace(
@@ -3222,7 +3376,7 @@ def test_provision_raises_on_version_mismatch(
                     stdout="2.1.50 (Claude Code)\n",
                     stderr="",
                 ),
-                write_file=lambda *args, **kwargs: None,
+                write_file=_real_write_file,
             ),
         )
 
@@ -3235,6 +3389,19 @@ def test_provision_raises_on_version_mismatch(
         assert "Claude version mismatch" in str(exc_info.value.main_exception)
 
 
+def _install_clause_tokens(install_command: str, marker: str) -> list[str]:
+    """Return the shlex-parsed tokens of the `&&`-joined clause containing ``marker``.
+
+    _install_claude builds a single string of clauses joined by ` && `. Parsing
+    the relevant clause into tokens lets the install-command tests assert on the
+    semantically load-bearing arguments (e.g. presence/absence of a version arg)
+    without pinning the exact whitespace or clause ordering of the full string.
+    """
+    clauses = [clause for clause in install_command.split(" && ") if marker in clause]
+    assert len(clauses) == 1, f"Expected exactly one clause containing {marker!r}, got {clauses!r}"
+    return shlex.split(clauses[0])
+
+
 def test_install_claude_passes_version_to_command() -> None:
     """_install_claude should pass the version as a positional arg to the install script."""
     host, executed_commands = _make_command_tracking_host()
@@ -3242,7 +3409,11 @@ def test_install_claude_passes_version_to_command() -> None:
     _install_claude(host, version="2.1.50")
 
     assert len(executed_commands) == 1
-    assert "install_claude.sh 2.1.50" in executed_commands[0]
+    tokens = _install_clause_tokens(executed_commands[0], "bash /tmp/install_claude.sh")
+    # bash <script> <version>: the version must follow the install script path.
+    script_index = tokens.index("/tmp/install_claude.sh")
+    assert tokens[:script_index] == ["bash"]
+    assert tokens[script_index + 1 :] == ["2.1.50"]
 
 
 def test_install_claude_without_version() -> None:
@@ -3252,8 +3423,9 @@ def test_install_claude_without_version() -> None:
     _install_claude(host, version=None)
 
     assert len(executed_commands) == 1
-    # The bash invocation should have no version arg after the script name
-    assert "bash /tmp/install_claude.sh &&" in executed_commands[0]
+    tokens = _install_clause_tokens(executed_commands[0], "bash /tmp/install_claude.sh")
+    # bash <script> with no trailing positional version argument.
+    assert tokens == ["bash", "/tmp/install_claude.sh"]
 
 
 def test_install_claude_verifies_binary_exists() -> None:
@@ -3263,7 +3435,10 @@ def test_install_claude_verifies_binary_exists() -> None:
     _install_claude(host, version=None)
 
     assert len(executed_commands) == 1
-    assert "test -x $HOME/.local/bin/claude" in executed_commands[0]
+    # The installer must verify the binary it placed under CLAUDE_INSTALL_PATH is
+    # executable; anchor to the imported constant rather than a hand-typed literal.
+    tokens = _install_clause_tokens(executed_commands[0], "test -x")
+    assert tokens == ["test", "-x", f"{CLAUDE_INSTALL_PATH}/claude"]
 
 
 # =============================================================================
@@ -3302,12 +3477,14 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
     assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session is used with a claude agent."""
+def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3330,7 +3507,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
     chain reaches claude (e.g. a ``write-plus`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
@@ -3346,10 +3523,12 @@ def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext)
     mngr_ctx = temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
     )
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3378,6 +3557,29 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+
+    Validating here -- before any host or worktree is created, and outside the provisioning
+    ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
+    rather than being wrapped in a ConcurrencyExceptionGroup and reported mid-provisioning
+    as an "Unexpected error".
+    """
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("nonexistent-session",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    # Pin config-dir resolution to the isolated test HOME (~/.claude) so the search is
+    # deterministic even when CLAUDE_CONFIG_DIR is set (e.g. inside an mngr agent).
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        with pytest.raises(UserInputError, match="Session nonexistent-session not found"):
+            on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -3534,6 +3736,92 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     expected_project_name = encode_claude_project_dir_name(agent.work_dir)
     dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
     assert (dest_project_dir / "abc123-def456.jsonl").exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_preserved_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against a destroyed agent's preserved session files."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Mirror the on-disk layout that preserve_sessions_on_destroy produces:
+    # <local_host_dir>/preserved/<name>--<id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    preserved_project_dir = (
+        local_host_dir
+        / "preserved"
+        / "old-agent--00000000-0000-0000-0000-000000000001"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    preserved_project_dir.mkdir(parents=True)
+    target_session_id = "preserved-session-id"
+    (preserved_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against another live local mngr agent's per-agent config dir."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Another live agent's session lives under its per-agent state dir:
+    # <local_host_dir>/agents/<other-id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    other_agent_project_dir = (
+        local_host_dir
+        / "agents"
+        / "11111111-1111-1111-1111-111111111111"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    other_agent_project_dir.mkdir(parents=True)
+    target_session_id = "live-mngr-session-id"
+    (other_agent_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
 
 
 # =============================================================================
@@ -4599,6 +4887,48 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert json.loads(source_file.read_text()) == {"original": True}
 
 
+def test_sync_user_resources_is_idempotent_without_self_referential_symlinks(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Re-running _sync_user_resources must not create self-referential symlink loops in the shared source.
+
+    Regression test: plain `ln -sf` (no -n) dereferences an existing dest symlink-to-directory on
+    the second run and nests a new link inside the shared source (e.g. ~/.claude/agents/agents ->
+    ~/.claude/agents, or ~/.claude/skills/<skill>/<skill>). `ln -sfn` replaces the dest symlink
+    instead. Covers both the dir-level branch (agents/commands) and the child-level branch
+    (skills/plugins).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    home_claude = tmp_path / "home_claude"
+    # dir-level branch source (agents)
+    (home_claude / "agents").mkdir(parents=True)
+    (home_claude / "agents" / "my-agent.md").write_text("agent")
+    # child-level branch source (skills)
+    (home_claude / "skills" / "user-skill").mkdir(parents=True)
+    (home_claude / "skills" / "user-skill" / "SKILL.md").write_text("skill")
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=home_claude):
+        _sync_user_resources(host, config_dir, symlink=True)
+        _sync_user_resources(host, config_dir, symlink=True)
+
+    # No self-referential loop nested inside the shared source dirs.
+    assert not (home_claude / "agents" / "agents").exists()
+    assert not (home_claude / "skills" / "skills").exists()
+    assert not (home_claude / "skills" / "user-skill" / "user-skill").exists()
+
+    # dir-level: config_dir/agents is a symlink to the shared source dir.
+    assert (config_dir / "agents").is_symlink()
+    assert (config_dir / "agents").resolve() == (home_claude / "agents").resolve()
+
+    # child-level: config_dir/skills/user-skill is a symlink to the shared source skill.
+    assert (config_dir / "skills" / "user-skill").is_symlink()
+    assert (config_dir / "skills" / "user-skill").resolve() == (home_claude / "skills" / "user-skill").resolve()
+
+
 # =============================================================================
 # modify_env_vars Tests
 # =============================================================================
@@ -4618,10 +4948,11 @@ def test_modify_env_vars_sets_claude_config_dirs(
     agent.modify_env_vars(host, env_vars)
 
     assert env_vars["CLAUDE_CONFIG_DIR"] == str(agent.get_claude_config_dir())
-    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir -- we
-    # only assert it is set to a non-empty string; the exact path depends on
-    # the running user's $HOME and is not load-bearing for this test.
-    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"]
+    # ORIGINAL_CLAUDE_CONFIG_DIR points at the user's real ~/.claude dir. The
+    # autouse home-isolation fixture redirects $HOME to a temp dir and clears
+    # $CLAUDE_CONFIG_DIR / $ORIGINAL_CLAUDE_CONFIG_DIR, so the resolved value is
+    # known: it must be exactly ~/.claude (not, e.g., the per-agent config dir).
+    assert env_vars["ORIGINAL_CLAUDE_CONFIG_DIR"] == str(Path.home() / ".claude")
 
 
 def test_modify_env_vars_omits_claude_config_dir_in_shared_mode(

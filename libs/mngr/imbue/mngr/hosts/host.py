@@ -58,6 +58,8 @@ from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UnknownAgentTypeError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import build_ssh_transport_command
+from imbue.mngr.hosts.common import get_agent_state_dir_path
+from imbue.mngr.hosts.common import get_agents_root_dir
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.hosts.file_upload import upload_files_in_bulk
 from imbue.mngr.hosts.offline_host import BaseHost
@@ -158,12 +160,18 @@ def _is_transient_ssh_error(exception: BaseException) -> bool:
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
+    - TimeoutError (pyinfra read_output_buffers timeout when the remote
+      sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
+      Note: ``TimeoutError`` is an OSError subclass on Python 3, so this
+      check must precede any narrower OSError handling.
     """
     if isinstance(exception, OSError) and "Socket is closed" in str(exception):
         return True
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
+        return True
+    if isinstance(exception, TimeoutError):
         return True
     return False
 
@@ -193,12 +201,6 @@ def _get_ssh_transport(pyinfra_host: Any) -> Transport | None:
     if client is not None:
         return client.get_transport()
     return None
-
-
-@pure
-def get_agent_state_dir_path(host_dir: Path, agent_id: AgentId) -> Path:
-    """Compute the state directory path for an agent given the host directory and agent ID."""
-    return host_dir / "agents" / str(agent_id)
 
 
 def install_packaged_script_on_host(
@@ -421,6 +423,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with self._notify_on_connection_error():
             try:
                 return self._run_shell_command_with_transient_retry(command, pyinfra_kwargs)
+            except TimeoutError as e:
+                # ``TimeoutError`` is a subclass of ``OSError``, so this
+                # must precede the OSError branch below. Reached when the
+                # retry decorator has exhausted its attempts on transient
+                # SSH read timeouts; surface as a structured
+                # HostConnectionError so callers don't see a raw timeout.
+                raise HostConnectionError("SSH command timed out reading output") from e
             except OSError as e:
                 if "Socket is closed" in str(e):
                     raise HostConnectionError("Connection was closed while running command") from e
@@ -943,7 +952,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
-        agents_dir = self.host_dir / "agents"
+        agents_dir = get_agents_root_dir(self.host_dir)
         if not self._is_directory(agents_dir):
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
@@ -969,7 +978,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         since that data is more likely to be up-to-date.
         """
         with log_span("Loading all agents from host {}", self.id):
-            agents_dir = self.host_dir / "agents"
+            agents_dir = get_agents_root_dir(self.host_dir)
 
             with log_span("Listing agent dir for host {}", self.id):
                 try:
@@ -1329,6 +1338,48 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             logger.trace("No info/exclude in source, skipping")
             return None
 
+    def _git_mirror_pull_from_source(
+        self,
+        source_host: OnlineHostInterface,
+        source_path: Path,
+        dest_git_dir: Path,
+    ) -> None:
+        """Mirror a remote source repo's branches and tags into a local bare repo via ssh.
+
+        Runs locally, so the source host's ssh key and known_hosts -- which live on this
+        machine -- are valid. `dest_git_dir` may already be an initialized bare repo (the
+        remote->local target, which `_transfer_git_repo` created via `git init --bare`) or
+        a fresh path (the remote->remote relay's temp mirror); `git init --bare` is
+        idempotent, so both cases are handled. We use a mirror-style `git fetch` rather
+        than `git clone --mirror` because clone refuses a non-empty destination, and the
+        remote->local target always pre-exists by this point.
+        """
+        source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
+        if source_ssh_info is None:
+            raise MngrError("Cannot determine SSH connection info for remote source host")
+        user, hostname, port, key_path = source_ssh_info
+        source_known_hosts = get_ssh_known_hosts_file(source_host)
+        git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
+        remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
+        try:
+            self.mngr_ctx.concurrency_group.run_process_to_completion(
+                ["git", "init", "--bare", str(dest_git_dir)],
+            )
+            self.mngr_ctx.concurrency_group.run_process_to_completion(
+                [
+                    "git",
+                    "-C",
+                    str(dest_git_dir),
+                    "fetch",
+                    "--prune",
+                    remote_url,
+                    *GIT_MIRROR_PUSH_REFSPECS,
+                ],
+                env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd},
+            )
+        except ProcessError as e:
+            raise MngrError(f"Failed to fetch from remote source: {e}") from e
+
     def _git_push_to_target(
         self,
         source_host: OnlineHostInterface,
@@ -1351,23 +1402,46 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         if same_machine:
             git_url = str(target_path / ".git")
         elif target_ssh_info is None:
-            source_ssh_info = source_host.get_ssh_connection_info() if isinstance(source_host, Host) else None
-            if source_ssh_info is None:
-                raise MngrError("Cannot determine SSH connection info for remote source host")
-            user, hostname, port, key_path = source_ssh_info
-            source_known_hosts = get_ssh_known_hosts_file(source_host)
+            # Remote source -> local target: pull a bare mirror straight onto
+            # this machine using the source host's ssh credentials.
             with log_span("Fetching from remote source to local target"):
-                git_ssh_cmd = build_ssh_transport_command(key_path, port, source_known_hosts)
-                env = {"GIT_SSH_COMMAND": git_ssh_cmd}
-                remote_url = f"ssh://{user}@{hostname}:{port}{source_path}/.git"
-                try:
-                    self.mngr_ctx.concurrency_group.run_process_to_completion(
-                        ["git", "clone", "--mirror", remote_url, str(target_path / ".git")],
-                        env={**os.environ, **env},
-                    )
-                except ProcessError as e:
-                    raise MngrError(f"Failed to clone from remote source: {e}") from e
+                self._git_mirror_pull_from_source(source_host, source_path, target_path / ".git")
                 return
+        elif not source_host.is_local:
+            # Remote source -> remote target: a direct `git push` would run on
+            # the remote source host, but the target's ssh key and known_hosts
+            # live on this (orchestrator) machine, not there. So relay through a
+            # local bare mirror: pull from the source with the source's
+            # credentials, then push to the target with the target's, both run
+            # locally where those files exist. This mirrors the remote-to-remote
+            # handling used for rsync transfers.
+            user, hostname, port, key_path = target_ssh_info
+            target_known_hosts = get_ssh_known_hosts_file(self)
+            git_ssh_cmd = build_ssh_transport_command(key_path, port, target_known_hosts)
+            git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
+            with log_span("Relaying git repo remote-to-remote via local mirror: {}", git_url):
+                with tempfile.TemporaryDirectory(prefix="mngr-git-relay-") as temp_dir:
+                    mirror_git_dir = Path(temp_dir) / "mirror.git"
+                    self._git_mirror_pull_from_source(source_host, source_path, mirror_git_dir)
+                    command_args = [
+                        "git",
+                        "-C",
+                        str(mirror_git_dir),
+                        "push",
+                        "--no-verify",
+                        "--force",
+                        "--prune",
+                        git_url,
+                        *GIT_MIRROR_PUSH_REFSPECS,
+                    ]
+                    try:
+                        self.mngr_ctx.concurrency_group.run_process_to_completion(
+                            command_args,
+                            env={**os.environ, "GIT_SSH_COMMAND": git_ssh_cmd, "GIT_LFS_SKIP_PUSH": "1"},
+                        )
+                    except ProcessError as e:
+                        raise MngrError(f"Failed to push git repo to remote target: {e}") from e
+            return
         else:
             user, hostname, port, key_path = target_ssh_info
             git_url = f"ssh://{user}@{hostname}:{port}{target_path}/.git"
@@ -1388,6 +1462,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         # and without this, it can take a ridiculously long time.
         env["GIT_LFS_SKIP_PUSH"] = "1"
 
+        # Only same-machine and local-source pushes reach here: remote-source
+        # transfers (to a local or a remote target) returned above, since they
+        # cannot run a direct push from the source host with credentials that
+        # only exist on this machine.
         with log_span("Pushing git repo to target: {}", git_url):
             if same_machine:
                 # Run the push on the shared machine via the host interface.
@@ -1397,7 +1475,8 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 if not result.success:
                     output = (result.stderr + "\n" + result.stdout).strip()
                     raise MngrError(f"Failed to push git repo on same host: {output}")
-            elif source_host.is_local:
+            else:
+                assert source_host.is_local, "remote-source pushes must be handled before this point"
                 command_args = [
                     "git",
                     "-C",
@@ -1417,14 +1496,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 except ProcessError as e:
                     raise MngrError(f"Failed to push git repo: {e}") from e
                 logger.trace("Ran git mirror push from local source to target: {}", " ".join(command_args))
-            else:
-                env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-                refspecs = " ".join(shlex.quote(r) for r in GIT_MIRROR_PUSH_REFSPECS)
-                push_cmd = f"{env_prefix} git push --no-verify --force --prune {shlex.quote(git_url)} {refspecs}"
-                result = source_host.execute_idempotent_command(push_cmd, cwd=source_path)
-                if not result.success:
-                    output = (result.stderr + "\n" + result.stdout).strip()
-                    raise MngrError(f"Failed to push git repo from remote source: {output}")
 
     def _warn_if_submodules_detected(
         self,
@@ -1907,7 +1978,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     raise UserInputError(
                         f"{stderr.strip()}\n"
                         f"To create a new branch instead, use --branch BASE: or --branch BASE:new-name\n"
-                        f"To work directly in the existing worktree, use --in-place from that directory"
+                        f"To work directly in the existing worktree, cd into it and re-run with --transfer=none"
                     )
                 # `git worktree add` cannot resolve any commit reference in a
                 # repo with no commits and reports a cryptic error. Probe HEAD
@@ -2402,7 +2473,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 agent.on_destroy(self)
             finally:
                 self.stop_agents([agent.id])
-                state_dir = self.host_dir / "agents" / str(agent.id)
+                state_dir = get_agent_state_dir_path(self.host_dir, agent.id)
                 self._remove_directory(state_dir)
 
                 # Remove persisted agent data from external storage (e.g., Modal volume)
@@ -2756,7 +2827,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_command(self, agent: AgentInterface) -> str:
         """Get the command for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError as e:
@@ -2770,7 +2841,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     def _get_agent_additional_commands(self, agent: AgentInterface) -> list[NamedCommand]:
         """Get the additional commands for an agent."""
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError:
@@ -2796,7 +2867,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         Returns default (all-None) options when there is no data.json or no tmux
         block, so older agents created before this field existed behave as before.
         """
-        data_path = self.host_dir / "agents" / str(agent.id) / "data.json"
+        data_path = get_agent_state_dir_path(self.host_dir, agent.id) / "data.json"
         try:
             content = self.read_text_file(data_path)
         except FileNotFoundError:
@@ -3055,7 +3126,7 @@ def _build_start_agent_shell_command(
 
     # Record START activity for idle detection by writing JSON to the activity file
     # The authoritative activity time is the file's mtime, not the JSON content
-    activity_dir = host_dir / "agents" / str(agent.id) / "activity"
+    activity_dir = get_agent_state_dir_path(host_dir, agent.id) / "activity"
     activity_path = activity_dir / ActivitySource.START.value.lower()
     steps.append(f"mkdir -p {shlex.quote(str(activity_dir))}")
     activity_printf_cmd = (
