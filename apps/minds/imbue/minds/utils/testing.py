@@ -4,6 +4,7 @@ Per CLAUDE.md, this module has no test of its own; the helpers here are
 exercised through the tests that import them.
 """
 
+import threading
 from collections.abc import Mapping
 from collections.abc import Sequence
 
@@ -27,6 +28,7 @@ class RecordingMngrCaller(MngrCaller):
         description="Canned result returned by every call.",
     )
     _calls: list[list[str]] = PrivateAttr(default_factory=list)
+    _called_event: threading.Event = PrivateAttr(default_factory=threading.Event)
 
     def call(
         self,
@@ -35,9 +37,15 @@ class RecordingMngrCaller(MngrCaller):
         env_overrides: Mapping[str, str] | None = None,
     ) -> MngrCallResult:
         self._calls.append(list(argv))
+        self._called_event.set()
         return self.result
 
     @property
     def calls(self) -> list[list[str]]:
         """The argv of each recorded call (each excludes the ``mngr`` program name)."""
         return self._calls
+
+    @property
+    def called_event(self) -> threading.Event:
+        """Set once at least one call has been recorded; lets tests await a background send."""
+        return self._called_event

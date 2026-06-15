@@ -103,7 +103,7 @@ def _make_applier(
     return OnboardingApplier(
         agent_creator=agent_creator,
         paths=paths,
-        message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        message_sender=MngrMessageSender(mngr_caller=RecordingMngrCaller(), concurrency_group=root_concurrency_group),
         root_concurrency_group=root_concurrency_group,
     )
 
@@ -184,7 +184,7 @@ def test_q2_and_q3_are_applied_concurrently(
     applier = _HandshakeApplier(
         agent_creator=agent_creator,
         paths=paths,
-        message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        message_sender=MngrMessageSender(mngr_caller=RecordingMngrCaller(), concurrency_group=root_concurrency_group),
         root_concurrency_group=root_concurrency_group,
     )
 

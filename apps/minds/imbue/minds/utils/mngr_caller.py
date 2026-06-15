@@ -41,6 +41,7 @@ from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 
@@ -159,7 +160,7 @@ class MngrCaller(MutableModel):
     # private runtime state and allow arbitrary types through.
     _context: ForkServerContext | None = PrivateAttr(default=None)
     _context_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _prewarm_thread: threading.Thread | None = PrivateAttr(default=None)
+    _is_prewarm_started: bool = PrivateAttr(default=False)
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
@@ -172,24 +173,25 @@ class MngrCaller(MutableModel):
                 self._context = context
             return self._context
 
-    def prewarm(self) -> None:
+    def prewarm(self, concurrency_group: ConcurrencyGroup) -> None:
         """Start the forkserver in the background so the first real call is fast.
 
-        Non-blocking and idempotent: the first call spawns a daemon thread that
-        forces the forkserver to start and run its (multi-second) preload
-        imports; later calls return immediately. Intended to be invoked once at
-        app startup.
+        Non-blocking and idempotent: the first call dispatches a tracked thread
+        on ``concurrency_group`` that forces the forkserver to start and run its
+        (multi-second) preload imports; later calls return immediately. The
+        thread runs under the app's concurrency group so the warmup work shows
+        up in its resource accounting. Intended to be invoked once at startup.
         """
         with self._context_lock:
-            if self._prewarm_thread is not None:
+            if self._is_prewarm_started:
                 return
-            thread = threading.Thread(
-                target=self._ensure_forkserver_running,
-                name="mngr-caller-prewarm",
-                daemon=True,
-            )
-            self._prewarm_thread = thread
-        thread.start()
+            self._is_prewarm_started = True
+        concurrency_group.start_new_thread(
+            self._ensure_forkserver_running,
+            name="mngr-caller-prewarm",
+            is_checked=False,
+            on_failure=lambda exc: logger.warning("mngr forkserver pre-warm thread failed: {}", exc),
+        )
 
     def _ensure_forkserver_running(self) -> None:
         """Force the forkserver to start (and run its preload imports)."""

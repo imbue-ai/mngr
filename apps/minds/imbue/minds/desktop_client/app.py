@@ -4334,7 +4334,10 @@ def create_desktop_client(
         onboarding_applier = OnboardingApplier(
             agent_creator=agent_creator,
             paths=agent_creator.paths,
-            message_sender=MngrMessageSender(caller=get_default_mngr_caller()),
+            message_sender=MngrMessageSender(
+                mngr_caller=get_default_mngr_caller(),
+                concurrency_group=agent_creator.root_concurrency_group,
+            ),
             root_concurrency_group=agent_creator.root_concurrency_group,
             mngr_binary=mngr_binary,
         )

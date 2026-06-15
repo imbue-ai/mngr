@@ -67,16 +67,12 @@ class MngrMessageSender(MutableModel):
     recording double.
     """
 
-    caller: MngrCaller = Field(
+    mngr_caller: MngrCaller = Field(
         default_factory=get_default_mngr_caller,
         description="Forkserver-backed in-app ``mngr`` CLI caller.",
     )
-    concurrency_group: ConcurrencyGroup | None = Field(
-        default=None,
-        description=(
-            "App concurrency group. When set, :meth:`send` dispatches the message on a tracked "
-            "background thread instead of blocking the caller; when None it runs synchronously."
-        ),
+    concurrency_group: ConcurrencyGroup = Field(
+        description="App concurrency group on which :meth:`send` dispatches the (non-blocking) delivery thread.",
     )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
@@ -87,13 +83,9 @@ class MngrMessageSender(MutableModel):
         The permission Approve/Deny handlers call this *after* the response
         event is already persisted, so delivery is best-effort and its latency
         (a ~2s SSH round-trip to the agent's host) must not delay the HTTP
-        response. When a :attr:`concurrency_group` is set, the send runs on a
-        tracked background thread; otherwise (e.g. in tests) it runs
-        synchronously. Either way it never raises -- failures are logged.
+        response. The send runs on a thread tracked by :attr:`concurrency_group`
+        and never raises -- failures are logged.
         """
-        if self.concurrency_group is None:
-            self._send_and_log(agent_id, text)
-            return
         self.concurrency_group.start_new_thread(
             self._send_and_log,
             args=(agent_id, text),
@@ -120,7 +112,7 @@ class MngrMessageSender(MutableModel):
         # positional argument as an agent identifier (``nargs=-1``), so passing
         # the text as a positional would be parsed as a second agent and the
         # actual message content would be read from stdin (silently empty here).
-        result = self.caller.call(["message", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
+        result = self.mngr_caller.call(["message", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
         if result.returncode != 0:
             logger.warning(
                 "mngr message to target {} exited {}: {}",
@@ -140,7 +132,7 @@ class MngrMessageSender(MutableModel):
         when no agent matches the target, so a caller that retries until the
         agent exists must inspect the output, not the exit code.
         """
-        result = self.caller.call(
+        result = self.mngr_caller.call(
             ["message", "--format", "jsonl", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS
         )
         is_delivered = stdout_reports_message_delivered(result.stdout)

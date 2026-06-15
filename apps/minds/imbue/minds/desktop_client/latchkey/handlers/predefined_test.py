@@ -1,10 +1,12 @@
 import json
 import shlex
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import WorkspacePaths
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
@@ -30,11 +32,46 @@ from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
+# An entered ConcurrencyGroup for the handlers built in this module. Handlers
+# now require one (their message sender dispatches the nudge on a tracked
+# background thread); an autouse fixture provides it so each handler-building
+# helper does not have to thread it through.
+_MESSAGE_CONCURRENCY_GROUP: dict[str, ConcurrencyGroup | None] = {"cg": None}
+
+
+@pytest.fixture(autouse=True)
+def _entered_message_concurrency_group() -> Iterator[None]:
+    cg = ConcurrencyGroup(name="predefined-test-messages")
+    with cg:
+        _MESSAGE_CONCURRENCY_GROUP["cg"] = cg
+        try:
+            yield
+        finally:
+            _MESSAGE_CONCURRENCY_GROUP["cg"] = None
+
+
+def _message_sender() -> MngrMessageSender:
+    """Build a recording message sender bound to the test's concurrency group."""
+    cg = _MESSAGE_CONCURRENCY_GROUP["cg"]
+    assert cg is not None
+    return MngrMessageSender(mngr_caller=RecordingMngrCaller(), concurrency_group=cg)
+
+
+def _recorded_caller(handler: LatchkeyPermissionGrantHandler) -> RecordingMngrCaller:
+    caller = handler.mngr_message_sender.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    return caller
+
 
 def _recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler) -> list[list[str]]:
-    """Return the argv of each ``mngr`` call the handler's message sender made."""
-    caller = handler.mngr_message_sender.caller
-    assert isinstance(caller, RecordingMngrCaller)
+    """Return the argv of each ``mngr`` call the handler's message sender made (no wait)."""
+    return _recorded_caller(handler).calls
+
+
+def _wait_for_recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler, timeout: float = 5.0) -> list[list[str]]:
+    """Wait for the handler's background ``mngr message`` to run, then return its argv."""
+    caller = _recorded_caller(handler)
+    assert caller.called_event.wait(timeout), "background mngr message send did not run"
     return caller.calls
 
 
@@ -172,7 +209,7 @@ def _build_handler(
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
     )
 
@@ -205,7 +242,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     responses = load_response_events(tmp_path)
     assert len(responses) == 1
     assert responses[0].status == str(RequestStatus.GRANTED)
-    mngr_argvs = _recorded_mngr_argvs(handler)
+    mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
     assert argv[0] == "message"
@@ -268,7 +305,7 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
     )
 
@@ -530,7 +567,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         data_dir=tmp_path,
         latchkey=Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary)),
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
     )
     agent_id = AgentId()
@@ -593,7 +630,7 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
         display_name=_SLACK_SERVICE_INFO.display_name,
     )
 
-    mngr_argvs = _recorded_mngr_argvs(handler)
+    mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
     assert "denied" in argv[2].lower()
@@ -607,7 +644,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
     )
     host_id = HostId()
@@ -640,7 +677,7 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
     )
 
@@ -728,7 +765,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     assert response_events[0].scope == "not-in-catalog-scope"
     # Agent was notified; the message falls back to the raw scope as
     # the display name since no catalog entry exists.
-    mngr_argvs = _recorded_mngr_argvs(handler)
+    mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
     assert "denied" in argv[2].lower()
@@ -749,7 +786,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
         data_dir=tmp_path,
         latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=MngrMessageSender(caller=RecordingMngrCaller()),
+        mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
     )
     host_id = HostId()

@@ -254,8 +254,8 @@ def run(
     # interpreter+import startup cost. ``prewarm`` is non-blocking: it pays the
     # one-time import cost on a background thread, off the request path.
     mngr_caller = get_default_mngr_caller()
-    mngr_caller.prewarm()
-    mngr_message_sender = MngrMessageSender(caller=mngr_caller, concurrency_group=root_concurrency_group)
+    mngr_caller.prewarm(root_concurrency_group)
+    mngr_message_sender = MngrMessageSender(mngr_caller=mngr_caller, concurrency_group=root_concurrency_group)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
