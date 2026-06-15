@@ -23,6 +23,7 @@ from typing import assert_never
 
 import click
 from azure.core.exceptions import AzureError
+from click_option_group import optgroup
 from loguru import logger
 
 from imbue.mngr.cli.common_opts import add_common_options
@@ -219,7 +220,8 @@ def azure_cli_group() -> None:
 
 
 @azure_cli_group.command(name="prepare")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
     "--provider",
     "provider",
     default="azure",
@@ -231,25 +233,25 @@ def azure_cli_group() -> None:
         "defaults are used as the fallback. CLI options below override either source."
     ),
 )
-@click.option(
+@optgroup.option(
     "--subscription-id",
     "subscription_id",
     default=None,
     help="Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription.",
 )
-@click.option(
+@optgroup.option(
     "--region",
     "region",
     default=None,
     help="Azure region. Defaults to the resolved provider config's default_region (westus if unset).",
 )
-@click.option(
+@optgroup.option(
     "--resource-group",
     "resource_group",
     default=None,
     help="Resource group to create / reuse. Defaults to the resolved provider config's resource_group.",
 )
-@click.option(
+@optgroup.option(
     "--allowed-ssh-cidr",
     "allowed_ssh_cidrs",
     multiple=True,
@@ -298,7 +300,8 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
 
 
 @azure_cli_group.command(name="cleanup")
-@click.option(
+@optgroup.group("Provider")
+@optgroup.option(
     "--provider",
     "provider",
     default="azure",
@@ -309,19 +312,19 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         "exist, AzureProviderConfig class defaults are used as the fallback."
     ),
 )
-@click.option(
+@optgroup.option(
     "--subscription-id",
     "subscription_id",
     default=None,
     help="Azure subscription ID. Defaults to the resolved provider config, then AZURE_SUBSCRIPTION_ID, then your active `az` subscription.",
 )
-@click.option(
+@optgroup.option(
     "--region",
     "region",
     default=None,
     help="Azure region. Defaults to the resolved provider config's default_region (westus if unset).",
 )
-@click.option(
+@optgroup.option(
     "--resource-group",
     "resource_group",
     default=None,
