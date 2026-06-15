@@ -1,6 +1,5 @@
 """Tests for AWS provider backend registration."""
 
-import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -200,6 +199,59 @@ def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: Mn
     assert found is None
 
 
+def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: MngrContext) -> None:
+    """Two non-terminated instances sharing a mngr-host-id are refused, not silently disambiguated.
+
+    ``mngr-host-id`` is account-writable, so a duplicate (e.g. an attacker tagging
+    their own instance with a victim's host id) could otherwise steer ``mngr start``
+    -- and the agent-tag writes keyed off this lookup -- onto the wrong instance.
+    The lookup must raise rather than pick the first match.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-real", "stopped", "", {"mngr-host-id": str(host_id), "mngr-provider": "aws-test"}
+                ),
+                _instance_with_tags(
+                    "i-evil", "running", "", {"mngr-host-id": str(host_id), "mngr-provider": "aws-test"}
+                ),
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with pytest.raises(MngrError, match="ambiguous"):
+            provider._find_instance_for_host(host_id)
+    finally:
+        stubber.deactivate()
+
+
+def test_rebind_known_hosts_pre_connect_uses_local_keypairs(temp_mngr_ctx: MngrContext) -> None:
+    """The pre-connect known_hosts rebind pins mngr's own local host keys, not tag data.
+
+    On resume the new IP is added to known_hosts *before* the first SSH. Sourcing
+    the host keys from the locally held provider keypairs (injected into the box at
+    create) -- rather than from account-writable EC2 tags -- is what prevents an
+    attacker who can edit tags from substituting their own host key and MITMing the
+    resumed session.
+    """
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    new_ip = "203.0.113.50"
+    expected_vps_key = provider._get_vps_host_keypair()[1]
+    expected_container_key = provider._get_container_host_keypair()[1]
+
+    provider._rebind_known_hosts_pre_connect(new_ip)
+
+    vps_known_hosts = provider._vps_known_hosts_path().read_text()
+    container_known_hosts = provider._container_known_hosts_path().read_text()
+    assert new_ip in vps_known_hosts and expected_vps_key in vps_known_hosts
+    assert new_ip in container_known_hosts and expected_container_key in container_known_hosts
+
+
 def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict[str, str]) -> dict:
     entry: dict = {"InstanceId": instance_id, "State": {"Name": state}}
     if public_ip:
@@ -208,12 +260,15 @@ def _instance_with_tags(instance_id: str, state: str, public_ip: str, tags: dict
     return entry
 
 
-def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext) -> None:
-    """persist_agent_data finds the instance by host tag and upserts a compact mngr-agent-<id> tag.
+def test_persist_agent_data_writes_per_field_agent_tags(temp_mngr_ctx: MngrContext) -> None:
+    """persist_agent_data finds the instance by host tag and upserts per-field mngr-agent-<id>-* tags.
 
     Exercises the stopped-host path (the on-volume base write is unavailable, so
-    only the EC2 tag is written); the seeded ``vps_ip=None`` record makes
-    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``.
+    only the EC2 tags are written); the seeded ``vps_ip=None`` record makes
+    ``super().persist_agent_data`` short-circuit with ``HostNotFoundError``. The
+    agent id is carried in the tag key, and name/type each get their own tag; with
+    no labels here, no ``-labels`` tag is written and (no stale keys exist) nothing
+    is deleted.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
@@ -223,17 +278,54 @@ def test_persist_agent_data_writes_compact_agent_tag(temp_mngr_ctx: MngrContext)
         "describe_instances",
         _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
     )
-    expected_value = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
     stubber.add_response(
         "create_tags",
         {},
-        expected_params={"Resources": ["i-1"], "Tags": [{"Key": f"mngr-agent-{agent_id}", "Value": expected_value}]},
+        expected_params={
+            "Resources": ["i-1"],
+            "Tags": [
+                {"Key": f"mngr-agent-{agent_id}-name", "Value": "a1"},
+                {"Key": f"mngr-agent-{agent_id}-type", "Value": "command"},
+            ],
+        },
     )
     stubber.activate()
     try:
         provider.persist_agent_data(
             host_id,
             {"id": str(agent_id), "name": "a1", "type": "command", "command": "sleep 1", "work_dir": "/w"},
+        )
+    finally:
+        stubber.deactivate()
+
+
+def test_persist_agent_data_writes_labels_in_their_own_tag(temp_mngr_ctx: MngrContext) -> None:
+    """An agent with labels gets a dedicated ``mngr-agent-<id>-labels`` tag (compact JSON)."""
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    _seed_stopped_host_record(provider, host_id)
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response([_instance_with_tags("i-1", "stopped", "", {"mngr-host-id": str(host_id)})]),
+    )
+    stubber.add_response(
+        "create_tags",
+        {},
+        expected_params={
+            "Resources": ["i-1"],
+            "Tags": [
+                {"Key": f"mngr-agent-{agent_id}-name", "Value": "a1"},
+                {"Key": f"mngr-agent-{agent_id}-type", "Value": "command"},
+                {"Key": f"mngr-agent-{agent_id}-labels", "Value": '{"env":"prod"}'},
+            ],
+        },
+    )
+    stubber.activate()
+    try:
+        provider.persist_agent_data(
+            host_id,
+            {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
         )
     finally:
         stubber.deactivate()
@@ -310,17 +402,24 @@ def test_persist_agent_data_does_not_bypass_on_volume_store_for_running_host(tem
 
 
 def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContext) -> None:
-    """list_persisted_agent_data_for_host parses mngr-agent-* tags off a (stopped) instance."""
+    """list_persisted_agent_data_for_host reassembles an agent from its per-field tags (stopped host)."""
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
     stubber.add_response(
         "describe_instances",
         _describe_instances_response(
             [
                 _instance_with_tags(
-                    "i-1", "stopped", "", {"mngr-host-id": str(host_id), f"mngr-agent-{agent_id}": agent_json}
+                    "i-1",
+                    "stopped",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        f"mngr-agent-{agent_id}-name": "a1",
+                        f"mngr-agent-{agent_id}-type": "command",
+                        f"mngr-agent-{agent_id}-labels": '{"env":"prod"}',
+                    },
                 )
             ]
         ),
@@ -333,25 +432,24 @@ def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContex
     assert len(agents) == 1
     assert agents[0]["id"] == str(agent_id)
     assert agents[0]["name"] == "a1"
+    assert agents[0]["type"] == "command"
+    assert agents[0]["labels"] == {"env": "prod"}
 
 
-def test_list_persisted_agent_data_skips_non_object_agent_tag(
+def test_list_persisted_agent_data_skips_malformed_labels_tag(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
-    """A mngr-agent-* tag whose value is valid JSON but not an object is skipped, not crashed on.
+    """A ``-labels`` tag that is valid JSON but not an object is dropped (warn), not crashed on.
 
-    mngr only ever writes object-shaped values, so a scalar/array value means an
-    externally edited/corrupted tag. It must degrade gracefully (skip + warn) like
-    the unparseable-JSON case: appending a non-dict would make downstream
-    discovery (validate_and_create_discovered_agent's ``.get('id')``) raise
-    AttributeError and crash the whole sweep for every host. A well-formed sibling
-    tag is still returned.
+    mngr only ever writes object-shaped labels, so a scalar/array value means an
+    externally edited/corrupted tag. Reassembly must degrade gracefully: skip just
+    the labels for that agent (the agent still surfaces via its name/type tags) and
+    log a warning, rather than letting a malformed value crash the whole discovery
+    sweep for every host.
     """
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
-    good_id = AgentId.generate()
-    bad_id = AgentId.generate()
-    good_json = json.dumps({"id": str(good_id), "name": "a1"}, separators=(",", ":"))
+    agent_id = AgentId.generate()
     stubber.add_response(
         "describe_instances",
         _describe_instances_response(
@@ -362,9 +460,9 @@ def test_list_persisted_agent_data_skips_non_object_agent_tag(
                     "",
                     {
                         "mngr-host-id": str(host_id),
-                        f"mngr-agent-{good_id}": good_json,
+                        f"mngr-agent-{agent_id}-name": "a1",
                         # Valid JSON, but a bare integer rather than an object.
-                        f"mngr-agent-{bad_id}": "5",
+                        f"mngr-agent-{agent_id}-labels": "5",
                     },
                 )
             ]
@@ -375,7 +473,10 @@ def test_list_persisted_agent_data_skips_non_object_agent_tag(
         agents = provider.list_persisted_agent_data_for_host(host_id)
     finally:
         stubber.deactivate()
-    assert [a["id"] for a in agents] == [str(good_id)]
+    assert len(agents) == 1
+    assert agents[0]["id"] == str(agent_id)
+    assert agents[0]["name"] == "a1"
+    assert "labels" not in agents[0]
     assert any("not a JSON object" in w for w in log_warnings), log_warnings
 
 
@@ -384,7 +485,6 @@ def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx
     provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
-    agent_json = json.dumps({"id": str(agent_id), "name": "a1", "type": "command"}, separators=(",", ":"))
     stubber.add_response(
         "describe_instances",
         _describe_instances_response(
@@ -397,7 +497,8 @@ def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx
                         "mngr-host-id": str(host_id),
                         "mngr-provider": "aws-test",
                         "Name": "mngr-myhost",
-                        f"mngr-agent-{agent_id}": agent_json,
+                        f"mngr-agent-{agent_id}-name": "a1",
+                        f"mngr-agent-{agent_id}-type": "command",
                     },
                 )
             ]
@@ -418,6 +519,86 @@ def test_discover_hosts_and_agents_surfaces_stopped_host_from_tags(temp_mngr_ctx
     assert len(agents) == 1
     assert agents[0].agent_id == agent_id
     assert str(agents[0].agent_name) == "a1"
+
+
+def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp_mngr_ctx: MngrContext) -> None:
+    """A host whose instance is still ``stopping`` (OS already down) is reconstructed from tags.
+
+    Regression: the offline reconstruction used to require raw state ``stopped``, so a
+    host vanished from discovery for the seconds-long stop transition -- making
+    `mngr start <agent>` race a "not found" if it landed mid-stop. A stopping instance
+    must surface (as STOPPED) so resolve-by-name is stable across the transition.
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    agent_id = AgentId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-1",
+                    "stopping",
+                    "",
+                    {
+                        "mngr-host-id": str(host_id),
+                        "mngr-provider": "aws-test",
+                        "Name": "mngr-myhost",
+                        f"mngr-agent-{agent_id}-name": "a1",
+                    },
+                )
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    hosts = {host.host_id: host for host in result}
+    assert host_id in hosts
+    assert hosts[host_id].host_state == HostState.STOPPED
+    assert [a.agent_id for a in result[hosts[host_id]]] == [agent_id]
+
+
+def test_discover_hosts_and_agents_skips_instance_with_malformed_host_id_tag(
+    temp_mngr_ctx: MngrContext, log_warnings: list[str]
+) -> None:
+    """One instance with a corrupt mngr-host-id tag must not abort discovery for the others.
+
+    A malformed mngr-host-id yields an invalid ``HostId`` (a ``ValueError``); the
+    offline-discovery loop must skip just that instance (with a warning) and still
+    surface the well-formed stopped host, rather than letting one bad tag take down
+    the whole sweep (which would break ``mngr list`` / ``mngr start`` account-wide).
+    """
+    provider, stubber = _build_stubbed_provider(temp_mngr_ctx)
+    good_host_id = HostId.generate()
+    stubber.add_response(
+        "describe_instances",
+        _describe_instances_response(
+            [
+                _instance_with_tags(
+                    "i-bad", "stopped", "", {"mngr-host-id": "not-a-valid-host-id", "mngr-provider": "aws-test"}
+                ),
+                _instance_with_tags(
+                    "i-good",
+                    "stopped",
+                    "",
+                    {"mngr-host-id": str(good_host_id), "mngr-provider": "aws-test", "Name": "mngr-goodhost"},
+                ),
+            ]
+        ),
+    )
+    stubber.activate()
+    try:
+        with ConcurrencyGroup(name="test") as cg:
+            result = provider.discover_hosts_and_agents(cg)
+    finally:
+        stubber.deactivate()
+    host_ids = {host.host_id for host in result}
+    assert good_host_id in host_ids, "well-formed stopped host should still surface"
+    assert any("malformed mngr host tag" in w.lower() for w in log_warnings), log_warnings
 
 
 def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
@@ -480,58 +661,99 @@ def test_to_offline_host_warns_on_malformed_created_at_tag(
     assert any("Malformed mngr-created-at" in w for w in log_warnings), log_warnings
 
 
-def test_compact_agent_tag_value_falls_back_to_minimal_when_too_long(temp_mngr_ctx: MngrContext) -> None:
-    """When id+name+type would exceed the 256-char tag limit, type is dropped (id+name still fit)."""
+def _normalized_instance(tag_pairs: dict[str, str]) -> dict:
+    """A normalized instance dict (``{"id", "tags": ["k=v", ...]}``) for tag-helper unit tests."""
+    return {"id": "i-1", "tags": [f"{k}={v}" for k, v in tag_pairs.items()]}
+
+
+def test_agent_field_tags_builds_one_tag_per_field(temp_mngr_ctx: MngrContext) -> None:
+    """name/type/labels each map to their own mngr-agent-<id>-<field> tag; the id is in the key."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "a1", "type": "x" * 300})
-    assert value is not None
-    assert len(value) <= 256
-    assert json.loads(value) == {"id": "agent-1", "name": "a1"}
-
-
-def test_compact_agent_tag_value_none_without_id_or_name(temp_mngr_ctx: MngrContext) -> None:
-    """No id or no name -> None (nothing resolvable to persist)."""
-    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    assert provider._compact_agent_tag_value({"name": "a1"}) is None
-    assert provider._compact_agent_tag_value({"id": "agent-1"}) is None
-
-
-def test_compact_agent_tag_value_includes_labels_when_they_fit(temp_mngr_ctx: MngrContext) -> None:
-    """Labels round-trip in the tag when the encoded value fits the limit (so offline `mngr label` works)."""
-    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    value = provider._compact_agent_tag_value(
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+    set_tags, delete_keys = provider._agent_field_tags(
+        "agent-1",
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}},
+        _normalized_instance({"mngr-host-id": "h"}),
     )
-    assert value is not None
-    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command", "labels": {"env": "prod"}}
+    assert set_tags == {
+        "mngr-agent-agent-1-name": "a1",
+        "mngr-agent-agent-1-type": "command",
+        "mngr-agent-agent-1-labels": '{"env":"prod"}',
+    }
+    assert delete_keys == []
 
 
-def test_compact_agent_tag_value_drops_oversized_labels_with_warning(
+def test_agent_field_tags_omits_empty_labels(temp_mngr_ctx: MngrContext) -> None:
+    """An agent with absent or empty labels gets no -labels tag."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    instance = _normalized_instance({})
+    for agent_data in (
+        {"id": "agent-1", "name": "a1", "type": "command"},
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {}},
+    ):
+        set_tags, _ = provider._agent_field_tags("agent-1", agent_data, instance)
+        assert "mngr-agent-agent-1-labels" not in set_tags
+
+
+def test_agent_field_tags_drops_oversized_labels_with_warning(
     temp_mngr_ctx: MngrContext, log_warnings: list[str]
 ) -> None:
-    """Labels too large to fit are dropped (id/name/type kept) and a warning is logged, not a silent no-op."""
+    """Labels too large for a 256-char tag are dropped (name/type kept) with a warning, not a failure."""
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    value = provider._compact_agent_tag_value(
-        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}}
+    set_tags, _ = provider._agent_field_tags(
+        "agent-1",
+        {"id": "agent-1", "name": "a1", "type": "command", "labels": {"k": "x" * 300}},
+        _normalized_instance({}),
     )
-    assert value is not None
-    assert len(value) <= 256
-    assert json.loads(value) == {"id": "agent-1", "name": "a1", "type": "command"}
-    assert any("do not fit" in w for w in log_warnings), log_warnings
+    assert set_tags == {"mngr-agent-agent-1-name": "a1", "mngr-agent-agent-1-type": "command"}
+    assert any("exceeds the" in w and "labels" in w for w in log_warnings), log_warnings
 
 
-def test_compact_agent_tag_value_none_when_id_and_name_alone_exceed_limit(
-    temp_mngr_ctx: MngrContext, log_warnings: list[str]
-) -> None:
-    """An agent whose id+name alone overflow the tag limit yields None + a warning, not an over-limit value.
+def test_agent_field_tags_deletes_stale_labels_on_explicit_removal(temp_mngr_ctx: MngrContext) -> None:
+    """When an update carries empty labels (an explicit removal), the stale -labels tag is deleted."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    instance = _normalized_instance(
+        {
+            "mngr-agent-agent-1-name": "a1",
+            "mngr-agent-agent-1-type": "command",
+            "mngr-agent-agent-1-labels": '{"env":"prod"}',
+        }
+    )
+    set_tags, delete_keys = provider._agent_field_tags(
+        "agent-1", {"id": "agent-1", "name": "a1", "type": "command", "labels": {}}, instance
+    )
+    assert "mngr-agent-agent-1-labels" not in set_tags
+    assert delete_keys == ["mngr-agent-agent-1-labels"]
 
-    Otherwise persist_agent_data would hand an over-256-char value to CreateTags,
-    which AWS rejects -- crashing agent create instead of degrading gracefully.
+
+def test_agent_field_tags_preserves_absent_fields_on_partial_update(temp_mngr_ctx: MngrContext) -> None:
+    """A partial persist (e.g. only id+type) must NOT delete the agent's existing name/labels tags.
+
+    Regression: persist_agent_data is an upsert sometimes called with a partial
+    record. Treating an absent field as a removal would clobber the name tag that
+    offline resolve-by-name (`mngr start <agent>` on a stopped host) depends on, so
+    a stopped agent would become unresolvable after any partial update.
     """
     provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
-    value = provider._compact_agent_tag_value({"id": "agent-1", "name": "x" * 300})
-    assert value is None
-    assert any("id+name exceeds" in w for w in log_warnings), log_warnings
+    instance = _normalized_instance(
+        {
+            "mngr-agent-agent-1-name": "a1",
+            "mngr-agent-agent-1-type": "command",
+            "mngr-agent-agent-1-labels": '{"env":"prod"}',
+        }
+    )
+    set_tags, delete_keys = provider._agent_field_tags("agent-1", {"id": "agent-1", "type": "claude"}, instance)
+    assert set_tags == {"mngr-agent-agent-1-type": "claude"}
+    # name and labels are absent from this update, so their tags are left untouched.
+    assert delete_keys == []
+
+
+def test_persisted_agent_dicts_reassembles_id_with_dashes(temp_mngr_ctx: MngrContext) -> None:
+    """An agent id containing dashes still reassembles: the field is split off the *final* dash."""
+    provider, _stubber = _build_stubbed_provider(temp_mngr_ctx)
+    agents = provider._persisted_agent_dicts_from_instance(
+        _normalized_instance({"mngr-agent-ab-cd-ef-name": "a1", "mngr-agent-ab-cd-ef-type": "command"})
+    )
+    assert agents == [{"id": "ab-cd-ef", "name": "a1", "type": "command"}]
 
 
 def test_validate_provider_args_under_pytest_raises_when_unset(

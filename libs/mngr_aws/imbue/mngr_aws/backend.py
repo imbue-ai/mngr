@@ -39,16 +39,15 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
-from imbue.mngr.providers.ssh_host_setup import build_start_activity_watcher_command
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr_aws import hookimpl
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
-from imbue.mngr_vps_docker.container_setup import exec_in_container
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.container_setup import remove_host_from_known_hosts
+from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import open_host_store
 from imbue.mngr_vps_docker.instance import ParsedVpsBuildOptions
@@ -62,20 +61,26 @@ from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 AWS_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("aws")
 
-# Per-agent metadata is persisted as one EC2 tag per agent, keyed
-# ``mngr-agent-<agent_id>``, so a *stopped* instance (no public IP, SSH
-# unreachable) still surfaces its agents in discovery and resolves by name.
-# The value is a compact JSON record kept under EC2's 256-char tag-value limit.
+# Per-agent metadata is mirrored onto the instance as up to three EC2 tags per
+# agent, keyed ``mngr-agent-<agent_id>-<field>`` (the agent id lives in the key,
+# not a value), so a *stopped* instance (no public IP, SSH unreachable) still
+# surfaces its agents in discovery and resolves by name. ``name``/``type`` are
+# stored raw; ``labels`` as compact JSON. One tag per field (rather than one
+# packed tag per agent) gives ``labels`` the full 256-char value budget; a field
+# whose value still overflows is dropped, not failed.
 AGENT_TAG_PREFIX: Final[str] = "mngr-agent-"
+_AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 _MAX_TAG_VALUE_LEN: Final[int] = 256
-# The instance keeps its SSH host keys across a stop/start, but its public IP
-# changes -- and on resume the host record (which holds the keys) is unreadable
-# until we connect, which itself needs the key in known_hosts. Break that
-# chicken-and-egg by stashing the (public) host keys in tags at create, so
-# `start_host` can rebind known_hosts to the new IP *before* connecting. Ed25519
-# public keys are ~80 chars, well under the 256-char tag-value limit.
-SSH_HOST_KEY_TAG: Final[str] = "mngr-ssh-host-key"
-CONTAINER_SSH_HOST_KEY_TAG: Final[str] = "mngr-container-ssh-host-key"
+# EC2 allows 50 (non-``aws:``) tags per resource. When a host has so many agents
+# that mirroring another would exceed this, we surface a NotImplementedError
+# (which the CLI turns into an "open an issue" prompt) rather than failing
+# obscurely -- the S3-backed agent store is the planned fix for many-agent hosts.
+_AWS_MAX_TAGS_PER_INSTANCE: Final[int] = 50
+# EC2 states in which the host OS is down (so the SSH-based sweep can't see the
+# host) but the instance still exists and its agents must be reconstructed from
+# tags. ``stopping`` is included so a host doesn't vanish from discovery during
+# the (seconds-long) stop transition before it reaches the terminal ``stopped``.
+_HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped"})
 # The ``Name`` tag is set to ``mngr-<host_name>`` at launch; strip the prefix to
 # recover the host name when reconstructing a stopped host from tags.
 _HOST_NAME_TAG_PREFIX: Final[str] = "mngr-"
@@ -347,6 +352,7 @@ class AwsProvider(VpsDockerProvider):
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
     ) -> None:
         """Stop the agent container *and* the EC2 instance, preserving the EBS volume.
 
@@ -358,19 +364,20 @@ class AwsProvider(VpsDockerProvider):
 
         ``create_snapshot`` is intentionally ignored -- native EC2 stop preserves
         the whole filesystem, so the base's docker-commit snapshot would be
-        redundant. The base container-stop + record-write is reused via
-        ``super()``; we then record ``stop_reason=STOPPED`` so the offline-state
-        derivation reports STOPPED (not CRASHED) while the instance is down, and
-        finally stop the instance. The ``stop_reason`` write must happen *before*
-        the instance stops, since the volume is unreachable once it does.
+        redundant. The base container-stop + record-write is reused via ``super()``,
+        passing ``stop_reason=STOPPED`` so that single write marks the host STOPPED
+        (so the offline-state derivation reports STOPPED, not CRASHED, while the
+        instance is down) -- no second record write is needed. The write lands
+        before the instance stops, since the volume is unreachable once it does.
         """
         del create_snapshot
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
-        super().stop_host(host, create_snapshot=False, timeout_seconds=timeout_seconds)
-        self._record_stop_reason(host_id, host_record, HostState.STOPPED)
+        super().stop_host(
+            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
+        )
         with log_span("Stopping EC2 instance"):
             self.aws_client.stop_instance(host_record.config.vps_instance_id)
 
@@ -400,11 +407,12 @@ class AwsProvider(VpsDockerProvider):
         # The cached instance list predates the start (stale state / no public
         # IP); drop it so any later discovery sees the running instance + new IP.
         self._instances_cache = None
-        # Rebind known_hosts to the new IP from the tag-stashed host keys BEFORE
+        # Rebind known_hosts to the new IP from mngr's local host keypairs BEFORE
         # connecting -- the instance kept its host keys across the stop/start, but
         # the IP changed, and the record (the other key source) can't be read
-        # until we can SSH in.
-        self._rebind_known_hosts_from_tags(instance, new_ip)
+        # until we can SSH in. The local keypairs are what was injected at create,
+        # so they match what the resumed instance presents.
+        self._rebind_known_hosts_pre_connect(new_ip)
         with log_span("Waiting for VPS SSH after start"):
             self._wait_for_sshd_on_vps(new_ip, timeout_seconds=self.config.ssh_connect_timeout)
         with self._make_outer_for_vps_ip(new_ip) as outer:
@@ -432,37 +440,10 @@ class AwsProvider(VpsDockerProvider):
         self._evict_cached_host(host_id)
         self._host_record_cache[host_id] = updated_record
         started = super().start_host(host_id, snapshot_id)
-        # The in-container idle watcher does not survive a container restart, so
-        # re-launch it on resume; otherwise auto-stop-on-idle would work only
-        # until the first resume.
-        self._relaunch_idle_watcher(host_id, new_ip)
+        # The base ``start_host`` (called above) relaunches the in-container
+        # activity watcher and refreshes BOOT activity on resume, so auto-stop-on-
+        # idle keeps working across resumes without an AWS-specific step here.
         return started
-
-    def _relaunch_idle_watcher(self, host_id: HostId, vps_ip: str) -> None:
-        """Re-launch the in-container activity watcher after a resume (best-effort).
-
-        The watcher is a backgrounded process started at create time; a stopped
-        instance / restarted container loses it. Re-launching keeps auto-stop
-        working across resumes. Best-effort: a failure just means this resumed
-        agent won't auto-stop until the next create, so log and continue.
-        """
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            return
-        try:
-            with self._make_outer_for_vps_ip(vps_ip) as outer:
-                exec_in_container(
-                    outer,
-                    record.config.container_name,
-                    build_start_activity_watcher_command(str(self.host_dir)),
-                )
-        except MngrError as e:
-            logger.warning(
-                "Failed to re-launch the idle watcher on resume for host {} ({}); "
-                "this agent won't auto-stop on idle until recreated",
-                host_id,
-                e,
-            )
 
     def _find_instance_for_host(self, host_id: HostId) -> dict[str, Any] | None:
         """Locate this host's EC2 instance by its ``mngr-host-id`` tag (works while stopped).
@@ -471,42 +452,34 @@ class AwsProvider(VpsDockerProvider):
         EC2 ``DescribeInstances`` tags, so it resolves an instance that is
         stopped and therefore unreachable over SSH. ``list_instances`` already
         filters out terminated instances, so a destroyed host returns ``None``.
-        """
-        wanted_tag = f"mngr-host-id={host_id}"
-        for instance in self._list_instances_cached():
-            if wanted_tag in instance.get("tags", ()):
-                return instance
-        # Not in the (possibly stale) cached list. During `mngr create` the cache
-        # can be populated -- e.g. by an earlier discovery/name-conflict check --
-        # before the new instance exists, so `persist_agent_data` for the new
-        # agent would miss it. Refresh once and retry before giving up.
-        self._instances_cache = None
-        for instance in self._list_instances_cached():
-            if wanted_tag in instance.get("tags", ()):
-                return instance
-        return None
 
-    def _record_stop_reason(
-        self,
-        host_id: HostId,
-        host_record: VpsDockerHostRecord,
-        state: HostState,
-    ) -> None:
-        """Persist ``stop_reason`` on the host record while the instance is still reachable."""
-        if host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        certified = host_record.certified_host_data
-        updated_data = certified.model_copy_update(
-            to_update(certified.field_ref().stop_reason, state.value),
-            to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        updated_record = host_record.model_copy_update(
-            to_update(host_record.field_ref().certified_host_data, updated_data)
-        )
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = open_host_store(outer, host_record.config.volume_name)
-            host_store.write_host_record(updated_record)
-        self._host_record_cache[host_id] = updated_record
+        Refuses (raises) when more than one non-terminated instance carries the
+        same ``mngr-host-id`` tag. ``mngr-host-id`` is meant to be unique, but the
+        tag is account-writable, so a duplicate could otherwise silently steer
+        ``mngr start`` (and the agent-tag writes keyed off this lookup) onto the
+        wrong instance; failing loudly is safer than acting on an ambiguous match.
+        """
+        matches = self._instances_matching_host_id(host_id)
+        if not matches:
+            # Not in the (possibly stale) cached list. During `mngr create` the
+            # cache can be populated -- e.g. by an earlier discovery/name-conflict
+            # check -- before the new instance exists, so `persist_agent_data` for
+            # the new agent would miss it. Refresh once and retry before giving up.
+            self._instances_cache = None
+            matches = self._instances_matching_host_id(host_id)
+        if len(matches) > 1:
+            ids = sorted(str(m.get("id")) for m in matches)
+            raise MngrError(
+                f"AWS provider {self.name!r}: {len(matches)} non-terminated EC2 instances are tagged "
+                f"mngr-host-id={host_id} ({', '.join(ids)}); refusing to act on an ambiguous match. "
+                "Resolve the duplicate tags (or terminate the stray instance) and retry."
+            )
+        return matches[0] if matches else None
+
+    def _instances_matching_host_id(self, host_id: HostId) -> list[dict[str, Any]]:
+        """Return every cached non-terminated instance tagged ``mngr-host-id=<host_id>``."""
+        wanted_tag = f"mngr-host-id={host_id}"
+        return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
 
     def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.
@@ -534,27 +507,30 @@ class AwsProvider(VpsDockerProvider):
                 public_key=record.container_ssh_host_public_key,
             )
 
-    def _rebind_known_hosts_from_tags(self, instance: Mapping[str, Any], new_ip: str) -> None:
-        """Add the new IP to known_hosts using the host keys stashed in EC2 tags.
+    def _rebind_known_hosts_pre_connect(self, new_ip: str) -> None:
+        """Add ``new_ip`` to known_hosts using mngr's local, authoritative host keys.
 
-        Runs on resume *before* any SSH connection, since the host record (the
-        other source of the keys) can't be read until we can connect. The keys
-        survive the stop/start; only the IP changed.
+        Runs on resume *before* any SSH connection (the host record, the other key
+        source, can't be read until we can connect). The VPS/container host
+        keypairs are generated and held locally by mngr -- per provider instance,
+        in ``_key_dir()`` -- and injected into the instance at create time, so the
+        public keys here are exactly the ones the resumed instance presents.
+        Sourcing them locally (rather than from EC2 tags, which any principal with
+        ``ec2:CreateTags`` could rewrite) keeps SSH host-key verification anchored
+        to data mngr controls, not to account-writable instance metadata.
         """
-        tags = self._tag_dict_from_normalized(instance)
-        vps_key = tags.get(SSH_HOST_KEY_TAG)
-        container_key = tags.get(CONTAINER_SSH_HOST_KEY_TAG)
-        if vps_key:
-            add_host_to_known_hosts(
-                known_hosts_path=self._vps_known_hosts_path(), hostname=new_ip, port=22, public_key=vps_key
-            )
-        if container_key:
-            add_host_to_known_hosts(
-                known_hosts_path=self._container_known_hosts_path(),
-                hostname=new_ip,
-                port=self.config.container_ssh_port,
-                public_key=container_key,
-            )
+        add_host_to_known_hosts(
+            known_hosts_path=self._vps_known_hosts_path(),
+            hostname=new_ip,
+            port=22,
+            public_key=self._get_vps_host_keypair()[1],
+        )
+        add_host_to_known_hosts(
+            known_hosts_path=self._container_known_hosts_path(),
+            hostname=new_ip,
+            port=self.config.container_ssh_port,
+            public_key=self._get_container_host_keypair()[1],
+        )
 
     # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
@@ -595,17 +571,6 @@ class AwsProvider(VpsDockerProvider):
         WARNING; the only consequence is that the agent will not auto-stop on
         idle (manual ``mngr stop --stop-host`` still works).
         """
-        # Stash the (public) host keys in tags so resume can rebind known_hosts to
-        # the instance's new IP before connecting. Best-effort, like the watcher.
-        try:
-            self._store_host_keys_in_tags(host_id)
-        except MngrError as e:
-            logger.warning(
-                "Failed to stash host keys in tags for {} ({}); resume may fail SSH host-key "
-                "verification against the new IP",
-                host_id,
-                e,
-            )
         try:
             self._install_idle_watcher(host_id=host_id, vps_ip=vps_ip)
         except MngrError as e:
@@ -619,19 +584,6 @@ class AwsProvider(VpsDockerProvider):
                 host_id,
                 e,
             )
-
-    def _store_host_keys_in_tags(self, host_id: HostId) -> None:
-        """Tag the instance with its VPS + container SSH host public keys (for resume)."""
-        record = self._find_host_record(host_id)
-        if record is None or record.config is None:
-            return
-        tags: dict[str, str] = {}
-        if record.ssh_host_public_key:
-            tags[SSH_HOST_KEY_TAG] = record.ssh_host_public_key
-        if record.container_ssh_host_public_key:
-            tags[CONTAINER_SSH_HOST_KEY_TAG] = record.container_ssh_host_public_key
-        if tags:
-            self.aws_client.add_tags(VpsInstanceId(record.config.vps_instance_id), tags)
 
     def _install_idle_watcher(self, *, host_id: HostId, vps_ip: str) -> None:
         """Install the systemd path/service idle watcher on the outer host.
@@ -704,36 +656,55 @@ class AwsProvider(VpsDockerProvider):
         except HostNotFoundError:
             # Host stopped / unreachable: the on-volume store can't be written,
             # but the tag mirror below still must be (e.g. offline `mngr label`).
-            logger.debug("Host {} unreachable; persisting agent data to EC2 tag only", host_id)
-        value = self._compact_agent_tag_value(agent_data)
-        if value is None:
-            # _compact_agent_tag_value already logged the specific reason (missing
-            # id/name, or a record too large to fit the tag limit).
+            logger.debug("Host {} unreachable; persisting agent data to EC2 tags only", host_id)
+        agent_id = agent_data.get("id")
+        if agent_id is None:
+            logger.warning("Cannot mirror agent data to EC2 tags without an id (name={!r})", agent_data.get("name"))
             return
         instance = self._find_instance_for_host(host_id)
         if instance is None:
-            logger.warning("No EC2 instance found for host {}; cannot persist agent tag", host_id)
+            logger.warning("No EC2 instance found for host {}; cannot persist agent tags", host_id)
             return
-        agent_id = agent_data["id"]
-        self.aws_client.add_tags(VpsInstanceId(instance["id"]), {f"{AGENT_TAG_PREFIX}{agent_id}": value})
+        set_tags, delete_keys = self._agent_field_tags(str(agent_id), agent_data, instance)
+        try:
+            self.aws_client.add_tags(VpsInstanceId(instance["id"]), set_tags)
+        except VpsApiError as e:
+            # EC2 caps a resource at 50 (non-aws:) tags. Hitting it means the host
+            # has more agents than the tag mirror can hold; surface it as a
+            # NotImplementedError so the CLI offers to open an issue rather than
+            # failing obscurely. (Updating an existing agent overwrites its keys,
+            # so this only fires when a *new* agent's tags don't fit.)
+            if "TagLimitExceeded" in str(e):
+                raise NotImplementedError(
+                    f"The AWS host for agent {agent_id!r} has reached EC2's {_AWS_MAX_TAGS_PER_INSTANCE}-tag-per-"
+                    "instance limit, so this agent can't be mirrored to tags for stopped-host listing and "
+                    "resume-by-name. Running this many agents on a single AWS host isn't supported yet -- please "
+                    "open an issue at https://github.com/imbue-ai/mngr/issues so we can prioritize the planned "
+                    "S3-backed agent store."
+                ) from e
+            raise
+        if delete_keys:
+            self.aws_client.remove_tags(VpsInstanceId(instance["id"]), delete_keys)
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>`` tag.
+        """Remove the agent's on-volume record *and* its ``mngr-agent-<id>-*`` tags.
 
         Mirrors ``persist_agent_data``: the base removes the authoritative
         on-volume record (best-effort -- ``HostNotFoundError`` when the instance
-        is stopped) and this override additionally drops the EC2 tag, so a
-        destroyed agent stops appearing in both running- and stopped-host
-        discovery.
+        is stopped) and this override additionally drops the agent's per-field EC2
+        tags, so a destroyed agent stops appearing in both running- and
+        stopped-host discovery. ``DeleteTags`` is idempotent, so deleting a field
+        key the agent never had is a harmless no-op.
         """
         try:
             super().remove_persisted_agent_data(host_id, agent_id)
         except HostNotFoundError:
-            logger.debug("Host {} unreachable; removing agent data from EC2 tag only", host_id)
+            logger.debug("Host {} unreachable; removing agent data from EC2 tags only", host_id)
         instance = self._find_instance_for_host(host_id)
         if instance is None:
             return
-        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), [f"{AGENT_TAG_PREFIX}{agent_id}"])
+        keys = [f"{AGENT_TAG_PREFIX}{agent_id}-{field}" for field in _AGENT_TAG_FIELDS]
+        self.aws_client.remove_tags(VpsInstanceId(instance["id"]), keys)
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         """Return the host's persisted agent records, on-volume when reachable else from tags.
@@ -767,9 +738,27 @@ class AwsProvider(VpsDockerProvider):
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
-            if instance.get("main_ip") or instance.get("state") != "stopped":
+            # Reconstruct hosts whose instance is stopping or fully stopped: the OS
+            # is down, so the SSH-based sweep above can't reach them. Gate on state,
+            # not main_ip -- a `stopping` instance can still report a public IP while
+            # its OS is already off, and gating on main_ip would make the host vanish
+            # for the (seconds-long) stop transition. A genuinely-reachable host
+            # lands in online_host_ids and is deduped just below, so a running host
+            # is never double-listed here.
+            if instance.get("state") not in _HOST_DOWN_STATES:
                 continue
-            host_ref = self._discovered_host_from_tags(instance)
+            try:
+                host_ref = self._discovered_host_from_tags(instance)
+            except ValueError as e:
+                # A corrupted / externally-edited mngr-host-id or Name tag yields an
+                # invalid HostId/HostName (both ValueError subclasses). Skip just
+                # this instance rather than letting one bad tag abort offline
+                # discovery for every other stopped host in the account.
+                logger.opt(exception=e).warning(
+                    "Skipping instance {} in offline discovery: malformed mngr host tag(s)",
+                    instance.get("id"),
+                )
+                continue
             if host_ref is None or host_ref.host_id in online_host_ids:
                 continue
             agent_refs: list[DiscoveredAgent] = []
@@ -828,79 +817,89 @@ class AwsProvider(VpsDockerProvider):
                 raise
             return self._offline_host_from_tags(host_id, instance)
 
-    def _compact_agent_tag_value(self, agent_data: Mapping[str, object]) -> str | None:
-        """Build a compact JSON tag value (id/name[/type][/labels]) under the 256-char tag limit.
+    def _agent_field_value(self, field: str, agent_data: Mapping[str, object]) -> str | None:
+        """Render one agent field as a tag-value string, or ``None`` if absent/empty.
 
-        Returns ``None`` when the agent cannot be persisted in a tag: either the
-        required ``id``/``name`` are missing, or even the id+name minimum exceeds
-        the 256-char tag-value limit (e.g. a very long agent name). Otherwise
-        prefers the richest representation that fits, dropping ``labels`` (user
-        metadata) first, then ``type``, before the id+name minimum. Including
-        ``labels`` lets an offline ``mngr label`` on a stopped host actually
-        round-trip; if a given agent's labels are too large to fit, they are
-        dropped and a warning is logged so the write does not silently no-op. An
-        agent whose id+name alone do not fit is skipped (with a warning) rather
-        than returning an over-limit value that AWS would reject.
+        ``name``/``type`` are stored raw; ``labels`` as compact JSON (empty labels
+        are treated as absent so no ``-labels`` tag is written).
         """
-        agent_id = agent_data.get("id")
-        agent_name = agent_data.get("name")
-        if agent_id is None or agent_name is None:
-            logger.warning(
-                "Cannot mirror agent data to an EC2 tag without both an id and a name (got id={!r}, name={!r})",
-                agent_id,
-                agent_name,
-            )
-            return None
-        minimal: dict[str, object] = {"id": agent_id, "name": agent_name}
-        with_type = dict(minimal)
-        agent_type = agent_data.get("type")
-        if agent_type is not None:
-            with_type["type"] = agent_type
-        with_labels = dict(with_type)
-        labels = agent_data.get("labels")
-        if labels:
-            with_labels["labels"] = labels
-        for candidate in (with_labels, with_type, minimal):
-            value = json.dumps(candidate, separators=(",", ":"))
-            if len(value) <= _MAX_TAG_VALUE_LEN:
-                if labels and "labels" not in candidate:
-                    logger.warning(
-                        "Labels for agent {} do not fit the {}-char EC2 tag and were omitted from "
-                        "its tag mirror; they will not be visible while the host is stopped",
-                        agent_name,
-                        _MAX_TAG_VALUE_LEN,
-                    )
-                return value
-        logger.warning(
-            "Agent {} cannot be mirrored to an EC2 tag: even its id+name exceeds the {}-char tag "
-            "limit, so it will not be listed by name while the host is stopped",
-            agent_name,
-            _MAX_TAG_VALUE_LEN,
-        )
-        return None
+        if field == "labels":
+            labels = agent_data.get("labels")
+            return json.dumps(labels, separators=(",", ":")) if labels else None
+        value = agent_data.get(field)
+        return None if value is None else str(value)
+
+    def _agent_field_tags(
+        self, agent_id: str, agent_data: Mapping[str, object], instance: Mapping[str, Any]
+    ) -> tuple[dict[str, str], list[str]]:
+        """Compute the ``mngr-agent-<id>-<field>`` tags to set, and stale ones to delete.
+
+        Returns ``(tags_to_set, keys_to_delete)``. ``persist_agent_data`` is an
+        upsert that is sometimes called with a *partial* record (e.g. an update
+        carrying only ``id``/``type``), so a field absent from ``agent_data`` means
+        "unchanged" -- it is left alone, NOT removed (deleting it would clobber the
+        ``name`` tag that offline resolve-by-name depends on). A field that *is*
+        present but renders empty (e.g. ``labels={}``, an explicit removal) or
+        overflows the 256-char tag limit (realistically only ``labels``) is dropped
+        and its existing tag, if any, is deleted so no stale value lingers. The
+        agent id is carried in the tag *key*, not a value.
+        """
+        set_tags: dict[str, str] = {}
+        delete_keys: list[str] = []
+        for field in _AGENT_TAG_FIELDS:
+            if field not in agent_data:
+                continue
+            key = f"{AGENT_TAG_PREFIX}{agent_id}-{field}"
+            value = self._agent_field_value(field, agent_data)
+            if value is not None and len(value) <= _MAX_TAG_VALUE_LEN:
+                set_tags[key] = value
+                continue
+            # Present but empty (an explicit removal, e.g. labels={}) or too large
+            # for a single tag: drop it, and delete any existing tag so no stale
+            # value lingers. Only oversized values warrant a warning.
+            if value is not None:
+                logger.warning(
+                    "Agent {} {} ({} chars) exceeds the {}-char EC2 tag limit; omitted from the "
+                    "stopped-host tag mirror",
+                    agent_data.get("name", agent_id),
+                    field,
+                    len(value),
+                    _MAX_TAG_VALUE_LEN,
+                )
+            delete_keys.append(key)
+        existing = set(self._tag_dict_from_normalized(instance))
+        return set_tags, [key for key in delete_keys if key in existing]
 
     def _persisted_agent_dicts_from_instance(self, instance: Mapping[str, Any]) -> list[dict]:
-        """Parse the ``mngr-agent-*`` tags off a normalized instance dict into agent records."""
-        agents: list[dict] = []
-        for kv in instance.get("tags", ()):
-            key, sep, value = kv.partition("=")
-            if not sep or not key.startswith(AGENT_TAG_PREFIX):
+        """Reassemble agent records from this instance's ``mngr-agent-<id>-<field>`` tags.
+
+        Groups the per-field tags by agent id (recovered from the tag key, split on
+        the final ``-`` so ids may themselves contain dashes), and rebuilds one
+        dict per agent. A malformed/externally-edited ``-labels`` tag (not valid
+        JSON, or not a JSON object) is skipped for that field with a warning rather
+        than crashing the discovery sweep.
+        """
+        by_id: dict[str, dict] = {}
+        for key, value in self._tag_dict_from_normalized(instance).items():
+            if not key.startswith(AGENT_TAG_PREFIX):
                 continue
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                logger.warning("Skipping unparseable persisted-agent tag {!r}", key)
+            agent_id, sep, field = key[len(AGENT_TAG_PREFIX) :].rpartition("-")
+            if not sep or field not in _AGENT_TAG_FIELDS:
                 continue
-            # mngr only ever writes a JSON object here (see _compact_agent_tag_value);
-            # a valid-JSON-but-non-object value means an externally edited/corrupted
-            # tag. Skip it rather than appending a non-dict, which downstream callers
-            # (validate_and_create_discovered_agent's .get('id')) would crash on,
-            # taking down the whole discovery sweep for every host.
-            if not isinstance(parsed, dict):
-                logger.warning("Skipping persisted-agent tag {!r}: value is not a JSON object", key)
-                continue
-            agents.append(parsed)
-        return agents
+            record = by_id.setdefault(agent_id, {"id": agent_id})
+            if field == "labels":
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError:
+                    logger.warning("Skipping unparseable agent labels tag {!r}", key)
+                    continue
+                if not isinstance(parsed, dict):
+                    logger.warning("Skipping agent labels tag {!r}: value is not a JSON object", key)
+                    continue
+                record["labels"] = parsed
+            else:
+                record[field] = value
+        return list(by_id.values())
 
     def _tag_dict_from_normalized(self, instance: Mapping[str, Any]) -> dict[str, str]:
         """Turn the normalized ``["key=value", ...]`` tag list into a dict (split on first ``=``)."""
