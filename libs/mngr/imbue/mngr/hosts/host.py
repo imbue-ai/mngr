@@ -2331,7 +2331,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             with log_span("Calling on_after_provisioning for agent {}", agent.name):
                 agent.on_after_provisioning(host=self, options=options, mngr_ctx=mngr_ctx)
 
-    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = ("mngr_log.sh", "mngr_transcript_lib.sh")
+    _SHARED_SHELL_LIB_NAMES: ClassVar[tuple[str, ...]] = (
+        "mngr_log.sh",
+        "mngr_transcript_lib.sh",
+        "mngr_common_transcript_lib.sh",
+    )
 
     def _ensure_shared_shell_libs(self, agent: AgentInterface) -> None:
         """Write the shared shell libraries to host-level and agent-level commands dirs.
@@ -2347,6 +2351,11 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
           (field extraction, id-set construction, offset reconciliation,
           bounded sed-append, percent-encoded path keys) shared by per-agent
           streamers such as claude's ``stream_transcript.sh``.
+        - ``mngr_common_transcript_lib.sh`` provides the common-transcript
+          converter primitives (the convert lock and the turn-end flush) shared
+          by per-agent ``common_transcript.sh`` converters and the turn-end
+          hooks that flush them (claude's ``wait_for_stop_hook.sh``,
+          antigravity's ``statusline.sh``).
         """
         host_commands = self.host_dir / "commands"
         agent_commands = self._get_agent_state_dir(agent) / "commands"
