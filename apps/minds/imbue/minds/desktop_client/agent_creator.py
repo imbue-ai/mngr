@@ -367,7 +367,9 @@ def clone_git_repo(
     broke every local-worktree create until this checkout was restored.
 
     Implementation is ``git init`` + ``git remote add origin`` + ``git
-    fetch origin <ref>`` + ``git checkout --detach FETCH_HEAD`` rather than
+    fetch origin <ref>`` + a final checkout (``git checkout --detach
+    FETCH_HEAD`` when a branch is given, or the named-branch checkout
+    described above when it is not) rather than
     ``git clone --single-branch --branch <ref>``. ``--branch`` rejects
     commit SHAs (``fatal: Remote branch <sha> not found in upstream
     origin``); ``git fetch`` does not. The fetch downloads only the
