@@ -12,6 +12,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.flaky
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

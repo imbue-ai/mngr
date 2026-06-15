@@ -46,10 +46,11 @@ class CostMode(UpperCaseStrEnum):
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
-    max_age_seconds: int = Field(
+    stale_after_seconds: int = Field(
         default=300,
         description="Snapshot freshness threshold in seconds. When the snapshot's "
         "updated_at is older than this, `mngr usage` prints a stale-snapshot warning. "
+        "Display warning only -- it does not change which events are aggregated. "
         "Reader-only -- this plugin doesn't capture data, it walks events files "
         "produced by writer plugins (one event per provisioned agent's render) and "
         "aggregates them per-source (rate-limit windows reduce freshest-wins; "
