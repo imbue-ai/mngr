@@ -41,6 +41,7 @@ from imbue.mngr_usage.api import window_render_dict
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostSnapshot
 from imbue.mngr_usage.data_types import SessionCostRecord
+from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import UsagePluginConfig
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
@@ -341,6 +342,22 @@ class _UsageRenderModel(FrozenModel):
         return self.snapshot.api_cost
 
     @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        return self.snapshot.subscription_tokens
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        return self.snapshot.api_tokens
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        return self.snapshot.is_subscription_cost_estimated
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        return self.snapshot.is_api_cost_estimated
+
+    @property
     def since_seconds(self) -> int:
         return self.snapshot.since_seconds
 
@@ -416,8 +433,16 @@ def _render_one_source_for_json(model: _UsageRenderModel, now: int, detail: bool
         "session_count": model.session_count,
         "subscription_session_count": model.subscription_session_count,
         "api_session_count": model.api_session_count,
-        "subscription_cost": model.subscription_cost.model_dump(),
-        "api_cost": model.api_cost.model_dump(),
+        "subscription_cost": {
+            **model.subscription_cost.model_dump(),
+            "is_estimated": model.is_subscription_cost_estimated,
+        },
+        "subscription_tokens": model.subscription_tokens.model_dump(),
+        "api_cost": {
+            **model.api_cost.model_dump(),
+            "is_estimated": model.is_api_cost_estimated,
+        },
+        "api_tokens": model.api_tokens.model_dump(),
     }
     if detail:
         out["sessions"] = [session_render_dict(s, now) for s in model.sessions]
@@ -519,7 +544,8 @@ def _write_source_section(model: _UsageRenderModel, now: int, header: str, detai
     if api_latest is not None:
         api_line = _format_cost_line(
             mode_label="api cost",
-            mode_suffix="",
+            # Flag token-derived dollars so a reader doesn't read an estimate as billed.
+            mode_suffix=" (estimated)" if model.is_api_cost_estimated else "",
             aggregate_cost=model.api_cost,
             session_count=model.api_session_count,
             since_seconds=model.since_seconds,

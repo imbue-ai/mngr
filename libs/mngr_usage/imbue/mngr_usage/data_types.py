@@ -43,6 +43,23 @@ class CostMode(UpperCaseStrEnum):
     API_KEY = auto()
 
 
+class CostProvenance(UpperCaseStrEnum):
+    """How a session's ``total_cost_usd`` was obtained.
+
+    - ``REPORTED``: the harness supplied the dollar figure directly (Claude
+      Code's statusline, OpenCode's per-message cost, pi's client-side cost).
+    - ``ESTIMATED``: the reader derived it from token counts via the pricing
+      table (a token-only source like Codex, or a provider where the harness
+      reports no cost).
+
+    Orthogonal to [[cost-mode]] (who pays / whether it's billable). The reader
+    prefers a ``REPORTED`` figure and only falls back to ``ESTIMATED``.
+    """
+
+    REPORTED = auto()
+    ESTIMATED = auto()
+
+
 class UsagePluginConfig(PluginConfig):
     """Configuration for the usage plugin."""
 
@@ -123,6 +140,33 @@ class CostSnapshot(FrozenModel):
     total_lines_removed: int | None = Field(default=None, description="Lines of code removed during the session.")
 
 
+class TokenSnapshot(FrozenModel):
+    """Session-level token counts supplied by a writer that reports usage in tokens.
+
+    All fields optional and writer-driven, mirroring ``CostSnapshot``'s
+    passive-but-typed stance. The buckets are **non-overlapping**: ``input`` is
+    the non-cached input count, and ``cache_read`` / ``cache_creation`` are
+    separate, so the dollar cost is exactly
+    ``input*p_in + cache_read*p_cr + cache_creation*p_cw + output*p_out`` with no
+    double-counting (see :func:`imbue.mngr_usage.pricing.compute_cost`). Writers
+    whose source reports ``input`` inclusive of cache normalize it to the
+    non-cached count before emitting. ``output`` includes any reasoning tokens
+    (billed at the output rate).
+
+    Like ``CostSnapshot``, a ``TokenSnapshot`` plays two roles: one session's own
+    contribution at ``SessionCostRecord.tokens``, and the per-mode sum at
+    ``UsageSnapshot``'s token aggregates. Each field sums cleanly, so the same
+    type serves both.
+    """
+
+    input: int | None = Field(default=None, description="Non-cached input tokens (cache buckets are separate).")
+    output: int | None = Field(default=None, description="Output tokens, inclusive of reasoning tokens.")
+    cache_read: int | None = Field(default=None, description="Input tokens served from the prompt cache (read).")
+    cache_creation: int | None = Field(
+        default=None, description="Input tokens written to the prompt cache (creation/write)."
+    )
+
+
 class WindowSnapshot(FrozenModel):
     """A single rate-limit window's snapshot state.
 
@@ -197,6 +241,21 @@ class SessionCostRecord(FrozenModel):
         "(direct ANTHROPIC_API_KEY; cost is real). Determines which aggregate this session feeds "
         "into on UsageSnapshot."
     )
+    tokens: TokenSnapshot | None = Field(
+        default=None,
+        description="This session's own token contribution, when the source reports tokens; "
+        "None for cost-only sources (e.g. Claude).",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Canonical '<provider>/<model>' the tokens were billed against; drives "
+        "token->cost derivation. None when the source reports cost directly or omits the model.",
+    )
+    cost_provenance: CostProvenance = Field(
+        default=CostProvenance.REPORTED,
+        description="Whether ``cost`` was reported by the harness (default) or estimated by the "
+        "reader from ``tokens`` via the pricing table.",
+    )
     first_event_at: int = Field(description="Unix timestamp of the earliest event seen for this session.")
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
 
@@ -241,6 +300,20 @@ def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:
         total_api_duration_ms=_sum_optional([s.cost.total_api_duration_ms for s in records]),
         total_lines_added=_sum_optional([s.cost.total_lines_added for s in records]),
         total_lines_removed=_sum_optional([s.cost.total_lines_removed for s in records]),
+    )
+
+
+def _aggregate_tokens(records: tuple[SessionCostRecord, ...]) -> TokenSnapshot:
+    """Sum each token field across ``records``'s ``tokens`` (a None record contributes nothing).
+
+    All-None ``TokenSnapshot`` when no record carries tokens -- e.g. a cost-only
+    source like Claude -- so the JSON / CEL surface stays shape-stable.
+    """
+    return TokenSnapshot(
+        input=_sum_optional([s.tokens.input if s.tokens is not None else None for s in records]),
+        output=_sum_optional([s.tokens.output if s.tokens is not None else None for s in records]),
+        cache_read=_sum_optional([s.tokens.cache_read if s.tokens is not None else None for s in records]),
+        cache_creation=_sum_optional([s.tokens.cache_creation if s.tokens is not None else None for s in records]),
     )
 
 
@@ -331,6 +404,26 @@ class UsageSnapshot(FrozenModel):
         and real costs. All-None when there are no api_key sessions.
         """
         return _aggregate_cost(self.api_sessions)
+
+    @property
+    def subscription_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across subscription-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.subscription_sessions)
+
+    @property
+    def api_tokens(self) -> TokenSnapshot:
+        """Aggregate token counts across api_key-mode sessions (all-None for cost-only sources)."""
+        return _aggregate_tokens(self.api_sessions)
+
+    @property
+    def is_subscription_cost_estimated(self) -> bool:
+        """True if any subscription session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.subscription_sessions)
+
+    @property
+    def is_api_cost_estimated(self) -> bool:
+        """True if any api_key session's cost was reader-estimated from tokens (vs harness-reported)."""
+        return any(s.cost_provenance == CostProvenance.ESTIMATED for s in self.api_sessions)
 
     @property
     def session_count(self) -> int:
