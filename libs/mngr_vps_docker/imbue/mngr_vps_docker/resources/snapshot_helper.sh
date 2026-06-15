@@ -138,13 +138,27 @@ do_cleanup() {
 }
 
 handle_request() {
-    local payload request_id operation target
+    local payload request_id operation target last_result_request_id
     payload=$(cat "$REQUEST_PATH" 2>/dev/null || echo "{}")
     request_id=$(echo "$payload" | jq -r '.request_id // ""')
     operation=$(echo "$payload" | jq -r '.operation // ""')
     target=$(echo "$payload" | jq -r '.target // ""')
     if [ -z "$request_id" ]; then
         echo "snapshot_helper: request missing request_id; skipping" >&2
+        return
+    fi
+    # Idempotency guard: skip a request we have already produced a result for.
+    # request_ids are unique per request (a timestamp for snapshots, a uuid for
+    # cleanups), so re-seeing one means we are re-reading an un-consumed
+    # request.json -- e.g. on a helper restart, whose startup re-runs whatever
+    # request is still on disk. Without this, re-running a snapshot whose path now
+    # exists would overwrite a good result.json with a spurious "already exists"
+    # failure (and re-running cleanup would needlessly churn result.json). The
+    # requester uses a fresh request_id each time, so this never suppresses a real
+    # new request; a genuinely-unserviced request (no matching result yet) still
+    # runs via the startup path below.
+    last_result_request_id=$(jq -r '.request_id // ""' "$RESULT_PATH" 2>/dev/null || echo "")
+    if [ "$request_id" = "$last_result_request_id" ]; then
         return
     fi
     case "$operation" in

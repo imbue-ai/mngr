@@ -140,6 +140,79 @@ def test_snapshot_helper_snapshot_existing_path_fails_without_overwrite(
     assert not (tmp_path / "btrfs.log").exists()
 
 
+# A btrfs stand-in that, unlike _FAKE_BTRFS, actually materializes the snapshot
+# target dir (and removes it on delete) so a re-processed request hits the real
+# "target already exists" path -- the exact condition the idempotency guard
+# defends against.
+_FAKE_BTRFS_MATERIALIZING = """#!/usr/bin/env bash
+echo "$@" >> "$BTRFS_LOG"
+case "$2" in
+    snapshot) mkdir -p "${@: -1}" ;;
+    delete)   rm -rf "${@: -1}" ;;
+esac
+exit 0
+"""
+
+
+@pytest.mark.skipif(
+    shutil.which("bash") is None or shutil.which("jq") is None,
+    reason="bash and jq required",
+)
+def test_snapshot_helper_does_not_reprocess_already_serviced_request(
+    tmp_path: Path,
+) -> None:
+    """Running the helper twice on the same un-consumed request.json keeps the success.
+
+    This is the idempotency guard: a helper restart re-runs whatever request is
+    still on disk via the startup path. Without the guard the second pass would
+    find the snapshot path already present and clobber the good result.json with
+    an "already exists" failure. With it, the second pass is a no-op: result.json
+    still reports success and btrfs is invoked exactly once.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("btrfs", _FAKE_BTRFS_MATERIALIZING), ("inotifywait", _FAKE_INOTIFYWAIT)):
+        fake = bin_dir / name
+        fake.write_text(body)
+        fake.chmod(0o755)
+
+    btrfs_mount = tmp_path / "mngr-btrfs"
+    trigger_dir = tmp_path / "trigger"
+    trigger_dir.mkdir(parents=True)
+    snapshot_name = "2026-06-12T03:43:57.123456Z"
+    (trigger_dir / "request.json").write_text(json.dumps({"request_id": snapshot_name, "operation": "snapshot"}))
+
+    script_path = tmp_path / "snapshot_helper.sh"
+    script_path.write_text(load_resource_text("snapshot_helper.sh"))
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["BTRFS_LOG"] = str(tmp_path / "btrfs.log")
+    env["MNGR_BTRFS_MOUNT_PATH"] = str(btrfs_mount)
+    env["MNGR_HOST_SUBVOLUME"] = str(btrfs_mount / "abcdef")
+    env["MNGR_TRIGGER_DIR"] = str(trigger_dir)
+
+    for _run_index in range(2):
+        subprocess.run(
+            ["bash", str(script_path)],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
+
+    result = json.loads((trigger_dir / "result.json").read_text())
+    assert result["exit_code"] == 0
+    assert result["request_id"] == snapshot_name
+    assert result["snapshot_path"] == str(btrfs_mount / "snapshots" / snapshot_name)
+    # The snapshot ran on the first pass only; the second pass was suppressed.
+    btrfs_snapshot_calls = [
+        line for line in (tmp_path / "btrfs.log").read_text().splitlines() if "subvolume snapshot" in line
+    ]
+    assert len(btrfs_snapshot_calls) == 1
+
+
 @pytest.mark.skipif(
     shutil.which("bash") is None or shutil.which("jq") is None,
     reason="bash and jq required",
