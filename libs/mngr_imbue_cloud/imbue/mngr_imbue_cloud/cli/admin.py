@@ -571,6 +571,9 @@ def pool_create(
                     is_dry_run=is_dry_run,
                 )
             else:
+                # The ovh_vps branch above already rejected a missing key; assert it
+                # so the type checker sees the non-None value the helper requires.
+                assert management_public_key_file is not None
                 _create_ovh_vps_pool_hosts(
                     count=count,
                     region=region,
