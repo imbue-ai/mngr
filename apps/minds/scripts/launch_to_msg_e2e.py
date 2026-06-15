@@ -1427,11 +1427,22 @@ async def amain() -> int:
             await win.wait_for_url(origin + "/", timeout=30_000)
             await snap_page(win, "18c-w2-destroy-initiated")
 
-            # Poll /api/destroying/<id>/status until the record either
-            # moves past 'running' or returns 404 (cleanup). Lima VM
-            # stop+delete typically takes 30-90s; 4-min budget gives
-            # comfortable headroom.
+            # Poll /api/destroying/<id>/status until the host is actually gone
+            # (status 'done', or 404 once the record is cleaned up). Lima VM
+            # stop+delete typically takes 30-90s; 4-min budget gives comfortable
+            # headroom.
+            #
+            # 'failed' here is NOT terminal: the status is derived fresh per poll
+            # as pid-dead + is_host_still_active (see destroying.read_destroying).
+            # The detached `mngr destroy` subprocess exits before the lima VM
+            # finishes dropping out of discovery, so on a slow runner the status
+            # reads 'failed' transiently (subprocess gone, host not yet) before
+            # flipping to 'done' once the host is actually torn down. Treat it as
+            # "not done yet" and keep polling; a host that never tears down stays
+            # 'failed' until the deadline, which still surfaces a real
+            # silent-orphan teardown as a failure.
             destroy_deadline = time.time() + 240
+            last_body: dict[str, Any] = {}
             while time.time() < destroy_deadline:
                 resp = await win.evaluate(
                     """async (aid) => {
@@ -1443,18 +1454,15 @@ async def amain() -> int:
                 if resp["status"] == 404:
                     logger.info("[w2-destroy] DONE (record cleaned up)")
                     break
-                body = {}
                 with contextlib.suppress(Exception):
-                    body = json.loads(resp["body"])
-                state = body.get("status", "")
-                if state == "failed":
-                    raise E2EFailure(f"[w2-destroy] destroy reported FAILED: {body}")
-                if state and state != "running":
-                    logger.info("[w2-destroy] state={}", state)
+                    last_body = json.loads(resp["body"])
+                state = last_body.get("status", "")
+                if state == "done":
+                    logger.info("[w2-destroy] DONE")
                     break
                 await asyncio.sleep(3)
             else:
-                raise E2EFailure("[w2-destroy] did not complete within 240s")
+                raise E2EFailure(f"[w2-destroy] host still active after 240s (last={last_body})")
             await snap_page(win, "19-w2-destroy-done")
 
             logger.info("=== home page after W2 destroyed ===")
