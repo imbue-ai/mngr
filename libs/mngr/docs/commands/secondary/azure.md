@@ -28,6 +28,7 @@ mngr azure prepare [OPTIONS]
 | `--region` | text | Azure region. Defaults to the resolved provider config's default_region (westus if unset). | None |
 | `--resource-group` | text | Resource group to create / reuse. Defaults to the resolved provider config's resource_group. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the resolved provider config's allowed_ssh_cidrs ('0.0.0.0/0'). Tighten for production. | None |
+| `--host-dir-identity` | choice (`auto` &#x7C; `require` &#x7C; `skip`) | Whether to provision the bucket-write managed identity (user-assigned identity + a Storage Blob Data Contributor role assignment scoped to just the state storage account) that lets a VM push its host_dir to the bucket for offline reads. 'auto': attempt it, but degrade a missing-permission failure to a warning (network + bucket prepare still succeed). 'require': fail the command if the identity can't be provisioned. 'skip': don't attempt it. Needs Microsoft.ManagedIdentity/userAssignedIdentities/write + Microsoft.Authorization/roleAssignments/write (Owner or User Access Administrator) when something is actually created. | `auto` |
 
 ## Common
 

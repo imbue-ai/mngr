@@ -28,6 +28,7 @@ mngr aws prepare [OPTIONS]
 | `--sg-name` | text | Security group name to create / reuse. Defaults to the provider config's SG name. | None |
 | `--vpc-id` | text | VPC id to scope the SG lookup. Without this, multi-VPC name collisions raise. | None |
 | `--allowed-ssh-cidr` | text | Inbound CIDR allowed on tcp/22 and tcp/<container_ssh_port>. Repeat for multiple. Defaults to the provider config's allowed_ssh_cidrs. Tighten for production. | None |
+| `--host-dir-identity` | choice (`auto` &#x7C; `require` &#x7C; `skip`) | Whether to provision the bucket-write IAM identity (role + instance profile) that lets an instance push its host_dir to the bucket for offline reads. 'auto': attempt it, but degrade a missing-IAM-permission failure to a warning (SG + bucket prepare still succeed). 'require': fail the command if the identity can't be provisioned. 'skip': don't attempt it. Needs iam:CreateRole / iam:PutRolePolicy / iam:CreateInstanceProfile / iam:AddRoleToInstanceProfile when something is actually created. | `auto` |
 
 ## Common
 

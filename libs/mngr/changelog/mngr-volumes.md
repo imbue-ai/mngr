@@ -1,0 +1,1 @@
+Regenerated the `mngr aws` / `mngr azure` CLI doc pages to cover the new `prepare --host-dir-identity {auto,require,skip}` flag and the state-bucket setup these commands now perform (the providers' state-bucket feature is described in the `mngr_aws` / `mngr_azure` changelogs).
