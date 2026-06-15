@@ -269,6 +269,23 @@ def _checkout_best_effort(repo: Path, ref: str) -> None:
         text=True,
         timeout=60,
     )
+    # Point FETCH_HEAD at the same commit we just checked out. The minds create
+    # flow runs ``git checkout -B <ref> FETCH_HEAD`` in this clone; with HEAD
+    # already on <ref>, making FETCH_HEAD == HEAD turns that into a true no-op
+    # that preserves the uncommitted ``is_allowed_in_pytest`` opt-in the test
+    # writes into ``.mngr/settings.toml``. Without this, FETCH_HEAD still points
+    # at the branch tip left by the earlier ``fetch --tags`` (a different
+    # commit, whose ``.mngr/settings.toml`` differs from the tag's), so the
+    # downstream checkout tries to switch content and aborts on the dirty file
+    # ("Your local changes ... would be overwritten by checkout"). Fetching from
+    # ``.`` is local-only (no network).
+    subprocess.run(
+        ["git", "-C", str(repo), "fetch", "--no-tags", ".", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def resolve_fct_path(scratch_dir: Path) -> Path:
