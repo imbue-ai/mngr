@@ -28,8 +28,9 @@ def test_catalog_contains_expected_basic_entry_points() -> None:
 def test_cloud_provider_plugins_detect_their_cli() -> None:
     """aws/gcp/azure are recommended and pre-selected when their CLI is present.
 
-    Each carries a signal that runs the provider's CLI version check, mirroring
-    how the modal plugin is detected from its credentials.
+    Each carries a signal that runs the provider's CLI version check, so the
+    install wizard pre-selects it when that CLI is on PATH -- the same
+    signal-driven recommendation other plugins (claude, modal) use.
     """
     expected_commands = {
         "aws": ("aws", "--version"),
