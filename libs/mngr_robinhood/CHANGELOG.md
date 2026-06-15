@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-06-15
+
 ### Changed
 
 - Changed: robinhood's stream-json producers (CLI token stream and the Agent-SDK synthesizer) now build their events through the shared `imbue.mngr_claude.stream_json` typed boundary, and the `assistant` summary's inner message is constructed through `anthropic.types.Message`. The CLI token stream stays byte-identical to the real `claude` binary; the framing events (`message_start` ... `message_stop`) and the `assistant` summary now carry the `anthropic` Python SDK's optional null-valued fields, so they are shape-compatible but not byte-identical (consumers validate leniently).

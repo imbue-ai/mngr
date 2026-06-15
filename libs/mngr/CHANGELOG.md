@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.14] - 2026-06-15
+
 ### Changed
 
 - Changed: User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the existing colored `ERROR:` prefix. Suppressed when stderr is not a TTY or `NO_COLOR` is set; exit semantics are unchanged.

@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-06-15
+
 ### Fixed
 
 - Fixed: Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store, so agents created *inside* a container (e.g. by an in-container `mngr create`) are visible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery. Previously such agents only showed up in `mngr list`, so onboarding messages to an in-container chat agent were never delivered. Each host's running state is derived from the same live read, removing a per-host inspect round-trip.

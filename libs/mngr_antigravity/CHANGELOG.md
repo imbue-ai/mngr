@@ -6,6 +6,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.5] - 2026-06-15
+
 ### Changed
 
 - Changed: Ported the antigravity transcript streamer to agy's new SQLite conversation store (agy 1.0.4+ stopped writing the per-conversation JSONL transcript the old streamer tailed). A new self-contained `decode_agy_transcript.py` reads steps from each `.db` and emits the same record shape, so the common-transcript converter is unchanged; assistant tool calls (name + args) are now decoded too.
