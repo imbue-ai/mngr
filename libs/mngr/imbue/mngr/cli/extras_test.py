@@ -362,8 +362,12 @@ def test_plugins_status_returns_string() -> None:
 
 def test_print_extras_status_runs_without_error() -> None:
     """_print_extras_status completes without error."""
-    # Exercises plugin status, completion status, and claude plugin status code paths
-    _print_extras_status()
+    # Inject a fast claude-plugin status so the test does not shell out to the
+    # `claude` CLI -- a Node process whose startup dominated this test's runtime
+    # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
+    # ~0.4s locally). Report claude as available so the richer status-formatting
+    # branch is still exercised. The other status paths are fast local reads.
+    _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
 
 
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:

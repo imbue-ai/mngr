@@ -3505,12 +3505,14 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
     assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session is used with a claude agent."""
+def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3533,7 +3535,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
     chain reaches claude (e.g. a ``write-plus`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
@@ -3549,10 +3551,12 @@ def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext)
     mngr_ctx = temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
     )
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3581,6 +3585,29 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+
+    Validating here -- before any host or worktree is created, and outside the provisioning
+    ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
+    rather than being wrapped in a ConcurrencyExceptionGroup and reported mid-provisioning
+    as an "Unexpected error".
+    """
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("nonexistent-session",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    # Pin config-dir resolution to the isolated test HOME (~/.claude) so the search is
+    # deterministic even when CLAUDE_CONFIG_DIR is set (e.g. inside an mngr agent).
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        with pytest.raises(UserInputError, match="Session nonexistent-session not found"):
+            on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
