@@ -37,6 +37,9 @@ from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_scripts_to_commands_dir
 from imbue.mngr.agents.tui_agent import InteractiveTuiAgent
 from imbue.mngr.agents.tui_utils import send_enter_via_tmux_wait_for_hook
+from imbue.mngr.api.git import GitignoreStatus
+from imbue.mngr.api.git import check_path_gitignore_status
+from imbue.mngr.api.git import check_path_repo_gitignore_status
 from imbue.mngr.api.preservation import PreservedItem
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import get_preserved_agents_root_dir
@@ -175,8 +178,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
       * every preserved agent's ``projects/`` dir (preserve_sessions_on_destroy)
 
       All of these dirs are searched; a session ID matching in more than one is
-      rejected as ambiguous (the user must pass the full ``.jsonl`` path). The dir
-      order above is the order used when listing dirs in error messages.
+      rejected as ambiguous (the user must pass the full ``.jsonl`` path).
 
     Returns (session_id, source_project_dir).
     """
@@ -207,19 +209,16 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
             search_dirs.append(candidate)
 
     matches: list[Path] = []
-    searched: list[Path] = []
     for projects_dir in search_dirs:
         if projects_dir.exists():
-            searched.append(projects_dir)
             matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
 
-    if not searched:
-        dirs_str = " or ".join(str(d) for d in search_dirs)
-        raise UserInputError(f"No projects directory found at {dirs_str}. Cannot find session to adopt.")
     if not matches:
-        dirs_str = " or ".join(str(d) for d in searched)
+        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
+        # list can run to hundreds of paths. The --adopt-session help documents the
+        # search scope (current/user Claude config dirs, live agents, preserved agents).
         raise UserInputError(
-            f"Session {adopt_session_arg} not found in {dirs_str}. "
+            f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
         )
     if len(matches) > 1:
@@ -1263,64 +1262,24 @@ def _check_settings_local_gitignored(
     remote hosts, so the provisioning check would fail after expensive host
     creation.
     """
-    settings_relative = Path(".claude") / "settings.local.json"
-
-    is_git_repo = host.execute_idempotent_command(
-        "git rev-parse --is-inside-work-tree",
-        cwd=repo_path,
-        timeout_seconds=5.0,
-    )
-    if not is_git_repo.success:
+    settings_subpath = Path(".claude") / "settings.local.json"
+    if require_repo_rule:
+        status, settings_relative = check_path_repo_gitignore_status(host, repo_path, settings_subpath)
+    else:
+        status, settings_relative = check_path_gitignore_status(host, repo_path, settings_subpath)
+    if status in (GitignoreStatus.SKIP, GitignoreStatus.IGNORED):
         return
-
-    # Resolve symlinks so git check-ignore doesn't fail with
-    # "fatal: pathspec '...' is beyond a symbolic link" when .claude is a symlink.
-    # Only runs when .claude is actually a symlink. Resolves both .claude and the
-    # repo root (in case repo_path itself contains symlinks) to compute the correct
-    # relative path for git check-ignore.
-    resolve_result = host.execute_idempotent_command(
-        "test -L .claude && realpath .claude && realpath .",
-        cwd=repo_path,
-        timeout_seconds=5.0,
-    )
-    if resolve_result.success:
-        lines = resolve_result.stdout.strip().splitlines()
-        if len(lines) == 2:
-            resolved_claude_dir = Path(lines[0])
-            resolved_repo_root = Path(lines[1])
-            try:
-                settings_relative = resolved_claude_dir.relative_to(resolved_repo_root) / "settings.local.json"
-            except ValueError:
-                # Symlink target is outside the repo -- git won't track it, so no gitignore needed.
-                return
-
-    result = host.execute_idempotent_command(
-        f"git check-ignore -q {shlex.quote(str(settings_relative))}",
-        cwd=repo_path,
-        timeout_seconds=5.0,
-    )
-    if not result.success:
+    if status is GitignoreStatus.NOT_IGNORED:
         raise PluginMngrError(
             f"'{settings_relative}' is not gitignored in {repo_path}.\n"
             "mngr needs to write Claude hooks to this file, but it would appear as an unstaged change.\n"
-            f"Add '{settings_relative}' to your .gitignore and try again. (original error: {result.stderr})"
+            f"Add '{settings_relative}' to your .gitignore and try again."
         )
-
-    if require_repo_rule:
-        # Re-check with global excludes disabled to see if the rule is from
-        # the repo itself. If only the global gitignore covers it, the remote
-        # host (which has no global gitignore) will fail during provisioning.
-        repo_only_result = host.execute_idempotent_command(
-            f"git -c core.excludesFile= check-ignore -q {shlex.quote(str(settings_relative))}",
-            cwd=repo_path,
-            timeout_seconds=5.0,
-        )
-        if not repo_only_result.success:
-            raise PluginMngrError(
-                f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
-                "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
-                f"Add '{settings_relative}' to your repository's .gitignore and try again."
-            )
+    raise PluginMngrError(
+        f"'{settings_relative}' is only gitignored via your global gitignore, not in the repository at {repo_path}.\n"
+        "Remote hosts don't have your global gitignore, so this will fail during provisioning.\n"
+        f"Add '{settings_relative}' to your repository's .gitignore and try again."
+    )
 
 
 class DialogIndicator(FrozenModel, ABC):
@@ -2676,6 +2635,15 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
             "--adopt-session is incompatible with cloning via --from <agent>: both "
             "adopt a session into the new agent. Pick one."
         )
+
+    # Validate that every named session resolves *now* -- before any host or worktree
+    # is created. The real resolution happens again later in on_after_provisioning, but
+    # that runs inside provision_agent's ConcurrencyGroup, whose __exit__ would re-wrap a
+    # bad-ID UserInputError in a ConcurrencyExceptionGroup and surface it as an
+    # "Unexpected error" with a traceback. Resolving here (the session source is always
+    # local, so the result matches) makes a bad ID a clean, fail-fast user error.
+    for session_arg in adopt_session:
+        _resolve_adopt_session(session_arg, mngr_ctx)
 
     return None
 

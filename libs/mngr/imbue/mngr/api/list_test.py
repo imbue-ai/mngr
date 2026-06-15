@@ -15,6 +15,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr import hookimpl
 from imbue.mngr.api.discover import _all_identifiers_found
+from imbue.mngr.api.discover import _discover_provider_hosts_and_agents
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import get_discovery_events_path
@@ -38,7 +39,9 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.provider_config_registry import _provider_config_registry
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderEmptyError
+from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -1330,6 +1333,111 @@ class _RaisingDiscoveryProviderInstance(MockProviderInstance):
         raise MngrError("simulated discovery failure from test")
 
 
+class _UnavailableDiscoveryProviderInstance(MockProviderInstance):
+    """Provider whose backend is unreachable -- raises ProviderUnavailableError."""
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        raise ProviderUnavailableError(self.name, "backend offline")
+
+
+def test_discover_provider_hosts_and_agents_propagates_unavailable_error(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The per-provider worker propagates ProviderUnavailableError unwrapped.
+
+    Discovery does not swallow an unreachable provider, and the worker does NOT
+    wrap the error in ProviderDiscoveryError -- so it reaches the caller as a
+    clear "provider is not available" failure. The end-to-end propagation out of
+    discover_hosts_and_agents is covered by
+    test_discover_hosts_and_agents_propagates_unavailable_provider.
+    """
+    provider = _UnavailableDiscoveryProviderInstance(
+        name=ProviderInstanceName("offline-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderUnavailableError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def test_discover_provider_hosts_and_agents_wraps_non_availability_errors(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A non-availability discovery failure is wrapped in ProviderDiscoveryError.
+
+    ProviderUnavailableError propagates unwrapped (clear "unavailable" message);
+    any other failure is wrapped for per-provider attribution. Both propagate.
+    """
+    provider = _RaisingDiscoveryProviderInstance(
+        name=ProviderInstanceName("raising-provider"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(ProviderDiscoveryError):
+        _discover_provider_hosts_and_agents(
+            provider,
+            {},
+            include_destroyed=True,
+            results_lock=Lock(),
+            cg=temp_mngr_ctx.concurrency_group,
+        )
+
+
+def _make_unavailable_alongside_local_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
+    """Build a MngrContext with the default local provider plus one offline provider."""
+    provider_config = ProviderInstanceConfig(backend=_UNAVAILABLE_DISCOVERY_BACKEND_NAME)
+    merged_providers = {
+        **temp_mngr_ctx.config.providers,
+        ProviderInstanceName("offline-provider"): provider_config,
+    }
+    updated_config = temp_mngr_ctx.config.model_copy_update(
+        to_update(temp_mngr_ctx.config.field_ref().providers, merged_providers),
+    )
+    return temp_mngr_ctx.model_copy_update(
+        to_update(temp_mngr_ctx.field_ref().config, updated_config),
+    )
+
+
+def test_discover_hosts_and_agents_propagates_unavailable_provider(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """An unreachable provider fails a full (enumerate-all) discovery loudly.
+
+    For an enumerate-all call (provider_names=None), a down provider could hold a
+    target, so the error propagates and the command fails rather than silently
+    omitting that provider's agents. Targeted commands avoid this by scoping
+    discovery to the relevant provider(s).
+    """
+    _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = _UnavailableDiscoveryProviderBackend
+    _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        mngr_ctx = _make_unavailable_alongside_local_ctx(temp_mngr_ctx)
+
+        with pytest.raises(ProviderUnavailableError):
+            discover_hosts_and_agents(
+                mngr_ctx,
+                provider_names=None,
+                agent_identifiers=None,
+                include_destroyed=True,
+                reset_caches=False,
+            )
+    finally:
+        del _backend_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+        del _provider_config_registry[_UNAVAILABLE_DISCOVERY_BACKEND_NAME]
+
+
 class _RaisingDetailProviderInstance(MockProviderInstance):
     """Provider that raises MngrError from get_host_and_agent_details.
 
@@ -1405,9 +1513,7 @@ class _MismatchedProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del is_for_host_creation
         return _MismatchedProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
@@ -1446,10 +1552,49 @@ class _RaisingDiscoveryProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
+    ) -> ProviderInstanceInterface:
+        return _RaisingDiscoveryProviderInstance(
+            name=name,
+            host_dir=mngr_ctx.config.default_host_dir,
+            mngr_ctx=mngr_ctx,
+        )
+
+
+_UNAVAILABLE_DISCOVERY_BACKEND_NAME = ProviderBackendName("test-unavailable-discovery-backend")
+
+
+class _UnavailableDiscoveryProviderBackend(ProviderBackendInterface):
+    """Backend that creates a _UnavailableDiscoveryProviderInstance."""
+
+    @staticmethod
+    def get_name() -> ProviderBackendName:
+        return _UNAVAILABLE_DISCOVERY_BACKEND_NAME
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose provider is unreachable during discovery"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def build_provider_instance(
+        name: ProviderInstanceName,
+        config: ProviderInstanceConfig,
+        mngr_ctx: MngrContext,
         is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
         del is_for_host_creation
-        return _RaisingDiscoveryProviderInstance(
+        return _UnavailableDiscoveryProviderInstance(
             name=name,
             host_dir=mngr_ctx.config.default_host_dir,
             mngr_ctx=mngr_ctx,
@@ -1491,9 +1636,8 @@ class _EmptyProviderBackend(ProviderBackendInterface):
         name: ProviderInstanceName,
         config: ProviderInstanceConfig,
         mngr_ctx: MngrContext,
-        is_for_host_creation: bool = False,
     ) -> ProviderInstanceInterface:
-        del config, mngr_ctx, is_for_host_creation
+        del config, mngr_ctx
         raise ProviderEmptyError(provider_name=name, reason="simulated empty backend from test")
 
 

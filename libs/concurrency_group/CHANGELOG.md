@@ -6,6 +6,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.20] - 2026-06-13
+
+### Changed
+
+- Changed: Concurrency-group exception handling now raises a dedicated custom exception type instead of `ValueError`.
+
 ## [v0.1.19] - 2026-06-05
 
 ## [v0.1.18] - 2026-05-28

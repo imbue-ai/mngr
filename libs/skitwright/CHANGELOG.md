@@ -5,3 +5,7 @@ A concise, human-friendly summary of changes to the `skitwright` project. Entrie
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
 ## [Unreleased]
+
+### Changed
+
+- Changed: `expect()` now raises a dedicated custom exception type instead of `TypeError`.

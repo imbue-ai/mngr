@@ -330,8 +330,22 @@ class _KanpanState(MutableModel):
     list_walker: Any = None  # SimpleFocusListWalker, set during display build
     # Name of the agent that was focused before refresh (for focus persistence)
     focused_agent_name: AgentName | None = None
-    # Steady-state footer left text (restored after transient messages)
+    # Steady-state footer left text (shown when nothing higher-priority is active)
     steady_footer_text: str = "  Loading..."
+    # --- Footer rendering (single-owner model) ---
+    # The footer-left widget has exactly one writer (`_render_footer`), which picks
+    # what to show from the fields below by priority. This prevents the flicker that
+    # arose when several independent alarm loops (refresh spinner, batch action,
+    # custom command) each wrote the shared widget on overlapping ticks.
+    # Transient notification text; overrides everything while set.
+    transient_message: str | None = None
+    # Alarm handle that clears `transient_message` (None if none pending).
+    transient_alarm: Any = None
+    # Base text (without the spinner glyph) of an in-progress user action -- batch
+    # execution or a custom command. Takes priority over the background refresh.
+    action_label: str | None = None
+    # Handle for the single animation tick that advances the spinner (None if idle).
+    animation_alarm: Any = None
     # All commands (builtins merged with user config), keyed by trigger key
     commands: dict[str, KanpanCommand] = {}
     # Monotonic timestamp of the last completed refresh (for cooldown logic)
@@ -526,20 +540,8 @@ def _prune_orphaned_marks(state: _KanpanState) -> None:
 
 
 def _update_mark_count_footer(state: _KanpanState) -> None:
-    """Update the footer to show the count of marked agents."""
-    if not state.marks:
-        _restore_footer(state)
-        return
-    counts: dict[str, int] = {}
-    for mark_key in state.marks.values():
-        counts[mark_key] = counts.get(mark_key, 0) + 1
-    parts = []
-    for mark_key, count in sorted(counts.items()):
-        cmd = state.commands.get(mark_key)
-        label = cmd.name if cmd else mark_key
-        parts.append(f"{count} {label}")
-    state.footer_left_text.set_text(f"  Marked: {', '.join(parts)}  (x to execute, U to unmark all)")
-    state.footer_left_attr.set_attr_map({None: "footer"})
+    """Re-render the footer after the set of marked agents changed."""
+    _render_footer(state)
 
 
 def _execute_marks(state: _KanpanState) -> None:
@@ -593,7 +595,6 @@ def _start_batch_execution(state: _KanpanState) -> None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
     state.executing = True
-    state.spinner_index = 0
     # Clear failures from any previous run so a fresh attempt starts clean.
     state.execute_errors = ()
 
@@ -684,7 +685,9 @@ def _execute_next_in_batch(
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
-    state.footer_left_text.set_text(f"{state.execute_status}{_batch_item_label(item)}...")
+    state.action_label = f"{state.execute_status}{_batch_item_label(item)}"
+    _render_footer(state)
+    _ensure_animation_running(state)
 
     if state.loop is not None:
         state.loop.set_alarm_in(
@@ -731,9 +734,6 @@ def _on_batch_item_poll(
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
-    frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    state.footer_left_text.set_text(f"{state.execute_status}{_batch_item_label(item)} {frame_char}")
-    state.spinner_index += 1
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
 
 
@@ -741,6 +741,7 @@ def _finish_batch_execution(state: _KanpanState, results: list[_BatchItemResult]
     """Complete batch execution and show summary."""
     state.executing = False
     state.execute_status = ""
+    state.action_label = None
 
     ok_count = sum(1 for r in results if r.is_success)
     failures = [r for r in results if not r.is_success]
@@ -871,7 +872,9 @@ def _run_shell_command(state: _KanpanState, cmd: CustomCommand) -> None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
     agent_name = entry.name
-    state.footer_left_text.set_text(f"  Running {cmd.name} on {agent_name}...")
+    state.action_label = f"  Running {cmd.name} on {agent_name}"
+    _render_footer(state)
+    _ensure_animation_running(state)
 
     def _do_run() -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "MNGR_AGENT_NAME": str(agent_name)}
@@ -895,6 +898,7 @@ def _on_custom_command_poll(
     """Poll for custom command completion."""
     state, future, cmd, agent_name = data
     if future.done():
+        state.action_label = None
         try:
             result = future.result()
             if result.returncode == 0:
@@ -907,29 +911,79 @@ def _on_custom_command_poll(
         if cmd.refresh_afterwards:
             _start_local_refresh(loop, state)
     else:
-        frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-        state.footer_left_text.set_text(f"  Running {cmd.name} on {agent_name} {frame_char}")
-        state.spinner_index += 1
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, data)
+
+
+def _marks_footer_text(state: _KanpanState) -> str:
+    """Build the footer text summarizing the currently marked agents."""
+    counts: dict[str, int] = {}
+    for mark_key in state.marks.values():
+        counts[mark_key] = counts.get(mark_key, 0) + 1
+    parts = []
+    for mark_key, count in sorted(counts.items()):
+        cmd = state.commands.get(mark_key)
+        label = cmd.name if cmd else mark_key
+        parts.append(f"{count} {label}")
+    return f"  Marked: {', '.join(parts)}  (x to execute, U to unmark all)"
+
+
+def _compute_footer_display(state: _KanpanState) -> tuple[str, str]:
+    """Return the (text, palette attr) the footer-left should show, by priority.
+
+    Priority, highest first: a transient notification, an in-progress user action
+    (batch/custom command), a background refresh, the marked-agents summary, then
+    the steady-state text. Only one of these owns the widget at a time, so the
+    several alarm loops that drive them can no longer overwrite each other.
+    """
+    if state.transient_message is not None:
+        return state.transient_message, "notification"
+    frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
+    if state.action_label is not None:
+        return f"{state.action_label} {frame_char}", "footer"
+    if state.refresh_future is not None:
+        return f"  Refreshing {frame_char}", "footer"
+    if state.marks:
+        return _marks_footer_text(state), "footer"
+    return state.steady_footer_text, "footer"
+
+
+def _render_footer(state: _KanpanState) -> None:
+    """Write the footer-left widget from current state. The sole writer of that widget."""
+    text, attr = _compute_footer_display(state)
+    state.footer_left_text.set_text(text)
+    state.footer_left_attr.set_attr_map({None: attr})
+
+
+def _ensure_animation_running(state: _KanpanState) -> None:
+    """Start the single spinner-animation tick if it is not already running."""
+    if state.animation_alarm is None and state.loop is not None:
+        state.animation_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_animation_tick, state)
+
+
+def _on_animation_tick(loop: MainLoop, state: _KanpanState) -> None:
+    """Advance the spinner and re-render; reschedule while any animated work is active."""
+    state.animation_alarm = None
+    state.spinner_index += 1
+    _render_footer(state)
+    if state.action_label is not None or state.refresh_future is not None:
+        state.animation_alarm = loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_animation_tick, state)
 
 
 def _show_transient_message(state: _KanpanState, message: str) -> None:
     """Show a transient notification in the footer that auto-reverts after a few seconds."""
-    state.footer_left_text.set_text(message)
-    state.footer_left_attr.set_attr_map({None: "notification"})
+    state.transient_message = message
     if state.loop is not None:
-        state.loop.set_alarm_in(TRANSIENT_MESSAGE_SECONDS, _on_restore_footer, state)
+        if state.transient_alarm is not None:
+            state.loop.remove_alarm(state.transient_alarm)
+        state.transient_alarm = state.loop.set_alarm_in(TRANSIENT_MESSAGE_SECONDS, _on_transient_expire, state)
+    _render_footer(state)
 
 
-def _restore_footer(state: _KanpanState) -> None:
-    """Restore the steady-state footer styling and text."""
-    state.footer_left_text.set_text(state.steady_footer_text)
-    state.footer_left_attr.set_attr_map({None: "footer"})
-
-
-def _on_restore_footer(loop: MainLoop, state: _KanpanState) -> None:
-    """Alarm callback to restore the steady-state footer."""
-    _restore_footer(state)
+def _on_transient_expire(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback: clear the transient notification and re-render."""
+    state.transient_alarm = None
+    state.transient_message = None
+    _render_footer(state)
 
 
 def _request_refresh(loop: MainLoop, state: _KanpanState, cooldown_seconds: float) -> None:
@@ -971,8 +1025,6 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
         return
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
-    state.footer_left_attr.set_attr_map({None: "footer"})
-    state.spinner_index = 0
     state.refresh_is_local_only = True
     state.refresh_future = state.executor.submit(
         fetch_local_snapshot,
@@ -982,15 +1034,15 @@ def _start_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
         state.include_filters,
         state.exclude_filters,
     )
-    _schedule_spinner_tick(loop, state)
+    _render_footer(state)
+    _ensure_animation_running(state)
+    _schedule_refresh_poll(loop, state)
 
 
 def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
     """Start a full background refresh and begin the spinner animation."""
     if state.executor is None:
         state.executor = ThreadPoolExecutor(max_workers=1)
-    state.footer_left_attr.set_attr_map({None: "footer"})
-    state.spinner_index = 0
     state.refresh_is_local_only = False
     state.refresh_future = state.executor.submit(
         fetch_board_snapshot,
@@ -1000,16 +1052,22 @@ def _start_refresh(loop: MainLoop, state: _KanpanState) -> None:
         state.include_filters,
         state.exclude_filters,
     )
-    _schedule_spinner_tick(loop, state)
+    _render_footer(state)
+    _ensure_animation_running(state)
+    _schedule_refresh_poll(loop, state)
 
 
-def _schedule_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
-    """Schedule the next spinner tick."""
-    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_spinner_tick, state)
+def _schedule_refresh_poll(loop: MainLoop, state: _KanpanState) -> None:
+    """Schedule the next refresh-completion poll."""
+    loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_refresh_completion, state)
 
 
-def _on_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
-    """Alarm callback: update spinner, check if fetch is done."""
+def _poll_refresh_completion(loop: MainLoop, state: _KanpanState) -> None:
+    """Alarm callback: poll the in-flight refresh and finish it when done.
+
+    The spinner glyph is animated by `_on_animation_tick`; this loop only watches
+    for completion so the footer has a single writer.
+    """
     if state.refresh_future is None:
         return
 
@@ -1017,11 +1075,7 @@ def _on_spinner_tick(loop: MainLoop, state: _KanpanState) -> None:
         _finish_refresh(loop, state)
         return
 
-    # Animate spinner
-    frame_char = SPINNER_FRAMES[state.spinner_index % len(SPINNER_FRAMES)]
-    state.footer_left_text.set_text(f"  Refreshing {frame_char}")
-    state.spinner_index += 1
-    _schedule_spinner_tick(loop, state)
+    _schedule_refresh_poll(loop, state)
 
 
 def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
@@ -1069,7 +1123,7 @@ def _finish_refresh(loop: MainLoop, state: _KanpanState) -> None:
         state.steady_footer_text = f"  Last refresh: {now} (took {elapsed})"
     else:
         state.steady_footer_text = f"  Last refresh: {now}"
-    state.footer_left_text.set_text(state.steady_footer_text)
+    _render_footer(state)
 
     if failed:
         _request_refresh(loop, state, state.retry_cooldown_seconds)

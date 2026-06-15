@@ -32,9 +32,9 @@ from enum import Enum
 from typing import Any
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.mngr.cli.model_schema import render_annotation
-from imbue.mngr.cli.model_schema import walk_model_fields
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.utils.model_schema import render_annotation
+from imbue.mngr.utils.model_schema import walk_model_fields
 
 
 class FieldContext(str, Enum):

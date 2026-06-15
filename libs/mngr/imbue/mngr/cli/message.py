@@ -6,6 +6,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.message import MessageResult
 from imbue.mngr.api.message import send_message_to_agents
 from imbue.mngr.cli.address_params import AGENT_ADDRESS
@@ -22,6 +23,7 @@ from imbue.mngr.cli.stdin_utils import STDIN_PLACEHOLDER
 from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import ErrorBehavior
@@ -44,7 +46,6 @@ class MessageCliOptions(CommonCliOptions):
     agent_list: tuple[AgentAddress, ...]
     message_content: str | None
     message_file: str | None
-    provider: tuple[str, ...]
     on_error: str
     start: bool
 
@@ -83,11 +84,6 @@ class MessageCliOptions(CommonCliOptions):
     type=click.Choice(["abort", "continue"], case_sensitive=False),
     default="continue",
     help="What to do when errors occur: abort (stop immediately) or continue (keep going)",
-)
-@optgroup.option(
-    "--provider",
-    multiple=True,
-    help="Message only agents using specified provider (repeatable)",
 )
 @add_common_options
 @click.pass_context
@@ -138,34 +134,33 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    # Build include filters from agent addresses.
-    include_filters: list[str] = []
-    if agent_addresses:
-        ref_filters = []
-        for address in agent_addresses:
-            plain_id = str(address.agent)
-            ref_filter = f'(name == "{plain_id}" || id == "{plain_id}")'
-            if address.host is not None:
-                if address.host.host is not None:
-                    ref_filter += f' && host.name == "{address.host.host}"'
-                if address.host.provider is not None:
-                    ref_filter += f' && host.provider == "{address.host.provider}"'
-            ref_filters.append(f"({ref_filter})")
-        combined_filter = " || ".join(ref_filters)
-        include_filters.append(combined_filter)
+    # Resolve addresses to live agents. find_all_agents narrows discovery to the
+    # providers named by the addresses (full scan only when an address omits
+    # its provider) and raises AgentNotFoundError if any address has no match.
+    # Treat that as "no agents found": preserve historical exit-0 behavior in
+    # CONTINUE mode, surface it in ABORT mode.
+    try:
+        matches = find_all_agents(
+            addresses=agent_addresses,
+            filter_all=False,
+            target_state=None,
+            mngr_ctx=mngr_ctx,
+        )
+    except AgentNotFoundError:
+        if error_behavior == ErrorBehavior.ABORT:
+            raise
+        matches = []
 
     # For JSONL format, use streaming callbacks
     if output_opts.output_format == OutputFormat.JSONL:
         result = send_message_to_agents(
             mngr_ctx=mngr_ctx,
             message_content=message_content,
-            include_filters=tuple(include_filters),
-            exclude_filters=(),
+            agents_to_message=matches,
             error_behavior=error_behavior,
             is_start_desired=opts.start,
             on_success=lambda agent_name: _emit_jsonl_success(agent_name),
             on_error=lambda agent_name, error: _emit_jsonl_error(agent_name, error),
-            provider_names=opts.provider,
         )
         if result.failed_agents:
             ctx.exit(1)
@@ -175,11 +170,9 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
     result = send_message_to_agents(
         mngr_ctx=mngr_ctx,
         message_content=message_content,
-        include_filters=tuple(include_filters),
-        exclude_filters=(),
+        agents_to_message=matches,
         error_behavior=error_behavior,
         is_start_desired=opts.start,
-        provider_names=opts.provider,
     )
 
     _emit_output(result, output_opts)
