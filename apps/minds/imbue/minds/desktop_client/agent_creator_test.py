@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.agent_creator import checkout_branch
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
+from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -211,7 +212,7 @@ def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
-        (LaunchMode.CLOUD, None),
+        (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
@@ -258,12 +259,50 @@ def test_build_mngr_create_command_forwards_region_for_imbue_cloud() -> None:
 
 def test_build_mngr_create_command_forwards_region_for_vultr() -> None:
     command = _build_mngr_create_command(
-        launch_mode=LaunchMode.CLOUD,
+        launch_mode=LaunchMode.VULTR,
         host_name=HostName("hello"),
         region="lhr",
     )
     # Vultr takes the region as the --vultr-region build arg.
     assert "--vultr-region=lhr" in command
+
+
+def test_build_mngr_create_command_aws_address_encodes_region() -> None:
+    """AWS selects the region-specific provider via the ``aws-<region>`` address suffix."""
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.AWS,
+        host_name=HostName("hello"),
+        region="us-west-2",
+    )
+    assert "system-services@hello.aws-us-west-2" in command
+    assert "aws" in command
+    assert "--template" in command
+
+
+def test_build_mngr_create_command_forwards_region_for_aws() -> None:
+    command = _build_mngr_create_command(
+        launch_mode=LaunchMode.AWS,
+        host_name=HostName("hello"),
+        region="eu-west-1",
+    )
+    # AWS confirms the placement with a matching --aws-region build arg.
+    assert "--aws-region=eu-west-1" in command
+
+
+def test_build_mngr_create_command_aws_requires_region() -> None:
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        _build_mngr_create_command(
+            launch_mode=LaunchMode.AWS,
+            host_name=HostName("hello"),
+        )
+
+
+def test_run_mngr_aws_prepare_requires_region() -> None:
+    # prepare runs before the create-command builder in the AWS create flow, so
+    # it must reject an empty region with the same message rather than shelling
+    # out to ``mngr aws prepare --provider aws- --region ''``.
+    with pytest.raises(MngrCommandError, match="AWS mode requires a region"):
+        run_mngr_aws_prepare("")
 
 
 def test_build_mngr_create_command_omits_region_when_unset() -> None:
@@ -300,7 +339,7 @@ def test_build_mngr_create_command_omits_latchkey_when_env_is_empty() -> None:
         assert "LATCHKEY_DISABLE_COUNTING" not in joined
 
 
-@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.CLOUD])
+@pytest.mark.parametrize("launch_mode", [LaunchMode.DOCKER, LaunchMode.LIMA, LaunchMode.VULTR])
 def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse(
     launch_mode: LaunchMode,
 ) -> None:
@@ -370,7 +409,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
     assert "GH_TOKEN" not in joined
     assert "--pass-host-env" not in command
     # IMBUE_CLOUD now uses the symmetric ``--template main --template imbue_cloud``
-    # shape (mirroring how DOCKER/LIMA/CLOUD use ``--template main --template <provider>``).
+    # shape (mirroring how DOCKER/LIMA/VULTR/AWS use ``--template main --template <provider>``).
     # The provider-specific knobs (idle_mode, pass_host_env) live in the
     # ``imbue_cloud`` template instead of being inlined here.
     assert "--template" in command
@@ -387,7 +426,7 @@ def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
     for mode, account in (
         (LaunchMode.DOCKER, None),
         (LaunchMode.LIMA, None),
-        (LaunchMode.CLOUD, None),
+        (LaunchMode.VULTR, None),
         (LaunchMode.IMBUE_CLOUD, "alice@imbue.com"),
     ):
         command = _build_mngr_create_command(
