@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 from pathlib import Path
 
 import pytest
@@ -39,10 +40,11 @@ _OLD_SELF_CONTAINED_ZSH_BLOCK = (
 )
 
 
-def test_detect_shell_returns_zsh_or_bash() -> None:
-    """_detect_shell returns a valid shell type."""
-    shell = _detect_shell()
-    assert shell in ("zsh", "bash")
+def test_detect_shell_uses_os_fallback_when_shell_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With SHELL unset, _detect_shell uses the OS fallback (Darwin -> zsh, else bash)."""
+    monkeypatch.delenv("SHELL", raising=False)
+    expected = "zsh" if platform.system() == "Darwin" else "bash"
+    assert _detect_shell() == expected
 
 
 def test_detect_shell_returns_zsh_for_zsh_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,9 +62,8 @@ def test_detect_shell_returns_bash_for_bash_env(monkeypatch: pytest.MonkeyPatch)
 def test_detect_shell_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """_detect_shell falls back based on OS when SHELL is unrecognized."""
     monkeypatch.setenv("SHELL", "/bin/fish")
-    # On the current platform, verify it returns a valid shell type
-    shell = _detect_shell()
-    assert shell in ("zsh", "bash")
+    expected = "zsh" if platform.system() == "Darwin" else "bash"
+    assert _detect_shell() == expected
 
 
 def test_get_shell_rc_zsh() -> None:
@@ -125,14 +126,14 @@ def test_generate_completion_script_bash_is_shim(tmp_path: Path, monkeypatch: py
     assert "complete -o default" not in script
 
 
-def test_completion_status_returns_tuple() -> None:
-    """_completion_status returns a 3-tuple."""
-    result = _completion_status()
-    assert len(result) == 3
-    configured, shell_type, rc_path = result
-    assert isinstance(configured, bool)
+def test_completion_status_unconfigured_on_clean_home() -> None:
+    """On a clean (temp) HOME with no shell RC file, completion is not configured."""
+    configured, shell_type, rc_path = _completion_status()
+    assert configured is False
     assert shell_type in ("zsh", "bash")
-    assert isinstance(rc_path, Path)
+    # The RC path must live under the isolated temp HOME, not the real home.
+    assert rc_path == Path.home() / (".zshrc" if shell_type == "zsh" else ".bashrc")
+    assert not rc_path.exists()
 
 
 def test_install_completion_auto_writes_shim_and_managed_files(
@@ -353,21 +354,30 @@ def test_install_claude_plugin_returns_false_when_install_fails() -> None:
     assert result is False
 
 
-def test_plugins_status_returns_string() -> None:
-    """_plugins_status returns a string describing plugin status."""
-    status = _plugins_status()
-    assert isinstance(status, str)
-    assert len(status) > 0
+def test_plugins_status_unknown_without_uv_tool_receipt() -> None:
+    """Without a uv-tool receipt (the test environment), _plugins_status reports 'status unknown'.
+
+    mngr in tests runs from the workspace venv, not a `uv tool install`, so
+    require_uv_tool_receipt() raises AbortError, which _plugins_status catches.
+    """
+    assert _plugins_status() == "status unknown"
 
 
-def test_print_extras_status_runs_without_error() -> None:
-    """_print_extras_status completes without error."""
+def test_print_extras_status_writes_all_status_lines(capsys: pytest.CaptureFixture[str]) -> None:
+    """_print_extras_status writes the header and one status line per extra."""
     # Inject a fast claude-plugin status so the test does not shell out to the
     # `claude` CLI -- a Node process whose startup dominated this test's runtime
     # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
     # ~0.4s locally). Report claude as available so the richer status-formatting
     # branch is still exercised. The other status paths are fast local reads.
     _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
+    out = capsys.readouterr().out
+    assert "Extras" in out
+    # On a clean test environment: no uv-tool receipt, no shell RC, no default type.
+    assert "  plugins          status unknown" in out
+    assert "  completion       not configured" in out
+    assert "  claude-plugin    " in out
+    assert "  default-type     not set" in out
 
 
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
@@ -390,27 +400,50 @@ def test_extras_interactive_mode(cli_runner: CliRunner) -> None:
 
 
 def test_extras_help(cli_runner: CliRunner) -> None:
-    """The --help flag should work for the extras command."""
-    result = cli_runner.invoke(extras, ["--help"])
+    """--help lists the documented option and every extras subcommand.
+
+    Invoking the command object directly renders click's default help (the
+    rich metadata help only renders through the full ``cli`` group), so we
+    assert the option help text and the subcommand list rather than the
+    metadata description. Whitespace is normalized because the renderer wraps
+    to the terminal width.
+    """
+    result = cli_runner.invoke(extras, ["--help"], catch_exceptions=False)
     assert result.exit_code == 0
+    normalized = " ".join(result.output.split())
+    assert "Walk through all extras interactively" in normalized
+    for subcommand in ("plugins", "completion", "claude-plugin", "config"):
+        assert subcommand in normalized
 
 
 def test_extras_completion_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras completion' subcommand should work."""
-    result = cli_runner.invoke(extras, ["completion"])
+    """The 'extras completion' subcommand reports no interactive terminal and skips.
+
+    In the test environment has_interactive_terminal() is False (no /dev/tty),
+    so the non-auto path short-circuits before any picker or file write.
+    """
+    result = cli_runner.invoke(extras, ["completion"], catch_exceptions=False)
     assert result.exit_code == 0
+    assert "No interactive terminal available. Skipping shell completion." in result.output
 
 
-def test_extras_claude_plugin_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras claude-plugin' subcommand should work."""
-    result = cli_runner.invoke(extras, ["claude-plugin"])
-    assert result.exit_code == 0
+# Note: the `extras claude-plugin` subcommand is intentionally not tested through
+# the CLI. Its only logic is the one-line delegation to `_install_claude_plugin`,
+# whose every branch (claude missing, already installed, no tty, declined) is
+# covered deterministically by the injected `test_install_claude_plugin_*` tests
+# above. A CLI-level test would call the real `_claude_plugin_status`, making the
+# outcome depend on whether `claude` happens to be installed in the environment.
 
 
 def test_extras_completion_yes_flag(cli_runner: CliRunner) -> None:
-    """The 'extras completion -y' subcommand auto-installs."""
-    result = cli_runner.invoke(extras, ["completion", "-y"])
+    """The 'extras completion -y' subcommand writes the completion script to the shell RC file."""
+    result = cli_runner.invoke(extras, ["completion", "-y"], catch_exceptions=False)
     assert result.exit_code == 0
+    assert "Shell completion enabled in" in result.output
+    # The shim must actually have been appended to the RC file under the temp HOME.
+    shell_type = _detect_shell()
+    rc_path = _get_shell_rc(shell_type)
+    assert COMPLETION_SHIM_MARKER in rc_path.read_text()
 
 
 def test_extras_claude_plugin_yes_flag(cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -559,15 +592,21 @@ def test_install_default_agent_type_skip_writes_nothing() -> None:
 
 
 def test_extras_config_subcommand(cli_runner: CliRunner) -> None:
-    """The 'extras config' subcommand should work."""
-    result = cli_runner.invoke(extras, ["config"])
+    """The 'extras config' subcommand prints the suggested config command.
+
+    No interactive terminal is available in tests, so _install_default_agent_type
+    falls back to printing the suggestion instead of showing a picker.
+    """
+    result = cli_runner.invoke(extras, ["config"], catch_exceptions=False)
     assert result.exit_code == 0
+    assert "mngr config set commands.create.type" in result.output
 
 
 def test_extras_config_yes_flag(cli_runner: CliRunner) -> None:
-    """The 'extras config -y' subcommand runs non-interactively."""
-    result = cli_runner.invoke(extras, ["config", "-y"])
+    """The 'extras config -y' subcommand prints the suggested config command without prompting."""
+    result = cli_runner.invoke(extras, ["config", "-y"], catch_exceptions=False)
     assert result.exit_code == 0
+    assert "mngr config set commands.create.type" in result.output
 
 
 def test_extras_interactive_includes_default_type(cli_runner: CliRunner) -> None:

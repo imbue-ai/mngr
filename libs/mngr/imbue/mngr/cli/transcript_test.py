@@ -5,66 +5,16 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.testing import create_agent_with_events_dir
 from imbue.mngr.cli.testing import create_agent_with_sample_transcript
-from imbue.mngr.cli.transcript import TranscriptCliOptions
 from imbue.mngr.cli.transcript import _format_event_human
 from imbue.mngr.cli.transcript import _get_event_role
 from imbue.mngr.cli.transcript import _parse_transcript_events
 from imbue.mngr.cli.transcript import transcript
-from imbue.mngr.primitives import AgentAddress
-from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.utils.testing import capture_loguru
 
-_DEFAULT_TARGET = AgentAddress(agent=AgentName("my-agent"))
-
-
-def _make_transcript_opts(
-    target: AgentOrHostAddress = _DEFAULT_TARGET,
-    role: tuple[str, ...] = (),
-    tail: int | None = None,
-    head: int | None = None,
-) -> TranscriptCliOptions:
-    return TranscriptCliOptions(
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-        target=target,
-        role=role,
-        tail=tail,
-        head=head,
-    )
-
-
-# =============================================================================
-# TranscriptCliOptions tests
-# =============================================================================
-
-
-def test_transcript_cli_options_can_be_constructed() -> None:
-    opts = _make_transcript_opts()
-    assert opts.target == AgentAddress(agent=AgentName("my-agent"))
-    assert opts.role == ()
-    assert opts.tail is None
-    assert opts.head is None
-
-
-def test_transcript_cli_options_with_roles() -> None:
-    opts = _make_transcript_opts(role=("user", "assistant"))
-    assert opts.role == ("user", "assistant")
-
-
-def test_transcript_cli_options_with_tail() -> None:
-    opts = _make_transcript_opts(tail=10)
-    assert opts.tail == 10
-
-
-def test_transcript_cli_options_with_head() -> None:
-    opts = _make_transcript_opts(head=5)
-    assert opts.head == 5
+# NOTE: The flag->field mappings (--role -> role, --tail -> tail, --head -> head) are
+# verified through real CLI behavior in test_transcript_cli_filters_by_role,
+# test_transcript_cli_applies_tail, and test_transcript_cli_applies_head below, so a
+# tautological construct-and-echo test for TranscriptCliOptions is intentionally omitted.
 
 
 # =============================================================================
@@ -257,10 +207,9 @@ def test_format_event_human_tool_result_truncates_long_output() -> None:
         "is_error": False,
     }
     result = _format_event_human(event)
-    assert "..." in result
-    # Output should be truncated (500 chars + "...")
+    # Output is truncated to exactly the first 500 chars plus a "..." suffix (503 chars total).
     output_line = result.split("\n", 1)[1]
-    assert len(output_line) <= 504
+    assert output_line == "x" * 500 + "..."
 
 
 def test_format_event_human_assistant_no_content() -> None:
@@ -311,10 +260,12 @@ def test_transcript_cli_reads_and_displays_human_format(
         obj=plugin_manager,
     )
     assert result.exit_code == 0
-    assert "Hello" in result.output
-    assert "World" in result.output
-    assert "user:" in result.output
-    assert "assistant:" in result.output
+    # Assert each role label is paired with the correct content (a role-label swap must fail).
+    # _format_event_human renders "<role>:\n<content>" (see transcript.py:147,160,170).
+    assert "user:\nHello" in result.output
+    assert "assistant:\nWorld" in result.output
+    # The tool_result event (tool_name "Bash", output "ok") is rendered too.
+    assert "tool (Bash):\nok" in result.output
 
 
 def test_transcript_cli_reads_jsonl_format(

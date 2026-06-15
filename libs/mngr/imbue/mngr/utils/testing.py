@@ -781,6 +781,28 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def get_tmux_pane_pids(session_name: str) -> tuple[str, ...]:
+    """Return the pane PIDs for a tmux session (empty if the session is gone).
+
+    Useful for asserting that an operation actually replaced the running
+    process (e.g. ``start --restart`` must spawn a fresh pane process, so the
+    pane PID set must differ before and after). The has-session guard avoids
+    the ``list-panes -s`` exact-match prefix quirk noted in
+    ``cleanup_tmux_session``.
+    """
+    if not tmux_session_exists(session_name):
+        return ()
+    result = subprocess.run(
+        ["tmux", "list-panes", "-s", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ()
+    return tuple(pid for pid in result.stdout.strip().split("\n") if pid)
+
+
 def create_test_agent_via_cli(
     cli_runner: CliRunner,
     temp_work_dir: Path,

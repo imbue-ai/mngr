@@ -17,6 +17,7 @@ from imbue.mngr.utils.deps import DependencyCategory
 from imbue.mngr.utils.deps import InstallMethod
 from imbue.mngr.utils.deps import OsName
 from imbue.mngr.utils.deps import SystemDependency
+from imbue.mngr.utils.deps import check_bash_version
 from imbue.mngr.utils.deps import describe_install_commands
 from imbue.mngr.utils.deps import detect_os
 
@@ -56,38 +57,91 @@ _MISSING_OPT = SystemDependency(
 )
 
 
-def test_print_status_table_all_present(capsys: object) -> None:
+def _status_for_binary(output: str, binary: str) -> str:
+    """Return the single status-table row line for the given binary."""
+    rows = [line for line in output.splitlines() if line.strip().startswith(binary)]
+    assert len(rows) == 1, f"Expected exactly one row for {binary!r} in:\n{output}"
+    return rows[0]
+
+
+def test_print_status_table_all_present(capsys: pytest.CaptureFixture[str]) -> None:
     """_print_status_table prints 'ok' for all deps when none are missing."""
     _print_status_table(_TEST_DEPS, missing=[], bash_ok=True, os_name=OsName.LINUX)
+    output = capsys.readouterr().out
+    assert "ok" in _status_for_binary(output, _TEST_DEPS[0].binary)
+    assert "ok" in _status_for_binary(output, _TEST_DEPS[1].binary)
+    assert "missing" not in output
 
 
-def test_print_status_table_with_missing(capsys: object) -> None:
+def test_print_status_table_with_missing(capsys: pytest.CaptureFixture[str]) -> None:
     """_print_status_table prints 'missing' for deps in the missing list."""
     _print_status_table(_TEST_DEPS, missing=[_TEST_DEPS[0]], bash_ok=True, os_name=OsName.LINUX)
+    output = capsys.readouterr().out
+    assert "missing" in _status_for_binary(output, _TEST_DEPS[0].binary)
+    assert "ok" in _status_for_binary(output, _TEST_DEPS[1].binary)
 
 
-def test_print_status_table_bash_missing_on_macos() -> None:
+def test_print_status_table_bash_missing_on_macos(capsys: pytest.CaptureFixture[str]) -> None:
     """_print_status_table shows bash(4+) as missing on macOS when bash_ok is False."""
     _print_status_table(_TEST_DEPS, missing=[], bash_ok=False, os_name=OsName.MACOS)
+    output = capsys.readouterr().out
+    bash_row = _status_for_binary(output, "bash(4+)")
+    assert "missing" in bash_row
+
+
+def _all_deps_present() -> bool:
+    """Mirror _check_deps_impl's "all present" condition for the real environment."""
+    missing = [dep for dep in ALL_DEPS if not dep.is_available()]
+    bash_ok = check_bash_version() if detect_os() == OsName.MACOS else True
+    return len(missing) == 0 and bash_ok
 
 
 def test_check_deps_no_flags(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies' with no flags outputs a status table."""
+    """Running 'mngr dependencies' with no flags reports status and exits accordingly."""
     result = cli_runner.invoke(check_deps, [])
-    assert result.exit_code in (0, 1)
-    assert "System dependencies" in result.output
+    if _all_deps_present():
+        assert result.exit_code == 0
+        assert "All system dependencies are present." in result.output
+    else:
+        assert result.exit_code == 1
+        # The no-flags branch never installs; it instructs the user to use -i.
+        assert "missing dependency(ies). Use -i to install interactively." in result.output
 
 
 def test_check_deps_scope_core_flag(cli_runner: CliRunner) -> None:
-    """Running 'mngr dependencies --scope core' runs the check flow scoped to core deps."""
+    """Running 'mngr dependencies --scope core' runs the check flow scoped to core deps.
+
+    Guarded to avoid invoking real package managers: if any core dependency is
+    actually missing in this environment, the default install behavior would shell
+    out to sudo/brew, so that path is exercised by the release test instead
+    (see test_check_deps.py).
+    """
+    missing_core = [dep for dep in ALL_DEPS if dep.category == DependencyCategory.CORE and not dep.is_available()]
+    os_name = detect_os()
+    need_bash = os_name == OsName.MACOS and not check_bash_version()
+    if missing_core or need_bash:
+        pytest.skip("core dependency missing; --scope core would trigger a real install")
+
     result = cli_runner.invoke(check_deps, ["--scope", "core"])
-    assert "System dependencies" in result.output
+    if _all_deps_present():
+        # All deps present -> short-circuits before the install branch.
+        assert result.exit_code == 0
+        assert "All system dependencies are present." in result.output
+    else:
+        # Only optional deps are missing, so there is nothing for --scope core to install.
+        assert result.exit_code == 0
+        assert "Nothing to install." in result.output
 
 
 def test_check_deps_install_interactive_flag(cli_runner: CliRunner) -> None:
     """Running 'mngr dependencies --install interactive' runs the interactive flow (skipped without tty)."""
     result = cli_runner.invoke(check_deps, ["--install", "interactive"])
-    assert "System dependencies" in result.output
+    if _all_deps_present():
+        assert result.exit_code == 0
+        assert "All system dependencies are present." in result.output
+    else:
+        # Without a tty, read_tty_choice returns "" so installation is skipped.
+        assert "No interactive terminal available. Skipping dependency installation." in result.output
 
 
 def test_check_deps_scope_and_install_are_independent(cli_runner: CliRunner) -> None:
@@ -258,7 +312,7 @@ def test_check_deps_all_scope_plans_correct_install_commands() -> None:
             assert identifier not in joined, f"Present dep {dep.binary} should NOT be in the install commands"
 
 
-def test_run_installation_with_deps_invokes_batch_install() -> None:
+def test_run_installation_returns_dep_with_no_matching_installer_as_failed() -> None:
     """_run_installation with deps that have no installer for the given OS returns them as failed."""
     # Use a dep with only a brew installer but pass OsName.LINUX, so no installer matches
     # and the dep ends up in the "no auto install" / failed list without touching any package manager.

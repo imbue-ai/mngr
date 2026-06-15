@@ -42,7 +42,7 @@ def test_snapshot_create_nonexistent_agent_errors(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that snapshot create for a nonexistent agent raises an error."""
+    """Test that snapshot create for a nonexistent agent fails with a not-found error."""
     result = cli_runner.invoke(
         snapshot,
         ["create", "nonexistent-agent-99999"],
@@ -50,6 +50,7 @@ def test_snapshot_create_nonexistent_agent_errors(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+    assert "Agent not found: No agent(s) found matching: nonexistent-agent-99999" in result.output
 
 
 @pytest.mark.tmux
@@ -117,7 +118,7 @@ def test_snapshot_list_nonexistent_agent_errors(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that snapshot list for a nonexistent agent raises an error."""
+    """Test that snapshot list for a nonexistent agent fails with a not-found error."""
     result = cli_runner.invoke(
         snapshot,
         ["list", "nonexistent-agent-99999"],
@@ -125,13 +126,14 @@ def test_snapshot_list_nonexistent_agent_errors(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+    assert "Agent not found: No agent(s) found matching: nonexistent-agent-99999" in result.output
 
 
 def test_snapshot_destroy_nonexistent_agent_errors(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that snapshot destroy for a nonexistent agent raises an error."""
+    """Test that snapshot destroy for a nonexistent agent fails with a not-found error."""
     result = cli_runner.invoke(
         snapshot,
         ["destroy", "nonexistent-agent-99999", "--all-snapshots", "--force"],
@@ -139,3 +141,4 @@ def test_snapshot_destroy_nonexistent_agent_errors(
         catch_exceptions=True,
     )
     assert result.exit_code != 0
+    assert "Agent not found: No agent(s) found matching: nonexistent-agent-99999" in result.output

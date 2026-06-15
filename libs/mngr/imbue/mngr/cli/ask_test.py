@@ -7,6 +7,8 @@ from click.testing import CliRunner
 
 import imbue.mngr.cli.ask as ask_module
 from imbue.mngr.cli.ask import ClaudeBackendInterface
+from imbue.mngr.cli.ask import _EXECUTE_QUERY_PREFIX
+from imbue.mngr.cli.ask import _QUERY_PREFIX
 from imbue.mngr.cli.ask import _build_ask_context
 from imbue.mngr.cli.ask import _execute_response
 from imbue.mngr.cli.ask import _show_command_summary
@@ -71,7 +73,7 @@ def test_ask_passes_query_to_claude(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """The full query (with prefix) should be passed to the claude backend."""
+    """The full query (with the non-execute prefix) should be passed to the claude backend."""
     fake_claude.responses.append("mngr create my-agent")
 
     result = cli_runner.invoke(
@@ -81,7 +83,34 @@ def test_ask_passes_query_to_claude(
     assert result.exit_code == 0
     assert "mngr create my-agent" in result.output
     assert len(fake_claude.queries) == 1
-    assert "how do I create an agent?" in fake_claude.queries[0]
+    # Without --execute, the explanatory _QUERY_PREFIX must be prepended (not the execute one).
+    assert fake_claude.queries[0].startswith(_QUERY_PREFIX)
+    assert not fake_claude.queries[0].startswith(_EXECUTE_QUERY_PREFIX)
+    assert fake_claude.queries[0].endswith("how do I create an agent?")
+
+
+def test_ask_execute_uses_execute_prefix(
+    fake_claude: FakeClaude,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """With --execute, the execute-only _EXECUTE_QUERY_PREFIX should be prepended.
+
+    The fake returns a non-mngr command so _execute_response rejects it before
+    any subprocess runs; the query recorded by the backend still proves the
+    execute prefix was used.
+    """
+    fake_claude.responses.append("rm -rf /")
+
+    # MngrError is a ClickException, so click renders it and exits 1 rather than
+    # propagating; catch_exceptions=False still lets a real traceback surface.
+    result = cli_runner.invoke(ask, ["--execute", "destroy", "everything"], obj=plugin_manager, catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "not a valid mngr command" in result.output
+    assert len(fake_claude.queries) == 1
+    assert fake_claude.queries[0].startswith(_EXECUTE_QUERY_PREFIX)
+    assert fake_claude.queries[0].endswith("destroy everything")
 
 
 def test_ask_json_output(
@@ -130,13 +159,19 @@ def test_ask_claude_error_shows_message(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """When the claude backend raises an error, it should be displayed to the user."""
+    """When the claude backend raises an error, the formatted message should be shown (not a traceback).
+
+    Uses catch_exceptions=False so that an uncaught non-Click exception (a
+    traceback) would propagate and fail the test; only a properly rendered
+    MngrError (a ClickException) is handled by click into clean output.
+    """
     backend = FakeClaudeError(error_message=error_message)
     monkeypatch.setattr(ask_module, "HeadlessClaudeBackend", lambda **kwargs: backend)
 
-    result = cli_runner.invoke(ask, ["test"], obj=plugin_manager, catch_exceptions=True)
+    result = cli_runner.invoke(ask, ["test"], obj=plugin_manager, catch_exceptions=False)
 
-    assert result.exit_code != 0
+    assert result.exit_code == 1
+    assert f"Error: {error_message}" in result.output
     assert expected_substring in result.output
 
 

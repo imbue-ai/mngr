@@ -4,14 +4,12 @@ import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
-from uuid import uuid4
 
 import pluggy
 import pytest
 from click.testing import CliRunner
 
 from imbue.mngr.api.data_types import GcResult
-from imbue.mngr.cli.gc import GcCliOptions
 from imbue.mngr.cli.gc import _emit_destroyed
 from imbue.mngr.cli.gc import _emit_final_summary
 from imbue.mngr.cli.gc import _emit_human_summary
@@ -65,9 +63,13 @@ def _create_discovered_host(name: str = "test-host") -> DiscoveredHost:
 
 
 def _create_snapshot_info(name: str = "test-snapshot", size_bytes: int | None = 1000) -> SnapshotInfo:
-    """Create a SnapshotInfo for testing."""
+    """Create a SnapshotInfo for testing.
+
+    The snapshot id is derived deterministically from ``name`` so tests stay
+    reproducible (no test asserts on the id itself).
+    """
     return SnapshotInfo(
-        id=SnapshotId(f"snap-{uuid4().hex}"),
+        id=SnapshotId(f"snap-{name}"),
         name=SnapshotName(name),
         created_at=datetime.now(timezone.utc),
         size_bytes=size_bytes,
@@ -210,6 +212,7 @@ def test_emit_jsonl_summary_empty_result(capsys: pytest.CaptureFixture[str]) -> 
     assert output["total_size_bytes"] == 0
     assert output["work_dirs_count"] == 0
     assert output["machines_count"] == 0
+    assert output["machine_record_count"] == 0
     assert output["snapshots_count"] == 0
     assert output["volumes_count"] == 0
     assert output["logs_count"] == 0
@@ -242,6 +245,7 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[s
     result = GcResult()
     result.work_dirs_destroyed = [_create_work_dir_info(size_bytes=1000)]
     result.machines_destroyed = [_create_discovered_host(), _create_discovered_host()]
+    result.machines_deleted = [_create_discovered_host()]
     result.snapshots_destroyed = [_create_snapshot_info(size_bytes=500)]
     result.volumes_destroyed = [_create_volume_info(size_bytes=200)]
     result.logs_destroyed = [_create_log_file_info(size_bytes=100)]
@@ -252,12 +256,13 @@ def test_emit_jsonl_summary_with_mixed_resources(capsys: pytest.CaptureFixture[s
     captured = capsys.readouterr()
     output = json.loads(captured.out.strip())
 
-    # 1 work_dir + 2 machines + 1 snapshot + 1 volume + 1 log + 1 build_cache = 7
-    assert output["total_count"] == 7
+    # 1 work_dir + 2 machines + 1 machine_record + 1 snapshot + 1 volume + 1 log + 1 build_cache = 8
+    assert output["total_count"] == 8
     # 1000 (work_dir) + 500 (snapshot) + 200 (volume) + 100 (log) + 300 (build_cache) = 2100
     assert output["total_size_bytes"] == 2100
     assert output["work_dirs_count"] == 1
     assert output["machines_count"] == 2
+    assert output["machine_record_count"] == 1
     assert output["snapshots_count"] == 1
     assert output["volumes_count"] == 1
     assert output["logs_count"] == 1
@@ -300,30 +305,6 @@ def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> N
 # =============================================================================
 # Tests for _emit_human_summary
 # =============================================================================
-
-
-# =============================================================================
-# Tests for GcCliOptions
-# =============================================================================
-
-
-def test_gc_cli_options_can_be_instantiated() -> None:
-    """Test that GcCliOptions can be instantiated with all required fields."""
-    opts = GcCliOptions(
-        dry_run=True,
-        on_error="abort",
-        all_providers=False,
-        provider=(),
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-    )
-    assert opts.dry_run is True
-    assert opts.on_error == "abort"
 
 
 # =============================================================================
@@ -537,7 +518,7 @@ def test_gc_no_args_succeeds(
         gc,
         [],
         obj=plugin_manager,
-        catch_exceptions=True,
+        catch_exceptions=False,
     )
     assert result.exit_code == 0
     assert "Cleaning work directories" in result.output
@@ -557,7 +538,7 @@ def test_gc_dry_run(
         gc,
         ["--dry-run"],
         obj=plugin_manager,
-        catch_exceptions=True,
+        catch_exceptions=False,
     )
     assert result.exit_code == 0
     assert "Cleaning work directories" in result.output

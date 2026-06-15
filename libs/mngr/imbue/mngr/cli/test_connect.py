@@ -49,15 +49,21 @@ def test_connect_no_agent_found(
     temp_work_dir: Path,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that connecting to a non-existent agent raises an error."""
+    """Test that connecting to a non-existent agent fails with the specific not-found message.
+
+    The not-found case raises UserInputError, a ClickException, so click renders
+    it to a clean ``Error: ...`` message and exits 1; catch_exceptions=False
+    still lets any real (non-Click) traceback propagate and fail the test.
+    """
     result = cli_runner.invoke(
         connect,
         ["nonexistent-agent-xyz123"],
         obj=plugin_manager,
+        catch_exceptions=False,
     )
 
-    assert result.exit_code != 0
-    assert result.exception is not None
+    assert result.exit_code == 1
+    assert "Could not find agent with ID or name: nonexistent-agent-xyz123" in result.output
 
 
 @pytest.mark.tmux
@@ -84,6 +90,10 @@ def test_connect_cli_invokes_tmux_attach_for_named_agent(
     assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
 
+# Marked flaky because this drives the real tmux/create/connect pipeline: the
+# created agent's tmux session may not be ready the instant connect resolves it,
+# so connect can intermittently lose the readiness race. Kept flaky (vs fixed)
+# because the underlying race is inherent to exercising the live tmux backend.
 @pytest.mark.tmux
 def test_connect_cli_runs_custom_connect_command(
     cli_runner: CliRunner,
@@ -177,13 +187,14 @@ def test_connect_via_cli_group(
         )
         assert create_result.exit_code == 0, f"Create failed with: {create_result.output}"
 
-        cli_runner.invoke(
+        connect_result = cli_runner.invoke(
             cli,
             ["connect", agent_name],
             obj=plugin_manager,
             catch_exceptions=False,
         )
 
+        assert connect_result.exit_code == 0, f"Connect failed with: {connect_result.output}"
         assert len(intercepted_execvp_calls) == 1
         assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])
 
@@ -236,7 +247,7 @@ def test_connect_start_restarts_stopped_agent(
         assert not tmux_session_exists(session_name), f"Expected tmux session {session_name} to be killed"
 
         # Connect with --start (default), which should restart the agent
-        cli_runner.invoke(
+        connect_result = cli_runner.invoke(
             connect,
             [agent_name],
             obj=plugin_manager,
@@ -244,6 +255,7 @@ def test_connect_start_restarts_stopped_agent(
         )
 
         # Verify the tmux session was recreated before attaching
+        assert connect_result.exit_code == 0, f"Connect failed with: {connect_result.output}"
         assert tmux_session_exists(session_name), f"Expected tmux session {session_name} to be restarted"
         assert len(intercepted_execvp_calls) == 1
         assert intercepted_execvp_calls[0] == ("tmux", ["tmux", "attach", "-t", f"={session_name}"])

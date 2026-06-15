@@ -6,10 +6,12 @@ import pytest
 from inline_snapshot import snapshot
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.cli.issue_reporting import ExistingIssue
 from imbue.mngr.cli.issue_reporting import GITHUB_BASE_URL
 from imbue.mngr.cli.issue_reporting import MNGR_REPO_URL
+from imbue.mngr.cli.issue_reporting import _MAX_URL_LENGTH
 from imbue.mngr.cli.issue_reporting import _print_diagnose_instructions
 from imbue.mngr.cli.issue_reporting import build_diagnose_prompt
 from imbue.mngr.cli.issue_reporting import build_issue_body
@@ -94,9 +96,33 @@ def test_build_new_issue_url_encodes_title_and_body() -> None:
 
 
 def test_build_new_issue_url_truncates_long_body() -> None:
-    long_body = "x" * 10000
-    url = build_new_issue_url("title", long_body)
-    assert len(url) <= 8000
+    """A body that overflows the URL limit is truncated, but the title and the
+    truncation marker both survive into the produced URL."""
+    title = "[NotImplemented] --sync-mode=full"
+    url = build_new_issue_url(title, "x" * 10000)
+    assert len(url) <= _MAX_URL_LENGTH
+    # The encoded title must still be present (truncation only touches the body).
+    assert "%5BNotImplemented%5D%20--sync-mode%3Dfull" in url
+    # The encoded `_(truncated)_` marker must mark where the body was cut.
+    assert "_%28truncated%29_" in url
+
+
+def test_build_new_issue_url_does_not_truncate_at_limit_boundary() -> None:
+    """A body whose untruncated URL is exactly at the limit is left untouched."""
+    title = "[NotImplemented] --sync-mode=full"
+    # 7903 x's produces an untruncated URL of exactly _MAX_URL_LENGTH (8000);
+    # 7904 is the first length whose untruncated URL exceeds the limit.
+    url_at_limit = build_new_issue_url(title, "x" * 7903)
+    assert len(url_at_limit) == _MAX_URL_LENGTH
+    assert "_%28truncated%29_" not in url_at_limit
+
+
+def test_build_new_issue_url_truncates_just_over_limit_boundary() -> None:
+    """A body one character over the limit is truncated with the marker."""
+    title = "[NotImplemented] --sync-mode=full"
+    url = build_new_issue_url(title, "x" * 7904)
+    assert len(url) <= _MAX_URL_LENGTH
+    assert "_%28truncated%29_" in url
 
 
 # =============================================================================
@@ -107,13 +133,20 @@ def test_build_new_issue_url_truncates_long_body() -> None:
 def test_search_for_existing_issue_returns_none_when_both_fail(
     cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When both GitHub API and gh CLI fail, search returns None.
+    """When both the GitHub API (curl) and the gh CLI fail, search returns None.
 
-    Points at a nonexistent GitHub repo so both curl and gh CLI fail
-    with real errors rather than mocking the failure.
+    Both subprocesses are stubbed to fail deterministically -- curl exits
+    nonzero with empty stdout (so the JSON parse fails) and gh raises a
+    ConcurrencyGroupError -- so the None-on-both-failures path is exercised
+    with no network access.
     """
-    fake_repo = f"nonexistent-org/nonexistent-repo-{uuid4().hex}"
-    monkeypatch.setattr("imbue.mngr.cli.issue_reporting.GITHUB_REPO", fake_repo)
+
+    def fake_run(self, command, **kwargs):
+        if command[0] == "curl":
+            return _fake_finished_process(returncode=22, stdout="", command=tuple(command))
+        raise ConcurrencyGroupError("gh CLI is unavailable")
+
+    monkeypatch.setattr(ConcurrencyGroup, "run_process_to_completion", fake_run)
 
     result = search_for_existing_issue("some error", cg)
     assert result is None
@@ -151,11 +184,10 @@ def test_search_for_existing_issue_returns_api_result_when_found(
     cg: ConcurrencyGroup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When GitHub API finds an issue, returns it without trying gh CLI."""
-    call_count = 0
+    invoked_programs: list[str] = []
 
     def fake_run(self, command, **kwargs):
-        nonlocal call_count
-        call_count += 1
+        invoked_programs.append(command[0])
         return _fake_finished_process(
             returncode=0,
             stdout=json.dumps(
@@ -178,8 +210,8 @@ def test_search_for_existing_issue_returns_api_result_when_found(
     assert result is not None
     assert result.number == 99
     assert result.url == "https://github.com/imbue-ai/mngr/issues/99"
-    # Should only call curl (API), not gh
-    assert call_count == 1
+    # The API hit should short-circuit: gh must never be invoked as a fallback.
+    assert "gh" not in invoked_programs
 
 
 def test_search_for_existing_issue_returns_none_when_no_results(

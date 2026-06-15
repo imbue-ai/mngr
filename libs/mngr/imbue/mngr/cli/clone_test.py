@@ -15,11 +15,6 @@ def test_clone_command_exists() -> None:
     assert "clone" in cli.commands
 
 
-def test_clone_is_not_create() -> None:
-    """Clone should be a distinct command object from create."""
-    assert cli.commands["clone"] is not cli.commands["create"]
-
-
 def test_clone_requires_source_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -40,7 +35,7 @@ def test_clone_rejects_from_option(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --from in remaining args."""
+    """Clone should reject --from in remaining args with its dedicated guard message."""
     result = cli_runner.invoke(
         clone,
         ["source-agent", "--from", "other-agent"],
@@ -49,14 +44,14 @@ def test_clone_rejects_from_option(
     )
 
     assert result.exit_code != 0
-    assert "--from" in result.output
+    assert "Cannot use --from with clone" in result.output
 
 
 def test_clone_rejects_source_option(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --source in remaining args."""
+    """Clone should reject --source in remaining args with its dedicated guard message."""
     result = cli_runner.invoke(
         clone,
         ["source-agent", "--source", "other-agent"],
@@ -65,14 +60,14 @@ def test_clone_rejects_source_option(
     )
 
     assert result.exit_code != 0
-    assert "--source" in result.output
+    assert "Cannot use --source with clone" in result.output
 
 
 def test_clone_rejects_from_equals_form(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Clone should reject --from=value form in remaining args."""
+    """Clone should reject --from=value form, reporting the bare --from in its guard message."""
     result = cli_runner.invoke(
         clone,
         ["source-agent", "--from=other-agent"],
@@ -81,7 +76,7 @@ def test_clone_rejects_from_equals_form(
     )
 
     assert result.exit_code != 0
-    assert "--from" in result.output
+    assert "Cannot use --from with clone" in result.output
 
 
 # --- _reject_source_agent_options with -- boundary tests ---

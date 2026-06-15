@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from imbue.mngr.cli.start import start
 from imbue.mngr.cli.stop import stop
+from imbue.mngr.utils.testing import get_tmux_pane_pids
 from imbue.mngr.utils.testing import tmux_session_exists
 
 
@@ -22,6 +23,8 @@ def test_start_restart_running_agent(
     create_test_agent("restart-running-agent", "sleep 140101")
     session_name = f"{mngr_test_prefix}restart-running-agent"
     assert tmux_session_exists(session_name)
+    pids_before = get_tmux_pane_pids(session_name)
+    assert pids_before != ()
 
     result = cli_runner.invoke(
         start,
@@ -32,6 +35,12 @@ def test_start_restart_running_agent(
     assert result.exit_code == 0
     assert "Restarted agent: restart-running-agent" in result.output
     assert tmux_session_exists(session_name)
+    # --restart must actually stop and re-launch: the pane process is replaced,
+    # so the pane PID set must differ. A no-op that skipped the stop step would
+    # keep the same PIDs and this assertion would catch it.
+    pids_after = get_tmux_pane_pids(session_name)
+    assert pids_after != ()
+    assert set(pids_after).isdisjoint(pids_before)
 
 
 @pytest.mark.tmux

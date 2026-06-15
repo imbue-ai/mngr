@@ -61,7 +61,9 @@ def test_exec_requires_command(
         obj=plugin_manager,
         catch_exceptions=True,
     )
-    assert result.exit_code != 0
+    # Click reports a missing required argument as a usage error (exit code 2).
+    assert result.exit_code == 2
+    assert "Missing argument 'COMMAND'" in result.output
 
 
 def test_exec_requires_agent(
@@ -80,24 +82,28 @@ def test_exec_requires_agent(
 
 
 def test_emit_human_output_single_success(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test human output prints stdout and logs success for a single agent."""
+    """Test human output prints stdout and logs success for a single agent, with no per-agent header."""
     exec_result = ExecResult(agent_name="test-agent", stdout="hello world\n", stderr="", success=True)
     multi_result = MultiExecResult(successful_results=[exec_result], failed_agents=[])
     _emit_human_output(multi_result)
 
     captured = capsys.readouterr()
     assert "hello world" in captured.out
+    # A single result must not emit a per-agent "--- name ---" header.
+    assert "--- test-agent ---" not in captured.out
 
 
 @pytest.mark.allow_warnings(match=r"^Command failed on agent test-agent")
 def test_emit_human_output_single_failure(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test human output handles failed commands."""
+    """Test human output forwards stderr and logs a 'Command failed' error for a failed result."""
     exec_result = ExecResult(agent_name="test-agent", stdout="", stderr="bad command\n", success=False)
     multi_result = MultiExecResult(successful_results=[exec_result], failed_agents=[])
-    _emit_human_output(multi_result)
+    with capture_loguru(level="ERROR") as log_output:
+        _emit_human_output(multi_result)
 
     captured = capsys.readouterr()
     assert "bad command" in captured.err
+    assert "Command failed on agent test-agent" in log_output.getvalue()
 
 
 def test_emit_human_output_multi_agent_shows_headers(capsys: pytest.CaptureFixture[str]) -> None:
@@ -108,6 +114,8 @@ def test_emit_human_output_multi_agent_shows_headers(capsys: pytest.CaptureFixtu
     _emit_human_output(multi_result)
 
     captured = capsys.readouterr()
+    assert "--- agent-1 ---" in captured.out
+    assert "--- agent-2 ---" in captured.out
     assert "output1" in captured.out
     assert "output2" in captured.out
 
@@ -250,18 +258,21 @@ def test_emit_human_output_stdout_without_trailing_newline(capsys: pytest.Captur
     multi_result = MultiExecResult(successful_results=[result], failed_agents=[])
     _emit_human_output(multi_result)
     captured = capsys.readouterr()
-    # The output should still be readable with a newline added
-    assert "no trailing newline" in captured.out
+    # A trailing newline must be appended after the command's stdout (which had none).
+    assert "no trailing newline\n" in captured.out
 
 
 @pytest.mark.allow_warnings(match=r"^Command failed on agent test-agent")
 def test_emit_human_output_stderr_without_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
-    """Test human output adds trailing newline if stderr doesn't have one."""
+    """Test human output adds trailing newline to stderr and logs the 'Command failed' error."""
     result = ExecResult(agent_name="test-agent", stdout="", stderr="error output", success=False)
     multi_result = MultiExecResult(successful_results=[result], failed_agents=[])
-    _emit_human_output(multi_result)
+    with capture_loguru(level="ERROR") as log_output:
+        _emit_human_output(multi_result)
     captured = capsys.readouterr()
-    assert "error output" in captured.err
+    # A trailing newline must be appended after the command's stderr (which had none).
+    assert "error output\n" in captured.err
+    assert "Command failed on agent test-agent" in log_output.getvalue()
 
 
 def test_emit_human_output_failed_agents_logs_errors() -> None:

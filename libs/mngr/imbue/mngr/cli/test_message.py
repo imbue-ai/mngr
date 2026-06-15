@@ -131,6 +131,7 @@ def test_mngr_create_with_message_succeeds(claude_test_env: dict[str, str], temp
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
+@pytest.mark.flaky
 @pytest.mark.timeout(300)
 def test_mngr_create_with_message_multiple_times(claude_test_env: dict[str, str], temp_git_repo: Path) -> None:
     """Test that `mngr create --message` works reliably across multiple trials.

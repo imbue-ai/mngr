@@ -167,11 +167,14 @@ def test_find_last_full_snapshot_skips_blank_lines() -> None:
 
 
 def test_find_last_full_snapshot_skips_malformed_json() -> None:
-    """Malformed JSON lines containing the DISCOVERY_FULL string should be skipped."""
-    bad_line = '{"type": "DISCOVERY_FULL", broken json'
+    """A malformed DISCOVERY_FULL line at the highest index is skipped, falling back to a valid lower one."""
     good = json.dumps({"type": "DISCOVERY_FULL", "agents": [], "hosts": []})
-    lines = [good, bad_line]
-    # The bad line at index 1 is skipped, and the good line at index 0 is found
+    other = json.dumps({"type": "AGENT_DISCOVERED", "agent": {}})
+    bad_line = '{"type": "DISCOVERY_FULL", broken json'
+    # The only valid snapshot is at index 0; the malformed DISCOVERY_FULL at the
+    # highest index (2) is encountered first by the reverse scan and must be
+    # skipped, so the function falls back past it to index 0.
+    lines = [good, other, bad_line]
     assert _find_last_full_snapshot_line_idx(lines) == 0
 
 
@@ -363,5 +366,5 @@ def test_main_prints_both_with_both_flag(tmp_path: Path) -> None:
     )
     assert result.returncode == 0
     lines = result.stdout.strip().splitlines()
-    assert "my-agent" in lines
-    assert "localhost" in lines
+    # --both prints agents first, then hosts (per main()'s loop order).
+    assert lines == ["my-agent", "localhost"]

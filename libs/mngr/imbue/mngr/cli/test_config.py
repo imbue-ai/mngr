@@ -110,18 +110,23 @@ def test_config_list_with_scope_shows_file_path(
 def test_config_get_retrieves_value(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    mngr_test_prefix: str,
 ) -> None:
-    """Test config get retrieves a specific configuration value."""
+    """Test config get retrieves the resolved value of a specific key.
+
+    The test environment configures ``prefix`` to mngr_test_prefix (via
+    setup_mngr_test_environment), so the merged ``get`` resolves to that value.
+    """
     result = cli_runner.invoke(
         config,
-        ["get", "prefix"],
+        ["get", "prefix", "--format", "json"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
 
     assert result.exit_code == 0
-    # The prefix should be the test prefix from the fixture
-    assert "mngr" in result.output.lower()
+    output = json.loads(result.output)
+    assert output == {"key": "prefix", "value": mngr_test_prefix}
 
 
 def test_config_get_with_nested_key(
@@ -294,11 +299,11 @@ def test_config_set_rejects_unknown_top_level_field(
     assert result.exit_code == 1
     assert "Invalid configuration" in result.output
 
-    # Verify the file was NOT created/modified
+    # On rejection, validation raises before save_config_file is reached, so the
+    # config file is never written. In this fresh repo it didn't exist before, so
+    # it must not exist afterward.
     config_path = temp_git_repo / f".{mngr_test_root_name}" / "settings.toml"
-    if config_path.exists():
-        content = config_path.read_text()
-        assert "provider" not in content
+    assert not config_path.exists()
 
 
 def test_config_unset_removes_value(

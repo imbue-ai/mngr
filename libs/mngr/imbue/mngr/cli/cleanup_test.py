@@ -194,27 +194,15 @@ def test_cleanup_cli_options_fields() -> None:
 
 
 # =============================================================================
-# Tests for CLI command invocation
-# =============================================================================
-
-
-def test_cleanup_dry_run_yes_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test that --dry-run --yes with no agents reports none found."""
-    result = cli_runner.invoke(
-        cleanup,
-        ["--dry-run", "--yes"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-    assert result.exit_code == 0
-    assert "no agents found" in result.output.lower()
-
-
-# =============================================================================
-# Dry-run output formatting tests (monkeypatched agents, no real providers)
+# CLI command wiring tests (monkeypatched agents, no real providers)
+#
+# The cleanup command resolves agents via the module-level
+# `find_agents_for_cleanup` and has no injectable seam, so these wiring tests
+# patch it by string path. The dry-run / no-agents output *formatting* is
+# covered directly and exhaustively by the `_emit_dry_run_output` and
+# `_emit_no_agents_found` tests below, so we keep only two end-to-end wiring
+# tests here: one that the command reaches the dry-run path with discovered
+# agents, and one that it reaches the no-agents path.
 # =============================================================================
 
 
@@ -236,7 +224,7 @@ def test_cleanup_dry_run_human_format_with_agents(
     plugin_manager: pluggy.PluginManager,
     patch_find_agents: Callable[[list[AgentDetails]], None],
 ) -> None:
-    """--dry-run --yes should list agents that would be destroyed in human format."""
+    """--dry-run --yes should route discovered agents into the dry-run output."""
     agents = [
         make_test_agent_details(name="cleanup-alpha", state=AgentLifecycleState.RUNNING),
         make_test_agent_details(name="cleanup-beta", state=AgentLifecycleState.STOPPED),
@@ -256,137 +244,12 @@ def test_cleanup_dry_run_human_format_with_agents(
     assert "cleanup-beta" in result.output
 
 
-def test_cleanup_dry_run_stop_action_human_format(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--stop --dry-run --yes should say 'Would stop' in human format."""
-    agents = [
-        make_test_agent_details(name="stop-me", state=AgentLifecycleState.RUNNING),
-    ]
-    patch_find_agents(agents)
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--stop", "--dry-run", "--yes"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "Would stop" in result.output
-    assert "stop-me" in result.output
-
-
-def test_cleanup_dry_run_json_format_with_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--dry-run --yes --format json should emit structured JSON."""
-    agents = [
-        make_test_agent_details(name="json-agent", state=AgentLifecycleState.RUNNING),
-    ]
-    patch_find_agents(agents)
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--dry-run", "--yes", "--format", "json"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    output = json.loads(result.output.strip())
-    assert output["dry_run"] is True
-    assert output["action"] == "destroy"
-    assert len(output["agents"]) == 1
-    assert output["agents"][0]["name"] == "json-agent"
-
-
-def test_cleanup_dry_run_jsonl_format_with_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--dry-run --yes --format jsonl should emit JSONL events."""
-    agents = [
-        make_test_agent_details(name="jsonl-agent", state=AgentLifecycleState.RUNNING),
-    ]
-    patch_find_agents(agents)
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--dry-run", "--yes", "--format", "jsonl"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
-    # Should have at least the dry_run event (may also have info events)
-    dry_run_events = [json.loads(line) for line in lines if "dry_run" in line]
-    assert len(dry_run_events) == 1
-    assert dry_run_events[0]["event"] == "dry_run"
-    assert dry_run_events[0]["action"] == "destroy"
-    assert len(dry_run_events[0]["agents"]) == 1
-
-
-def test_cleanup_dry_run_stop_json_format(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--stop --dry-run --yes --format json should report action as 'stop'."""
-    agents = [
-        make_test_agent_details(name="stop-json", state=AgentLifecycleState.RUNNING),
-    ]
-    patch_find_agents(agents)
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--stop", "--dry-run", "--yes", "--format", "json"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    output = json.loads(result.output.strip())
-    assert output["action"] == "stop"
-    assert output["dry_run"] is True
-
-
-# =============================================================================
-# --yes --force and no-agents output format tests
-# =============================================================================
-
-
-def test_cleanup_yes_force_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--yes --force with no agents returns 0 and reports no agents found."""
-    patch_find_agents([])
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--yes", "--force"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    assert "no agents found" in result.output.lower()
-
-
 def test_cleanup_json_output_no_agents(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     patch_find_agents: Callable[[list[AgentDetails]], None],
 ) -> None:
-    """--format json with no agents emits JSON with empty agents list."""
+    """With no discovered agents the command routes to the no-agents path."""
     patch_find_agents([])
 
     result = cli_runner.invoke(
@@ -400,28 +263,6 @@ def test_cleanup_json_output_no_agents(
     output = json.loads(result.output.strip())
     assert output["agents"] == []
     assert output["message"] == "No agents found"
-
-
-def test_cleanup_jsonl_output_no_agents(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    patch_find_agents: Callable[[list[AgentDetails]], None],
-) -> None:
-    """--format jsonl with no agents emits a JSONL info event."""
-    patch_find_agents([])
-
-    result = cli_runner.invoke(
-        cleanup,
-        ["--yes", "--format", "jsonl"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-    lines = [line for line in result.output.strip().split("\n") if line.strip()]
-    info_events = [json.loads(line) for line in lines if "info" in line]
-    assert len(info_events) >= 1
-    assert any(e.get("message") == "No agents found" for e in info_events)
 
 
 # =============================================================================

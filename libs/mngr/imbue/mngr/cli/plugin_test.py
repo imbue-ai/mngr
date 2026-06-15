@@ -1,6 +1,7 @@
 import json
+import sys
 from pathlib import Path
-from typing import Any
+from uuid import uuid4
 
 import pluggy
 import pytest
@@ -193,17 +194,34 @@ def _make_test_plugins() -> list[PluginInfo]:
 
 
 def test_emit_plugin_list_human_format_renders_table(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_plugin_list with HUMAN format should render a table via logger."""
+    """_emit_plugin_list with HUMAN format should render a table with headers and plugin data."""
     plugins = _make_test_plugins()
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    # This outputs via logger, so we just verify no exception
     _emit_plugin_list(plugins, output_opts, ("name", "version", "description", "enabled"))
+
+    out = capsys.readouterr().out
+    # Headers are the uppercased field names (see _emit_plugin_list_human).
+    assert "NAME" in out
+    assert "VERSION" in out
+    assert "DESCRIPTION" in out
+    assert "ENABLED" in out
+    # Both plugins and their values appear in the table.
+    assert "alpha" in out
+    assert "beta" in out
+    assert "First" in out
+    assert "Second" in out
+    # is_enabled is rendered lowercase by _get_field_value.
+    assert "true" in out
+    assert "false" in out
 
 
 def test_emit_plugin_list_human_format_empty(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_plugin_list with HUMAN format should handle empty list."""
+    """_emit_plugin_list with HUMAN format should emit the empty-list message."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
     _emit_plugin_list([], output_opts, ("name", "version", "description", "enabled"))
+
+    out = capsys.readouterr().out
+    assert out.strip() == "No plugins found."
 
 
 def test_emit_plugin_list_json_format(capsys: pytest.CaptureFixture[str]) -> None:
@@ -466,37 +484,54 @@ def test_parse_pypi_package_name_invalid_format() -> None:
 # =============================================================================
 
 
+class _FakeProcessResult:
+    """Minimal stand-in for a completed-process result with a ``stdout`` attribute."""
+
+    def __init__(self, stdout: str) -> None:
+        self.stdout = stdout
+
+
+class _RecordingConcurrencyGroup:
+    """Fake ConcurrencyGroup that records the command and returns canned stdout.
+
+    The ``run_process_to_completion`` signature mirrors the real one closely
+    enough for ``_get_installed_package_names`` (which calls it positionally
+    with a single command tuple).
+    """
+
+    def __init__(self, stdout: str) -> None:
+        self._stdout = stdout
+        self.received_command: tuple[str, ...] | None = None
+
+    def run_process_to_completion(self, command: tuple[str, ...]) -> _FakeProcessResult:
+        self.received_command = command
+        return _FakeProcessResult(self._stdout)
+
+
 def test_get_installed_package_names_returns_package_names() -> None:
-    """_get_installed_package_names should return a set of installed package names."""
+    """_get_installed_package_names should parse names and issue the expected uv command."""
+    stdout = json.dumps(
+        [
+            {"name": "mngr", "version": "1.0.0"},
+            {"name": "imbue-mngr-opencode", "version": "0.1.0"},
+            {"name": "pluggy", "version": "1.5.0"},
+        ]
+    )
+    fake = _RecordingConcurrencyGroup(stdout)
 
-    class FakeConcurrencyGroup:
-        def run_process_to_completion(self, command: tuple[str, ...]) -> Any:
-            class Result:
-                stdout = json.dumps(
-                    [
-                        {"name": "mngr", "version": "1.0.0"},
-                        {"name": "imbue-mngr-opencode", "version": "0.1.0"},
-                        {"name": "pluggy", "version": "1.5.0"},
-                    ]
-                )
+    names = _get_installed_package_names(fake)
 
-            return Result()
-
-    names = _get_installed_package_names(FakeConcurrencyGroup())
     assert names == {"mngr", "imbue-mngr-opencode", "pluggy"}
+    # Verify the exact uv command (see plugin._get_installed_package_names).
+    assert fake.received_command == ("uv", "pip", "list", "--python", sys.executable, "--format", "json")
 
 
 def test_get_installed_package_names_empty_list() -> None:
     """_get_installed_package_names should return an empty set when no packages are installed."""
+    fake = _RecordingConcurrencyGroup("[]")
 
-    class FakeConcurrencyGroup:
-        def run_process_to_completion(self, command: tuple[str, ...]) -> Any:
-            class Result:
-                stdout = "[]"
+    names = _get_installed_package_names(fake)
 
-            return Result()
-
-    names = _get_installed_package_names(FakeConcurrencyGroup())
     assert names == set()
 
 
@@ -794,12 +829,18 @@ def test_parse_remove_sources_invalid_name_raises_abort() -> None:
 def test_project_to_agent_type_entries_keeps_existing_metadata_when_names_match() -> None:
     """When a plugin's entry-point name equals an agent-type name, reuse its full PluginInfo.
 
-    Most agent-type plugins (claude, opencode, codex) follow the convention of
-    naming their entry point identically to the registered agent type. For
-    those, we want the version/description we already gathered to flow through.
+    Most agent-type plugins follow the convention of naming their entry point
+    identically to the registered agent type. For those, we want the
+    version/description we already gathered to flow through.
+
+    We register a uniquely-named test agent type so the assertion does not
+    depend on any particular built-in being present (a built-in rename should
+    not break this projection test).
     """
+    agent_type = f"proj-meta-{uuid4().hex}"
+    _register_agent(agent_type, agent_class=BaseAgent)
     plugins = [
-        PluginInfo(name="codex", version="1.2.3", description="Codex agent", is_enabled=True),
+        PluginInfo(name=agent_type, version="1.2.3", description="Matching agent", is_enabled=True),
         PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
     ]
     # No user-defined agent types.
@@ -808,12 +849,12 @@ def test_project_to_agent_type_entries_keeps_existing_metadata_when_names_match(
     result = _project_to_agent_type_entries(plugins, config)
 
     by_name = {p.name: p for p in result}
-    # codex is a recommended catalog agent type (enabled by default), so it must be present.
-    assert "codex" in by_name
+    # The registered agent type must be present.
+    assert agent_type in by_name
     # Metadata must come through from the existing PluginInfo entry.
-    assert by_name["codex"].version == "1.2.3"
-    assert by_name["codex"].description == "Codex agent"
-    # The unrelated plugin must NOT be in the result.
+    assert by_name[agent_type].version == "1.2.3"
+    assert by_name[agent_type].description == "Matching agent"
+    # The unrelated plugin (not a registered agent type) must NOT be in the result.
     assert "some-unrelated-plugin" not in by_name
 
 
@@ -858,10 +899,13 @@ def test_project_to_agent_type_entries_synthesizes_when_plugin_entry_point_name_
     We register an agent class with a hyphenated name to simulate this
     shape without depending on the pi_coding plugin being installed.
     """
-    _register_agent("name-with-hyphen", agent_class=BaseAgent)
+    suffix = uuid4().hex
+    hyphen_name = f"hyphen-{suffix}"
+    underscore_name = f"hyphen_{suffix}"
+    _register_agent(hyphen_name, agent_class=BaseAgent)
     plugins = [
         # The "plugin entry-point" name is the underscored form.
-        PluginInfo(name="name_with_hyphen", version="1.0", description="Hyphen plugin", is_enabled=True),
+        PluginInfo(name=underscore_name, version="1.0", description="Hyphen plugin", is_enabled=True),
     ]
     config = MngrConfig()
 
@@ -870,11 +914,11 @@ def test_project_to_agent_type_entries_synthesizes_when_plugin_entry_point_name_
     by_name = {p.name: p for p in result}
     # The agent-type name (with hyphen) must be present despite the
     # entry-point name (with underscore) not matching.
-    assert "name-with-hyphen" in by_name
+    assert hyphen_name in by_name
     # Synthesized entry, since the names don't match.
-    assert by_name["name-with-hyphen"].version is None
-    assert by_name["name-with-hyphen"].description is None
-    assert by_name["name-with-hyphen"].is_enabled is True
+    assert by_name[hyphen_name].version is None
+    assert by_name[hyphen_name].description is None
+    assert by_name[hyphen_name].is_enabled is True
 
 
 def test_project_to_agent_type_entries_returns_sorted_output() -> None:
@@ -906,14 +950,16 @@ def test_project_to_agent_type_entries_emits_every_available_type() -> None:
     The projection therefore must not apply a second filter that could
     drop registered types.
     """
-    # 'codex' (a recommended catalog plugin, enabled by default) and 'command'
-    # (registered in core) are both available agent types, so
-    # ``list_available_agent_types(MngrConfig())`` will include both.
-    # We deliberately omit codex from the input ``plugins`` list to make
-    # sure the projection still emits it -- the input is consulted only
-    # for metadata, not for filtering.
+    # Register two test-only agent types so this does not depend on which
+    # built-ins happen to exist. We deliberately omit `present_in_input` from
+    # the input ``plugins`` list to make sure the projection still emits it --
+    # the input is consulted only for metadata, not for filtering.
+    present_in_input = f"proj-present-{uuid4().hex}"
+    absent_from_input = f"proj-absent-{uuid4().hex}"
+    _register_agent(present_in_input, agent_class=BaseAgent)
+    _register_agent(absent_from_input, agent_class=BaseAgent)
     plugins = [
-        PluginInfo(name="command", version=None, description=None, is_enabled=True),
+        PluginInfo(name=present_in_input, version=None, description=None, is_enabled=True),
     ]
     config = MngrConfig()
 
@@ -921,8 +967,8 @@ def test_project_to_agent_type_entries_emits_every_available_type() -> None:
 
     names = {p.name for p in result}
     # Both registered agent types appear, even though one was missing from `plugins`.
-    assert "codex" in names
-    assert "command" in names
+    assert present_in_input in names
+    assert absent_from_input in names
 
 
 def test_project_to_agent_type_entries_keeps_user_config_types_when_no_plugins_listed() -> None:
@@ -954,18 +1000,19 @@ def test_project_to_provider_entries_keeps_existing_metadata_when_names_match() 
     """A registered provider backend whose name matches a plugin entry-point should reuse metadata."""
     reset_provider_config_registry()
     try:
-        register_provider_config("docker", ProviderInstanceConfig)
+        backend_name = f"prov-meta-{uuid4().hex}"
+        register_provider_config(backend_name, ProviderInstanceConfig)
         plugins = [
-            PluginInfo(name="docker", version="1.2.3", description="Docker backend", is_enabled=True),
+            PluginInfo(name=backend_name, version="1.2.3", description="Matching backend", is_enabled=True),
             PluginInfo(name="some-unrelated-plugin", version="9.0", description="Other", is_enabled=True),
         ]
 
         result = _project_to_provider_entries(plugins)
 
         by_name = {p.name: p for p in result}
-        assert "docker" in by_name
-        assert by_name["docker"].version == "1.2.3"
-        assert by_name["docker"].description == "Docker backend"
+        assert backend_name in by_name
+        assert by_name[backend_name].version == "1.2.3"
+        assert by_name[backend_name].description == "Matching backend"
         assert "some-unrelated-plugin" not in by_name
     finally:
         reset_provider_config_registry()

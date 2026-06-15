@@ -187,6 +187,40 @@ def _get_accepted_signals(selected: list[CatalogEntry]) -> set[SignalCheck]:
     return {entry.signal for entry in selected if entry.signal is not None}
 
 
+@pure
+def _compute_phase2_plugins(
+    rest_independent: tuple[CatalogEntry, ...],
+    dependent: tuple[CatalogEntry, ...],
+    accepted_signals: set[SignalCheck],
+) -> tuple[CatalogEntry, ...]:
+    """Compute the phase-2 plugin list.
+
+    Phase 2 shows all non-recommended INDEPENDENT plugins plus the DEPENDENT
+    plugins whose signal was accepted in phase 1. A DEPENDENT plugin is gated
+    out unless its signal is in ``accepted_signals`` (a DEPENDENT entry always
+    has a signal, so a ``None`` signal can never be accepted).
+    """
+    visible_dependent = tuple(e for e in dependent if e.signal in accepted_signals)
+    return rest_independent + visible_dependent
+
+
+@pure
+def _dedup_package_names(entries: list[CatalogEntry]) -> list[str]:
+    """Return the package names of ``entries``, de-duplicated, preserving order.
+
+    Multiple entry points can share a package (e.g. imbue-mngr-claude provides
+    claude, code_guardian, fixme_fairy, headless_claude), so we collapse them to
+    one ``uv tool install`` argument per package.
+    """
+    seen: set[str] = set()
+    package_names: list[str] = []
+    for entry in entries:
+        if entry.package_name not in seen:
+            seen.add(entry.package_name)
+            package_names.append(entry.package_name)
+    return package_names
+
+
 def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
     """Run the two-phase install wizard.
 
@@ -220,8 +254,7 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
     accepted_signals = _get_accepted_signals(phase1_result)
 
     # Phase 2: non-recommended INDEPENDENT + DEPENDENT (filtered by accepted signals)
-    visible_dependent = tuple(e for e in dependent if e.signal in accepted_signals)
-    phase2_plugins = rest_independent + visible_dependent
+    phase2_plugins = _compute_phase2_plugins(rest_independent, dependent, accepted_signals)
 
     if phase2_plugins:
         phase2_preselect = {e.entry_point_name: e.is_recommended for e in phase2_plugins}
@@ -236,18 +269,8 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
     else:
         phase2_result = []
 
-    # Combine selections from both phases
-    all_selected = phase1_result + phase2_result
-
-    # Deduplicate by package name (multiple entry points can share a package)
-    seen: set[str] = set()
-    package_names: list[str] = []
-    for entry in all_selected:
-        if entry.package_name not in seen:
-            seen.add(entry.package_name)
-            package_names.append(entry.package_name)
-
-    return package_names
+    # Combine selections from both phases and de-duplicate by package name.
+    return _dedup_package_names(phase1_result + phase2_result)
 
 
 def _enable_selected_plugins(selected_package_names: frozenset[str]) -> None:

@@ -14,7 +14,7 @@ def test_plugin_list_succeeds(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that plugin list executes without errors."""
+    """Test that plugin list renders the registered plugins in a table."""
     result = cli_runner.invoke(
         plugin,
         ["list"],
@@ -23,6 +23,16 @@ def test_plugin_list_succeeds(
     )
 
     assert result.exit_code == 0
+    # The human table includes uppercased headers ...
+    assert "NAME" in result.output
+    assert "ENABLED" in result.output
+    # ... and a row for every registered plugin. Derive the expected names from
+    # the fixture rather than hard-coding so a fixture change cannot silently
+    # leave this asserting on nothing.
+    registered_names = [name for name, _ in plugin_manager.list_name_plugin() if name and not name.startswith("_")]
+    assert registered_names, "fixture should register at least one plugin"
+    for name in registered_names:
+        assert name in result.output
 
 
 def test_plugin_list_json_format_returns_valid_json(
@@ -136,7 +146,13 @@ def test_plugin_without_subcommand_shows_help(
     )
 
     assert result.exit_code == 0
-    assert "list" in result.output.lower()
+    # Help text includes a usage line and the real subcommand names, not just
+    # the over-common word "list".
+    assert "Usage:" in result.output
+    assert "add" in result.output
+    assert "remove" in result.output
+    assert "enable" in result.output
+    assert "disable" in result.output
 
 
 # =============================================================================
@@ -250,9 +266,13 @@ def test_plugin_enable_registered_plugin_does_not_warn(
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "settings.toml").write_text("is_allowed_in_pytest = true\n")
 
-    # These are the built-in plugin names that are registered by the test fixture
-    # (local, ssh from load_local_backend_only; claude, codex from load_agents_from_plugins)
-    for name in ("local", "ssh", "claude", "codex"):
+    # Derive the registered names directly from the plugin manager (the same
+    # source _validate_plugin_name_is_known consults) rather than hard-coding a
+    # literal tuple, so this cannot drift from what the fixture registers.
+    registered_names = [name for name, _ in plugin_manager.list_name_plugin() if name and not name.startswith("_")]
+    assert registered_names, "fixture should register at least one plugin to enable"
+
+    for name in registered_names:
         result = cli_runner.invoke(
             plugin,
             ["enable", name],
@@ -423,11 +443,15 @@ def test_plugin_add_path_and_remove_lifecycle() -> None:
         return result
 
     # -- Install via mngr plugin add --path --
-    add_result = run_mngr("plugin", "add", "--path", str(_MNGR_OPENCODE_DIR), "--format", "json")
-    add_output = json.loads(add_result.stdout)
-    assert add_output["package"] == "imbue-mngr-opencode"
-
+    # The entire add (including the first assert) is inside the try so that an
+    # early failure -- e.g. the package-name assertion below -- still triggers
+    # the finally cleanup. Otherwise a failed assert before the try would leave
+    # imbue-mngr-opencode installed in the developer's real uv tool env.
     try:
+        add_result = run_mngr("plugin", "add", "--path", str(_MNGR_OPENCODE_DIR), "--format", "json")
+        add_output = json.loads(add_result.stdout)
+        assert add_output["package"] == "imbue-mngr-opencode"
+
         # -- Verify it shows up --
         list_after_add = run_mngr("plugin", "list", "--format", "json")
         plugin_names_after_add = [p["name"] for p in json.loads(list_after_add.stdout)["plugins"]]

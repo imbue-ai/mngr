@@ -1,60 +1,65 @@
 import json
+from pathlib import Path
+from uuid import uuid4
 
 import pluggy
 from click.testing import CliRunner
 
-from imbue.mngr.cli.rename import RenameCliOptions
 from imbue.mngr.cli.rename import _output
 from imbue.mngr.cli.rename import _output_result
 from imbue.mngr.cli.rename import rename
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import CommandString
+from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
+from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.local.instance import LocalProviderInstance
 
 
-def test_rename_cli_options_parsing_creates_valid_options() -> None:
-    """Test that RenameCliOptions can be constructed with the expected fields."""
-    opts = RenameCliOptions(
-        output_format="human",
-        quiet=False,
-        verbose=0,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-        current=AgentAddress(agent=AgentName("my-agent")),
-        new_name=AgentName("new-agent"),
-        dry_run=False,
-        start=False,
-        host=False,
+def test_rename_dry_run_flag_parses_and_short_circuits(
+    cli_runner: CliRunner,
+    temp_work_dir: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider: LocalProviderInstance,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    """The --dry-run flag must parse through Click and gate the rename to preview-only.
+
+    This drives the real CLI parser (rather than constructing RenameCliOptions
+    by hand): if Click failed to wire --dry-run to opts.dry_run, the command
+    would perform the rename instead of previewing it, and the agent would no
+    longer be found under its original name.
+    """
+    agent_name = f"test-rename-dryparse-{uuid4().hex}"
+    new_name = f"test-renamed-dryparse-{uuid4().hex}"
+
+    host = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+    host.create_agent_state(
+        work_dir_path=temp_work_dir,
+        options=CreateAgentOptions(
+            name=AgentName(agent_name),
+            agent_type=AgentTypeName("generic"),
+            command=CommandString("sleep 938271"),
+        ),
     )
-    assert opts.current == AgentAddress(agent=AgentName("my-agent"))
-    assert opts.new_name == AgentName("new-agent")
-    assert opts.dry_run is False
 
-
-def test_rename_cli_options_with_dry_run() -> None:
-    """Test RenameCliOptions with dry_run enabled."""
-    opts = RenameCliOptions(
-        output_format="json",
-        quiet=True,
-        verbose=1,
-        log_file=None,
-        log_commands=None,
-        plugin=(),
-        disable_plugin=(),
-        current=AgentAddress(agent=AgentName("agent-123")),
-        new_name=AgentName("renamed-agent"),
-        dry_run=True,
-        start=False,
-        host=False,
+    result = cli_runner.invoke(
+        rename,
+        [agent_name, new_name, "--dry-run"],
+        obj=plugin_manager,
+        catch_exceptions=False,
     )
-    assert opts.current == AgentAddress(agent=AgentName("agent-123"))
-    assert opts.new_name == AgentName("renamed-agent")
-    assert opts.dry_run is True
-    assert opts.output_format == "json"
-    assert opts.quiet is True
+
+    assert result.exit_code == 0, result.output
+    assert f"Would rename agent: {agent_name} -> {new_name}" in result.output
+    # The dry-run must not have mutated the agent: it is still under its old name.
+    agent_names = [str(a.name) for a in host.get_agents()]
+    assert agent_name in agent_names
+    assert new_name not in agent_names
 
 
 def _make_output_opts(fmt: OutputFormat = OutputFormat.HUMAN) -> OutputOptions:
@@ -114,4 +119,7 @@ def test_rename_requires_two_arguments(
         obj=plugin_manager,
         catch_exceptions=True,
     )
-    assert result.exit_code != 0
+    # A missing required positional is a Click usage error (exit code 2). With
+    # no args, the first missing argument reported is CURRENT.
+    assert result.exit_code == 2
+    assert "Missing argument 'CURRENT'" in result.output

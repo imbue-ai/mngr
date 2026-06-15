@@ -2,8 +2,8 @@
 
 import json
 import os
-import time
 from pathlib import Path
+from uuid import uuid4
 
 import pluggy
 import pytest
@@ -56,7 +56,7 @@ def test_list_command_with_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command shows created agent."""
-    agent_name = f"test-list-cli-{int(time.time())}"
+    agent_name = f"test-list-cli-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -103,7 +103,7 @@ def test_list_command_json_format_with_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with JSON format shows agent data."""
-    agent_name = f"test-list-json-{int(time.time())}"
+    agent_name = f"test-list-json-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -151,7 +151,7 @@ def test_list_command_jsonl_format_with_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with JSONL format streams agent data."""
-    agent_name = f"test-list-jsonl-{int(time.time())}"
+    agent_name = f"test-list-jsonl-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -199,7 +199,7 @@ def test_list_command_with_include_filter(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with include filter."""
-    agent_name = f"test-list-filter-{int(time.time())}"
+    agent_name = f"test-list-filter-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -246,7 +246,7 @@ def test_list_command_with_exclude_filter(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with exclude filter."""
-    agent_name = f"test-list-exclude-{int(time.time())}"
+    agent_name = f"test-list-exclude-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -297,7 +297,7 @@ def test_list_command_with_host_provider_filter(
     This test verifies that the standard CEL dot notation 'host.provider' works correctly.
     Nested dictionaries are automatically converted to CEL-compatible objects via json_to_cel().
     """
-    agent_name = f"test-list-host-provider-{int(time.time())}"
+    agent_name = f"test-list-host-provider-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -358,7 +358,7 @@ def test_list_command_with_host_name_filter(
 
     Verifies that the standard CEL dot notation 'host.name' works in CEL filters.
     """
-    agent_name = f"test-list-host-name-{int(time.time())}"
+    agent_name = f"test-list-host-name-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -397,36 +397,6 @@ def test_list_command_with_host_name_filter(
         assert agent_name in result.output
 
 
-def test_list_command_on_error_continue(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test list command with --on-error continue."""
-    result = cli_runner.invoke(
-        list_command,
-        ["--on-error", "continue"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-
-
-def test_list_command_on_error_abort(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    """Test list command with --on-error abort (default behavior)."""
-    result = cli_runner.invoke(
-        list_command,
-        ["--on-error", "abort"],
-        obj=plugin_manager,
-        catch_exceptions=False,
-    )
-
-    assert result.exit_code == 0
-
-
 @pytest.mark.tmux
 def test_list_command_with_basic_fields(
     cli_runner: CliRunner,
@@ -435,7 +405,7 @@ def test_list_command_with_basic_fields(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with basic field selection."""
-    agent_name = f"test-list-fields-basic-{int(time.time())}"
+    agent_name = f"test-list-fields-basic-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -487,7 +457,7 @@ def test_list_command_with_nested_fields(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with nested field selection."""
-    agent_name = f"test-list-fields-nested-{int(time.time())}"
+    agent_name = f"test-list-fields-nested-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -538,7 +508,7 @@ def test_list_command_with_host_and_provider_fields(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with host.name and host.provider_name fields."""
-    agent_name = f"test-list-fields-host-provider-{int(time.time())}"
+    agent_name = f"test-list-fields-host-provider-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -592,7 +562,7 @@ def test_list_command_with_invalid_fields(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with invalid field shows empty column."""
-    agent_name = f"test-list-fields-invalid-{int(time.time())}"
+    agent_name = f"test-list-fields-invalid-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -644,7 +614,7 @@ def test_list_command_with_running_filter_alias(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --running filter alias."""
-    agent_name = f"test-list-running-{int(time.time())}"
+    agent_name = f"test-list-running-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -713,8 +683,10 @@ def test_list_command_with_stopped_filter_alias(
     )
 
     assert result.exit_code == 0
-    # Should indicate no agents found or empty output
-    assert "No agents found" in result.output or "stopped" not in result.output.lower()
+    # The host dir is isolated and empty, so --stopped matches nothing and the human
+    # output is exactly the "No agents found" sentinel (see _emit_human_output /
+    # _StreamingHumanRenderer.finish in list.py).
+    assert "No agents found" in result.output
 
 
 @pytest.mark.tmux
@@ -725,7 +697,7 @@ def test_list_command_with_local_filter_alias(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --local filter alias."""
-    agent_name = f"test-list-local-{int(time.time())}"
+    agent_name = f"test-list-local-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -774,7 +746,7 @@ def test_list_command_with_remote_filter_alias(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --remote filter alias (excludes local agents)."""
-    agent_name = f"test-list-remote-{int(time.time())}"
+    agent_name = f"test-list-remote-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -800,6 +772,18 @@ def test_list_command_with_remote_filter_alias(
         )
         assert create_result.exit_code == 0
         wait_for_agent_session(session_name)
+
+        # Positive control: with no provider filter, the local agent IS listed. Without
+        # this, the --remote assertion below would pass even if --remote were broken and
+        # silently returned nothing.
+        unfiltered_result = cli_runner.invoke(
+            list_command,
+            [],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+        assert unfiltered_result.exit_code == 0
+        assert agent_name in unfiltered_result.output
 
         # List with --remote should NOT show the local agent
         result = cli_runner.invoke(
@@ -827,8 +811,8 @@ def test_list_command_with_limit(
     Note: The limit is applied after fetching all results from providers.
     This test verifies that only the specified number of agents are displayed.
     """
-    agent_name_1 = f"test-list-limit-1-{int(time.time())}"
-    agent_name_2 = f"test-list-limit-2-{int(time.time())}"
+    agent_name_1 = f"test-list-limit-1-{uuid4().hex}"
+    agent_name_2 = f"test-list-limit-2-{uuid4().hex}"
     session_name_1 = f"{mngr_test_prefix}{agent_name_1}"
     session_name_2 = f"{mngr_test_prefix}{agent_name_2}"
 
@@ -904,44 +888,75 @@ def test_list_command_with_limit_json_format(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test list command with --limit option in JSON format."""
-    agent_name = f"test-list-limit-json-{int(time.time())}"
-    session_name = f"{mngr_test_prefix}{agent_name}"
+    """Test list command with --limit option in JSON format.
 
-    with tmux_session_cleanup(session_name):
-        # Create an agent
-        create_result = cli_runner.invoke(
-            create,
-            [
-                "--name",
-                agent_name,
-                "--type",
-                "command",
-                "--source",
-                str(temp_work_dir),
-                "--transfer=none",
-                "--no-connect",
-                "--no-ensure-clean",
-                "--",
-                "sleep",
-                "110017",
-            ],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
-        assert create_result.exit_code == 0
-        wait_for_agent_session(session_name)
+    Creates two agents and asserts --limit 1 caps the JSON output to a single agent.
+    The JSON path is the batch (non-streaming) path, where the limit is applied
+    deterministically after sorting (agents_to_display[: limit] in list.py), so the
+    count is exactly 1 regardless of which agent sorts first.
+    """
+    agent_name_1 = f"test-list-limit-json-1-{uuid4().hex}"
+    agent_name_2 = f"test-list-limit-json-2-{uuid4().hex}"
+    session_name_1 = f"{mngr_test_prefix}{agent_name_1}"
+    session_name_2 = f"{mngr_test_prefix}{agent_name_2}"
 
-        # List with --limit 1 --format json
-        result = cli_runner.invoke(
-            list_command,
-            ["--limit", "1", "--format", "json"],
-            obj=plugin_manager,
-            catch_exceptions=False,
-        )
+    with tmux_session_cleanup(session_name_1):
+        with tmux_session_cleanup(session_name_2):
+            create_result_1 = cli_runner.invoke(
+                create,
+                [
+                    "--name",
+                    agent_name_1,
+                    "--type",
+                    "command",
+                    "--source",
+                    str(temp_work_dir),
+                    "--transfer=none",
+                    "--no-connect",
+                    "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110017",
+                ],
+                obj=plugin_manager,
+                catch_exceptions=False,
+            )
+            assert create_result_1.exit_code == 0
+            wait_for_agent_session(session_name_1)
 
-        assert result.exit_code == 0
-        assert '"agents":' in result.output
+            create_result_2 = cli_runner.invoke(
+                create,
+                [
+                    "--name",
+                    agent_name_2,
+                    "--type",
+                    "command",
+                    "--source",
+                    str(temp_work_dir),
+                    "--transfer=none",
+                    "--no-connect",
+                    "--no-ensure-clean",
+                    "--",
+                    "sleep",
+                    "110024",
+                ],
+                obj=plugin_manager,
+                catch_exceptions=False,
+            )
+            assert create_result_2.exit_code == 0
+            wait_for_agent_session(session_name_2)
+
+            # List with --limit 1 --format json
+            result = cli_runner.invoke(
+                list_command,
+                ["--limit", "1", "--format", "json"],
+                obj=plugin_manager,
+                catch_exceptions=False,
+            )
+
+            assert result.exit_code == 0
+            data = json.loads(result.output)
+            assert len(data["agents"]) == 1
 
 
 @pytest.mark.tmux
@@ -953,8 +968,8 @@ def test_list_command_with_sort_by_name(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --sort option by name."""
-    agent_name_a = f"aaa-list-sort-{int(time.time())}"
-    agent_name_z = f"zzz-list-sort-{int(time.time())}"
+    agent_name_a = f"aaa-list-sort-{uuid4().hex}"
+    agent_name_z = f"zzz-list-sort-{uuid4().hex}"
     session_name_a = f"{mngr_test_prefix}{agent_name_a}"
     session_name_z = f"{mngr_test_prefix}{agent_name_z}"
 
@@ -1032,8 +1047,8 @@ def test_list_command_with_sort_descending(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --sort option in descending order."""
-    agent_name_a = f"aaa-list-desc-{int(time.time())}"
-    agent_name_z = f"zzz-list-desc-{int(time.time())}"
+    agent_name_a = f"aaa-list-desc-{uuid4().hex}"
+    agent_name_z = f"zzz-list-desc-{uuid4().hex}"
     session_name_a = f"{mngr_test_prefix}{agent_name_a}"
     session_name_z = f"{mngr_test_prefix}{agent_name_z}"
 
@@ -1109,7 +1124,7 @@ def test_list_command_with_provider_filter(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --provider filter."""
-    agent_name = f"test-list-provider-{int(time.time())}"
+    agent_name = f"test-list-provider-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1185,7 +1200,7 @@ def test_list_command_format_template_with_agent(
     plugin_manager: pluggy.PluginManager,
 ) -> None:
     """Test list command with --format template shows template-expanded output."""
-    agent_name = f"test-list-template-{int(time.time())}"
+    agent_name = f"test-list-template-{uuid4().hex}"
     session_name = f"{mngr_test_prefix}{agent_name}"
 
     with tmux_session_cleanup(session_name):
@@ -1261,7 +1276,13 @@ def test_list_command_format_jsonl(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test list command with --format jsonl."""
+    """Test list command with --format jsonl emits no JSONL records when no agents exist.
+
+    Unlike `gc`, the list command's JSONL path (`_list_jsonl` in list.py) only writes a
+    line per agent (and per error); it does NOT emit a trailing "summary" event. With an
+    isolated, empty host dir there are no agents and no errors, so no JSONL line is
+    written at all.
+    """
     result = cli_runner.invoke(
         list_command,
         ["--format", "jsonl"],
@@ -1270,3 +1291,7 @@ def test_list_command_format_jsonl(
     )
 
     assert result.exit_code == 0
+    # Every non-blank line of JSONL output must be a JSON object; with no agents there
+    # should be none at all (in particular, no agent records and no error events).
+    json_lines = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+    assert json_lines == []

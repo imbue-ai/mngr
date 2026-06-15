@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import click
 import pytest
@@ -9,6 +10,7 @@ from click_option_group import optgroup
 
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
+from imbue.mngr.cli.help_formatter import _help_metadata_registry
 from imbue.mngr.cli.help_formatter import _run_pager_with_subprocess
 from imbue.mngr.cli.help_formatter import _wrap_text
 from imbue.mngr.cli.help_formatter import _write_to_stdout
@@ -44,38 +46,47 @@ def test_get_pager_command_uses_config_first(mngr_test_prefix: str) -> None:
     assert result == "custom-pager"
 
 
-def test_get_pager_command_defaults_to_less_when_no_config() -> None:
-    """When no config is provided, defaults to less."""
-    result = get_pager_command(None)
-    # Could be from PAGER env var or default "less"
-    assert result is not None
+def test_get_pager_command_defaults_to_less_when_no_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no config and no PAGER env var, get_pager_command returns the 'less' default."""
+    monkeypatch.delenv("PAGER", raising=False)
+    assert get_pager_command(None) == "less"
 
 
-def test_get_pager_command_uses_less_when_config_has_no_pager(mngr_test_prefix: str) -> None:
-    """When config has no pager set, falls back to PAGER env or less."""
+def test_get_pager_command_uses_less_when_config_has_no_pager(
+    monkeypatch: pytest.MonkeyPatch, mngr_test_prefix: str
+) -> None:
+    """When config has no pager and no PAGER env var, get_pager_command returns the 'less' default."""
+    monkeypatch.delenv("PAGER", raising=False)
     config = MngrConfig(prefix=mngr_test_prefix)
-    result = get_pager_command(config)
-    # Should be "less" or PAGER env var
-    assert result is not None
+    assert get_pager_command(config) == "less"
 
 
 def test_register_and_get_help_metadata() -> None:
-    """Test registering and retrieving help metadata."""
+    """register() inserts metadata into the global registry retrievable by key."""
+    # Use a unique key so we never collide with real commands, and remove it in
+    # teardown so this test leaves the module-global registry exactly as it found it.
+    key = f"test-cmd-{uuid4().hex}"
     metadata = CommandHelpMetadata(
-        key="test-cmd",
+        key=key,
         one_line_description="A test command",
         synopsis="mngr test [options]",
         description="This is a test command for testing.",
         examples=(("Run a basic test", "mngr test"),),
     )
 
-    metadata.register()
-    retrieved = get_help_metadata("test-cmd")
+    try:
+        metadata.register()
+        retrieved = get_help_metadata(key)
 
-    assert retrieved is not None
-    assert retrieved.key == "test-cmd"
-    assert retrieved.name == "mngr test-cmd"
-    assert retrieved.one_line_description == "A test command"
+        assert retrieved is not None
+        assert retrieved.key == key
+        assert retrieved.name == f"mngr {key}"
+        assert retrieved.one_line_description == "A test command"
+    finally:
+        _help_metadata_registry.pop(key, None)
+
+    # After teardown the registry no longer contains our key.
+    assert get_help_metadata(key) is None
 
 
 def test_get_help_metadata_returns_none_for_unregistered() -> None:
@@ -202,23 +213,25 @@ def test_create_command_has_help_metadata_registered() -> None:
 
 
 def test_create_command_help_output_structure() -> None:
-    """Test that create command help has expected sections.
+    """create --help renders the git-style sections populated with the registered metadata content.
 
     Must invoke through cli for correct help key resolution.
     """
     runner = CliRunner()
     result = runner.invoke(cli, ["create", "--help"])
 
-    # Check exit code
     assert result.exit_code == 0
-
-    # Check for git-style sections
     help_output = result.output
-    assert "NAME" in help_output
-    assert "SYNOPSIS" in help_output
-    assert "DESCRIPTION" in help_output
-    assert "OPTIONS" in help_output
-    assert "EXAMPLES" in help_output
+
+    # The git-style section headers must be present...
+    for section in ("NAME", "SYNOPSIS", "DESCRIPTION", "OPTIONS", "EXAMPLES"):
+        assert section in help_output, f"missing section {section!r} in help output"
+
+    # ...and they must be populated with the create command's registered metadata
+    # (one_line_description in NAME, synopsis text in SYNOPSIS), so an empty/stub
+    # render would fail rather than pass on always-printed headers alone.
+    assert "Create and run an agent" in help_output
+    assert "mngr [create|c]" in help_output
 
 
 def test_create_command_help_contains_common_options() -> None:
@@ -231,8 +244,9 @@ def test_create_command_help_contains_common_options() -> None:
 
     help_output = result.output
 
-    # Check for some key options
-    assert "--connect" in help_output or "--no-connect" in help_output
+    # The --connect/--no-connect boolean flag renders both forms, so both must appear.
+    assert "--connect" in help_output
+    assert "--no-connect" in help_output
     assert "--new-host" in help_output
     assert "--name" in help_output
     assert "--type" in help_output
@@ -248,9 +262,11 @@ def test_create_command_help_contains_examples() -> None:
 
     help_output = result.output
 
-    # Check for example patterns
-    assert "mngr create" in help_output
-    assert "@.docker" in help_output or "@.modal" in help_output
+    # Assert specific registered example commands appear verbatim (not just the
+    # command's own name), so a render that drops the EXAMPLES content fails.
+    assert "mngr create my-agent@.docker" in help_output
+    assert "mngr create my-agent@.modal" in help_output
+    assert "mngr create my-agent --no-connect" in help_output
 
 
 def test_run_pager_writes_to_stdout_when_not_interactive(capsys: pytest.CaptureFixture[str]) -> None:
@@ -721,6 +737,18 @@ def _commands_with_flag_enumerating_synopsis() -> list[tuple[str, CommandHelpMet
 
 
 _RATCHETED_COMMANDS = _commands_with_flag_enumerating_synopsis()
+
+
+def test_ratcheted_commands_set_is_populated() -> None:
+    """The flag-enumerating-synopsis set is non-empty and includes 'create'.
+
+    _RATCHETED_COMMANDS is computed at import time from the live help registry
+    and cli tree, so it can silently under-populate if imports run in an
+    unexpected order. This guards test_synopsis_lists_all_non_optout_flags from
+    becoming a no-op (zero parametrize cases) by pinning a known member.
+    """
+    keys = {entry[0] for entry in _RATCHETED_COMMANDS}
+    assert "create" in keys, f"expected 'create' among flag-enumerating commands, got {sorted(keys)}"
 
 
 @pytest.mark.parametrize(
