@@ -40,9 +40,9 @@ _OLD_SELF_CONTAINED_ZSH_BLOCK = (
 
 
 def test_detect_shell_returns_zsh_or_bash() -> None:
-    """_detect_shell returns a valid shell type."""
+    """_detect_shell returns a valid shell type (or None if $SHELL is unrecognized)."""
     shell = _detect_shell()
-    assert shell in ("zsh", "bash")
+    assert shell in ("zsh", "bash", None)
 
 
 def test_detect_shell_returns_zsh_for_zsh_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,12 +57,10 @@ def test_detect_shell_returns_bash_for_bash_env(monkeypatch: pytest.MonkeyPatch)
     assert _detect_shell() == "bash"
 
 
-def test_detect_shell_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_detect_shell falls back based on OS when SHELL is unrecognized."""
+def test_detect_shell_returns_none_for_unrecognized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_detect_shell returns None (rather than guessing) when $SHELL is unrecognized."""
     monkeypatch.setenv("SHELL", "/bin/fish")
-    # On the current platform, verify it returns a valid shell type
-    shell = _detect_shell()
-    assert shell in ("zsh", "bash")
+    assert _detect_shell() is None
 
 
 def test_get_shell_rc_zsh() -> None:
@@ -255,6 +253,57 @@ def _all_installed() -> tuple[bool, dict[str, bool]]:
 
 def _none_installed() -> tuple[bool, dict[str, bool]]:
     return True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
+
+
+def test_install_completion_auto_skips_unrecognized_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In auto mode, an unrecognized shell ($SHELL not bash/zsh) is skipped, not guessed."""
+    # Keep the always-on managed-file refresh inside tmp_path rather than the real host dir.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    assert (
+        _install_completion(
+            auto=True,
+            status_fn=lambda: (False, None, None),
+            is_interactive_fn=lambda: True,
+        )
+        is False
+    )
+
+
+def test_install_completion_prompts_for_unrecognized_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interactively, an unrecognized shell prompts for a shell and installs to its rc."""
+    # Redirect HOME so _get_shell_rc(prompted_shell) resolves into tmp_path, and
+    # MNGR_HOST_DIR so the managed completion files are written under tmp_path too.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    rc = tmp_path / ".bashrc"
+    rc.write_text("# existing config\n")
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, None, None),
+            is_interactive_fn=lambda: True,
+            prompt_shell_fn=lambda: "bash",
+            confirm_fn=lambda _rc, _replace: True,
+        )
+        is True
+    )
+    assert COMPLETION_SHIM_MARKER in rc.read_text()
+
+
+def test_install_completion_unrecognized_shell_prompt_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interactively, skipping the shell prompt for an unrecognized shell installs nothing."""
+    # Keep the always-on managed-file refresh inside tmp_path rather than the real host dir.
+    monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
+    assert (
+        _install_completion(
+            auto=False,
+            status_fn=lambda: (False, None, None),
+            is_interactive_fn=lambda: True,
+            prompt_shell_fn=lambda: None,
+            confirm_fn=lambda _rc, _replace: True,
+        )
+        is False
+    )
 
 
 def test_install_claude_plugin_returns_false_when_claude_missing() -> None:

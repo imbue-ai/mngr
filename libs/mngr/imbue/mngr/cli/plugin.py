@@ -15,6 +15,7 @@ from pydantic import Field
 from tabulate import tabulate
 
 from imbue.concurrency_group.errors import ProcessError
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
@@ -169,7 +170,9 @@ def _get_field_value(plugin: PluginInfo, field: str) -> str:
         case "enabled":
             return str(plugin.is_enabled).lower()
         case _:
-            return "-"
+            # Field names are validated against DEFAULT_FIELDS in _parse_fields,
+            # so an unknown field here is a programming error, not user input.
+            raise SwitchError(f"Unknown plugin field: {field!r}")
 
 
 def _emit_plugin_list(
@@ -222,10 +225,19 @@ def _emit_plugin_list_jsonl(plugins: list[PluginInfo], fields: tuple[str, ...]) 
 
 @pure
 def _parse_fields(fields_str: str | None) -> tuple[str, ...]:
-    """Parse a comma-separated fields string into a tuple of field names."""
+    """Parse a comma-separated fields string into a tuple of field names.
+
+    Raises AbortError if any field name is not one of DEFAULT_FIELDS, so a typo'd
+    --fields value (e.g. 'enbaled') errors instead of silently rendering a blank
+    column.
+    """
     if fields_str is None:
         return DEFAULT_FIELDS
-    return tuple(f.strip() for f in fields_str.split(",") if f.strip())
+    fields = tuple(f.strip() for f in fields_str.split(",") if f.strip())
+    unknown = [f for f in fields if f not in DEFAULT_FIELDS]
+    if unknown:
+        raise AbortError(f"Unknown plugin field(s): {', '.join(unknown)}. Valid fields: {', '.join(DEFAULT_FIELDS)}")
+    return fields
 
 
 @pure
@@ -271,18 +283,26 @@ def _read_package_name_from_pyproject(local_path: str) -> str:
 
 def _emit_plugin_add_result(
     specifier: str,
-    package_name: str,
+    # None when the installed package name could not be resolved (git sources only).
+    package_name: str | None,
     has_entry_points: bool,
     output_opts: OutputOptions,
 ) -> None:
     """Emit the result of a plugin add operation."""
     match output_opts.output_format:
         case OutputFormat.HUMAN:
-            write_human_line("Installed plugin package '{}'", package_name)
-            if not has_entry_points:
-                logger.warning(
-                    "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
+            if package_name is None:
+                write_human_line(
+                    "Installed plugin from '{}' (could not determine the installed package name; "
+                    "skipped the mngr entry-point check)",
+                    specifier,
                 )
+            else:
+                write_human_line("Installed plugin package '{}'", package_name)
+                if not has_entry_points:
+                    logger.warning(
+                        "Package installed but no mngr entry points found -- this package may not be a mngr plugin"
+                    )
         case OutputFormat.JSON:
             write_json_line(
                 {
@@ -573,18 +593,22 @@ def _plugin_add_impl(ctx: click.Context) -> None:
     # For git sources, resolved_package_name is set to the URL initially and
     # updated after install by diffing the installed packages.
     new_requirements: list[ToolRequirement] = []
-    source_info: list[tuple[str, str, bool]] = []
+    # Each entry is (specifier, resolved_package_name, is_git). The name is None
+    # only for a git source whose package name could not be resolved after install.
+    source_info: list[tuple[str, str | None, bool]] = []
     has_git_source = False
 
     for source in sources:
         match source:
             case _PathSource(path=path):
                 resolved_path = str(Path(path).expanduser().resolve())
+                # A missing/invalid pyproject is a real user error; surface it
+                # (matching _plugin_remove_impl) rather than papering over it with
+                # the raw filesystem path masquerading as a package name.
                 try:
                     package_name = _read_package_name_from_pyproject(path)
-                except PluginSpecifierError:
-                    logger.debug("Could not read package name from pyproject.toml at '{}', using raw path", path)
-                    package_name = path
+                except PluginSpecifierError as e:
+                    raise AbortError(str(e)) from e
                 new_requirements.append(ToolRequirement(name=package_name, editable=resolved_path))
                 source_info.append((path, package_name, False))
             case _GitSource(url=url):
@@ -621,19 +645,27 @@ def _plugin_add_impl(ctx: click.Context) -> None:
         assert packages_before is not None
         packages_after = _get_installed_package_names(mngr_ctx.concurrency_group)
         new_packages = packages_after - packages_before
-        # Best-effort: assign new package names to git sources in order.
-        # When multiple git sources are installed, we cannot reliably
-        # map each URL to its package name, so we assign in iteration order.
+        # Assign newly-installed package names to git sources in iteration order.
+        # When fewer new packages appear than git sources (e.g. a re-add/upgrade
+        # that adds no net-new package, or set ordering that doesn't line up with
+        # source order), the source's package name cannot be resolved -- record
+        # None rather than substituting the git URL as if it were a package name.
         new_names_iter = iter(new_packages)
         source_info = [
-            (spec, next(new_names_iter, url), is_git) if is_git else (spec, url, is_git)
-            for spec, url, is_git in source_info
+            (spec, next(new_names_iter, None), is_git) if is_git else (spec, name, is_git)
+            for spec, name, is_git in source_info
         ]
 
     # Report results for each source
     for specifier, resolved_package_name, _ in source_info:
-        has_entry_points = has_mngr_entry_points(resolved_package_name)
-        _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
+        if resolved_package_name is None:
+            # Could not resolve the installed package name for this git source;
+            # the entry-point check needs a real package name, so skip it and
+            # report the source as unresolved.
+            _emit_plugin_add_result(specifier, None, has_entry_points=False, output_opts=output_opts)
+        else:
+            has_entry_points = has_mngr_entry_points(resolved_package_name)
+            _emit_plugin_add_result(specifier, resolved_package_name, has_entry_points, output_opts)
 
 
 def _plugin_remove_impl(ctx: click.Context) -> None:

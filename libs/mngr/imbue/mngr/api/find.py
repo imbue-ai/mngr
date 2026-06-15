@@ -343,6 +343,7 @@ def _find_agents_by_identifiers_or_state(
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
     provider_names: tuple[str, ...] | None = None,
+    is_missing_allowed: bool = False,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -352,7 +353,9 @@ def _find_agents_by_identifiers_or_state(
 
     When provider_names is set, only those providers are queried during discovery.
 
-    Raises AgentNotFoundError if any identifier does not match an agent.
+    Raises AgentNotFoundError if any identifier does not match an agent, unless
+    ``is_missing_allowed`` is True, in which case unmatched identifiers are
+    silently omitted from the returned matches instead of raising.
     """
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
@@ -395,7 +398,7 @@ def _find_agents_by_identifiers_or_state(
                     )
                 )
 
-    if agent_identifiers:
+    if agent_identifiers and not is_missing_allowed:
         unmatched_identifiers = set(agent_identifiers) - matched_identifiers
         if unmatched_identifiers:
             unmatched_list = ", ".join(sorted(str(i) for i in unmatched_identifiers))
@@ -479,6 +482,7 @@ def find_all_agents(
     target_state: AgentLifecycleState | None,
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
+    is_missing_allowed: bool = False,
 ) -> list[AgentMatch]:
     """Find agents matching a sequence of :class:`AgentAddress` constraints.
 
@@ -486,6 +490,10 @@ def find_all_agents(
     discovery. Identifiers without host/provider components match by name/ID
     alone; identifiers with host/provider components are post-filtered to
     keep only matches on a satisfying host.
+
+    When ``is_missing_allowed`` is True, addresses that match no agent are
+    silently omitted from the result instead of raising
+    :class:`AgentNotFoundError` (enabling partial-batch behaviour).
     """
     agent_identifiers = [addr.agent for addr in addresses]
     provider_filter = _collect_required_provider_names(addresses)
@@ -498,22 +506,25 @@ def find_all_agents(
         mngr_ctx=mngr_ctx,
         include_destroyed=include_destroyed,
         provider_names=provider_names,
+        is_missing_allowed=is_missing_allowed,
     )
 
-    return _post_filter_matches_by_addresses(addresses, matches)
+    return _post_filter_matches_by_addresses(addresses, matches, is_missing_allowed=is_missing_allowed)
 
 
 @pure
 def _post_filter_matches_by_addresses(
     addresses: Sequence[AgentAddress],
     matches: Sequence[AgentMatch],
+    is_missing_allowed: bool = False,
 ) -> list[AgentMatch]:
     """Post-filter agent matches by the host/provider constraints of each address.
 
     For addresses without host/provider components, matches pass through
     unchanged. For constrained addresses, only matches on a satisfying host are
     kept. Raises :class:`AgentNotFoundError` if a constrained address has no
-    matching agents after filtering.
+    matching agents after filtering, unless ``is_missing_allowed`` is True, in
+    which case such addresses are silently omitted from the result.
     """
     has_host_constraints = any(addr.host is not None for addr in addresses)
     if not has_host_constraints:
@@ -540,7 +551,7 @@ def _post_filter_matches_by_addresses(
             continue
         agent_str = str(addr.agent)
         has_match = any(str(m.agent_name) == agent_str or str(m.agent_id) == agent_str for m in filtered)
-        if not has_match:
+        if not has_match and not is_missing_allowed:
             raise AgentNotFoundError(f"No agent found matching address: {addr}")
 
     return filtered

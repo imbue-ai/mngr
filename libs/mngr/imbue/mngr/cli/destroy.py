@@ -35,7 +35,6 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostOfflineError
@@ -137,6 +136,7 @@ class DestroyCliOptions(CommonCliOptions):
     agents: tuple[str, ...]
     agent_list: tuple[AgentAddress, ...]
     force: bool
+    on_error: str
     gc: bool
     remove_created_branch: bool
     allow_worktree_removal: bool
@@ -167,6 +167,12 @@ class DestroyCliOptions(CommonCliOptions):
     "--force",
     is_flag=True,
     help="Skip confirmation prompts and force destroy running agents",
+)
+@optgroup.option(
+    "--on-error",
+    type=click.Choice(["abort", "continue"], case_sensitive=False),
+    default="abort",
+    help="What to do when some target agents are not found: abort (stop) or continue (destroy the ones found and warn about the rest)",
 )
 @optgroup.option(
     "--gc/--no-gc",
@@ -224,18 +230,19 @@ def destroy(ctx: click.Context, **kwargs) -> None:
             raise UserInputError("Must specify at least one agent (use '-' to read from stdin)")
         return
 
-    # Find agents to destroy
-    try:
-        targets = _find_agents_to_destroy(
-            addresses=agent_addresses,
-            mngr_ctx=mngr_ctx,
-        )
-    except AgentNotFoundError as e:
-        if opts.force:
-            targets = _DestroyTargets(online_agents=[], offline_hosts=[])
-            _output(f"Error destroying agent(s): {e}", output_opts)
-        else:
-            raise
+    # Find agents to destroy. In abort mode (the default), find_all_agents
+    # raises AgentNotFoundError if any named agent is missing. In continue
+    # mode, missing identifiers are returned separately and warned about
+    # while the agents that DO exist are still destroyed.
+    error_behavior = ErrorBehavior(opts.on_error.upper())
+    is_missing_allowed = error_behavior == ErrorBehavior.CONTINUE
+    targets, missing = _find_agents_to_destroy(
+        addresses=agent_addresses,
+        mngr_ctx=mngr_ctx,
+        is_missing_allowed=is_missing_allowed,
+    )
+    if missing:
+        _output(f"Warning: no agent(s) found matching: {', '.join(missing)}", output_opts)
 
     if not targets.online_agents and not targets.offline_hosts:
         _output("No agents found to destroy", output_opts)
@@ -328,11 +335,18 @@ def destroy(ctx: click.Context, **kwargs) -> None:
 def _find_agents_to_destroy(
     addresses: Sequence[AgentAddress],
     mngr_ctx: MngrContext,
-) -> _DestroyTargets:
+    is_missing_allowed: bool = False,
+) -> tuple[_DestroyTargets, list[str]]:
     """Find all agents to destroy.
 
-    Returns _DestroyTargets containing online agents and offline hosts to destroy.
-    Raises AgentNotFoundError if any specified address does not match an agent.
+    Returns a tuple of (_DestroyTargets, missing) where _DestroyTargets contains
+    the online agents and offline hosts to destroy, and ``missing`` is the list
+    of requested agent identifiers (as strings, order-preserving and deduped)
+    that matched no agent.
+
+    Raises AgentNotFoundError if any specified address does not match an agent,
+    unless ``is_missing_allowed`` is True, in which case unmatched identifiers
+    are reported via the ``missing`` return value instead of raising.
     """
     # include_destroyed=True so we can find and clean up agents on already-destroyed hosts.
     matches = find_all_agents(
@@ -341,10 +355,20 @@ def _find_agents_to_destroy(
         target_state=None,
         mngr_ctx=mngr_ctx,
         include_destroyed=True,
+        is_missing_allowed=is_missing_allowed,
     )
 
+    # Determine which requested identifiers produced no match (only meaningful
+    # when is_missing_allowed=True; otherwise find_all_agents already raised).
+    matched = {str(m.agent_name) for m in matches} | {str(m.agent_id) for m in matches}
+    requested = [str(addr.agent) for addr in addresses]
+    missing: list[str] = []
+    for identifier in requested:
+        if identifier not in matched and identifier not in missing:
+            missing.append(identifier)
+
     # Partition matches into online agents vs offline hosts.
-    return _partition_destroy_targets(matches, mngr_ctx)
+    return _partition_destroy_targets(matches, mngr_ctx), missing
 
 
 def _partition_destroy_targets(
@@ -463,12 +487,14 @@ def _resolve_host_for_partition(
                 # auto-destroy contract).
                 if added_any:
                     online_hosts_with_provider.append((online_host, provider))
+        # OnlineHostInterface is a subclass of HostInterface, so this arm is the
+        # catch-all for every non-online host. No trailing `case _` /
+        # assert_never: it would be unreachable dead code (and could not actually
+        # prove exhaustiveness via a subclass runtime check anyway).
         case HostInterface() as offline_host:
             _check_all_agents_targeted_on_offline_host(
                 offline_host, matched_ids, host_id_str, offline_hosts, provider, results_lock
             )
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def _destroy_single_online_agent(
@@ -780,7 +806,7 @@ def _run_post_destroy_gc(
 CommandHelpMetadata(
     key="destroy",
     one_line_description="Destroy agent(s) and clean up resources",
-    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
+    synopsis="mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [--on-error abort|continue] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]",
     description="""When the last agent on a host is destroyed, the host itself is also destroyed
 (including containers, volumes, snapshots, and any remote infrastructure).
 
@@ -790,6 +816,11 @@ By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
 agents unless --force is specified.
 
+By default (--on-error abort), destroy aborts if any named agent is not found.
+Use --on-error continue to destroy the agents that are found and warn about the
+ones that are not -- useful for batch destroys (e.g. piping a list of ids) where
+some ids may be stale.
+
 Use '-' in place of agent names to read them from stdin, one per line.
 
 Supports custom format templates via --format. Available fields: name.""",
@@ -797,10 +828,10 @@ Supports custom format templates via --format. Available fields: name.""",
     examples=(
         ("Destroy an agent by name", "mngr destroy my-agent"),
         ("Destroy multiple agents", "mngr destroy agent1 agent2 agent3"),
-        ("Destroy all agents", "mngr list --ids | mngr destroy - --force"),
+        ("Destroy all agents", "mngr list --ids | mngr destroy - --force --on-error continue"),
         ("Destroy using --agent flag (repeatable)", "mngr destroy --agent my-agent --agent another-agent"),
         ("Destroy by tmux session name", "mngr destroy --session mngr-my-agent"),
-        ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force"),
+        ("Pipe agent names from list", "mngr list --ids | mngr destroy - --force --on-error continue"),
         ("Preview what would be destroyed", "mngr list --ids | mngr destroy - --dry-run"),
         ("Custom format template output", "mngr destroy my-agent --force --format '{name}'"),
     ),

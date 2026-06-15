@@ -76,11 +76,9 @@ class ConfigCliOptions(CommonCliOptions):
 
 
 def get_config_path(scope: ConfigScope, root_name: str, profile_dir: Path, cg: ConcurrencyGroup) -> Path:
-    """Get the config file path for the given scope. The profile_dir is required for USER scope."""
+    """Get the config file path for the given scope."""
     match scope:
         case ConfigScope.USER:
-            if profile_dir is None:
-                raise ConfigNotFoundError("profile_dir is required for USER scope")
             return get_user_config_path(profile_dir)
         case ConfigScope.PROJECT:
             project_dir = resolve_project_config_dir(root_name, cg)
@@ -432,10 +430,11 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
         config_data = _load_config_file(config_path)
         try:
             value = _get_nested_value(config_data, key)
-            _emit_config_value(key, value, output_opts)
-            return
         except KeyError:
             pass
+        else:
+            _emit_config_value(key, value, output_opts)
+            return
         # Bare key not found; try the ``key__extend`` form for scope-file reads.
         extend_key = f"{key}{EXTEND_SUFFIX}"
         try:
@@ -454,10 +453,11 @@ def _config_get_impl(ctx: click.Context, key: str, **kwargs: Any) -> None:
     config_data = mngr_ctx.config.model_dump(mode="json", serialize_as_any=True)
     try:
         value = _get_nested_value(config_data, key)
-        _emit_config_value(key, value, output_opts)
     except KeyError:
         _emit_key_not_found(key, output_opts)
         ctx.exit(1)
+    else:
+        _emit_config_value(key, value, output_opts)
 
 
 def _emit_config_value(key: str, value: Any, output_opts: OutputOptions) -> None:

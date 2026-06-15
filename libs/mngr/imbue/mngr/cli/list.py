@@ -46,6 +46,8 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
@@ -896,8 +898,9 @@ def _format_value_as_string(value: Any) -> str:
         return ", ".join(f"{k}={v}" for k, v in value.items())
     elif isinstance(value, Enum):
         return str(value.value)
-    elif hasattr(value, "name") and hasattr(value, "id"):
-        # For objects like SnapshotInfo that have both name and id, prefer name
+    elif isinstance(value, (SnapshotInfo, HostDetails)):
+        # SnapshotInfo and HostDetails both carry name and id; prefer the name
+        # for display (e.g. a bare `host` field renders as the host name).
         return str(value.name)
     elif isinstance(value, (tuple, list)) and not isinstance(value, str):
         return ", ".join(_format_value_as_string(item) for item in value)
@@ -1026,48 +1029,52 @@ def _get_field_value(agent: AgentDetails, field: str) -> str:
     parts = field.split(".")
     value: Any = agent
 
-    try:
-        for part in parts:
-            # Parse the part for bracket notation
-            match = _BRACKET_PATTERN.match(part)
-            if not match:
+    for part in parts:
+        # Parse the part for bracket notation
+        match = _BRACKET_PATTERN.match(part)
+        if not match:
+            return ""
+
+        field_name = match.group(1)
+        # bracket_spec may be None if no brackets present in the part
+        bracket_spec = match.group(2)
+
+        # Get the field value: try object attribute first, then dict key. A
+        # field segment that is neither (an unknown/typo'd field, or a field
+        # legitimately absent on this particular agent) renders as an empty
+        # string -- an intentional scripting convenience so --fields/--format
+        # over heterogeneous agents don't crash on a field missing for some.
+        # The hasattr/isinstance guards here (and the bracket try below) cover
+        # every lookup that can raise, so there is no broad outer try/except
+        # silently swallowing unexpected errors.
+        if hasattr(value, field_name):
+            value = getattr(value, field_name)
+        elif isinstance(value, dict) and field_name in value:
+            value = value[field_name]
+        else:
+            return ""
+
+        # Apply bracket indexing/slicing if present
+        if bracket_spec is not None:
+            if not isinstance(value, (list, tuple, Sequence)) or isinstance(value, str):
                 return ""
 
-            field_name = match.group(1)
-            # bracket_spec may be None if no brackets present in the part
-            bracket_spec = match.group(2)
-
-            # Get the field value: try object attribute first, then dict key
-            if hasattr(value, field_name):
-                value = getattr(value, field_name)
-            elif isinstance(value, dict) and field_name in value:
-                value = value[field_name]
-            else:
+            index_or_slice = _parse_slice_spec(bracket_spec)
+            if index_or_slice is None:
                 return ""
 
-            # Apply bracket indexing/slicing if present
-            if bracket_spec is not None:
-                if not isinstance(value, (list, tuple, Sequence)) or isinstance(value, str):
-                    return ""
+            try:
+                value = value[index_or_slice]
+            except (IndexError, ValueError):
+                # IndexError: out of bounds index
+                # ValueError: slice step cannot be zero
+                return ""
 
-                index_or_slice = _parse_slice_spec(bracket_spec)
-                if index_or_slice is None:
-                    return ""
+            # If the result is a list (from slicing), format each element
+            if isinstance(value, (list, tuple)) and not isinstance(value, str):
+                return ", ".join(_format_value_as_string(item) for item in value)
 
-                try:
-                    value = value[index_or_slice]
-                except (IndexError, ValueError):
-                    # IndexError: out of bounds index
-                    # ValueError: slice step cannot be zero
-                    return ""
-
-                # If the result is a list (from slicing), format each element
-                if isinstance(value, (list, tuple)) and not isinstance(value, str):
-                    return ", ".join(_format_value_as_string(item) for item in value)
-
-        return _format_value_as_string(value)
-    except (AttributeError, KeyError):
-        return ""
+    return _format_value_as_string(value)
 
 
 @pure

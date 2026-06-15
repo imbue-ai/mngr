@@ -10,6 +10,7 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mngr.api.data_types import GcResult
 from imbue.mngr.cli.gc import GcCliOptions
 from imbue.mngr.cli.gc import _emit_destroyed
@@ -185,11 +186,11 @@ def test_format_destroyed_message_build_cache() -> None:
 
 
 def test_format_destroyed_message_unknown_type() -> None:
-    """_format_destroyed_message should handle unknown resource types."""
+    """_format_destroyed_message should raise on an unlisted resource type."""
     resource = "some-resource"
 
-    msg = _format_destroyed_message("unknown_type", resource, dry_run=False)
-    assert msg == "Destroyed unknown_type: some-resource"
+    with pytest.raises(SwitchError):
+        _format_destroyed_message("unknown_type", resource, dry_run=False)
 
 
 # =============================================================================
@@ -367,12 +368,10 @@ def test_emit_destroyed_dry_run(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Would destroy snapshot: snap-test" in captured.out
 
 
-def test_emit_destroyed_with_non_model_resource(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_destroyed should handle resources without model_dump (fallback to str)."""
-    _emit_destroyed("custom", "some-resource-name", OutputFormat.JSONL, dry_run=False)
-    captured = capsys.readouterr()
-    output = json.loads(captured.out.strip())
-    assert output["resource"] == "some-resource-name"
+def test_emit_destroyed_unknown_type_raises() -> None:
+    """_emit_destroyed should raise on an unlisted resource type rather than degrade output."""
+    with pytest.raises(SwitchError):
+        _emit_destroyed("custom", "some-resource-name", OutputFormat.JSONL, dry_run=False)
 
 
 # =============================================================================

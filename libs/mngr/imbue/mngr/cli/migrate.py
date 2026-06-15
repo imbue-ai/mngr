@@ -17,8 +17,11 @@ def migrate(ctx: click.Context, args: tuple[str, ...]) -> None:
 
     # Destroy the source agent with --force
     destroy_args = [source_agent, "--force"]
+    # Build the destroy context outside the try: a failure here is an internal
+    # arg-construction bug, not a destroy failure, and should surface as a normal
+    # crash rather than the misleading "destroy failed" message below.
+    destroy_ctx = destroy_cmd.make_context("migrate-destroy", destroy_args, parent=ctx)
     try:
-        destroy_ctx = destroy_cmd.make_context("migrate-destroy", destroy_args, parent=ctx)
         with destroy_ctx:
             destroy_cmd.invoke(destroy_ctx)
     except (click.Abort, click.ClickException):

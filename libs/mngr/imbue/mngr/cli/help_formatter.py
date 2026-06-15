@@ -16,6 +16,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.common_opts import COMMON_OPTIONS_GROUP_NAME
 from imbue.mngr.cli.common_opts import find_option_group
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.utils.interactive_subprocess import popen_interactive_subprocess
 
 
@@ -135,8 +136,10 @@ def is_interactive_terminal() -> bool:
     """
     try:
         return sys.stdout.isatty()
-    except (ValueError, AttributeError):
-        # Handle cases where stdout is uninitialized (e.g., xdist workers)
+    except ValueError:
+        # stdout is a closed/detached stream (e.g., xdist workers). An
+        # AttributeError would instead mean stdout was replaced by an object
+        # lacking isatty -- a real bug -- so let that propagate.
         return False
 
 
@@ -506,12 +509,12 @@ def help_option_callback(
 
     command = ctx.command
 
-    # Try to get config from context for pager settings
+    # Try to get config from context for pager settings. ctx.obj may be a
+    # MngrContext (carries config), a PluginManager (no config), or None
+    # depending on when --help is invoked. Only MngrContext has config.
     config: MngrConfig | None = None
-    if hasattr(ctx, "obj") and ctx.obj is not None:
-        # ctx.obj might be a MngrContext or PluginManager depending on when --help is called
-        if hasattr(ctx.obj, "config"):
-            config = ctx.obj.config
+    if isinstance(ctx.obj, MngrContext):
+        config = ctx.obj.config
 
     show_help_with_pager(ctx, command, config)
     ctx.exit(0)

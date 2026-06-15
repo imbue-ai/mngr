@@ -10,6 +10,7 @@ from imbue.mngr.api.address_parsers import parse_host_location_address
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import _filter_all_agents
 from imbue.mngr.api.find import _find_agents_by_identifiers_or_state
+from imbue.mngr.api.find import _post_filter_matches_by_addresses
 from imbue.mngr.api.find import determine_resolved_path
 from imbue.mngr.api.find import ensure_agent_started
 from imbue.mngr.api.find import filter_all_hosts
@@ -25,6 +26,7 @@ from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.host import CreateAgentOptions
+from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -1060,3 +1062,54 @@ def test_ensure_agent_started_respects_config_when_data_unset(
     ensure_agent_started(agent, agent.host, is_start_desired=True)
 
     assert agent.captured_timeouts == [37.5]
+
+
+# =============================================================================
+# _post_filter_matches_by_addresses is_missing_allowed Tests
+# =============================================================================
+
+
+def _make_match_on_host(agent_name: str, host_name: str) -> AgentMatch:
+    return AgentMatch(
+        agent_id=AgentId.generate(),
+        agent_name=AgentName(agent_name),
+        host_id=HostId.generate(),
+        host_name=HostName(host_name),
+        provider_name=ProviderInstanceName("local"),
+    )
+
+
+def test_post_filter_raises_for_unmatched_constrained_address_by_default() -> None:
+    """A host-constrained address with no matching agent raises AgentNotFoundError."""
+    match = _make_match_on_host("agent-a", "host-a")
+    addresses = [
+        AgentAddress(agent=AgentName("agent-a"), host=HostAddress(host=HostName("host-a"))),
+        AgentAddress(agent=AgentName("missing"), host=HostAddress(host=HostName("host-a"))),
+    ]
+    with pytest.raises(AgentNotFoundError, match="missing"):
+        _post_filter_matches_by_addresses(addresses, [match])
+
+
+def test_post_filter_omits_unmatched_constrained_address_when_missing_allowed() -> None:
+    """With is_missing_allowed=True, an unmatched constrained address is omitted, not raised."""
+    match = _make_match_on_host("agent-a", "host-a")
+    addresses = [
+        AgentAddress(agent=AgentName("agent-a"), host=HostAddress(host=HostName("host-a"))),
+        AgentAddress(agent=AgentName("missing"), host=HostAddress(host=HostName("host-a"))),
+    ]
+    result = _post_filter_matches_by_addresses(addresses, [match], is_missing_allowed=True)
+    assert result == [match]
+
+
+def test_find_agents_by_identifiers_omits_unmatched_when_missing_allowed(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """is_missing_allowed=True returns matches for found ids without raising on missing ones."""
+    result = _find_agents_by_identifiers_or_state(
+        agent_identifiers=[AgentName("does-not-exist")],
+        filter_all=False,
+        target_state=None,
+        mngr_ctx=temp_mngr_ctx,
+        is_missing_allowed=True,
+    )
+    assert result == []

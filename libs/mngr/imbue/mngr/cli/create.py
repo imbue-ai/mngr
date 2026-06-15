@@ -1285,9 +1285,12 @@ def _try_reuse_existing_agent(
             break
 
     if agent is None:
-        # Agent not found on online host - this could happen if the host came online
-        # but the agent data is stale. Return None to create a new agent.
-        logger.info("Agent {} not found on host after starting, will create new agent", agent_name)
+        # The agent was discovered but is not present on the host after it came
+        # online (e.g. stale agent data). --reuse is reuse-or-create, so fall
+        # back to creating a new agent rather than erroring -- but warn, since a
+        # transient inconsistency here means the user may unexpectedly get a
+        # second agent instead of reusing the existing one.
+        logger.warning("Agent {} not found on host after starting, will create a new agent", agent_name)
         return None
 
     # Ensure the agent is started (reusing shared logic from find.py)
@@ -1845,8 +1848,20 @@ def _ensure_clean_work_dir(location: HostLocation) -> None:
     """Verify the source work_dir has no uncommitted changes."""
     result = location.host.execute_idempotent_command("git status --porcelain", cwd=location.path)
     if not result.success:
-        # Not a git repo or git command failed, skip the check
-        logger.debug("Failed to check git status: {}", result.stderr)
+        if "not a git repository" in result.stderr.lower():
+            # Source is not a git repo: there is nothing to verify, skip silently.
+            logger.debug("Source at {} is not a git repository, skipping clean-tree check", location.path)
+            return
+        # git status failed for some other reason (git missing, permissions, a
+        # transient host error). We could not verify the tree is clean, so warn
+        # loudly rather than silently skip the safety check the user opted into.
+        # (Pass --no-ensure-clean to bypass the check intentionally.)
+        logger.warning(
+            "Could not verify the working tree at {} is clean (git status failed: {}); "
+            "proceeding without the clean-tree check",
+            location.path,
+            result.stderr.strip(),
+        )
         return
 
     if result.stdout.strip():

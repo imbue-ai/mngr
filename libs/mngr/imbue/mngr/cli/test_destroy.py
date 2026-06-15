@@ -277,11 +277,12 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
     mngr_test_prefix: str,
     plugin_manager: pluggy.PluginManager,
 ) -> None:
-    """Test that destroy fails if any specified identifier doesn't match an agent.
+    """Destroy's --on-error controls partial-batch behaviour when some ids are stale.
 
-    When multiple agents are specified and some don't exist, the command should:
-    1. Fail without destroying any agents
-    2. Include all missing identifiers in the error message
+    With the default --on-error abort, a batch containing any missing identifier
+    aborts (non-zero exit) and destroys nothing, naming the missing ids. With
+    --on-error continue, the agents that DO exist are destroyed and the missing
+    ids are reported via a warning (exit 0). --force is confirmation-skip only.
     """
     agent_name = f"test-destroy-partial-{int(time.time())}"
     session_name = f"{mngr_test_prefix}{agent_name}"
@@ -316,24 +317,38 @@ def test_destroy_prints_errors_if_any_identifier_not_found(
             error_message=f"Expected tmux session {session_name} to exist",
         )
 
-        # Try to destroy the real agent plus two non-existent ones
-        destroy_result = cli_runner.invoke(
+        # Default --on-error abort: a batch with any missing id aborts and
+        # destroys nothing (the real agent survives), naming the missing ids.
+        abort_result = cli_runner.invoke(
             destroy,
             [agent_name, nonexistent_name1, nonexistent_name2, "--force"],
             obj=plugin_manager,
             catch_exceptions=True,
         )
+        assert abort_result.exit_code != 0
+        abort_message = abort_result.output
+        assert nonexistent_name1 in abort_message
+        assert nonexistent_name2 in abort_message
+        assert tmux_session_exists(session_name), "Abort mode must not destroy any agent when some identifiers fail"
 
-        # Command does not fail (because of the "--force" flag), but reports errors
-        assert destroy_result.exit_code == 0
+        # --on-error continue: destroy the real agent, warn about the missing ids.
+        continue_result = cli_runner.invoke(
+            destroy,
+            [agent_name, nonexistent_name1, nonexistent_name2, "--force", "--on-error", "continue"],
+            obj=plugin_manager,
+            catch_exceptions=True,
+        )
+        assert continue_result.exit_code == 0
+        continue_message = continue_result.output
+        assert nonexistent_name1 in continue_message
+        assert nonexistent_name2 in continue_message
 
-        # Error message should include both missing agent names
-        error_message = destroy_result.output
-        assert nonexistent_name1 in error_message
-        assert nonexistent_name2 in error_message
-
-        # The existing agent should NOT have been destroyed
-        assert tmux_session_exists(session_name), "Existing agent should not be destroyed when some identifiers fail"
+        # The existing agent SHOULD have been destroyed in continue mode.
+        wait_for(
+            lambda: not tmux_session_exists(session_name),
+            timeout=15.0,
+            error_message=f"Expected tmux session {session_name} to be destroyed in continue mode",
+        )
 
 
 # Flaky under heavy CI load: the multi-agent shape means twice the create and

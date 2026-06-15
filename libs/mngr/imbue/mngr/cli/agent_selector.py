@@ -19,6 +19,7 @@ from urwid.widget.pile import Pile
 from urwid.widget.text import Text
 from urwid.widget.wimp import SelectableIcon
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.cli.urwid_utils import create_urwid_screen_preserving_terminal
@@ -159,8 +160,15 @@ def _handle_selector_input(state: AgentSelectorState, key: str) -> bool:
     if key == "enter":
         if state.list_walker and state.filtered_agents:
             _, focus_index = state.list_walker.get_focus()
-            if focus_index is not None and 0 <= focus_index < len(state.filtered_agents):
-                state.result = state.filtered_agents[focus_index]
+            # _refresh_agent_list always set_focus(0) on a non-empty walker, so a
+            # None/out-of-range focus here means the walker and filtered_agents
+            # have drifted out of sync -- a bug. Fail loudly rather than silently
+            # treating the user's explicit Enter as a cancel.
+            if focus_index is None or not (0 <= focus_index < len(state.filtered_agents)):
+                raise SwitchError(
+                    f"Picker focus index {focus_index} is out of range for {len(state.filtered_agents)} agents"
+                )
+            state.result = state.filtered_agents[focus_index]
         raise ExitMainLoop()
 
     # Let arrow keys pass through to the ListBox for navigation

@@ -5,6 +5,7 @@ import click
 from click_option_group import optgroup
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.data_types import GcResourceTypes
 from imbue.mngr.api.data_types import GcResult
@@ -175,8 +176,13 @@ _RESOURCE_TYPE_MESSAGES: dict[str, str] = {
 
 def _emit_resource_type_start(resource_type: str, output_format: OutputFormat) -> None:
     """Emit an info message when starting to GC a specific resource type."""
-    msg = _RESOURCE_TYPE_MESSAGES.get(resource_type, f"Cleaning {resource_type}...")
-    emit_info(msg, output_format)
+    # The resource_type values are a fixed internal set produced by
+    # destroy_resources() (api/gc.py). A missing key means this message map has
+    # drifted out of sync with that set, so fail loudly rather than emit a
+    # synthesized generic message that hides the drift.
+    if resource_type not in _RESOURCE_TYPE_MESSAGES:
+        raise SwitchError(f"Unknown GC resource type: {resource_type!r}")
+    emit_info(_RESOURCE_TYPE_MESSAGES[resource_type], output_format)
 
 
 @pure
@@ -197,7 +203,7 @@ def _format_destroyed_message(resource_type: str, resource: Any, dry_run: bool) 
         return f"{action} log: {resource.path}"
     if resource_type == "build_cache":
         return f"{action} build cache: {resource.path}"
-    return f"{action} {resource_type}: {resource}"
+    raise SwitchError(f"Unknown GC resource type: {resource_type!r}")
 
 
 def _emit_destroyed(
@@ -211,7 +217,7 @@ def _emit_destroyed(
     event_data = {
         "message": _format_destroyed_message(resource_type, resource, dry_run),
         "resource_type": resource_type,
-        "resource": resource.model_dump(mode="json") if hasattr(resource, "model_dump") else str(resource),
+        "resource": resource.model_dump(mode="json"),
         "dry_run": dry_run,
     }
     emit_event("destroyed", event_data, output_format)

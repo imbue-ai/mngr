@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
+mngr [destroy|rm] [AGENTS...|-] [--agent <AGENT>] [--session <SESSION>] [-f|--force] [--on-error abort|continue] [-b|--remove-created-branch] [--[no-]gc] [--[no-]allow-worktree-removal] [--dry-run]
 ```
 
 Destroy agent(s) and clean up resources.
@@ -19,6 +19,11 @@ Use with caution! This operation is irreversible.
 By default, running agents cannot be destroyed. Use --force to stop and destroy
 running agents. The command will prompt for confirmation before destroying
 agents unless --force is specified.
+
+By default (--on-error abort), destroy aborts if any named agent is not found.
+Use --on-error continue to destroy the agents that are found and warn about the
+ones that are not -- useful for batch destroys (e.g. piping a list of ids) where
+some ids may be stale.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
@@ -49,6 +54,7 @@ mngr destroy [OPTIONS] [AGENTS]...
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `-f`, `--force` | boolean | Skip confirmation prompts and force destroy running agents | `False` |
+| `--on-error` | choice (`abort` &#x7C; `continue`) | What to do when some target agents are not found: abort (stop) or continue (destroy the ones found and warn about the rest) | `abort` |
 | `--gc`, `--no-gc` | boolean | Run garbage collection after destroying agents to clean up orphaned resources (default: enabled) | `True` |
 | `-b`, `--remove-created-branch` | boolean | Delete the git branch that mngr created for the agent's work directory | `False` |
 | `--allow-worktree-removal`, `--no-allow-worktree-removal` | boolean | Allow GC to remove the git worktree directory (default: enabled) | `True` |
@@ -95,7 +101,7 @@ $ mngr destroy agent1 agent2 agent3
 **Destroy all agents**
 
 ```bash
-$ mngr list --ids | mngr destroy - --force
+$ mngr list --ids | mngr destroy - --force --on-error continue
 ```
 
 **Destroy using --agent flag (repeatable)**
@@ -113,7 +119,7 @@ $ mngr destroy --session mngr-my-agent
 **Pipe agent names from list**
 
 ```bash
-$ mngr list --ids | mngr destroy - --force
+$ mngr list --ids | mngr destroy - --force --on-error continue
 ```
 
 **Preview what would be destroyed**

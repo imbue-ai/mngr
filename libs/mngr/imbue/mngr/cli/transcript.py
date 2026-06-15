@@ -51,8 +51,13 @@ def _assert_agent_type_supports_transcripts(address: AgentOrHostAddress, mngr_ct
     _host_ref, agent_ref = find_one_agent(address, mngr_ctx)
     agent_type = agent_ref.agent_type
     if agent_type is None:
-        # Agent's data.json lacks 'type'; defer to downstream error rather than blocking.
-        return
+        # Agent's data.json lacks 'type'; surface that directly rather than
+        # deferring to the downstream "no common transcript ... may not have
+        # produced any transcript events yet" message, which misattributes the
+        # cause to missing events instead of the missing type.
+        raise UserInputError(
+            f"Agent '{agent_ref.agent_name}' has no recorded type; cannot determine transcript support."
+        )
     agent_class = get_agent_class(str(agent_type))
     if issubclass(agent_class, HasCommonTranscriptMixin):
         return

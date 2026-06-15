@@ -195,8 +195,10 @@ def setup_command_context(
     else:
         try:
             is_interactive = sys.stdout.isatty()
-        except (ValueError, AttributeError):
-            # Handle cases where stdout is uninitialized (e.g., xdist workers)
+        except ValueError:
+            # stdout is a closed/detached stream (e.g., xdist workers). An
+            # AttributeError would instead mean stdout was replaced by an object
+            # lacking isatty -- a real bug -- so let that propagate.
             is_interactive = False
 
     # Update MngrContext with the resolved is_interactive and safe mode
@@ -646,9 +648,14 @@ def apply_config_defaults(
             elif isinstance(config_value, (list, tuple)):
                 updated_params[param_name] = tuple(config_value)
             else:
-                # Shape mismatch (config gave a non-aggregate for a tuple param);
-                # pass it through so downstream validation can catch it.
-                updated_params[param_name] = config_value
+                # Shape mismatch: config gave a non-aggregate for a tuple/list
+                # param. Fail at the point of detection with a precise message
+                # rather than passing the scalar downstream where it surfaces as
+                # an opaque pydantic error (or is silently coerced).
+                raise ConfigParseError(
+                    f"Parameter '{param_name}' in commands.{command_name} config expects a list, "
+                    f"but got {type(config_value).__name__}: {config_value!r}"
+                )
             continue
 
         # Scalar params: only DEFAULT-source values are overridden by config.
@@ -961,7 +968,11 @@ def _run_single_script(script: str, cg: ConcurrencyGroup, cwd: Path | None) -> t
             ["sh", "-c", script],
             cwd=cwd,
         )
-        return (script, result.returncode if result.returncode is not None else 0, result.stdout, result.stderr)
+        # A None returncode means the exit status is unknown (check() passes None
+        # through without raising). Treat unknown as failure (-1, matching the
+        # error path below), never as success: these scripts gate the command, so
+        # an unknown status must block rather than silently pass the gate.
+        return (script, result.returncode if result.returncode is not None else -1, result.stdout, result.stderr)
     except ProcessError as e:
         return (script, e.returncode if e.returncode is not None else -1, e.stdout, e.stderr)
 

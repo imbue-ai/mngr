@@ -32,6 +32,7 @@ from imbue.mngr.cli.stdin_utils import expand_stdin_placeholder
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
@@ -246,22 +247,27 @@ def _start_agents(
         # Emit discovery events for agents and host
         emit_discovery_events_for_host(mngr_ctx.config, online_host)
 
+        agents_by_id = {agent.id: agent for agent in online_host.get_agents()}
         for match in agent_list:
             verb = "Restarted" if is_restart else "Started"
             started_agents.append(str(match.agent_name))
             _output(f"{verb} agent: {match.agent_name}", output_opts)
 
-            # Get the agent object for potential connect and resume message
-            for agent in online_host.get_agents():
-                if agent.id == match.agent_id:
-                    if send_resume:
-                        _send_resume_message_if_configured(agent, output_opts)
+            # The agent was just started, so it must be present on the host. If
+            # it is missing, surface the inconsistency loudly rather than
+            # silently skipping the resume/connect handling while still having
+            # reported the agent as started.
+            agent = agents_by_id.get(match.agent_id)
+            if agent is None:
+                raise AgentNotFoundOnHostError(match.agent_id, HostId(host_id_str))
 
-                    # Track for potential connect
-                    if opts.connect:
-                        last_started_agent = agent
-                        last_started_host = online_host
-                    break
+            if send_resume:
+                _send_resume_message_if_configured(agent, output_opts)
+
+            # Track for potential connect
+            if opts.connect:
+                last_started_agent = agent
+                last_started_host = online_host
 
     # Output final result
     _output_result(started_agents, output_opts, is_restart=is_restart)

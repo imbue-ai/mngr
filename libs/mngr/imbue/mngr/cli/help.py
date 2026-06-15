@@ -27,6 +27,7 @@ from imbue.mngr.cli.help_topics import get_all_topics
 from imbue.mngr.cli.help_topics import get_topic
 from imbue.mngr.cli.help_topics import register_topic
 from imbue.mngr.config.data_types import MngrConfig
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.help_topic import TopicHelpPage
 
 # =============================================================================
@@ -130,9 +131,11 @@ def _resolve_command_chain(
 def _get_config_from_ctx(ctx: click.Context) -> MngrConfig | None:
     """Extract MngrConfig from a click context, if available."""
     root_ctx = ctx.find_root()
-    if hasattr(root_ctx, "obj") and root_ctx.obj is not None and hasattr(root_ctx.obj, "config"):
-        config: MngrConfig = root_ctx.obj.config
-        return config
+    # ctx.obj may be a MngrContext (carries config), a PluginManager (no config),
+    # or None depending on when --help is invoked. Only MngrContext has config.
+    obj = root_ctx.obj
+    if isinstance(obj, MngrContext):
+        return obj.config
     return None
 
 

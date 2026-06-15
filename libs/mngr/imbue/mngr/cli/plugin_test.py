@@ -6,6 +6,7 @@ import pluggy
 import pytest
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.mngr.agents.agent_registry import _register_agent
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.cli.output_helpers import AbortError
@@ -151,9 +152,16 @@ def test_get_field_value_enabled_false() -> None:
 
 
 def test_get_field_value_unknown_field() -> None:
-    """_get_field_value should return '-' for unknown fields."""
+    """_get_field_value should raise on an unknown field (validated upstream)."""
     info = PluginInfo(name="test", is_enabled=True)
-    assert _get_field_value(info, "nonexistent") == "-"
+    with pytest.raises(SwitchError):
+        _get_field_value(info, "nonexistent")
+
+
+def test_parse_fields_unknown_raises() -> None:
+    """_parse_fields should reject a typo'd field name rather than render a blank column."""
+    with pytest.raises(AbortError):
+        _parse_fields("name,enbaled")
 
 
 # =============================================================================

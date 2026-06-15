@@ -40,17 +40,24 @@ class _CompletionContext(NamedTuple):
 
 
 def _read_cache() -> CompletionCacheData:
-    """Read the command completions cache file. Returns defaults on any error."""
+    """Read the command completions cache file. Returns defaults on any error.
+
+    This is a deliberate fail-soft: a TAB press must never crash the shell, so a
+    missing/corrupt/stale cache yields empty completions rather than raising. Do
+    not "fix" this into a raise.
+    """
+    path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
+    if not path.is_file():
+        return CompletionCacheData()
     try:
-        path = get_completion_cache_dir() / COMPLETION_CACHE_FILENAME
-        if not path.is_file():
-            return CompletionCacheData()
         data = json.loads(path.read_text())
-        if isinstance(data, dict):
-            return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
     except (json.JSONDecodeError, OSError):
-        pass
-    return CompletionCacheData()
+        return CompletionCacheData()
+    if not isinstance(data, dict):
+        # A non-dict JSON value (e.g. a bare list/number) is a corrupt cache;
+        # treat it as empty rather than letting the **-unpack below explode.
+        return CompletionCacheData()
+    return CompletionCacheData(**{k: v for k, v in data.items() if k in CompletionCacheData._fields})
 
 
 def _read_host_names() -> list[str]:
@@ -551,6 +558,11 @@ def main() -> None:
 
     if len(args) >= 2 and args[0] == "--script":
         shell = args[1]
+        if shell not in ("zsh", "bash"):
+            # Only zsh and bash shims exist; fail loudly rather than silently
+            # emitting a bash shim for an unsupported/typo'd shell.
+            # sys.exit(str) writes the message to stderr and exits non-zero.
+            sys.exit(f"Unsupported shell: {shell!r}. Supported shells: zsh, bash.")
         # Materialise the managed files so the shim has something to source, then
         # emit the shim (the rc content).
         write_managed_completion_scripts()

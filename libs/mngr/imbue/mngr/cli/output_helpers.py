@@ -8,6 +8,7 @@ from typing import assert_never
 
 from loguru import logger
 
+from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.rsync import RsyncResult
 from imbue.mngr.primitives import ErrorBehavior
@@ -79,15 +80,20 @@ def read_tty_choice(prompt: str) -> str:
     When a script is invoked via ``curl ... | bash``, stdin is the pipe
     from curl, not the terminal.  This function opens /dev/tty directly
     so interactive prompts still work.  Returns an empty string if
-    /dev/tty is unavailable (e.g. in CI).
+    /dev/tty is unavailable (e.g. in CI) -- intentionally the same value as
+    an empty Enter, since callers treat "" as the safe "skip" default for both
+    the no-tty and empty-line cases.
     """
     try:
-        with open("/dev/tty") as tty:
-            sys.stdout.write(prompt)
-            sys.stdout.flush()
-            return tty.readline().strip()
+        tty = open("/dev/tty")
     except OSError:
         return ""
+    # Only the open() can raise the "no controlling terminal" OSError; a failure
+    # during the prompt/read below is a real error and should propagate.
+    with tty:
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        return tty.readline().strip()
 
 
 class AbortError(BaseException):
@@ -133,8 +139,12 @@ def emit_event(
     """Emit an event in the appropriate format."""
     match output_format:
         case OutputFormat.HUMAN:
-            if "message" in data:
-                write_human_line(str(data["message"]))
+            # Every HUMAN-format event must carry a "message" (see the data param
+            # doc). A missing key is a caller contract violation; fail loudly
+            # rather than silently emit no line for the event.
+            if "message" not in data:
+                raise SwitchError(f"HUMAN-format event {event_type!r} is missing a 'message' field")
+            write_human_line(str(data["message"]))
         case OutputFormat.JSONL:
             event = {"event": event_type, **data}
             write_json_line(event)
@@ -212,7 +222,7 @@ def render_format_template(template: str, values: Mapping[str, str]) -> str:
         elif conversion == "a":
             value = ascii(value)
         else:
-            raise AssertionError(f"Unknown conversion: {conversion!r}")
+            raise SwitchError(f"Unknown conversion: {conversion!r}")
         if format_spec:
             value = format(value, format_spec)
         parts.append(value)

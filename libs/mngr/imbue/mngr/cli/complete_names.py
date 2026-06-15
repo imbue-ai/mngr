@@ -141,7 +141,11 @@ def resolve_names_from_discovery_stream(
                     agent_name_by_id.pop(agent_id, None)
 
         else:
-            pass
+            # Unknown/newer event types are intentionally ignored: this is a
+            # stdlib-only completion helper that cannot import the event enum, so
+            # skipping unrecognized types keeps it forward-compatible with
+            # event-schema additions (a TAB press must never crash the shell).
+            continue
 
     agent_names = sorted(set(agent_name_by_id.values()))
     host_names = sorted(set(host_name_by_id.values()))
