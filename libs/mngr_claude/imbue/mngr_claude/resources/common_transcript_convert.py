@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from typing import Any
 from typing import Union
 
@@ -320,6 +321,10 @@ def convert(input_file: str, output_file: str) -> int:
 
 
 if __name__ == "__main__":
-    # The caller (common_transcript.sh) tracks how many events were appended by
-    # diffing the output file's line count, so nothing is written to stdout here.
+    # Route routine per-line skip warnings to stdout. common_transcript.sh treats
+    # any stderr output as a "convert error", so a truncated trailing line caught
+    # mid-write must not land there; stdout is not captured (the shell reports the
+    # appended count by diffing the output file's line count). Genuine uncaught
+    # exceptions still hit stderr via the default traceback and surface as errors.
+    logging.basicConfig(stream=sys.stdout, level=logging.WARNING, format="%(message)s")
     convert(os.environ["_INPUT_FILE"], os.environ["_OUTPUT_FILE"])
