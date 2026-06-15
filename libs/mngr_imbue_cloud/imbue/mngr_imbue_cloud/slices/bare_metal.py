@@ -33,6 +33,11 @@ DISK_RESERVE_GB: Final[int] = 20
 # boot disk to 100GiB, which (unaccounted) would massively overcommit the box.
 SLICE_BOOT_DISK_GIB: Final[int] = 32
 
+# Default RAM (GB) each slice advertises / is sized to. A box's slot count is
+# floor(total_RAM / this), so it also sets how many slices a box yields. Used as the
+# default for the pricing table and the natural slice size for our workspaces.
+DEFAULT_MEMORY_PER_SLICE_GB: Final[int] = 8
+
 # Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
 # floor(threads * ratio / slots)). Overridable per box at ``admin server
 # register --cpu-overcommit``; RAM is never overcommitted.

@@ -23,11 +23,13 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import click
 import psycopg2
 from loguru import logger
+from tabulate import tabulate
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
@@ -43,10 +45,13 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
 from imbue.mngr_imbue_cloud.data_types import BareMetalServerCapacity
+from imbue.mngr_imbue_cloud.data_types import SlicePricingRow
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
+from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
+from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_END
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_PORT_RANGE_START
@@ -66,7 +71,10 @@ from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import DEFAULT_LIMA_VERSION
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import build_box_prep_script
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.pricing import compute_slice_pricing_rows
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
+from imbue.mngr_ovh.client import build_ovh_client
+from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 
@@ -758,3 +766,127 @@ def set_status(server_id: str, status: str, database_url: str | None) -> None:
     finally:
         conn.close()
     logger.info("Set server {} status to {}", server_id, validated)
+
+
+def _format_delivery(delivery_hours: int) -> str:
+    """Human-readable delivery time from OVH availability hours (e.g. 1 -> '~1h', 72 -> '3d')."""
+    if delivery_hours <= 0:
+        return "?"
+    if delivery_hours < 24:
+        return f"~{delivery_hours}h"
+    return f"{delivery_hours // 24}d"
+
+
+def _format_storage_options(row: SlicePricingRow) -> str:
+    """Render a row's storage upgrade options as a compact end-of-row string."""
+    if not row.storage_options:
+        return "-"
+    return "  ".join(
+        f"{option.label}(+{option.extra_disk_gb_per_slice}G/slice @ ${option.dollars_per_extra_gb}/GB)"
+        for option in row.storage_options
+    )
+
+
+def _format_slice_pricing_table(rows: list[SlicePricingRow]) -> str:
+    """Render the per-slice pricing rows as a plain table (already sorted cheapest-per-slice first)."""
+    headers = [
+        "$/SLICE/MO",
+        "PLAN_CODE",
+        "MODEL",
+        "REGIONS",
+        "DELIVERY",
+        "STOCK",
+        "RAM_GB",
+        "SLOTS",
+        "CPU/SLICE",
+        "DISK/SLICE(GiB)",
+        "$/MO",
+        "SETUP",
+        "BASE_STORAGE",
+        "STORAGE_UPGRADES (per slice)",
+    ]
+    table_rows = [
+        [
+            f"{row.price_per_slice_usd:.2f}",
+            row.plan_code,
+            row.server_model,
+            ",".join(row.available_regions),
+            _format_delivery(row.delivery_hours),
+            row.stock_level or "-",
+            row.server_ram_gb,
+            row.slot_count,
+            row.cpus_per_slice,
+            row.disk_gb_per_slice,
+            f"{row.recurring_monthly_usd:.2f}",
+            f"{row.one_time_setup_usd:.2f}",
+            row.base_storage_label,
+            _format_storage_options(row),
+        ]
+        for row in rows
+    ]
+    return tabulate(table_rows, headers=headers, tablefmt="plain")
+
+
+@server.command(name="pricing")
+@click.option(
+    "--region",
+    "regions",
+    type=click.Choice(sorted(OVH_US_DATACENTER_CODES)),
+    multiple=True,
+    help="Restrict to a US datacenter (vin=US-EAST-VA, hil=US-WEST-OR). Repeatable; default: both.",
+)
+@click.option(
+    "--memory-per-slice-gb",
+    type=int,
+    default=DEFAULT_MEMORY_PER_SLICE_GB,
+    show_default=True,
+    help="RAM (GB) per slice; sets slot count (floor(server_RAM / this)) and per-slice CPU/disk sizing.",
+)
+@click.option(
+    "--cpu-overcommit",
+    type=float,
+    default=DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO,
+    show_default=True,
+    help="CPU overcommit factor for sizing each slice's vCPUs.",
+)
+@click.option(
+    "--catalog-name",
+    default="eco",
+    show_default=True,
+    help="OVH catalog to price (eco = the RISE/SYS/KS bare-metal line we carve slices on).",
+)
+def pricing(regions: tuple[str, ...], memory_per_slice_gb: int, cpu_overcommit: float, catalog_name: str) -> None:
+    """Print a per-slice pricing table for OVH bare-metal plans (read-only; needs OVH_* creds in env).
+
+    Each row is a server x RAM config; price/slice = (month-to-month + setup/12) / slots, sorted cheapest
+    first, with delivery time + stock from OVH availability and storage-upgrade options at the end of each
+    row. This only reads the catalog/availability APIs -- it never places an order.
+    """
+    config = OvhProviderConfig()
+    if not config.has_explicit_credentials():
+        raise BareMetalProvisioningError(
+            "No OVH credentials found. Export OVH_APPLICATION_KEY / OVH_APPLICATION_SECRET / OVH_CONSUMER_KEY "
+            "(from the activated env's ovh secret) before running pricing."
+        )
+    allowed_regions = frozenset(regions) if regions else OVH_US_DATACENTER_CODES
+
+    client = build_ovh_client(config)
+    # The OVH SDK's generic call() sends kwargs as the request body, so for GETs the query params must
+    # go in the path; the availabilities endpoint takes no params here (we fetch all and filter locally).
+    catalog_path = f"/order/catalog/public/{catalog_name}?{urlencode({'ovhSubsidiary': client.subsidiary})}"
+    catalog = client.call_api("GET", catalog_path)
+    availabilities = client.call_api("GET", "/dedicated/server/datacenter/availabilities")
+    rows = compute_slice_pricing_rows(catalog, availabilities, allowed_regions, memory_per_slice_gb, cpu_overcommit)
+
+    region_label = ",".join(sorted(allowed_regions))
+    if not rows:
+        logger.info("No orderable plans found in region(s) {} at {}GB/slice.", region_label, memory_per_slice_gb)
+        return
+    logger.info(
+        "\nOVH bare-metal slice pricing -- {}GB/slice, {}x CPU overcommit, region(s) {} (catalog '{}')\n{}",
+        memory_per_slice_gb,
+        cpu_overcommit,
+        region_label,
+        catalog_name,
+        _format_slice_pricing_table(rows),
+    )

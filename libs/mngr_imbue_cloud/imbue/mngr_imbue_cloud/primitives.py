@@ -14,6 +14,11 @@ IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 # purpose; extend when the pool gains new datacenters.
 KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset({"US-EAST-VA", "US-WEST-OR"})
 
+# The OVH datacenter codes for those US regions, as used by the OVH order/catalog and
+# ``/dedicated/server/datacenter/availabilities`` APIs and stored in ``bare_metal_servers.region``:
+# ``vin`` = Vint Hill (US-EAST-VA), ``hil`` = Hillsboro (US-WEST-OR).
+OVH_US_DATACENTER_CODES: Final[frozenset[str]] = frozenset({"vin", "hil"})
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 

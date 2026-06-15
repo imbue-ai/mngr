@@ -914,3 +914,21 @@ mngr imbue_cloud admin server set-status [OPTIONS]
 | `--server-id` | text | bare_metal_servers row id. | None |
 | `--status` | text | New lifecycle status. | None |
 | `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin server pricing
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server pricing [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--region` | choice (`hil` &#x7C; `vin`) | Restrict to a US datacenter (vin=US-EAST-VA, hil=US-WEST-OR). Repeatable; default: both. | None |
+| `--memory-per-slice-gb` | integer | RAM (GB) per slice; sets slot count (floor(server_RAM / this)) and per-slice CPU/disk sizing. | `8` |
+| `--cpu-overcommit` | float | CPU overcommit factor for sizing each slice's vCPUs. | `2.0` |
+| `--catalog-name` | text | OVH catalog to price (eco = the RISE/SYS/KS bare-metal line we carve slices on). | `eco` |

@@ -374,3 +374,57 @@ class OrderPricing(FrozenModel):
     )
     one_time_setup: Decimal = Field(description="Total one-time setup fee in USD (waived on committed terms)")
     first_payment: Decimal = Field(description="Amount charged at checkout in USD: recurring_monthly + one_time_setup")
+
+
+class SliceStorageOption(FrozenModel):
+    """One orderable storage config for a server, expressed as a per-slice disk upgrade over the base."""
+
+    storage_plan_code: str = Field(description="OVH storage add-on planCode (full, plan-suffixed)")
+    label: str = Field(description="Short storage label parsed from the planCode (e.g. '2x1920nvme')")
+    raid_level: str = Field(
+        description="Mirror-based RAID level assumed for usable capacity (RAID1/RAID10/RAID5/MIXED)"
+    )
+    usable_disk_gb: int = Field(description="Usable disk in GB after RAID, for the whole server")
+    extra_disk_gb_per_slice: int = Field(description="Additional usable disk per slice vs the row's base storage")
+    extra_monthly_usd: Decimal = Field(description="Additional month-to-month cost in USD vs the row's base storage")
+    dollars_per_extra_gb: Decimal = Field(
+        description="Marginal USD per added usable GB vs base (same per-slice or whole-server, since slots cancel)"
+    )
+
+
+class SlicePricingRow(FrozenModel):
+    """Pricing + effective slice sizing for one (server x RAM config), for the operator pricing table.
+
+    Each row is the product of a bare-metal plan and one of its memory configs, priced
+    month-to-month with the setup fee amortized over a year, divided across the slices the
+    config yields. Storage stays a per-row list of upgrade options rather than its own product axis.
+    """
+
+    plan_code: str = Field(description="OVH planCode of the bare-metal server")
+    server_model: str = Field(description="CPU / server description (e.g. 'Intel Xeon-E 2388G')")
+    available_regions: tuple[str, ...] = Field(description="US datacenter codes where this config is orderable")
+    delivery_hours: int = Field(
+        description="Fastest advertised delivery time in hours for the base config (from OVH availability; lower = sooner)"
+    )
+    stock_level: str = Field(
+        description="Stock level for that fastest option ('high'/'low'), or '' when OVH reports only a delivery time"
+    )
+    server_ram_gb: int = Field(description="Total server RAM in GB for this row's memory config")
+    cpu_cores: int = Field(description="Physical CPU cores")
+    cpu_threads: int = Field(description="CPU threads")
+    memory_per_slice_gb: int = Field(description="RAM (GB) each slice advertises (the requested slice size)")
+    slot_count: int = Field(description="Slices this server holds = floor(server_ram_gb / memory_per_slice_gb)")
+    cpus_per_slice: int = Field(description="vCPUs per slice after CPU overcommit")
+    disk_gb_per_slice: int = Field(
+        description="Total usable disk per slice with the base (cheapest in-region) storage"
+    )
+    base_storage_label: str = Field(description="The cheapest in-region storage backing the base price/disk columns")
+    recurring_monthly_usd: Decimal = Field(
+        description="True month-to-month cost: base plan + RAM + base-storage deltas"
+    )
+    one_time_setup_usd: Decimal = Field(description="One-time setup fee in USD")
+    amortized_monthly_usd: Decimal = Field(description="recurring_monthly + setup/12 (setup amortized over one year)")
+    price_per_slice_usd: Decimal = Field(description="amortized_monthly / slot_count -- the primary sort key")
+    storage_options: tuple[SliceStorageOption, ...] = Field(
+        description="Other in-region storage configs as per-slice disk upgrades (not splatted into their own rows)"
+    )
