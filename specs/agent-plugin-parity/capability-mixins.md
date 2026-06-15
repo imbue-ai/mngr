@@ -168,7 +168,8 @@ belongs on the base (a method every plugin supplies its install command for, inv
 shared provision flow), and the agents currently missing it (antigravity, opencode, codex) get
 it added rather than left as a gap. The one non-trivial part is per-CLI: each CLI's install
 command differs (claude's installer script, pi's npm, codex's `codex update`/standalone, an
-opencode install script, agy's -- to be determined), so "toss it in" still means sourcing each
+opencode install script, and agy's `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+-- which drops the `agy` binary into `~/.local/bin/`), so "toss it in" still means sourcing each
 command. Version management (pin vs auto-update) stays a *distinguishing* capability
 (`HasVersionManagementMixin`: claude, codex), since not every CLI exposes version control.
 
