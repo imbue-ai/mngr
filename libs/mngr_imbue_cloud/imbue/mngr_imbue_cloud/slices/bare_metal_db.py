@@ -171,6 +171,14 @@ def fetch_servers(conn: Any) -> list[BareMetalServer]:
     return [_server_from_row(row) for row in rows]
 
 
+def fetch_server_by_id(conn: Any, server_id: BareMetalServerDbId) -> BareMetalServer | None:
+    """Return a single bare_metal_servers row by id, or None if it does not exist."""
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_SERVERS_SQL.replace("ORDER BY created_at ASC", "WHERE id = %s"), (str(server_id),))
+        row = cur.fetchone()
+    return _server_from_row(row) if row else None
+
+
 def count_slices_on_server(conn: Any, server_id: BareMetalServerDbId) -> int:
     """Count the baked (non-removing) slices currently on a server."""
     with conn.cursor() as cur:

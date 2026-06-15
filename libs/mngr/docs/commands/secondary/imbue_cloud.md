@@ -932,3 +932,63 @@ mngr imbue_cloud admin server pricing [OPTIONS]
 | `--memory-per-slice-gb` | integer | RAM (GB) per slice; sets slot count (floor(server_RAM / this)) and per-slice CPU/disk sizing. | `8` |
 | `--cpu-overcommit` | float | CPU overcommit factor for sizing each slice's vCPUs. | `2.0` |
 | `--catalog-name` | text | OVH catalog to price (eco = the RISE/SYS/KS bare-metal line we carve slices on). | `eco` |
+
+## mngr imbue_cloud admin server order
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server order [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--plan-code` | text | OVH eco planCode to order (e.g. 24rise01-v1-us). | None |
+| `--region` | choice (`hil` &#x7C; `vin`) | OVH US datacenter to order in (vin = US-EAST-VA, hil = US-WEST-OR). | None |
+| `--memory-gb` | integer | Server RAM in GB (selects the memory option). | None |
+| `--storage` | text | Storage option short code (the pricing table's BASE_STORAGE, e.g. softraid-2x512nvme). | None |
+| `--memory-per-slice-gb` | integer | RAM (GB) each slice will advertise; sets slot_count = floor(server RAM / this). | `8` |
+| `--cpu-overcommit` | float | CPU overcommit factor recorded for slice sizing on this box. | `2.0` |
+| `--yes` | boolean | Skip the interactive confirmation and place the order. | `False` |
+| `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+
+## mngr imbue_cloud admin server await-delivery
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server await-delivery [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-id` | text | bare_metal_servers row id (from `order`). | None |
+| `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin server setup
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server setup [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-id` | text | bare_metal_servers row id (delivered). | None |
+| `--ssh-user` | text | Bootstrap SSH user after reinstall (OS image's default user). | `debian` |
+| `--lima-service-user` | text | Dedicated non-root user to create for the lima VMs. | `limahost` |
+| `--lima-version` | text | Lima release to install on the box. | `2.1.2` |
+| `--slice-base-image-url` | text | Guest OS image to stage on the box once (slices boot from this via file://). | `https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2` |
+| `--os-template` | text | OVH OS template to reinstall onto the box. | `debian12_64` |
+| `--ssh-ready-timeout` | float | Seconds to wait for SSH. | `900.0` |
+| `--database-url` | text |  | None |

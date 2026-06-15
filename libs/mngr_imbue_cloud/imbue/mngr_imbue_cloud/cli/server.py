@@ -33,9 +33,11 @@ from tabulate import tabulate
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
+from imbue.imbue_common.logging import log_span
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
@@ -51,6 +53,9 @@ from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
+from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
+from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_INSTALLING
+from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_MEMORY_PER_SLICE_GB
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
@@ -65,6 +70,7 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import partition_port_range
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import build_slice_pool_host_insert_values
+from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import fetch_server_capacities
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_bare_metal_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_db import insert_slice_pool_host
@@ -72,6 +78,16 @@ from imbue.mngr_imbue_cloud.slices.bare_metal_db import update_server
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import DEFAULT_LIMA_VERSION
 from imbue.mngr_imbue_cloud.slices.bare_metal_prep import build_box_prep_script
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.ordering import DEFAULT_REINSTALL_OS_TEMPLATE
+from imbue.mngr_imbue_cloud.slices.ordering import build_and_assign_eco_cart
+from imbue.mngr_imbue_cloud.slices.ordering import checkout_eco_cart
+from imbue.mngr_imbue_cloud.slices.ordering import delete_cart_quietly
+from imbue.mngr_imbue_cloud.slices.ordering import derive_server_specs
+from imbue.mngr_imbue_cloud.slices.ordering import start_os_reinstall
+from imbue.mngr_imbue_cloud.slices.ordering import summarize_checkout_prices
+from imbue.mngr_imbue_cloud.slices.ordering import wait_for_dedicated_server_address
+from imbue.mngr_imbue_cloud.slices.ordering import wait_for_order_service_name
+from imbue.mngr_imbue_cloud.slices.ordering import wait_for_os_reinstall
 from imbue.mngr_imbue_cloud.slices.pricing import compute_slice_pricing_rows
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_ovh.client import build_ovh_client
@@ -102,7 +118,7 @@ def _format_capacity_table(capacities: list[BareMetalServerCapacity]) -> str:
 
 @click.group(name="server")
 def server() -> None:
-    """Bare-metal server fleet management (prep / list / register / set-status)."""
+    """Bare-metal server fleet management (pricing / order / await-delivery / setup / list / register / set-status)."""
 
 
 @contextmanager
@@ -890,3 +906,269 @@ def pricing(regions: tuple[str, ...], memory_per_slice_gb: int, cpu_overcommit: 
         f"{cpu_overcommit}x CPU overcommit, region(s) {region_label} (catalog '{catalog_name}')"
     )
     write_human_line(f"{header}\n{_format_slice_pricing_table(rows)}")
+
+
+def _require_ovh_config() -> OvhProviderConfig:
+    """Return the OVH provider config, raising a clear error if no credentials are present in the env."""
+    config = OvhProviderConfig()
+    if not config.has_explicit_credentials():
+        raise BareMetalProvisioningError(
+            "No OVH credentials found. Export OVH_APPLICATION_KEY / OVH_APPLICATION_SECRET / OVH_CONSUMER_KEY "
+            "(from the activated env's ovh secret) first."
+        )
+    return config
+
+
+def _probe_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path) -> bool | None:
+    """One SSH-readiness probe: True once a login succeeds, else None (for poll_for_value)."""
+    cg = ConcurrencyGroup(name="ssh-ready")
+    with cg:
+        result = cg.run_process_to_completion(
+            command=[
+                "ssh",
+                "-i",
+                str(private_key_path),
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=15",
+                f"{ssh_user}@{server_address}",
+                "echo ok",
+            ],
+            timeout=30.0,
+            is_checked_after=False,
+        )
+    return True if result.returncode == 0 else None
+
+
+def _wait_for_ssh_ready(server_address: str, ssh_user: str, private_key_path: Path, timeout_seconds: float) -> None:
+    """Poll until the box accepts an SSH login (it reboots into the freshly-installed OS). Raises on timeout."""
+    with log_span("Waiting for SSH on {} as {}", server_address, ssh_user):
+        is_ready, _polls, _elapsed = poll_for_value(
+            lambda: _probe_ssh_ready(server_address, ssh_user, private_key_path),
+            timeout=timeout_seconds,
+            poll_interval=10.0,
+        )
+    if not is_ready:
+        raise BareMetalProvisioningError(f"SSH to {server_address} not ready within {timeout_seconds:.0f}s")
+
+
+@server.command(name="order")
+@click.option("--plan-code", required=True, help="OVH eco planCode to order (e.g. 24rise01-v1-us).")
+@click.option(
+    "--region",
+    required=True,
+    type=click.Choice(sorted(OVH_US_DATACENTER_CODES)),
+    help="OVH US datacenter to order in (vin = US-EAST-VA, hil = US-WEST-OR).",
+)
+@click.option("--memory-gb", required=True, type=int, help="Server RAM in GB (selects the memory option).")
+@click.option(
+    "--storage",
+    required=True,
+    help="Storage option short code (the pricing table's BASE_STORAGE, e.g. softraid-2x512nvme).",
+)
+@click.option(
+    "--memory-per-slice-gb",
+    type=int,
+    default=DEFAULT_MEMORY_PER_SLICE_GB,
+    show_default=True,
+    help="RAM (GB) each slice will advertise; sets slot_count = floor(server RAM / this).",
+)
+@click.option(
+    "--cpu-overcommit",
+    type=float,
+    default=DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO,
+    show_default=True,
+    help="CPU overcommit factor recorded for slice sizing on this box.",
+)
+@click.option("--yes", is_flag=True, default=False, help="Skip the interactive confirmation and place the order.")
+@click.option("--database-url", default=None, help="Pool DSN (else resolved from env/activated minds env).")
+def order(
+    plan_code: str,
+    region: str,
+    memory_gb: int,
+    storage: str,
+    memory_per_slice_gb: int,
+    cpu_overcommit: float,
+    yes: bool,
+    database_url: str | None,
+) -> None:
+    """Order a bare-metal server from OVH (THIS CHARGES the account) and record it at status 'ordered'.
+
+    Builds + assigns the eco cart, shows the real OVH price preview for confirmation, places the order, and
+    inserts a bare_metal_servers row (specs derived from the catalog). Then run ``await-delivery`` + ``setup``.
+    Needs OVH_* credentials and the pool DSN.
+    """
+    config = _require_ovh_config()
+    client = build_ovh_client(config)
+    catalog_path = f"/order/catalog/public/eco?{urlencode({'ovhSubsidiary': client.subsidiary})}"
+    catalog = client.call_api("GET", catalog_path)
+    cpu_cores, cpu_threads, disk_gb, raid_level = derive_server_specs(catalog, plan_code, storage)
+    slot_count = compute_slot_count(memory_gb, memory_per_slice_gb)
+    if slot_count <= 0:
+        raise BareMetalProvisioningError(
+            f"{memory_gb}GB RAM / {memory_per_slice_gb}GB per slice yields 0 slots; pick a smaller slice size"
+        )
+
+    cart_id, preview, _option_codes = build_and_assign_eco_cart(
+        client, plan_code=plan_code, datacenter=region, memory_gb=memory_gb, storage_short=storage
+    )
+    write_human_line(
+        f"About to order {plan_code} in {region}: {memory_gb}GB RAM, {storage}, {cpu_cores}c/{cpu_threads}t, "
+        f"{disk_gb}GB usable disk ({raid_level}) -> {slot_count} slices of {memory_per_slice_gb}GB.\n"
+        f"OVH price preview:\n{summarize_checkout_prices(preview)}"
+    )
+    if not yes and not click.confirm("Place this order now (this charges the account)?", default=False):
+        delete_cart_quietly(client, cart_id)
+        write_human_line("Aborted; cart deleted, no order placed.")
+        return
+
+    order_id = checkout_eco_cart(client, cart_id)
+    now = datetime.now(timezone.utc)
+    server_row = BareMetalServer(
+        id=BareMetalServerDbId(str(uuid4())),
+        ovh_order_id=str(order_id),
+        ovh_service_name=None,
+        plan_code=plan_code,
+        region=region,
+        public_address=None,
+        cpu_cores=cpu_cores,
+        cpu_threads=cpu_threads,
+        ram_gb=memory_gb,
+        disk_gb=disk_gb,
+        memory_per_slice_gb=memory_per_slice_gb,
+        cpu_overcommit_ratio=cpu_overcommit,
+        slot_count=slot_count,
+        raid_level=raid_level,
+        lima_service_user=None,
+        status=BareMetalServerStatus(SERVER_STATUS_ORDERED),
+        created_at=now,
+        updated_at=now,
+    )
+    conn = psycopg2.connect(resolve_pool_database_url(database_url))
+    try:
+        insert_bare_metal_server(conn, server_row)
+    finally:
+        conn.close()
+    write_human_line(
+        f"Ordered {plan_code} (OVH order {order_id}); recorded server {server_row.id} at status 'ordered'. "
+        f"Next: `admin server await-delivery --server-id {server_row.id}`."
+    )
+
+
+@server.command(name="await-delivery")
+@click.option("--server-id", required=True, help="bare_metal_servers row id (from `order`).")
+@click.option("--database-url", default=None)
+def await_delivery(server_id: str, database_url: str | None) -> None:
+    """Wait for OVH to deliver an ordered server (assign a serviceName + IP), then mark it 'delivered'.
+
+    Resumable: a no-op if the server is already delivered. Delivery can take a while (often ~1h).
+    """
+    conn = psycopg2.connect(resolve_pool_database_url(database_url))
+    try:
+        server = fetch_server_by_id(conn, BareMetalServerDbId(server_id))
+        if server is None:
+            raise BareMetalProvisioningError(f"no bare_metal_servers row with id {server_id}")
+        if str(server.status) in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING, SERVER_STATUS_READY):
+            write_human_line(f"Already delivered: {server.ovh_service_name} ({server.public_address}).")
+            return
+        if not server.ovh_order_id:
+            raise BareMetalProvisioningError(f"server {server_id} has no ovh_order_id to wait on")
+        client = build_ovh_client(_require_ovh_config())
+        service_name = wait_for_order_service_name(client, order_id=int(server.ovh_order_id))
+        address = wait_for_dedicated_server_address(client, service_name=service_name)
+        update_server(
+            conn,
+            server.id,
+            ovh_service_name=service_name,
+            public_address=address,
+            status=SERVER_STATUS_DELIVERED,
+        )
+        write_human_line(
+            f"Server {server_id} delivered: {service_name} ({address}). "
+            f"Next: `admin server setup --server-id {server_id}`."
+        )
+    finally:
+        conn.close()
+
+
+@server.command(name="setup")
+@click.option("--server-id", required=True, help="bare_metal_servers row id (delivered).")
+@click.option("--ssh-user", default="debian", help="Bootstrap SSH user after reinstall (OS image's default user).")
+@click.option("--lima-service-user", default="limahost", help="Dedicated non-root user to create for the lima VMs.")
+@click.option("--lima-version", default=DEFAULT_LIMA_VERSION, help="Lima release to install on the box.")
+@click.option(
+    "--slice-base-image-url",
+    default=DEFAULT_IMAGE_URL_X86_64,
+    show_default=True,
+    help="Guest OS image to stage on the box once (slices boot from this via file://).",
+)
+@click.option(
+    "--os-template",
+    default=DEFAULT_REINSTALL_OS_TEMPLATE,
+    show_default=True,
+    help="OVH OS template to reinstall onto the box.",
+)
+@click.option("--ssh-ready-timeout", type=float, default=900.0, show_default=True, help="Seconds to wait for SSH.")
+@click.option("--database-url", default=None)
+def setup(
+    server_id: str,
+    ssh_user: str,
+    lima_service_user: str,
+    lima_version: str,
+    slice_base_image_url: str,
+    os_template: str,
+    ssh_ready_timeout: float,
+    database_url: str | None,
+) -> None:
+    """Provision a delivered box to 'ready': reinstall our OS (destructive), prep qemu/lima/tooling, stage image.
+
+    Resumable via status: reinstall runs only from 'delivered'; re-running from 'installing' resumes at prep.
+    """
+    conn = psycopg2.connect(resolve_pool_database_url(database_url))
+    try:
+        server = fetch_server_by_id(conn, BareMetalServerDbId(server_id))
+        if server is None:
+            raise BareMetalProvisioningError(f"no bare_metal_servers row with id {server_id}")
+        if str(server.status) == SERVER_STATUS_READY:
+            write_human_line(f"Server {server_id} is already ready ({server.ovh_service_name}).")
+            return
+        if str(server.status) not in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING):
+            raise BareMetalProvisioningError(
+                f"server {server_id} is {server.status}; run `await-delivery` until it is 'delivered' first"
+            )
+        if not server.ovh_service_name or not server.public_address:
+            raise BareMetalProvisioningError(f"server {server_id} has no serviceName/address; re-run await-delivery")
+
+        client = build_ovh_client(_require_ovh_config())
+        with _pool_private_key_path() as private_key_path:
+            pool_public_key = _derive_public_key(private_key_path)
+            # Reinstall only from 'delivered'; if we're already 'installing' we assume the reinstall completed
+            # (or will be re-driven by a fresh run from delivered) and resume at SSH-wait + prep.
+            if str(server.status) == SERVER_STATUS_DELIVERED:
+                task_id = start_os_reinstall(
+                    client,
+                    service_name=server.ovh_service_name,
+                    ssh_public_key=pool_public_key,
+                    os_template=os_template,
+                )
+                update_server(conn, server.id, status=SERVER_STATUS_INSTALLING)
+                wait_for_os_reinstall(client, service_name=server.ovh_service_name, task_id=task_id)
+
+            _wait_for_ssh_ready(server.public_address, ssh_user, private_key_path, ssh_ready_timeout)
+            script = build_box_prep_script(
+                pool_public_key=pool_public_key,
+                lima_service_user=lima_service_user,
+                lima_version=lima_version,
+                slice_base_image_url=slice_base_image_url,
+            )
+            logger.info("Prepping delivered box {} ({})", server_id, server.public_address)
+            _run_root_script_over_ssh(server.public_address, ssh_user, private_key_path, script)
+
+        update_server(conn, server.id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
+        write_human_line(
+            f"Server {server_id} is READY: {server.ovh_service_name} ({server.public_address}), "
+            f"{server.slot_count} slots. Bake a slice with `admin pool create --backend slice`."
+        )
+    finally:
+        conn.close()

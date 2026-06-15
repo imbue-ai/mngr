@@ -7,3 +7,13 @@ Added `mngr imbue_cloud admin server pricing`: an operator-only, read-only comma
 - A config is only excluded when NO available storage can host a slice at the chosen size; the base columns use the cheapest storage that IS sliceable, so RAM-dense servers that need a larger disk to fit a slice still appear (on that larger disk) instead of being dropped.
 
 - The command only reads the OVH catalog and availability APIs; it never places an order. It needs `OVH_APPLICATION_KEY` / `OVH_APPLICATION_SECRET` / `OVH_CONSUMER_KEY` in the environment (from the activated env's ovh secret).
+
+Added the bare-metal purchase + provisioning lifecycle commands under `mngr imbue_cloud admin server`:
+
+- `order` — places a real OVH eco order for a chosen `--plan-code` / `--region` (vin/hil) / `--memory-gb` / `--storage`, driving the eco cart (mandatory bandwidth/memory/storage/vrack options, `dedicated_os=none_64.en`). It assigns the cart and shows OVH's real price preview for confirmation (`--yes` to skip), places the order, and records a `bare_metal_servers` row at status `ordered` with specs derived from the catalog. THIS CHARGES the account.
+
+- `await-delivery` — polls the OVH order until the server is delivered (serviceName + public IP assigned), then advances the row to `delivered`. Resumable (no-op if already delivered); delivery can take ~1h.
+
+- `setup` — provisions a delivered box to `ready`: reinstalls our OS via `/dedicated/server/{s}/reinstall` (Debian, RAID1, pool SSH key; destructive), waits for the install, waits for SSH, then runs the existing box prep (qemu/lima/tooling/service user/stage image). Resumable via status.
+
+Together with `pricing`, this codifies the full RAM-pricing -> order -> deliver -> provision -> slice flow (previously the box was ordered and OS-installed by hand).
