@@ -332,25 +332,27 @@ class AzureProvider(VpsDockerProvider):
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of *running* Azure VMs tagged with this provider's name.
+        """Return public IPs of Azure VMs tagged with this provider's name.
 
         Credentials are guaranteed resolvable here: ``build_provider_instance``
         raises ``ProviderUnavailableError`` when ``config.get_subscription_id()``
         fails, so any AzureProvider that reaches this point has a subscription.
 
-        Deallocated/stopped VMs are skipped: Azure allocates the public IP
-        ``Static``, so a deallocated VM keeps its IP (unlike a stopped GCE/EC2
-        instance, which loses its ephemeral IP). Feeding that IP to the SSH-based
-        discovery sweep would make every ``mngr list`` block on an SSH timeout per
-        paused host. Those hosts are surfaced from tags instead (see
-        ``discover_hosts_and_agents``), so dropping them here is purely an
-        optimization with no loss of visibility.
+        Note: Azure allocates the public IP ``Static``, so a *deallocated* VM keeps
+        its IP (unlike a stopped GCE/EC2 instance, which loses its ephemeral IP and
+        is thus naturally excluded by the ``if main_ip`` check below). We
+        deliberately do NOT special-case deallocated VMs out here: the shared
+        discovery probe applies a bounded SSH connect timeout (pyinfra's
+        ``CONNECT_TIMEOUT``, 10s), so an unreachable VM fails fast and is surfaced
+        offline -- the same path a crashed-but-still-"running" host takes. The
+        deallocated host is then reconstructed from tags in
+        ``discover_hosts_and_agents``. This keeps discovery uniform (no
+        power-state-specific branch) at the cost of one bounded timeout when a
+        paused VM is present.
         """
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
         for instance in instances:
-            if instance.get("state") in _HOST_DOWN_STATES:
-                continue
             main_ip = instance.get("main_ip", "")
             if main_ip:
                 vps_ips.append(main_ip)
