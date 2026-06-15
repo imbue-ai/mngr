@@ -19,15 +19,11 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 # the launched VM); the ADC used by mngr itself is never scoped here.
 DEFAULT_SERVICE_ACCOUNT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/cloud-platform",)
 
-# Global Ubuntu 22.04 LTS image family. GCE image families are global (unlike
-# AWS AMIs, which are per-region), so a single string suffices -- no per-region
-# map. Ubuntu (not Debian) is the default deliberately: the stock GCE
-# ``debian-cloud`` images do NOT ship/run cloud-init, so the ``user-data``
-# metadata carrying the mngr bootstrap is silently ignored on them. The GCE
-# Ubuntu LTS images run cloud-init with the GCE datasource, so the shared
-# ``mngr_vps_docker`` cloud-init flow works unchanged. The family always
-# resolves to the latest published image.
-DEFAULT_GCE_IMAGE: str = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+# Global Debian 12 image family (GCE families are global, unlike per-region AWS
+# AMIs), matching the rest of the mngr fleet. Stock GCE Debian images ship no
+# cloud-init, so GCP bootstraps via the GCE ``startup-script`` metadata (run by
+# the google-guest-agent on every image) -- see ``generate_gce_startup_script``.
+DEFAULT_GCE_IMAGE: str = "projects/debian-cloud/global/images/family/debian-12"
 
 # Final fallback zone when neither the provider config nor the active gcloud
 # config supplies one. GCE VMs are zonal, so a concrete zone is always required;
@@ -131,11 +127,8 @@ class GcpProviderConfig(VpsDockerProviderConfig):
     default_source_image: str = Field(
         default=DEFAULT_GCE_IMAGE,
         description=(
-            "Default GCE source image for the VM boot disk (distinct from the base "
-            "``default_image``, which is the Docker *container* image run inside the VM). GCE image "
-            "families are global, so a single string (no per-region map) suffices. Defaults to the "
-            "latest Ubuntu 22.04 LTS family; Ubuntu (not Debian) because the stock GCE Debian images "
-            "do not run cloud-init."
+            "GCE VM boot-disk image (not the base ``default_image``, which is the Docker container "
+            "image). Global family string (no per-region map). Defaults to Debian 12."
         ),
     )
     boot_disk_size_gb: int = Field(

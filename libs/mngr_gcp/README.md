@@ -75,8 +75,8 @@ project_id = "my-gcp-project"      # optional; falls back to the gcloud/ADC defa
 default_region = "us-west1"
 default_zone = "us-west1-a"        # GCE VMs are zonal
 default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
-# default_source_image (the GCE VM image) defaults to the global Ubuntu 22.04 LTS family; override only if needed:
-# default_source_image = "projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts"
+# default_source_image (the GCE VM image) defaults to the global Debian 12 family; override only if needed:
+# default_source_image = "projects/debian-cloud/global/images/family/debian-12"
 
 # Every CIDR allowed inbound on tcp/22 and the container SSH port of the
 # firewall rule `mngr gcp prepare` creates. Defaults to the wide-open '0.0.0.0/0' (fail-open,
@@ -141,7 +141,7 @@ These fields extend the base `VpsDockerProviderConfig` (see `mngr_vps_docker`):
 | `default_region` | derived from zone | GCE region. Used only to validate the resolved zone. When unset it is derived from the zone; set it to assert a region and catch a mismatched `default_zone` typo. |
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active `gcloud config get compute/zone` if the gcloud CLI is available, otherwise `us-west1-a`. |
 | `default_machine_type` | `e2-small` | GCE machine type. |
-| `default_source_image` | `projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts` | GCE VM boot-disk image (distinct from the base `default_image`, which is the Docker *container* image run inside the VM). GCE image families are global, so no per-region map is needed. Ubuntu (not Debian): the stock GCE Debian images do not run cloud-init, so the `user-data` bootstrap would be silently ignored. |
+| `default_source_image` | `projects/debian-cloud/global/images/family/debian-12` | GCE VM boot-disk image (distinct from the base `default_image`, which is the Docker *container* image run inside the VM). GCE image families are global, so no per-region map is needed. Debian 12 matches the rest of the mngr fleet; GCP bootstraps via the GCE `startup-script` (run by the google-guest-agent on every image), so it does not require the image to ship cloud-init. |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
 | `boot_disk_type` | `pd-balanced` | Boot disk type (`pd-balanced`, `pd-ssd`, `pd-standard`). |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |
@@ -185,7 +185,7 @@ If `service_account_email` is set, the caller also needs `iam.serviceAccounts.ac
 - Uses the `google-cloud-compute` SDK (`compute_v1`) for the Compute Engine API.
 - Instances are labeled `mngr-provider=<name>`, `mngr-host-id=<id>`, and `mngr-created-at=<iso8601>` for discovery and cleanup-tracking. GCE label values are restricted to `[a-z0-9_-]`, so the provider lowercases values before applying them and applies the same transform to the discovery filter (two provider instances whose names differ only by case would collide — name them distinctly).
 - SSH key auth: there is no per-key GCE resource (unlike an EC2 KeyPair). The client holds the per-host public key in memory and writes it into the instance's `ssh-keys` metadata as `ubuntu:<pub>` at create time. The key lives only in per-instance metadata and dies with the VM. OS Login and project-wide SSH keys are disabled per instance (`enable-oslogin=FALSE`, `block-project-ssh-keys=TRUE`).
-- cloud-init is delivered via the `user-data` metadata key. The GCE Ubuntu LTS images run cloud-init with the GCE datasource; the stock GCE Debian images do **not** run cloud-init (the guest agent ignores `user-data`), which is why Ubuntu is the default image. The shared cloud-init writes the provider key straight into root's authorized_keys (and also copies the `ubuntu` user's), so mngr's root SSH works regardless of guest-agent timing.
+- The first-boot bootstrap is delivered via the GCE `startup-script` metadata key, run by the google-guest-agent on every image (including the default Debian 12, which ships no cloud-init -- so the `user-data` flow the other backends use would be ignored here). It renders the same shared host-setup steps and writes the provider key into root's authorized_keys. It installs the SSH host key and restarts sshd as its first action; since that happens after sshd booted with a random key, the provisioner polls the live host key until it matches before strict-checking (`_wait_for_expected_host_key`).
 - Discovery: `instances.list` filtered by the `mngr-provider` label, then SSH to each VPS to read host records from the state volume.
 - Firewall: GCE firewalls are network-scoped and tag-targeted (not per-instance like an EC2 security group). The rule (`mngr-gcp-ssh` by default) is created once by `mngr gcp prepare` (privileged) and reused across hosts; the hot `create_host` path only resolves it read-only and errors with a `prepare` pointer if it's missing. The rule is not deleted on `destroy_host`; run `mngr gcp cleanup` to delete it when retiring a provider (it refuses while any mngr-managed instance still exists in the project).
 - Auto-delete: when `auto_shutdown_seconds` is set, `scheduling.max_run_duration` + `instance_termination_action=DELETE` makes the VM self-delete from the inside even if the orchestrating process is killed (the GCE-native analog of AWS `InstanceInitiatedShutdownBehavior=terminate`).

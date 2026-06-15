@@ -133,7 +133,7 @@ def test_create_instance_builds_expected_resource() -> None:
         label="mngr-my-agent",
         region="us-west1-a",
         plan="e2-medium",
-        user_data="#cloud-config\n",
+        user_data="#!/bin/bash\n",
         ssh_key_ids=["key-1"],
         tags={"mngr-provider": "gcp", "mngr-host-id": "host-abcdef0123456789abcdef0123456789"},
     )
@@ -144,9 +144,11 @@ def test_create_instance_builds_expected_resource() -> None:
     assert built.name.startswith("mngr-my-agent-")
     assert "e2-medium" in built.machine_type
     assert built.tags.items == ["mngr-ssh"]
-    # Metadata carries user-data, oslogin/block-project-keys, and ssh-keys.
+    # Bootstrap is the GCE startup-script (not cloud-init user-data); metadata also
+    # carries oslogin/block-project-keys and ssh-keys.
     metadata = {item.key: item.value for item in built.metadata.items}
-    assert metadata["user-data"] == "#cloud-config\n"
+    assert metadata["startup-script"] == "#!/bin/bash\n"
+    assert "user-data" not in metadata
     assert metadata["enable-oslogin"] == "FALSE"
     assert metadata["block-project-ssh-keys"] == "TRUE"
     assert metadata["ssh-keys"] == "ubuntu:ssh-ed25519 AAAA test"

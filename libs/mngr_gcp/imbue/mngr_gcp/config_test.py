@@ -72,8 +72,9 @@ def test_get_gcloud_compute_zone_honors_contract(temp_mngr_ctx: MngrContext) -> 
     assert result is None or (isinstance(result, str) and result != "")
 
 
-def test_default_source_image_is_global_ubuntu_family() -> None:
-    # GCE image families are global (no per-region map), unlike AWS AMIs. Ubuntu
-    # (not Debian) because the stock GCE Debian images do not run cloud-init.
+def test_default_source_image_is_global_debian_family() -> None:
+    # GCE image families are global (no per-region map), unlike AWS AMIs. Debian 12
+    # matches the rest of the fleet; GCP bootstraps via the GCE startup-script, so
+    # it does not need the image to ship cloud-init.
     config = GcpProviderConfig(project_id="p")
-    assert "global/images/family/ubuntu-2204-lts" in config.default_source_image
+    assert "global/images/family/debian-12" in config.default_source_image

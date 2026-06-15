@@ -322,6 +322,9 @@ class _KanpanState(MutableModel):
     # Active batch execution state
     executing: bool = False
     execute_status: str = ""
+    # Failures from the most recent batch execution, rendered at the bottom of
+    # the board (like fetch errors) until the next execution clears them.
+    execute_errors: tuple[str, ...] = ()
     # Maps list walker index -> AgentBoardEntry for selectable agent entries
     index_to_entry: dict[int, AgentBoardEntry] = {}
     list_walker: Any = None  # SimpleFocusListWalker, set during display build
@@ -556,6 +559,15 @@ class _BatchWorkItem(FrozenModel):
     batch_names: tuple[AgentName, ...] = ()
 
 
+class _BatchItemResult(FrozenModel):
+    """Outcome of executing one marked operation (or one agent within a batch)."""
+
+    label: str
+    is_success: bool
+    # For failures, the captured stderr or exception text shown to the user.
+    detail: str = ""
+
+
 @pure
 def _batch_item_label(item: _BatchWorkItem) -> str:
     """Format a human-readable label for a batch work item."""
@@ -583,6 +595,8 @@ def _start_batch_execution(state: _KanpanState) -> None:
         state.executor = ThreadPoolExecutor(max_workers=1)
 
     state.executing = True
+    # Clear failures from any previous run so a fresh attempt starts clean.
+    state.execute_errors = ()
 
     entries_by_name: dict[AgentName, AgentBoardEntry] = {}
     if state.snapshot is not None:
@@ -617,7 +631,8 @@ def _start_batch_execution(state: _KanpanState) -> None:
             )
     work.extend(individual_work)
 
-    _execute_next_in_batch(state, work, [], 0)
+    initial_results: list[_BatchItemResult] = []
+    _execute_next_in_batch(state, work, initial_results, 0)
 
 
 def _submit_batch_item(
@@ -650,7 +665,7 @@ def _submit_batch_item(
 def _execute_next_in_batch(
     state: _KanpanState,
     work: list[_BatchWorkItem],
-    results: list[str],
+    results: list[_BatchItemResult],
     index: int,
 ) -> None:
     """Execute the next item in the batch work queue."""
@@ -664,7 +679,9 @@ def _execute_next_in_batch(
     assert state.executor is not None
     future = _submit_batch_item(state.executor, item)
     if future is None:
-        results.append(f"{_batch_item_label(item)}: skipped (not executable)")
+        results.append(
+            _BatchItemResult(label=_batch_item_label(item), is_success=False, detail="skipped (not executable)")
+        )
         _execute_next_in_batch(state, work, results, index + 1)
         return
 
@@ -686,7 +703,7 @@ def _on_batch_item_poll(
         _KanpanState,
         Future[subprocess.CompletedProcess[str]],
         list[_BatchWorkItem],
-        list[str],
+        list[_BatchItemResult],
         int,
         _BatchWorkItem,
     ],
@@ -701,16 +718,18 @@ def _on_batch_item_poll(
             if result.returncode == 0:
                 if item.batch_names:
                     for n in item.batch_names:
-                        results.append(f"{item.cmd.name} {n}: ok")
+                        results.append(_BatchItemResult(label=f"{item.cmd.name} {n}", is_success=True))
                         state.marks.pop(n, None)
                 else:
-                    results.append(f"{item.cmd.name} {item.name}: ok")
+                    results.append(_BatchItemResult(label=f"{item.cmd.name} {item.name}", is_success=True))
                     state.marks.pop(item.name, None)
             else:
-                stderr = result.stderr.strip()
-                results.append(f"{label}: failed ({stderr})")
+                detail = result.stderr.strip() or f"exited with code {result.returncode}"
+                results.append(_BatchItemResult(label=label, is_success=False, detail=detail))
+        except subprocess.TimeoutExpired as e:
+            results.append(_BatchItemResult(label=label, is_success=False, detail=f"timed out after {e.timeout:g}s"))
         except Exception as e:
-            results.append(f"{label}: failed ({e})")
+            results.append(_BatchItemResult(label=label, is_success=False, detail=str(e)))
 
         _execute_next_in_batch(state, work, results, index + 1)
         return
@@ -718,19 +737,24 @@ def _on_batch_item_poll(
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_batch_item_poll, data)
 
 
-def _finish_batch_execution(state: _KanpanState, results: list[str]) -> None:
+def _finish_batch_execution(state: _KanpanState, results: list[_BatchItemResult]) -> None:
     """Complete batch execution and show summary."""
     state.executing = False
     state.execute_status = ""
     state.action_label = None
 
-    ok_count = sum(1 for r in results if r.endswith(": ok"))
-    fail_count = len(results) - ok_count
+    ok_count = sum(1 for r in results if r.is_success)
+    failures = [r for r in results if not r.is_success]
 
-    if fail_count == 0:
+    # Persist failure detail so it renders at the bottom of the board (the same
+    # place fetch/GitHub errors appear) until the next execution clears it. The
+    # transient footer message alone is too easy to miss.
+    state.execute_errors = tuple(f"{r.label}: {r.detail}" if r.detail else r.label for r in failures)
+
+    if not failures:
         _show_transient_message(state, f"  Executed {ok_count} operation(s) successfully")
     else:
-        _show_transient_message(state, f"  Executed: {ok_count} ok, {fail_count} failed")
+        _show_transient_message(state, f"  Executed: {ok_count} ok, {len(failures)} failed (see errors below)")
 
     _refresh_display(state)
 
@@ -1473,6 +1497,7 @@ def _build_board_widgets(
     section_order: tuple[BoardSection, ...] = BOARD_SECTION_ORDER,
     staleness_threshold_seconds: float = DEFAULT_STALENESS_THRESHOLD_SECONDS,
     now: datetime | None = None,
+    execute_errors: tuple[str, ...] = (),
 ) -> tuple[SimpleFocusListWalker[AttrMap | Text | Divider | Columns], dict[int, AgentBoardEntry]]:
     """Build the urwid widget list from a BoardSnapshot, grouped by section.
 
@@ -1533,11 +1558,13 @@ def _build_board_widgets(
     if not has_content:
         walker.append(Text("No agents found."))
 
-    # Show errors if any
-    if snapshot.errors:
+    # Show errors at the bottom: fetch/GitHub errors from the snapshot plus any
+    # failures from the most recent batch execution, rendered identically.
+    all_errors = (*snapshot.errors, *execute_errors)
+    if all_errors:
         walker.append(Divider())
         walker.append(Text(("error_text", "Errors:")))
-        for error in snapshot.errors:
+        for error in all_errors:
             walker.append(Text(("error_text", f"  {error}")))
 
     return walker, index_to_entry
@@ -1564,6 +1591,7 @@ def _refresh_display(state: _KanpanState) -> None:
         state.col_attr_names,
         state.section_order,
         staleness_threshold_seconds=state.staleness_threshold_seconds,
+        execute_errors=state.execute_errors,
     )
     state.list_walker = walker
     state.frame.body = ListBox(walker)

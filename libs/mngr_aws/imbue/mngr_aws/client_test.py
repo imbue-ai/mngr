@@ -432,6 +432,13 @@ def test_stop_instance_times_out_if_not_stopped(stubbed_client: tuple[AwsVpsClie
 def test_start_instance_returns_new_public_ip(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     """start_instance issues StartInstances and returns the (fresh) public IP once running."""
     client, stubber = stubbed_client
+    # start_instance first checks the state (to wait out a `stopping` instance);
+    # here it is already stopped, so it proceeds straight to StartInstances.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
     stubber.add_response(
         "start_instances",
         {"StartingInstances": [{"InstanceId": "i-abc"}]},
@@ -467,12 +474,60 @@ def test_start_instance_times_out_if_not_active(stubbed_client: tuple[AwsVpsClie
     """A zero timeout means the activeness wait never succeeds and raises."""
     client, stubber = stubbed_client
     stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
         "start_instances",
         {"StartingInstances": [{"InstanceId": "i-abc"}]},
         expected_params={"InstanceIds": ["i-abc"]},
     )
     with pytest.raises(VpsProvisioningError, match="did not become active"):
         client.start_instance(VpsInstanceId("i-abc"), timeout_seconds=0.0)
+
+
+def test_start_instance_waits_for_stopped_when_still_stopping(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
+    """A still-``stopping`` instance is waited out to ``stopped`` before StartInstances is issued.
+
+    AWS rejects start-instances on a stopping instance (IncorrectInstanceState), so
+    resuming a host caught mid-stop (e.g. just powered off by the idle watcher) must
+    first wait for the terminal stopped state.
+    """
+    client, stubber = stubbed_client
+    # Initial state check: still stopping.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopping"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # _wait_for_instance_state polls until stopped.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "stopped"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "start_instances",
+        {"StartingInstances": [{"InstanceId": "i-abc"}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    # wait_for_instance_active polls get_instance_status (running) then get_instance_ip.
+    stubber.add_response(
+        "describe_instances",
+        {"Reservations": [{"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}}]}]},
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    stubber.add_response(
+        "describe_instances",
+        {
+            "Reservations": [
+                {"Instances": [{"InstanceId": "i-abc", "State": {"Name": "running"}, "PublicIpAddress": "5.6.7.8"}]}
+            ]
+        },
+        expected_params={"InstanceIds": ["i-abc"]},
+    )
+    assert client.start_instance(VpsInstanceId("i-abc")) == "5.6.7.8"
 
 
 def test_add_tags(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:

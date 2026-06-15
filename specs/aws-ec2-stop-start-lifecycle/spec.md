@@ -101,9 +101,10 @@ IMDS — no separate endpoint needed.
   (`ec2 stop-instances`, wait for `stopped`) and `start_instance(instance_id) -> new_ip`
   (`ec2 start-instances`, wait for `running`, return the new public IP). These are AWS-only
   methods; `VpsClientInterface` is **not** modified (AwsProvider calls `self.aws_client.…`).
-- `AwsProvider.stop_host` (override): call `super().stop_host(host, create_snapshot=False)` to
-  stop the container and update the record (no docker-commit — the filesystem persists on the
-  stopped volume), set `stop_reason` (`PAUSED` vs `STOPPED`), then `self.aws_client.stop_instance(...)`.
+- `AwsProvider.stop_host` (override): call `super().stop_host(host, create_snapshot=False,
+  stop_reason=STOPPED)` to stop the container and update the record in a single write (no
+  docker-commit — the filesystem persists on the stopped volume; the `stop_reason` rides along in
+  that write), then `self.aws_client.stop_instance(...)`.
 - `AwsProvider.start_host` (override): `self.aws_client.start_instance(...)` first (instance must
   be running before we can SSH), persist the new `vps_ip` into the host record + refresh
   known_hosts, then call `super().start_host(...)` to start the container against the refreshed IP.
@@ -201,9 +202,11 @@ Two sub-parts, with an open decision on the second:
 2. **Agent-level resolution while stopped (the open fork).** `mngr start` is agent-addressed
    (`mngr start --host` is `NotImplementedError`), so resolving `mngr start <agent>` needs the
    stopped host's *agents* to be discoverable. But agent records live on the unreadable EBS volume.
-   Options: (a) persist a minimal agent record (id/name/type/command) into EC2 tags and serve it via
-   `list_persisted_agent_data_for_host` (no new infra; capped by EC2's 50-tag / 256-char limits, so
-   fine for few-agent hosts); (b) persist agent records to S3 (full parity, any count; the
+   Options: (a) persist a minimal agent record (id/name/type/labels, as per-field
+   `mngr-agent-<id>-<field>` tags) into EC2 tags and serve it via `list_persisted_agent_data_for_host`
+   (no new infra; capped by EC2's 50-tag / 256-char limits, so fine for few-agent hosts -- a host with
+   too many agents to mirror raises `NotImplementedError`, prompting an issue); (b) persist agent
+   records to S3 (full parity, any count; the
    previously-deferred piece); or (c) implement `mngr start --host <name>` so resume targets the
    host and skips agent resolution. Modal's analog is (a/b): it serves stopped-host agents via
    `list_persisted_agent_data_for_host` backed by its persistent volume.
@@ -233,7 +236,7 @@ Two sub-parts, with an open decision on the second:
   stop/start-instances. `vps_ip` in `VpsDockerHostRecord` becomes mutable across a stop/start and
   is refreshed on resume.
 - No new snapshot records (EBS snapshots dropped). `stop_reason` already exists on
-  `CertifiedHostData` and drives the offline `PAUSED`/`STOPPED` state derivation
+  `CertifiedHostData` and drives the offline `STOPPED` state derivation
   (`supports_shutdown_hosts=True` is already set for vps_docker).
 
 ## Out of scope / future
