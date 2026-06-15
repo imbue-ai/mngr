@@ -59,8 +59,9 @@ default vnet. `mngr azure prepare` does the one-time privileged setup: it
 registers the `Microsoft.Compute` / `Microsoft.Network` / `Microsoft.Storage`
 resource providers and creates the resource group, vnet, subnet, and NSG (tagged
 `managed-by=mngr`). After it succeeds, `mngr create --provider azure` needs only
-VM/NIC/IP-create permissions — it just resolves the existing subnet, never writing
-network resources, so you can run it with limited credentials.
+VM/NIC/IP-create permissions, not the network-management permissions that build the
+vnet/subnet/NSG — it just resolves the existing subnet, so you can run it with
+limited credentials.
 
 ```bash
 mngr azure prepare --allowed-ssh-cidr 203.0.113.4/32
