@@ -22,10 +22,12 @@ import pytest
 from botocore.stub import ANY
 from botocore.stub import Stubber
 from click.testing import CliRunner
+from moto import mock_aws
 
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
@@ -33,12 +35,14 @@ from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.cli import _output_cleanup_result
 from imbue.mngr_aws.cli import _output_prepare_result
 from imbue.mngr_aws.cli import _perform_cleanup
+from imbue.mngr_aws.cli import _perform_state_bucket_cleanup
 from imbue.mngr_aws.cli import _resolve_provider_config
 from imbue.mngr_aws.cli import aws_cli_group
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 
 _ACTIVE_STATES = ["pending", "running", "stopping", "stopped"]
@@ -206,49 +210,104 @@ def test_cleanup_logic_refuses_when_instances_exist() -> None:
         ec2_stubber.deactivate()
 
 
+def test_perform_state_bucket_cleanup_refuses_while_host_state_remains() -> None:
+    """The bucket cleanup refuses (deletes nothing) while any host state remains."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-refuse")
+        bucket.ensure_bucket()
+        bucket.write_host_record(HostId.generate(), "{}")
+        with pytest.raises(click.ClickException, match="still holds host state"):
+            _perform_state_bucket_cleanup(bucket)
+        # The bucket must still exist after a refusal.
+        assert bucket.bucket_exists() is True
+
+
+def test_perform_state_bucket_cleanup_deletes_empty_bucket() -> None:
+    """With no host state, the bucket cleanup deletes the bucket and returns its name."""
+    with mock_aws():
+        session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
+        bucket = S3StateBucket(session=session, region="us-east-1", bucket_name="mngr-state-cleanup-empty")
+        bucket.ensure_bucket()
+        assert _perform_state_bucket_cleanup(bucket) == "mngr-state-cleanup-empty"
+        assert bucket.bucket_exists() is False
+
+
+def test_perform_state_bucket_cleanup_none_is_noop() -> None:
+    """A None bucket (none configured) is a harmless no-op."""
+    assert _perform_state_bucket_cleanup(None) is None
+
+
 # =============================================================================
 # format-aware output (prepare / cleanup respect --format)
 # =============================================================================
 
 
 def test_output_prepare_result_human_emits_single_line(capsys: pytest.CaptureFixture[str]) -> None:
-    """HUMAN mode emits one result sentence to stdout (no bare echo line)."""
+    """HUMAN mode emits one SG sentence (plus a bucket line when a bucket was set up)."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
-    _output_prepare_result(result, "us-east-1", OutputFormat.HUMAN)
+    # Bucket skipped (e.g. missing S3 perms): only the SG line is emitted.
+    _output_prepare_result(result, "us-east-1", None, False, OutputFormat.HUMAN)
     captured = capsys.readouterr()
     assert captured.out == "Prepared AWS security group sg-new123 in region us-east-1\n"
 
 
+def test_output_prepare_result_human_includes_bucket_line(capsys: pytest.CaptureFixture[str]) -> None:
+    """HUMAN mode appends a bucket line when a state bucket was created."""
+    result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
+    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", True, OutputFormat.HUMAN)
+    captured = capsys.readouterr()
+    assert "Prepared AWS security group sg-new123 in region us-east-1\n" in captured.out
+    assert "Created S3 state bucket mngr-state-123-us-east-1 in region us-east-1\n" in captured.out
+
+
 def test_output_prepare_result_json_carries_created_flag(capsys: pytest.CaptureFixture[str]) -> None:
-    """JSON mode emits a structured object including the created signal."""
+    """JSON mode emits a structured object including the created signal and bucket fields."""
     result = SecurityGroupPrepareResult(security_group_id="sg-reused", was_created=False)
-    _output_prepare_result(result, "us-east-1", OutputFormat.JSON)
+    _output_prepare_result(result, "us-east-1", "mngr-state-123-us-east-1", False, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"security_group_id": "sg-reused", "region": "us-east-1", "created": False}
+    assert payload == {
+        "security_group_id": "sg-reused",
+        "region": "us-east-1",
+        "created": False,
+        "state_bucket_name": "mngr-state-123-us-east-1",
+        "state_bucket_created": False,
+    }
 
 
 def test_output_prepare_result_jsonl_emits_prepared_event(capsys: pytest.CaptureFixture[str]) -> None:
     """JSONL mode emits a ``prepared`` event with the same fields."""
     result = SecurityGroupPrepareResult(security_group_id="sg-new123", was_created=True)
-    _output_prepare_result(result, "us-east-1", OutputFormat.JSONL)
+    _output_prepare_result(result, "us-east-1", None, False, OutputFormat.JSONL)
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["event"] == "prepared"
     assert payload["created"] is True
     assert payload["security_group_id"] == "sg-new123"
+    assert payload["state_bucket_name"] is None
 
 
 def test_output_cleanup_result_json_reports_deleted(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=True when an SG was removed."""
-    _output_cleanup_result("sg-gone", "us-east-1", OutputFormat.JSON)
+    _output_cleanup_result("sg-gone", "us-east-1", "mngr-state-123-us-east-1", OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"security_group_id": "sg-gone", "region": "us-east-1", "deleted": True}
+    assert payload == {
+        "security_group_id": "sg-gone",
+        "region": "us-east-1",
+        "deleted": True,
+        "state_bucket_deleted": "mngr-state-123-us-east-1",
+    }
 
 
 def test_output_cleanup_result_json_reports_noop(capsys: pytest.CaptureFixture[str]) -> None:
     """JSON cleanup output reports deleted=False on the idempotent no-op path."""
-    _output_cleanup_result(None, "us-east-1", OutputFormat.JSON)
+    _output_cleanup_result(None, "us-east-1", None, OutputFormat.JSON)
     payload = json.loads(capsys.readouterr().out.strip())
-    assert payload == {"security_group_id": None, "region": "us-east-1", "deleted": False}
+    assert payload == {
+        "security_group_id": None,
+        "region": "us-east-1",
+        "deleted": False,
+        "state_bucket_deleted": None,
+    }
 
 
 def test_cleanup_command_help_is_reachable() -> None:

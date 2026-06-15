@@ -627,6 +627,7 @@ class VpsDockerProvider(BaseProviderInstance):
                 if existing is not None:
                     updated = existing.model_copy(update={"certified_host_data": certified_data})
                     host_store.write_host_record(updated)
+                    self._persist_host_record_externally(updated)
         except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
@@ -1236,6 +1237,7 @@ class VpsDockerProvider(BaseProviderInstance):
         )
         host_store = open_host_store(outer, volume_name)
         host_store.write_host_record(host_record)
+        self._persist_host_record_externally(host_record)
 
         # Cache so that persist_agent_data (called moments later) can find
         # the record without re-querying the Vultr API, which would return
@@ -1260,6 +1262,24 @@ class VpsDockerProvider(BaseProviderInstance):
 
         Default no-op. Must not raise; any errors should be caught and
         logged by the override.
+        """
+
+    def _persist_host_record_externally(self, record: VpsDockerHostRecord) -> None:
+        """Mirror the authoritative on-volume host record to an external store.
+
+        Lets a provider copy the record to a compute-decoupled object store
+        (e.g. an S3 bucket) so a stopped/offline instance's full record stays
+        readable without SSH. Called right after every on-volume
+        ``write_host_record``. Default no-op, so providers without an external
+        store are unaffected.
+        """
+
+    def _delete_host_record_externally(self, host_id: HostId) -> None:
+        """Remove a host's record from the external store, if any.
+
+        The inverse of ``_persist_host_record_externally``: called when a host
+        is destroyed/deleted so its mirrored record does not linger in the
+        external store. Default no-op.
         """
 
     def _wait_for_container_sshd(self, vps_ip: str) -> None:
@@ -1361,6 +1381,7 @@ class VpsDockerProvider(BaseProviderInstance):
             updated_data = host_record.certified_host_data.model_copy(update=record_updates)
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
             host_store.write_host_record(updated_record)
+            self._persist_host_record_externally(updated_record)
 
         self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
@@ -1520,11 +1541,13 @@ class VpsDockerProvider(BaseProviderInstance):
             except Exception as e:
                 logger.trace("Failed to clean up container known_hosts: {}", e)
 
+        self._delete_host_record_externally(host_id)
         logger.info("Host {} destroyed (VPS {})", host_id, vps_config.vps_instance_id)
 
     def delete_host(self, host: HostInterface) -> None:
         """Delete all local records for a destroyed host (does not destroy VPS)."""
         self._evict_cached_host(host.id)
+        self._delete_host_record_externally(host.id)
 
     def on_connection_error(self, host_id: HostId) -> None:
         self._evict_cached_host(host_id)
@@ -2196,6 +2219,7 @@ class VpsDockerProvider(BaseProviderInstance):
             # ``host_record.config`` is guaranteed non-None by the guard at the top of this method.
             host_store = open_host_store(outer, host_record.config.volume_name)
             host_store.write_host_record(updated_record)
+            self._persist_host_record_externally(updated_record)
 
         logger.info("Created snapshot {} for host {}", snapshot_name, host_id)
         return SnapshotId(image_id)
@@ -2268,6 +2292,7 @@ class VpsDockerProvider(BaseProviderInstance):
             with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
                 host_store = open_host_store(outer, host_record.config.volume_name)
                 host_store.write_host_record(updated_record)
+                self._persist_host_record_externally(updated_record)
 
         return self.get_host(host_id)
 

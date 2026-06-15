@@ -37,6 +37,8 @@ from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.client import SecurityGroupPrepareResult
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
+from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateBucketError
 
 
 class _AwsOperatorCliOptions(CommonCliOptions):
@@ -141,6 +143,53 @@ def _build_operator_client(
     )
 
 
+def _build_state_bucket(base: AwsProviderConfig, region: str | None) -> S3StateBucket | None:
+    """Build the S3 state bucket for the operator commands, or None when unresolvable.
+
+    Uses the resolved provider config's bucket name (or the derived
+    ``mngr-state-<account_id>-<region>``). Returns None when the account id
+    cannot be resolved (e.g. missing ``sts:GetCallerIdentity`` permission), so
+    the operator command degrades gracefully.
+    """
+    session = base.get_session()
+    effective_region = region or base.default_region
+    bucket_name = base.resolve_state_bucket_name(session)
+    if bucket_name is None:
+        return None
+    return S3StateBucket(session=session, region=effective_region, bucket_name=bucket_name)
+
+
+def _ensure_state_bucket_best_effort(base: AwsProviderConfig, region: str | None) -> tuple[str | None, bool]:
+    """Ensure the state bucket exists, returning ``(bucket_name, was_created)``.
+
+    Best-effort for ``mngr aws prepare``: a missing-permission / API failure (or
+    an unresolvable bucket name) is logged at WARNING and surfaces as
+    ``(None, False)`` so the security-group prepare still succeeds even when the
+    operator's key cannot manage S3.
+    """
+    try:
+        bucket = _build_state_bucket(base, region)
+    except (ValueError, BotoCoreError) as e:
+        logger.warning("Could not resolve credentials for the S3 state bucket; skipping bucket setup: {}", e)
+        return None, False
+    if bucket is None:
+        logger.warning(
+            "Could not resolve a state-bucket name (AWS account id unavailable); skipping bucket setup. "
+            "Offline host state will fall back to the EC2 tag mirror."
+        )
+        return None, False
+    try:
+        was_created = bucket.ensure_bucket()
+    except S3StateBucketError as e:
+        logger.warning(
+            "Failed to create the S3 state bucket {!r} (offline host state will fall back to the EC2 tag mirror): {}",
+            bucket.bucket_name,
+            e,
+        )
+        return None, False
+    return bucket.bucket_name, was_created
+
+
 def _perform_cleanup(client: AwsVpsClient) -> str | None:
     """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
 
@@ -161,21 +210,49 @@ def _perform_cleanup(client: AwsVpsClient) -> str | None:
     return client.delete_security_group()
 
 
+def _perform_state_bucket_cleanup(bucket: S3StateBucket | None) -> str | None:
+    """Delete the state bucket, refusing while any managed-host state remains.
+
+    Returns the deleted bucket name, or ``None`` when no bucket is configured /
+    none existed. Raises ``click.ClickException`` when the bucket still holds any
+    ``hosts/`` state, mirroring the instance-exists safety: deleting it would
+    strand the offline state of still-managed hosts. Split out so the
+    refuse/delete decision is unit-testable.
+    """
+    if bucket is None:
+        return None
+    if not bucket.bucket_exists():
+        return None
+    if bucket.has_any_host_state():
+        raise click.ClickException(
+            f"Refusing to delete S3 state bucket {bucket.bucket_name!r}: it still holds host state. "
+            "Destroy the managed hosts first with `mngr destroy <agent>`, then re-run `mngr aws cleanup`."
+        )
+    bucket.delete_bucket()
+    return bucket.bucket_name
+
+
 def _output_prepare_result(
     result: SecurityGroupPrepareResult,
     region: str,
+    state_bucket_name: str | None,
+    was_bucket_created: bool,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr aws prepare`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
-    ``prepared`` event. The structured forms carry ``created`` so a caller can
-    tell a first-run create from an idempotent no-op.
+    HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` (SG) and
+    ``state_bucket_name`` / ``state_bucket_created`` (None when the bucket setup
+    was skipped, e.g. missing S3/STS permissions) so a caller can tell a
+    first-run create from an idempotent no-op.
     """
     data = {
         "security_group_id": result.security_group_id,
         "region": region,
         "created": result.was_created,
+        "state_bucket_name": state_bucket_name,
+        "state_bucket_created": was_bucket_created,
     }
     match output_format:
         case OutputFormat.JSON:
@@ -184,6 +261,13 @@ def _output_prepare_result(
             emit_event("prepared", data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
             write_human_line("Prepared AWS security group {} in region {}", result.security_group_id, region)
+            if state_bucket_name is not None:
+                write_human_line(
+                    "{} S3 state bucket {} in region {}",
+                    "Created" if was_bucket_created else "Reused existing",
+                    state_bucket_name,
+                    region,
+                )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -191,18 +275,21 @@ def _output_prepare_result(
 def _output_cleanup_result(
     deleted_sg_id: str | None,
     region: str,
+    deleted_bucket_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr aws cleanup`` in the requested format.
 
-    HUMAN: one result line to stdout. JSON: a single object. JSONL: a
+    HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
     ``cleaned_up`` event. ``deleted`` is False when the security group was
-    already absent (idempotent no-op).
+    already absent; ``state_bucket_deleted`` carries the deleted bucket name (or
+    None when no bucket existed / setup was skipped).
     """
     data = {
         "security_group_id": deleted_sg_id,
         "region": region,
         "deleted": deleted_sg_id is not None,
+        "state_bucket_deleted": deleted_bucket_name,
     }
     match output_format:
         case OutputFormat.JSON:
@@ -214,6 +301,8 @@ def _output_cleanup_result(
                 write_human_line("Nothing to clean up: no mngr-managed security group in region {}.", region)
             else:
                 write_human_line("Cleaned up AWS security group {} in region {}", deleted_sg_id, region)
+            if deleted_bucket_name is not None:
+                write_human_line("Deleted S3 state bucket {} in region {}", deleted_bucket_name, region)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -299,7 +388,11 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
         # ``AwsProviderBackend.build_provider_instance``.
         raise click.ClickException(str(e)) from e
     result = client.ensure_security_group()
-    _output_prepare_result(result, client.region, output_opts.output_format)
+    # Best-effort bucket setup: a missing S3/STS permission degrades to a
+    # warning so the SG prepare still succeeds (offline state then falls back
+    # to the EC2 tag mirror).
+    state_bucket_name, was_bucket_created = _ensure_state_bucket_best_effort(base, opts.region)
+    _output_prepare_result(result, client.region, state_bucket_name, was_bucket_created, output_opts.output_format)
 
 
 @aws_cli_group.command(name="cleanup")
@@ -366,8 +459,17 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
         # Same credential / environment errors as the prepare path.
         raise click.ClickException(str(e)) from e
 
+    # Refuse the whole cleanup (delete nothing) while host state remains in the
+    # bucket, before touching the SG -- the bucket refusal mirrors the
+    # instance-exists refusal. ``_build_state_bucket`` may raise if S3 creds are
+    # unresolvable; surface that to the operator rather than silently skipping.
+    try:
+        bucket = _build_state_bucket(base, opts.region)
+    except (ValueError, BotoCoreError) as e:
+        raise click.ClickException(str(e)) from e
+    deleted_bucket_name = _perform_state_bucket_cleanup(bucket)
     deleted_sg_id = _perform_cleanup(client)
-    _output_cleanup_result(deleted_sg_id, client.region, output_opts.output_format)
+    _output_cleanup_result(deleted_sg_id, client.region, deleted_bucket_name, output_opts.output_format)
 
 
 @aws_cli_group.command(name="ami")
