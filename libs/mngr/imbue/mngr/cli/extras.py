@@ -228,7 +228,7 @@ _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
 )
 
 
-def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
+def _claude_native_plugin_status() -> tuple[bool, dict[str, bool]]:
     """Return (claude_available, {plugin_name: is_installed}).
 
     When Claude Code is not on PATH, the per-plugin map reports every plugin
@@ -317,7 +317,7 @@ def _install_claude_plugin(
     *,
     # Dependencies are exposed as keyword arguments so tests can substitute
     # in-memory fakes without monkeypatching module-level callables.
-    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+    status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
     is_interactive_fn: Callable[[], bool] = has_interactive_terminal,
     select_fn: Callable[[tuple[ClaudeCodePlugin, ...]], tuple[ClaudeCodePlugin, ...]] = _prompt_claude_plugins_choice,
     install_fn: Callable[[ClaudeCodePlugin], bool] = _install_one_claude_plugin,
@@ -519,13 +519,15 @@ def _install_default_agent_type(
 
 def _print_extras_status(
     *,
-    claude_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_plugin_status,
+    claude_native_plugin_status_fn: Callable[[], tuple[bool, dict[str, bool]]] = _claude_native_plugin_status,
 ) -> None:
     """Print the status of all extras.
 
-    ``claude_status_fn`` is injectable (mirroring the ``status_fn`` seam on the
-    ``_install_*`` helpers) so tests can avoid shelling out to the ``claude``
-    CLI -- a Node process whose startup is the slow, variable part of this call.
+    ``claude_native_plugin_status_fn`` reports whether claude is available and which
+    known Claude Code plugins are installed. It is injectable (mirroring the
+    ``status_fn`` seam on the ``_install_*`` helpers) so tests can avoid shelling
+    out to ``claude plugin list`` -- a Node process whose startup is the slow,
+    variable part of this call.
     """
     write_human_line("Extras")
     write_human_line("")
@@ -542,7 +544,7 @@ def _print_extras_status(
         write_human_line("  completion       not configured")
 
     # Claude Code plugins
-    claude_available, installed_by_name = claude_status_fn()
+    claude_available, installed_by_name = claude_native_plugin_status_fn()
     if not claude_available:
         write_human_line("  claude-plugin    claude not installed")
     else:

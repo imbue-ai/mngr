@@ -367,14 +367,16 @@ def test_print_extras_status_runs_without_error() -> None:
     # and made it flaky under the 10s offload timeout (observed at 10.05s in CI;
     # ~0.4s locally). Report claude as available so the richer status-formatting
     # branch is still exercised. The other status paths are fast local reads.
-    _print_extras_status(claude_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}))
+    _print_extras_status(
+        claude_native_plugin_status_fn=lambda: (True, {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS})
+    )
 
 
 @pytest.mark.flaky
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
     """Running 'mngr extras' with no flags shows status.
 
-    Marked flaky: `_print_extras_status` invokes `_claude_plugin_status`,
+    Marked flaky: `_print_extras_status` invokes `_claude_native_plugin_status`,
     which spawns a `claude` subprocess inside a `ConcurrencyGroup`. Under
     CI load the subprocess startup occasionally exceeds pytest-timeout's
     10s budget, with no obvious productive bound to make it tighter at
