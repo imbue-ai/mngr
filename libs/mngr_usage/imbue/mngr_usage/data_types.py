@@ -261,6 +261,33 @@ class SessionCostRecord(FrozenModel):
     last_event_at: int = Field(description="Unix timestamp of the most recent event seen for this session.")
 
 
+class UsageEvent(FrozenModel):
+    """One raw event dict parsed and validated into the shape the walkers consume.
+
+    Produced by ``_parse_usage_event`` (in ``api``); a parsed event always has a
+    usable ``timestamp_unix`` and non-empty ``session_id`` (both are drop
+    conditions in the parser). The walkers read every other field off this typed
+    surface instead of re-doing ``event.get(...)`` + ``isinstance`` guards, which
+    keeps the cross-strategy invariant intact: windows can only be read off a
+    parsed event, so the session_id requirement filters windows exactly as it
+    filters sessions.
+    """
+
+    timestamp_unix: int = Field(description="Event timestamp as a Unix timestamp.")
+    session_id: str = Field(description="Writer-supplied session id (always non-empty on a parsed event).")
+    event_id: str | None = Field(default=None, description="Per-event id, when the writer emitted one.")
+    message_id: str | None = Field(default=None, description="Per-message id for session-incremental sources.")
+    cost: CostSnapshot | None = Field(default=None, description="Parsed cost block, or None when absent/malformed.")
+    tokens: TokenSnapshot | None = Field(
+        default=None, description="Parsed tokens block, or None when absent/malformed."
+    )
+    windows: dict[str, WindowSnapshot] = Field(
+        default_factory=dict, description="Parsed rate_limits payload (empty when absent)."
+    )
+    model: str | None = Field(default=None, description="Canonical '<provider>/<model>', or None.")
+    cost_mode_hint: CostMode | None = Field(default=None, description="Writer-declared cost_mode hint, or None.")
+
+
 @overload
 def _sum_optional(values: list[int | None]) -> int | None: ...
 

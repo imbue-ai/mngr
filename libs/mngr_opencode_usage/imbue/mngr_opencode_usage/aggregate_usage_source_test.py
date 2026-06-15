@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from imbue.mngr_opencode_usage.plugin import aggregate_usage_source
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import CostMode
 from imbue.mngr_usage.data_types import CostProvenance
 
@@ -26,10 +27,13 @@ def test_opencode_hookimpl_sums_per_message_as_reported() -> None:
     snapshot = aggregate_usage_source(
         source_name="opencode",
         agents_events={
-            "agent-1": [
-                _message_event("s1", "m1", 1, 0.10),
-                _message_event("s1", "m2", 2, 0.25),
-            ]
+            "agent-1": parse_usage_events(
+                [
+                    _message_event("s1", "m1", 1, 0.10),
+                    _message_event("s1", "m2", 2, 0.25),
+                ],
+                "opencode",
+            )
         },
         since_seconds=_SINCE,
         now=_NOW,
@@ -45,7 +49,7 @@ def test_opencode_hookimpl_sums_per_message_as_reported() -> None:
 def test_opencode_hookimpl_declines_non_opencode_sources() -> None:
     snapshot = aggregate_usage_source(
         source_name="claude",
-        agents_events={"agent-1": [_message_event("s1", "m1", 1, 0.10)]},
+        agents_events={"agent-1": parse_usage_events([_message_event("s1", "m1", 1, 0.10)], "claude")},
         since_seconds=_SINCE,
         now=_NOW,
     )

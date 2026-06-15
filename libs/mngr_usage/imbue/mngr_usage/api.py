@@ -75,6 +75,7 @@ from imbue.mngr_usage.data_types import EVENTS_JSONL_FILENAME
 from imbue.mngr_usage.data_types import SessionCostRecord
 from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.data_types import USAGE_DIR_NAME
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.data_types import UsageSnapshot
 from imbue.mngr_usage.data_types import WindowSnapshot
 from imbue.mngr_usage.data_types import add_optional
@@ -96,14 +97,16 @@ _EVENTS_JSONL_FILENAME = EVENTS_JSONL_FILENAME
 
 
 @pure
-def parse_events_from_content(content: str, source_for_warnings: str) -> list[dict[str, Any]]:
-    """Return every well-formed JSON object from a JSONL events file's content.
+def parse_events_from_content(content: str, source_for_warnings: str) -> list[UsageEvent]:
+    """Parse a JSONL events file's content into typed ``UsageEvent``s.
 
-    Skips malformed lines with a warning (most commonly a writer mid-flight
-    truncated trailing line); ``source_for_warnings`` is included in the
-    warning so the user can locate the offending events file.
+    Each well-formed JSON object line is parsed (malformed lines skipped with a
+    warning -- most commonly a writer mid-flight truncated trailing line) and then
+    run through ``parse_usage_events``, which drops events lacking a parseable
+    timestamp / session_id. ``source_for_warnings`` is included in the warning so
+    the user can locate the offending events file.
     """
-    events: list[dict[str, Any]] = []
+    raw_events: list[dict[str, Any]] = []
     for raw in content.splitlines():
         if not raw.strip():
             continue
@@ -113,8 +116,8 @@ def parse_events_from_content(content: str, source_for_warnings: str) -> list[di
             logger.warning("Skipping malformed event line in {}: {}", source_for_warnings, e)
             continue
         if isinstance(event, dict):
-            events.append(event)
-    return events
+            raw_events.append(event)
+    return parse_usage_events(raw_events, source_for_warnings)
 
 
 @pure
@@ -233,33 +236,6 @@ def _str_field_from_event(event: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-class UsageEvent(FrozenModel):
-    """One raw event dict parsed and validated into the shape the walkers consume.
-
-    Produced by ``_parse_usage_event``; a parsed event always has a usable
-    ``timestamp_unix`` and non-empty ``session_id`` (both are drop conditions
-    in the parser). The walkers read every other field off this typed surface
-    instead of re-doing ``event.get(...)`` + ``isinstance`` guards, which keeps
-    the cross-strategy invariant intact: windows can only be read off a parsed
-    event, so the session_id requirement filters windows exactly as it filters
-    sessions.
-    """
-
-    timestamp_unix: int = Field(description="Event timestamp as a Unix timestamp.")
-    session_id: str = Field(description="Writer-supplied session id (always non-empty on a parsed event).")
-    event_id: str | None = Field(default=None, description="Per-event id, when the writer emitted one.")
-    message_id: str | None = Field(default=None, description="Per-message id for session-incremental sources.")
-    cost: CostSnapshot | None = Field(default=None, description="Parsed cost block, or None when absent/malformed.")
-    tokens: TokenSnapshot | None = Field(
-        default=None, description="Parsed tokens block, or None when absent/malformed."
-    )
-    windows: dict[str, WindowSnapshot] = Field(
-        default_factory=dict, description="Parsed rate_limits payload (empty when absent)."
-    )
-    model: str | None = Field(default=None, description="Canonical '<provider>/<model>', or None.")
-    cost_mode_hint: CostMode | None = Field(default=None, description="Writer-declared cost_mode hint, or None.")
-
-
 @pure
 def _parse_usage_event(raw: dict[str, Any], source_name: str) -> UsageEvent | None:
     """Parse one raw event dict into a ``UsageEvent``, or None to drop it.
@@ -299,16 +275,25 @@ def _parse_usage_event(raw: dict[str, Any], source_name: str) -> UsageEvent | No
 
 
 @pure
-def _sorted_usage_events(raw_events: list[dict[str, Any]], source_name: str) -> list[UsageEvent]:
-    """Parse + validate every raw event, drop the unparseable, and sort by timestamp.
+def parse_usage_events(raw_events: list[dict[str, Any]], source_name: str) -> list[UsageEvent]:
+    """Parse + validate every raw event dict into a ``UsageEvent``, dropping the unparseable.
 
-    Shared preamble for all three walkers. The stable timestamp sort makes a
-    single writer's append-only stream monotonic even if concurrent renders
-    arrived out of file order.
+    The conversion entry point for callers/tests holding raw dicts (the reader
+    boundary calls it via ``parse_events_from_content``). Does NOT sort -- the
+    walker preamble (``_sorted_usage_events``) owns that.
     """
-    parsed = [event for raw in raw_events if (event := _parse_usage_event(raw, source_name)) is not None]
-    parsed.sort(key=lambda event: event.timestamp_unix)
-    return parsed
+    return [event for raw in raw_events if (event := _parse_usage_event(raw, source_name)) is not None]
+
+
+@pure
+def _sorted_usage_events(events: list[UsageEvent]) -> list[UsageEvent]:
+    """Sort already-parsed events by timestamp.
+
+    Shared preamble for all three walkers; the parse happened upstream at the read
+    boundary. The stable timestamp sort makes a single writer's append-only stream
+    monotonic even if concurrent renders arrived out of file order.
+    """
+    return sorted(events, key=lambda event: event.timestamp_unix)
 
 
 @pure
@@ -449,7 +434,7 @@ def _classify_process(has_rate_limits: bool) -> CostMode:
 
 
 @pure
-def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+def _walk_agent_events(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events in time order, producing all the per-agent reductions.
 
     Combines four concerns that all gate on the same "is this event valid"
@@ -461,14 +446,15 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
       4. Classify each process as ``subscription`` or ``api_key`` based on
          whether any of its events carried a non-empty rate_limits payload.
 
-    Events lacking a parseable timestamp or ``session_id`` are dropped by
-    ``_sorted_usage_events`` (silently / with a WARNING respectively). Because
-    windows are only ever read off a parsed event, the session_id requirement
-    filters windows the same way it filters sessions: a malformed event can't
-    contribute its windows while having its cost / sessions dropped, which would
-    be a silent partial-data trap.
+    Events lacking a parseable timestamp or ``session_id`` were already dropped
+    upstream at the read boundary by ``parse_usage_events`` (silently / with a
+    WARNING respectively), so every ``UsageEvent`` here is valid. Because windows
+    are only ever read off a parsed event, the session_id requirement filters
+    windows the same way it filters sessions: a malformed event can't contribute
+    its windows while having its cost / sessions dropped, which would be a silent
+    partial-data trap.
     """
-    timed = _sorted_usage_events(events, source_name)
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -570,7 +556,7 @@ def _walk_agent_events(events: list[dict[str, Any]], source_name: str) -> _Agent
 
 def aggregate_process_cumulative(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -656,7 +642,7 @@ class _SessionCumulativeAccumulator(MutableModel):
 
 
 @pure
-def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+def _walk_agent_events_session_cumulative(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events treating each ``session_id`` as its own cumulative counter.
 
     Unlike ``_walk_agent_events`` (process-cumulative), there is no process
@@ -666,7 +652,7 @@ def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_n
     (reported vs token-estimated) and mode (writer hint -> rate_limits -> API_KEY)
     at the end.
     """
-    timed = _sorted_usage_events(events, source_name)
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -764,7 +750,7 @@ def _walk_agent_events_session_cumulative(events: list[dict[str, Any]], source_n
 
 def aggregate_session_cumulative(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -819,7 +805,7 @@ class _IncrementalSessionAccumulator(MutableModel):
 
 
 @pure
-def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_name: str) -> _AgentWalkResult:
+def _walk_agent_events_session_incremental(events: list[UsageEvent], source_name: str) -> _AgentWalkResult:
     """Walk one agent's events summing **per-message** contributions within each session.
 
     For harnesses that report cost/tokens per assistant message (OpenCode, pi):
@@ -829,7 +815,7 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
     token-estimated; the session is ``ESTIMATED`` if any message was estimated.
     Windows and max timestamp are tracked as in the other strategies.
     """
-    timed = _sorted_usage_events(events, source_name)
+    timed = _sorted_usage_events(events)
 
     max_timestamp = -1
     freshest_windows_timestamp = -1
@@ -932,7 +918,7 @@ def _walk_agent_events_session_incremental(events: list[dict[str, Any]], source_
 
 def aggregate_session_incremental(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -951,8 +937,8 @@ def aggregate_session_incremental(
 
 def _combine_agent_walks(
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
-    walk_agent_events: Callable[[list[dict[str, Any]], str], _AgentWalkResult],
+    agents_events: dict[str, list[UsageEvent]],
+    walk_agent_events: Callable[[list[UsageEvent], str], _AgentWalkResult],
     *,
     since_seconds: int,
     now: int,
@@ -1135,7 +1121,7 @@ def build_source_cel_context(snapshot: UsageSnapshot, now: int) -> dict[str, Any
 # =============================================================================
 
 
-def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> dict[str, list[dict[str, Any]]]:
+def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> dict[str, list[UsageEvent]]:
     """Read all usage events from one agent's events directory, grouped by source_name.
 
     Builds an ``EventsTarget`` for the agent (works for local + remote +
@@ -1158,7 +1144,7 @@ def _events_per_source_for_agent(mngr_ctx: MngrContext, agent: AgentDetails) -> 
     except MngrError as e:
         logger.debug("Could not discover events for agent {}: {}", agent.name, e)
         return {}
-    by_source: dict[str, list[dict[str, Any]]] = {}
+    by_source: dict[str, list[UsageEvent]] = {}
     for source in sources:
         if not source.source_path.endswith(_USAGE_SOURCE_SUFFIX) or not source.is_current_file_present:
             continue
@@ -1198,7 +1184,7 @@ class _RawEventsCollector(MutableModel):
     """
 
     mngr_ctx: MngrContext
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    events_by_source: dict[str, dict[str, list[UsageEvent]]] = {}
     _lock: Lock = PrivateAttr(default_factory=Lock)
 
     model_config = {"arbitrary_types_allowed": True}
@@ -1213,7 +1199,7 @@ class _RawEventsCollector(MutableModel):
                 self.events_by_source.setdefault(source_name, {}).setdefault(agent_id, []).extend(events)
 
 
-def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str, Any]]]:
+def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[UsageEvent]]:
     """Read a destroyed agent's preserved usage events, grouped by source_name.
 
     The preserved layout mirrors the live state dir: usage events live at
@@ -1222,7 +1208,7 @@ def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str
     the dir holds no usage events.
     """
     events_root = preserved_dir / EVENTS_DIR_NAME
-    by_source: dict[str, list[dict[str, Any]]] = {}
+    by_source: dict[str, list[UsageEvent]] = {}
     if not events_root.is_dir():
         return by_source
     for source_dir in sorted(events_root.iterdir()):
@@ -1242,7 +1228,7 @@ def _preserved_events_per_source(preserved_dir: Path) -> dict[str, list[dict[str
 
 def _merge_preserved_events(
     mngr_ctx: MngrContext,
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    events_by_source: dict[str, dict[str, list[UsageEvent]]],
     *,
     include_filters: tuple[str, ...],
     exclude_filters: tuple[str, ...],
@@ -1272,7 +1258,7 @@ def _merge_preserved_events(
 def _dispatch_source_aggregation(
     pm: pluggy.PluginManager,
     source_name: str,
-    agents_events: dict[str, list[dict[str, Any]]],
+    agents_events: dict[str, list[UsageEvent]],
     *,
     since_seconds: int,
     now: int,
@@ -1295,7 +1281,7 @@ def _dispatch_source_aggregation(
 
 def _aggregate_via_dispatch(
     pm: pluggy.PluginManager,
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]],
+    events_by_source: dict[str, dict[str, list[UsageEvent]]],
     *,
     since_seconds: int,
     now: int,

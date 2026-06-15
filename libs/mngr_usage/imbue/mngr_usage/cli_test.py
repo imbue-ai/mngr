@@ -26,6 +26,7 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr_usage.api import aggregate_process_cumulative
 from imbue.mngr_usage.api import parse_events_from_content
+from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.cli import _build_render_model
 from imbue.mngr_usage.cli import _flatten_primary_for_template
 from imbue.mngr_usage.cli import _format_cost_line
@@ -59,7 +60,10 @@ def aggregate_events_to_snapshots(
     """
     snapshots: list[UsageSnapshot] = []
     for source_name, agents_events in events_by_source.items():
-        snapshot = aggregate_process_cumulative(source_name, agents_events, since_seconds=since_seconds, now=now)
+        parsed_by_agent = {
+            agent_id: parse_usage_events(events, source_name) for agent_id, events in agents_events.items()
+        }
+        snapshot = aggregate_process_cumulative(source_name, parsed_by_agent, since_seconds=since_seconds, now=now)
         if snapshot is not None:
             snapshots.append(snapshot)
     return snapshots
@@ -259,8 +263,9 @@ def test_format_session_detail_line_renders_tag_truncated_id_and_age() -> None:
 
 
 def test_parse_events_from_content_returns_all_valid_lines() -> None:
-    """Every well-formed JSON line is returned. A truncated trailing line is
-    skipped with a warning rather than failing the whole parse."""
+    """Every well-formed JSON line is parsed into a typed ``UsageEvent``. A
+    truncated trailing line is skipped with a warning rather than failing the
+    whole parse."""
     content = (
         json.dumps(_make_event("2026-05-08T10:00:00.000000000Z"))
         + "\n"
@@ -270,8 +275,10 @@ def test_parse_events_from_content_returns_all_valid_lines() -> None:
     )
     events = parse_events_from_content(content, "test")
     assert len(events) == 2
-    assert events[0]["timestamp"] == "2026-05-08T10:00:00.000000000Z"
-    assert events[1]["timestamp"] == "2026-05-08T11:00:00.000000000Z"
+    # Both well-formed lines parse into typed events, in file order, with the
+    # ISO timestamps converted to Unix seconds.
+    assert events[0].timestamp_unix == int(datetime(2026, 5, 8, 10, 0, tzinfo=timezone.utc).timestamp())
+    assert events[1].timestamp_unix == int(datetime(2026, 5, 8, 11, 0, tzinfo=timezone.utc).timestamp())
 
 
 def test_parse_events_from_content_returns_empty_for_empty_or_garbage() -> None:

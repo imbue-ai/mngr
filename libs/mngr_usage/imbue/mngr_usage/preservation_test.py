@@ -27,6 +27,8 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_usage.api import _merge_preserved_events
 from imbue.mngr_usage.api import gather_usage_snapshots
+from imbue.mngr_usage.api import parse_usage_events
+from imbue.mngr_usage.data_types import UsageEvent
 from imbue.mngr_usage.preservation import discover_preserved_agents
 from imbue.mngr_usage.preservation import preserve_agent_usage
 
@@ -221,11 +223,11 @@ def test_merge_preserved_events_folds_in_preserved(temp_mngr_ctx: MngrContext) -
     agent_id = AgentId.generate()
     _plant_preserved_agent(temp_mngr_ctx, agent_id, "a1", events=[_usage_event("s1")])
 
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    events_by_source: dict[str, dict[str, list[UsageEvent]]] = {}
     _merge_preserved_events(
         temp_mngr_ctx, events_by_source, include_filters=(), exclude_filters=(), provider_names=None
     )
-    assert events_by_source["claude"][str(agent_id)][0]["session_id"] == "s1"
+    assert events_by_source["claude"][str(agent_id)][0].session_id == "s1"
 
 
 def test_merge_preserved_events_dedups_against_live_agent(temp_mngr_ctx: MngrContext) -> None:
@@ -233,11 +235,13 @@ def test_merge_preserved_events_dedups_against_live_agent(temp_mngr_ctx: MngrCon
     agent_id = AgentId.generate()
     _plant_preserved_agent(temp_mngr_ctx, agent_id, "a1", events=[_usage_event("preserved")])
 
-    events_by_source: dict[str, dict[str, list[dict[str, Any]]]] = {"claude": {str(agent_id): [_usage_event("live")]}}
+    events_by_source: dict[str, dict[str, list[UsageEvent]]] = {
+        "claude": {str(agent_id): parse_usage_events([_usage_event("live")], "claude")}
+    }
     _merge_preserved_events(
         temp_mngr_ctx, events_by_source, include_filters=(), exclude_filters=(), provider_names=None
     )
-    sessions = [e["session_id"] for e in events_by_source["claude"][str(agent_id)]]
+    sessions = [e.session_id for e in events_by_source["claude"][str(agent_id)]]
     assert sessions == ["live"]
 
 
