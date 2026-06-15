@@ -35,9 +35,9 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
         default=60.0,
         description="Timeout for SSH connections in seconds",
     )
-    vps_boot_timeout: float = Field(
+    instance_boot_timeout: float = Field(
         default=300.0,
-        description="Timeout for VPS to become active after provisioning in seconds",
+        description="Timeout for the cloud instance to become reachable after provisioning, in seconds",
     )
     docker_install_timeout: float = Field(
         default=300.0,
@@ -49,23 +49,22 @@ class VpsDockerProviderConfig(ProviderInstanceConfig):
     )
     default_region: str = Field(
         default="ewr",
-        description="Default VPS region",
-    )
-    default_plan: str = Field(
-        default="vc2-1c-1gb",
-        description="Default VPS plan (CPU/RAM specification)",
-    )
-    default_os_id: int | str = Field(
-        default=2136,
-        description=(
-            "Default VPS OS image identifier. Integer image ids are typical "
-            "(e.g. 2136 = Debian 12 x64 on Vultr); providers like OVH classic "
-            "VPS use string image names instead."
-        ),
+        description="Default cloud region. Provider subclasses override the default value.",
     )
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers",
+    )
+    auto_shutdown_seconds: int | None = Field(
+        default=None,
+        description=(
+            "When set, cloud-init schedules `shutdown -P` so the VPS halts itself after about "
+            "this many seconds (rounded up to whole minutes, the granularity `shutdown` accepts). "
+            "A hard max-lifetime cap, distinct from the activity-based default_idle_timeout. On "
+            "AWS, combined with InstanceInitiatedShutdownBehavior=terminate, this auto-terminates "
+            "the EC2 instance. On Vultr the OS halts but billing continues until the VPS is "
+            "destroyed."
+        ),
     )
     docker_runtime: str | None = Field(
         default=None,

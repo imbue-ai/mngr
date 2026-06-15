@@ -2,6 +2,7 @@ import re
 from typing import overload
 
 from imbue.skitwright.data_types import CommandResult
+from imbue.skitwright.errors import UnsupportedExpectTypeError
 
 
 class ResultExpectation:
@@ -103,4 +104,4 @@ def expect(value: CommandResult | str) -> ResultExpectation | StringExpectation:
         return StringExpectation(value)
     # Unreachable for type-correct callers (value is CommandResult | str); this guard only exists to
     # give untyped or misusing callers a clear, loud error rather than a confusing failure later.
-    raise TypeError(f"expect() does not support {type(value).__name__}")
+    raise UnsupportedExpectTypeError(f"expect() does not support {type(value).__name__}")

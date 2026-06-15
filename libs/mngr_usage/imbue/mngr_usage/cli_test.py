@@ -16,8 +16,8 @@ from loguru import logger
 
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.primitives import AgentId

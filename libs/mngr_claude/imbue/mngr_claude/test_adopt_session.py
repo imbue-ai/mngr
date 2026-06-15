@@ -342,7 +342,12 @@ def _verify_adopted_context(
     with ``mngr message`` after startup. ``mngr destroy`` is invoked on the
     way out regardless of success.
     """
-    create_result = _run(
+    # ``_run`` defaults to ``check=True``, so a non-zero ``mngr create`` exit
+    # already fails the test with full stdout/stderr -- create-success is
+    # verified structurally here, without coupling to mngr's "Done." log
+    # wording. The load-bearing behavioral check is the secret recall in the
+    # destination agent's pane below.
+    _run(
         [
             "uv",
             "run",
@@ -364,9 +369,6 @@ def _verify_adopted_context(
         ],
         env=env,
         timeout=float(_PROVISION_TIMEOUT_SECONDS),
-    )
-    assert "Done." in create_result.stdout, (
-        f"Expected 'Done.' in mngr create stdout. stdout:\n{create_result.stdout}\nstderr:\n{create_result.stderr}"
     )
     try:
         _run(

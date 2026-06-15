@@ -8,6 +8,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr_imbue_cloud.errors import InvalidBuildArgError
 from imbue.mngr_imbue_cloud.primitives import DEFAULT_FAST_MODE
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -126,7 +127,7 @@ def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbu
         value = value.strip()
         if separator and key == "account":
             if not value:
-                raise ValueError("build_arg account=<email> requires a non-empty value")
+                raise InvalidBuildArgError("build_arg account=<email> requires a non-empty value")
             account_override = value
         elif separator and key == "region":
             # Validate the region against the known OVH-US datacenters so a typo
@@ -136,19 +137,19 @@ def parse_imbue_cloud_build_args(build_args: Sequence[str] | None) -> ParsedImbu
             # caller (instance.create_host) catches ValueError and wraps it.
             if value not in KNOWN_OVH_US_REGIONS:
                 allowed = sorted(KNOWN_OVH_US_REGIONS)
-                raise ValueError(f"build_arg region={value!r} must be one of {allowed}")
+                raise InvalidBuildArgError(f"build_arg region={value!r} must be one of {allowed}")
             region = value
         elif separator and key == "fast_mode":
             try:
                 fast_mode = FastMode(value.upper())
             except ValueError as exc:
                 allowed = sorted(mode.value.lower() for mode in FastMode)
-                raise ValueError(f"build_arg fast_mode={value!r} must be one of {allowed}") from exc
+                raise InvalidBuildArgError(f"build_arg fast_mode={value!r} must be one of {allowed}") from exc
         elif separator and key in _INTEGER_ATTRIBUTE_KEYS:
             try:
                 parsed_attributes[key] = int(value)
             except ValueError as exc:
-                raise ValueError(f"build_arg {key}={value!r} must be an integer") from exc
+                raise InvalidBuildArgError(f"build_arg {key}={value!r} must be an integer") from exc
         elif separator and key in _LEASE_ATTRIBUTE_KEYS:
             parsed_attributes[key] = value
         else:
