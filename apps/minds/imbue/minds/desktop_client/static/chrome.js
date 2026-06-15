@@ -302,12 +302,14 @@
     // that doesn't match /goto/<id>/, which would prevent the recovery-page
     // redirect from firing for the current agent.
     //
-    // Distinct from the persisted "last opened workspace" accent (below):
-    // ``onCurrentWorkspaceChanged`` carries null whenever the content view is
-    // on a non-workspace URL (Home, sign-in, ...) so it can't be used as the
-    // titlebar accent source. We track both -- the current workspace drives
-    // the recovery-page redirect lock, the last-opened workspace drives the
-    // accent color.
+    // ``onCurrentWorkspaceChanged`` is NARROW -- it carries null on every
+    // URL that isn't the workspace itself, including the workspace's own
+    // settings / sharing screens -- so it can't be the accent source on
+    // its own. The accent source is the WIDER ``lastWorkspaceAgentId``
+    // (main's ``parseAccentSourceAgentId``), which is the workspace id on
+    // any workspace-scoped screen (settings / sharing / ...) and null on a
+    // general screen. We use both: the current workspace drives the
+    // recovery-page redirect lock, the accent-source drives the color.
     window.minds.onCurrentWorkspaceChanged(function (agentId) {
       // Authoritative for what THIS window is displaying: drive both the
       // recovery-redirect lock and the accent off the same event.
@@ -319,17 +321,20 @@
         applyTitleAccent(agentId);
         return;
       }
-      // Non-workspace URL (Home, sign-in, accounts, ...): the bar should
-      // track the persisted last-opened workspace, which main may have
-      // *already cleared* by the time we get here (sign-out, deletion of
-      // the displayed workspace). Re-query rather than relying on the
-      // ``onLastWorkspaceAgentIdChanged`` broadcast: that broadcast's
-      // gate (``if (currentTitleAgentId) return;``) blocks the clear in
-      // any flow where the broadcast arrives BEFORE this null
-      // ``current-workspace-changed``, which is the case on sign-out (the
-      // two events come from different async streams and aren't ordered).
-      // The deletion path explicitly orders the IPC, but pulling the
-      // stored value here covers both paths uniformly.
+      // Not displaying a workspace: this is either a workspace-scoped
+      // screen (settings / sharing -- accent stays) or a general screen
+      // (Home, accounts, ... -- neutral chrome). Which one is encoded in
+      // the accent source, so re-query it. Main may also have just
+      // *cleared* it (sign-out, deletion of the displayed workspace).
+      // Re-query rather than relying on the ``onLastWorkspaceAgentIdChanged``
+      // broadcast: that broadcast's gate (``if (currentTitleAgentId)
+      // return;``) blocks the clear in any flow where the broadcast
+      // arrives BEFORE this null ``current-workspace-changed``, which is
+      // the case on sign-out (the two events come from different async
+      // streams and aren't ordered). The deletion path explicitly orders
+      // the IPC, but pulling the stored value here covers both paths
+      // uniformly -- and paints null (the neutral chrome) when that's what
+      // it resolves to.
       window.minds.getLastWorkspaceAgentId().then(function (storedId) {
         // A subsequent workspace open may have set ``currentTitleAgentId``
         // while this IPC was in flight; let that win.
@@ -337,8 +342,10 @@
         applyTitleAccent(storedId || null);
       });
     });
-    // Bootstrap: paint the accent on chrome page load using the persisted
-    // last-opened workspace, before any other IPC fires.
+    // Bootstrap: paint the accent on chrome page load from the current
+    // screen's accent source (set by main from the restored content URL),
+    // before any other IPC fires. Null (a general screen) leaves the
+    // neutral chrome in place.
     window.minds.getLastWorkspaceAgentId().then(function (agentId) {
       if (agentId && !currentTitleAgentId) applyTitleAccent(agentId);
     });
@@ -354,7 +361,7 @@
     // content view's redirect to ``/`` has had a chance to emit
     // ``current-workspace-changed: null``. The gate keeps the accent
     // visible across that brief window so the bar doesn't flash to the
-    // default zinc-900 before the proper ``current-workspace-changed:
+    // neutral chrome before the proper ``current-workspace-changed:
     // null`` branch above re-queries ``getLastWorkspaceAgentId`` and
     // applies the (now-null) value cleanly.
     window.minds.onLastWorkspaceAgentIdChanged(function (agentId) {

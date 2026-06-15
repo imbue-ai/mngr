@@ -581,13 +581,19 @@ function createBundle() {
     currentContentUrl: null,
     currentWorkspaceId: null,
     // ``lastWorkspaceAgentId`` is the agent id whose accent should color
-    // THIS window's titlebar even after the user navigates away from the
-    // workspace (e.g. to Home). Distinct from ``currentWorkspaceId``
-    // because that clears on every navigate-to-non-workspace; this only
-    // changes when the user opens a *different* workspace in this window,
-    // or when the workspace is deleted / the user signs out. Persisted in
-    // each window-state.json entry so windows restore with their own
-    // accent rather than a single global one stepping on every window.
+    // THIS window's titlebar -- the accent source of the window's CURRENT
+    // screen, kept as a tiny piece of state only so the chrome renderer
+    // (a separate view) and a cold-start restore can read it. It tracks
+    // ``parseAccentSourceAgentId`` of the current content URL: the
+    // workspace id on a workspace-scoped screen (the workspace itself plus
+    // its settings / sharing / destroying / recovery screens), and null on
+    // every general screen (Home, Create, accounts, ...), where the bar
+    // paints the neutral chrome. Distinct from ``currentWorkspaceId``,
+    // which is narrower (only the workspace itself, for uniqueness /
+    // recovery-redirect) -- so settings / sharing keep the accent even
+    // though they don't count as "displaying" the workspace. Persisted in
+    // each window-state.json entry so a restored window re-paints its own
+    // accent before the first navigation event lands.
     lastWorkspaceAgentId: null,
     preErrorUrl: null,
     isErrorState: false,
@@ -1015,11 +1021,13 @@ function sendCurrentWorkspaceToBundleViews(bundle) {
     if (!view || view.webContents.isDestroyed()) continue;
     view.webContents.send('current-workspace-changed', bundle.currentWorkspaceId);
   }
-  // Persist this window's "last opened workspace" so a subsequent
-  // navigation to Home (or any non-workspace URL) keeps the bar tinted in
-  // this workspace's color, and so cold-start restores the same color
-  // before the first ``current-workspace-changed`` event lands. Each
-  // window remembers independently -- opening a workspace in window B
+  // Stamp this window's accent source when we ARE on a workspace, so a
+  // cold-start restore paints the right accent before the first
+  // ``current-workspace-changed`` event lands. This only ever SETS the
+  // accent (guarded on ``currentWorkspaceId``); the clear-on-general-screen
+  // half lives in the navigation handlers, which pass
+  // ``parseAccentSourceAgentId(url)`` -- null included -- straight through.
+  // Each window remembers independently: opening a workspace in window B
   // does not repaint window A.
   if (bundle.currentWorkspaceId) {
     updateBundleLastWorkspaceAgentId(bundle, bundle.currentWorkspaceId);
@@ -1260,11 +1268,14 @@ function readLastLogLines(lineCount) {
 // pre-titlebar-accent version of the file was a bare array of window
 // entries (no ``lastWorkspaceAgentId`` field); ``loadSessionState``
 // accepts either shape so existing installs migrate transparently on
-// first read. ``lastWorkspaceAgentId`` is per-window: the agent id whose
-// accent colors that window's titlebar across navigation to Home. Each
-// window remembers its own, so opening workspace B in window 2 does not
-// repaint window 1's titlebar. Cleared on workspace deletion (for
-// matching windows) or account sign-out (all windows).
+// first read. ``lastWorkspaceAgentId`` is per-window: the accent source
+// of that window's current screen (a workspace id on a workspace-scoped
+// screen -- the workspace plus its settings / sharing / destroying /
+// recovery screens -- and null on a general screen). Persisting it lets a
+// restored window re-paint its own accent before its first navigation
+// event. Each window remembers its own, so opening workspace B in window
+// 2 does not repaint window 1's titlebar. Also cleared on workspace
+// deletion (for matching windows) or account sign-out (all windows).
 
 function loadSessionState() {
   try {
