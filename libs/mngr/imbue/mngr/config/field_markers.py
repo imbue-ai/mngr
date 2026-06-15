@@ -20,11 +20,11 @@ class SettingsPatchField:
 
     ``merge_with`` (config-scope merge) and ``_apply_custom_overrides_to_parent_config``
     (agent-type ``parent_type`` inheritance) read this marker off the field's
-    ``model_fields[name].metadata``. A marked field is combined via
-    ``combine_patches`` (the four-rule, recursive, marker-preserving combine) so a
-    lower/parent layer's contribution is never dropped wholesale -- even for
-    non-overlapping keys, which an assign would clobber. Every other field stays
-    assign-by-default.
+    ``model_fields[name].metadata``. A marked field is merged via the overlay node
+    algebra's recursive, marker-preserving combine (the field is treated as
+    ``__extend``) so a lower/parent layer's contribution is never dropped wholesale --
+    even for non-overlapping keys, which an assign would clobber. Every other field
+    stays assign-by-default.
 
     The field carrying this marker (``ClaudeAgentConfig.settings_overrides``) lives
     on a plugin subclass; the base ``merge_with`` reads the marker generically, so

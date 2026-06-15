@@ -1,8 +1,9 @@
 """Unit tests for the model-aware ``resolve_extends`` resolver.
 
-The pure, model-free merge algebra (operator helpers, ``combine_patches``,
-``merge`` / ``finalize``, ``would_assignment_narrow``, and the ``Static*`` markers)
-is tested in ``imbue.overlay``. These tests cover what stays in mngr: resolving
+The pure, model-free merge algebra (operator helpers, the typed-node ``lift`` /
+``merge`` / ``finalize`` engine, ``apply_extend`` / ``would_assignment_narrow``, and
+the ``Static*`` markers) is tested in ``imbue.overlay``. These tests cover what stays
+in mngr: resolving
 ``__extend`` against a parsed ``MngrConfig`` (walking pydantic models,
 ``CommandDefaults`` / ``CreateTemplate`` wrappers) and the deferred-path carveouts.
 """

@@ -27,3 +27,10 @@ containing field. A new `narrowing_paths` predicate (the path-collecting counter
 yields the deep leaf path (e.g. `commands.create.defaults.env`), while a dropped dict
 key or a list/set narrowing still reports at the field. The raise/no-raise decision is
 unchanged -- only the path strings are more precise.
+
+Internal (no user-facing behavior change): the original string-suffix merge engine
+(`combine_patches`, the string-suffix `merge` / `finalize`, and their private helpers)
+is removed now that the typed-node algebra in `node_merge.py` is the sole engine. The
+`merge.py` module is now just the leaf primitives the node algebra reuses:
+`apply_extend` / `extend_dict` (single-`__extend` resolution) and the narrowing
+predicates `would_assignment_narrow` / `narrowing_paths`.
