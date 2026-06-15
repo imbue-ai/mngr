@@ -195,10 +195,10 @@ def _is_dependent_visible(
 ) -> bool:
     """Whether a DEPENDENT entry should appear in phase 2.
 
-    Package-gated entries (``requires_packages`` set) appear only when every
-    required package is present -- already installed or selected in phase 1.
-    Signal-gated entries (the legacy path) appear when their signal was among
-    those accepted in phase 1.
+    An entry with ``requires_packages`` appears only when every required package
+    is present -- already installed, or selected in phase 1. An entry without
+    ``requires_packages`` is gated on its ``signal`` instead: it appears when that
+    signal was among those accepted in phase 1.
     """
     if entry.requires_packages:
         return all(package in present_packages for package in entry.requires_packages)

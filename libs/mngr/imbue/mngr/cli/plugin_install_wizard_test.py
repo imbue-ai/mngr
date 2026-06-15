@@ -214,16 +214,17 @@ def test_is_dependent_visible_package_gated_ignores_signals() -> None:
     assert _is_dependent_visible(_CLAUDE_USAGE, {_CLAUDE_SIGNAL}, frozenset()) is False
 
 
-def test_is_dependent_visible_legacy_signal_gated() -> None:
-    legacy = CatalogEntry(
+def test_is_dependent_visible_signal_gated() -> None:
+    """An entry without requires_packages is gated purely on its signal."""
+    signal_gated = CatalogEntry(
         entry_point_name="code_guardian",
         package_name="imbue-mngr-claude",
-        description="legacy dependent",
+        description="signal-gated dependent",
         tier=PluginTier.DEPENDENT,
         signal=_CLAUDE_SIGNAL,
     )
-    assert _is_dependent_visible(legacy, {_CLAUDE_SIGNAL}, frozenset()) is True
-    assert _is_dependent_visible(legacy, set(), frozenset()) is False
+    assert _is_dependent_visible(signal_gated, {_CLAUDE_SIGNAL}, frozenset()) is True
+    assert _is_dependent_visible(signal_gated, set(), frozenset()) is False
 
 
 # =============================================================================
