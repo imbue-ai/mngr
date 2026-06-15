@@ -317,8 +317,11 @@ def _create_single_pool_host(
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
     # Stop the freshly-baked services agent (it boots during create); the user's
-    # lease re-starts it. Use the per-bake-unique address so sequential bakes don't
-    # stop the wrong `system-services` agent.
+    # lease re-starts it, which re-runs the FCT bootstrap and re-creates the chat
+    # agent under the lease's workspace name. (Slices do the equivalent stop inside
+    # the container in ``cli.server._bake_one_slice`` -- keep the two in sync.) Use
+    # the per-bake-unique address so sequential bakes don't stop the wrong
+    # `system-services` agent.
     stop_result = run_mngr_command(["stop", full_address], timeout=120)
     if stop_result.returncode != 0:
         raise PoolBakeError(
