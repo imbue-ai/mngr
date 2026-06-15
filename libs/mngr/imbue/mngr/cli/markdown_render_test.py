@@ -14,7 +14,7 @@ def _emitted_link_hrefs(ansi: str) -> set[str]:
 
 def _visible_lines(ansi: str) -> list[str]:
     """Return the non-blank rendered lines with all ANSI escape sequences stripped."""
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", ansi)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"\x1b\]8;[^\x1b]*\x1b\\", "", ansi))
     return [line.rstrip() for line in plain.splitlines() if line.strip()]
 
 
@@ -90,3 +90,19 @@ def test_width_wraps_long_line() -> None:
     # At width 20 it must wrap, and no rendered line may exceed the requested width.
     assert len(narrow) > 1
     assert max(len(line) for line in narrow) <= 20
+
+
+def test_indent_left_pads_every_line() -> None:
+    """A positive indent left-pads every rendered line by that many spaces."""
+    output = markdown_to_ansi("First paragraph.\n\nSecond paragraph.", 70, indent=7)
+    lines = _visible_lines(output)
+    assert lines, "expected rendered content"
+    assert all(line.startswith("       ") for line in lines)
+    assert "First paragraph." in output
+    assert "Second paragraph." in output
+
+
+def test_no_indent_does_not_pad() -> None:
+    """The default indent of zero leaves text flush against the left margin."""
+    output = markdown_to_ansi("Flush left.", 70)
+    assert _visible_lines(output)[0].startswith("Flush left.")

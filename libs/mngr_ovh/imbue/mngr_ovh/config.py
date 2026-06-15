@@ -97,7 +97,7 @@ class OvhProviderConfig(VpsDockerProviderConfig):
         default="P1M",
         description="ISO-8601 commitment duration. OVH classic VPS only supports monthly billing.",
     )
-    vps_boot_timeout: float = Field(
+    instance_boot_timeout: float = Field(
         default=600.0,
         description=(
             "Seconds to wait for an OVH order to deliver a VPS (slower than direct-create APIs). "

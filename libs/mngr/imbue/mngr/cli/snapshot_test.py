@@ -8,14 +8,16 @@ import pytest
 from click.testing import CliRunner
 from pydantic import BaseModel
 
+from imbue.mngr.cli.address_params import parse_agent_or_host_addresses_or_raise
 from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
-from imbue.mngr.cli.snapshot import _bucketize_mixed_identifiers
+from imbue.mngr.cli.snapshot import _agent_identifiers_for_targets
 from imbue.mngr.cli.snapshot import _emit_create_result
 from imbue.mngr.cli.snapshot import _emit_destroy_dry_run
 from imbue.mngr.cli.snapshot import _emit_destroy_result
 from imbue.mngr.cli.snapshot import _emit_list_snapshots
+from imbue.mngr.cli.snapshot import _required_providers_for_targets
 from imbue.mngr.cli.snapshot import snapshot
 from imbue.mngr.cli.snapshot import snapshot_create
 from imbue.mngr.cli.snapshot import snapshot_destroy
@@ -25,6 +27,7 @@ from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.main import cli
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -43,9 +46,7 @@ from imbue.mngr.primitives import SnapshotName
     [
         (snapshot_create, SnapshotCreateCliOptions, "--name", "name"),
         (snapshot_create, SnapshotCreateCliOptions, "--on-error", "on_error"),
-        (snapshot_create, SnapshotCreateCliOptions, "--host", "hosts"),
         (snapshot_list, SnapshotListCliOptions, "--limit", "limit"),
-        (snapshot_list, SnapshotListCliOptions, "--host", "hosts"),
         (snapshot_destroy, SnapshotDestroyCliOptions, "--snapshot", "snapshots"),
         (snapshot_destroy, SnapshotDestroyCliOptions, "--all-snapshots", "all_snapshots"),
         (snapshot_destroy, SnapshotDestroyCliOptions, "--force", "force"),
@@ -136,53 +137,44 @@ def test_snapshot_destroy_subcommand_not_forwarded(
 
 
 # =============================================================================
-# _bucketize_mixed_identifiers tests
+# parse_agent_or_host_addresses_or_raise tests
 # =============================================================================
 
 
-def test_bucketize_mixed_identifiers_empty_input_returns_empty_lists() -> None:
-    """Empty identifier list returns two empty lists."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers([])
-    assert agent_addrs == []
-    assert host_addrs == []
+def test_parse_agent_or_host_addresses_empty_input_returns_empty_list() -> None:
+    """Empty identifier list returns an empty list."""
+    assert parse_agent_or_host_addresses_or_raise([]) == []
 
 
-def test_bucketize_mixed_identifiers_bare_names_are_agents() -> None:
+def test_parse_agent_or_host_addresses_bare_names_are_agents() -> None:
     """Bare names parse as agents under text-only disambiguation."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["foo", "bar"])
-    assert agent_addrs == [
+    assert parse_agent_or_host_addresses_or_raise(["foo", "bar"]) == [
         AgentAddress(agent=AgentName("foo")),
         AgentAddress(agent=AgentName("bar")),
     ]
-    assert host_addrs == []
 
 
-def test_bucketize_mixed_identifiers_at_prefix_is_host() -> None:
+def test_parse_agent_or_host_addresses_at_prefix_is_host() -> None:
     """A leading ``@`` forces host parsing."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["@my-host", "@my-host.modal"])
-    assert agent_addrs == []
-    assert host_addrs == [
+    assert parse_agent_or_host_addresses_or_raise(["@my-host", "@my-host.modal"]) == [
         HostAddress(host=HostName("my-host")),
         HostAddress(host=HostName("my-host"), provider=ProviderInstanceName("modal")),
     ]
 
 
-def test_bucketize_mixed_identifiers_host_id_is_host() -> None:
+def test_parse_agent_or_host_addresses_host_id_is_host() -> None:
     """A bare HostId is recognized as a host without the ``@`` prefix."""
     host_id = HostId.generate()
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers([str(host_id)])
-    assert agent_addrs == []
-    assert host_addrs == [HostAddress(host=host_id)]
+    assert parse_agent_or_host_addresses_or_raise([str(host_id)]) == [HostAddress(host=host_id)]
 
 
-def test_bucketize_mixed_identifiers_mix_of_agents_and_hosts() -> None:
-    """Agent tokens and host tokens go to their respective buckets."""
-    agent_addrs, host_addrs = _bucketize_mixed_identifiers(["my-agent", "@my-host", "other-agent"])
-    assert agent_addrs == [
+def test_parse_agent_or_host_addresses_mix_of_agents_and_hosts() -> None:
+    """Agent tokens and host tokens are parsed into a single mixed list, preserving order."""
+    assert parse_agent_or_host_addresses_or_raise(["my-agent", "@my-host", "other-agent"]) == [
         AgentAddress(agent=AgentName("my-agent")),
+        HostAddress(host=HostName("my-host")),
         AgentAddress(agent=AgentName("other-agent")),
     ]
-    assert host_addrs == [HostAddress(host=HostName("my-host"))]
 
 
 # =============================================================================
@@ -227,41 +219,53 @@ def test_emit_destroy_result_format_template(capsys: pytest.CaptureFixture[str])
     assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
 
 
+def _make_destroy_dry_run_entry(
+    host_id: HostId,
+) -> tuple[DiscoveredHost, SnapshotId, str]:
+    return (
+        DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName("host-1"),
+            provider_name=ProviderInstanceName("modal"),
+        ),
+        SnapshotId("snap-abc"),
+        "before-refactor",
+    )
+
+
 def test_emit_destroy_dry_run_human(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_dry_run lists each snapshot that would be destroyed."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    snapshots_to_delete = [
-        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
-    ]
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
     _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
     out = capsys.readouterr().out
     assert "Would destroy 1 snapshot(s)" in out
     assert "snap-abc" in out
     assert "before-refactor" in out
-    assert "host-1" in out
+    assert str(host_id) in out
 
 
 def test_emit_destroy_dry_run_json(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_dry_run emits a dry_run JSON payload without a destroy count key."""
     output_opts = OutputOptions(output_format=OutputFormat.JSON)
-    snapshots_to_delete = [
-        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
-    ]
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
     _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["dry_run"] is True
     assert parsed["count"] == 1
     assert parsed["snapshots"][0]["snapshot_id"] == "snap-abc"
+    assert parsed["snapshots"][0]["host_id"] == str(host_id)
 
 
 def test_emit_destroy_dry_run_format_template(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_destroy_dry_run renders custom format templates."""
     output_opts = OutputOptions(output_format=OutputFormat.HUMAN, format_template="{snapshot_id}\t{host_id}")
-    snapshots_to_delete = [
-        ("host-1", ProviderInstanceName("modal"), SnapshotId("snap-abc"), "before-refactor"),
-    ]
+    host_id = HostId.generate()
+    snapshots_to_delete = [_make_destroy_dry_run_entry(host_id)]
     _emit_destroy_dry_run(snapshots_to_delete, output_opts=output_opts)
-    assert capsys.readouterr().out.strip() == "snap-abc\thost-1"
+    assert capsys.readouterr().out.strip() == f"snap-abc\t{host_id}"
 
 
 # =============================================================================
@@ -482,3 +486,60 @@ def test_emit_list_snapshots_human_table_with_size(capsys: pytest.CaptureFixture
     assert "snap-list-table-1" in output
     assert "my-snapshot" in output
     assert "host-abc" in output
+
+
+# =============================================================================
+# Discovery-narrowing helper tests
+# =============================================================================
+
+
+def test__required_providers_for_targets_returns_none_for_unpinned_agent() -> None:
+    """A bare agent address (no host/provider) disables provider narrowing."""
+    assert _required_providers_for_targets([AgentAddress(agent=AgentName("a"))]) is None
+
+
+def test__required_providers_for_targets_returns_none_for_unpinned_host() -> None:
+    """A host address without a provider disables provider narrowing."""
+    assert _required_providers_for_targets([HostAddress(host=HostName("h"))]) is None
+
+
+def test__required_providers_for_targets_dedupes_pinned_providers() -> None:
+    """When every address pins a provider, the deduped sorted tuple is returned."""
+    addrs = [
+        AgentAddress(
+            agent=AgentName("a"),
+            host=HostAddress(host=HostName("h1"), provider=ProviderInstanceName("modal")),
+        ),
+        HostAddress(host=HostName("h2"), provider=ProviderInstanceName("local")),
+        HostAddress(host=HostName("h3"), provider=ProviderInstanceName("modal")),
+    ]
+    assert _required_providers_for_targets(addrs) == (
+        ProviderInstanceName("local"),
+        ProviderInstanceName("modal"),
+    )
+
+
+def test__required_providers_for_targets_empty_input_returns_none() -> None:
+    assert _required_providers_for_targets([]) is None
+
+
+def test__agent_identifiers_for_targets_returns_none_when_any_host_address_present() -> None:
+    """A mixed list with any HostAddress disqualifies event-stream narrowing."""
+    addrs = [
+        AgentAddress(agent=AgentName("a")),
+        HostAddress(host=HostName("h")),
+    ]
+    assert _agent_identifiers_for_targets(addrs) is None
+
+
+def test__agent_identifiers_for_targets_collects_when_all_agents() -> None:
+    """When every address is an AgentAddress, identifiers are collected in order."""
+    addrs = [
+        AgentAddress(agent=AgentName("a")),
+        AgentAddress(agent=AgentName("b")),
+    ]
+    assert _agent_identifiers_for_targets(addrs) == ("a", "b")
+
+
+def test__agent_identifiers_for_targets_empty_input_returns_none() -> None:
+    assert _agent_identifiers_for_targets([]) is None

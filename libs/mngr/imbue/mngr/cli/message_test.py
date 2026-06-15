@@ -27,7 +27,6 @@ _DEFAULT_OPTS = MessageCliOptions(
     message_file=None,
     on_error="continue",
     start=False,
-    provider=(),
     output_format="human",
     quiet=False,
     verbose=0,

@@ -17,16 +17,45 @@ Task tool invocations are routed through a mngr-managed proxy subagent.
 This lets you `mngr connect` to subagents, observe their progress, and
 the parent still receives a normally-shaped `tool_result`.
 
-## Modes
+## Enabling the plugin (disabled by default)
 
-The plugin has two modes, selected via mngr config:
+Unlike most mngr plugins -- which load unless you explicitly disable them
+-- this plugin is **opt-in: disabled by default**. It does nothing until a
+config layer explicitly turns it on:
 
 ```toml
 [plugins.claude_subagent_proxy]
+enabled = true
+```
+
+This inverted default exists because the plugin is **very experimental and
+breaks a lot of other tooling**: it intercepts Claude Code's built-in
+`Task` tool and reroutes subagent execution, which interferes with stop
+hooks, plan mode, permission round-trips, and other plugins (see the
+warning above and "Deferred / out-of-scope" below). It is too disruptive
+to be on for every Claude agent by default, so it must be turned on
+deliberately.
+
+The opt-in is enforced in mngr core via the `OPT_IN_PLUGINS` set in
+`libs/mngr/imbue/mngr/config/pre_readers.py`: the plugin's name is listed
+there, so `read_disabled_plugins()` reports it as disabled unless a config
+layer sets `enabled = true`. Setting it to `enabled = true` reuses the
+exact same `[plugins.<name>] enabled` key as the normal enable/disable
+mechanism, just with the default flipped; later config layers (project,
+local) can re-disable it the usual way (`enabled = false`).
+
+## Modes
+
+Once enabled, the plugin has two modes, selected via mngr config (both keys
+live under the same table, so set them together):
+
+```toml
+[plugins.claude_subagent_proxy]
+enabled = true   # required: the plugin is disabled by default (see above).
 mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
                  # via a Haiku dispatcher (the original behavior).
 # mode = "DENY"  # alternative: deny Task calls with a short skill-pointer
-                 # reason that directs Claude at the `mngr-subagents` skill;
+                 # reason that directs Claude at the `mngr-proxy` skill;
                  # the skill teaches the two-command `mngr create` +
                  # `subagent_wait` protocol Claude runs itself via Bash.
 ```
@@ -63,8 +92,11 @@ mode = "PROXY"   # default: route Task calls through a mngr-managed subagent
   proxy children before the parent's state dir is wiped.
 
 The plugin also contributes a `mngr-proxy` Claude subagent definition
-at `.claude/agents/mngr-proxy.md` and writes per-tool-use wait-scripts
-into `$MNGR_AGENT_STATE_DIR/proxy_commands/`.
+at `.claude/agents/mngr-proxy/proxy.md` and writes per-tool-use wait-scripts
+into `$MNGR_AGENT_STATE_DIR/proxy_commands/`. The subagent is identified by
+the `name: mngr-proxy` field in that file's frontmatter, so the enclosing
+`mngr-proxy/` subdirectory does not affect discovery (see "Provisioning
+artifacts and gitignore" below).
 
 ## Wait-script protocol
 
@@ -231,9 +263,9 @@ The hook denies every Task call with a short, uniform
 
     mngr_claude_subagent_proxy is in deny mode: the Task tool is disabled
     for this agent. Use a mngr-managed subagent instead -- see the
-    `mngr-subagents` skill for the two-command spawn-and-wait protocol.
+    `mngr-proxy` skill for the two-command spawn-and-wait protocol.
 
-Claude (the calling agent) loads the `mngr-subagents` skill from the
+Claude (the calling agent) loads the `mngr-proxy` skill from the
 agent's `.claude/skills/`, which teaches the explicit two-command
 protocol:
 
@@ -271,14 +303,14 @@ What deny mode installs:
 - `PreToolUse:Agent` hook (the skill-pointer deny).
 - `SessionStart` hook -- the same `hooks/reap.py` PROXY uses
   (see "Reaping orphan children" below).
-- `.claude/skills/mngr-subagents/SKILL.md` -- the explicit
+- `.claude/skills/mngr-proxy/SKILL.md` -- the explicit
   spawn-and-wait protocol Claude is expected to use.
 
 What deny mode does NOT install or run (vs. PROXY):
 - No `PostToolUse:Agent` cleanup -- the deny hook never runs
   `mngr create` itself, so there is no per-Task-call state on the
   parent to clean up.
-- No `mngr-proxy.md` Haiku dispatcher.
+- No `mngr-proxy/proxy.md` Haiku dispatcher.
 - No `_check_project_settings_stop_hooks_guarded` check on
   `.claude/settings.json`.
 - No `hooks/guard_stop_hooks.py` SessionStart hook -- DENY children
@@ -390,7 +422,7 @@ points Claude at the resolved path so it can prepend the body itself
 (DENY). Both modes treat the body as **user-message text**, not a
 system prompt, and **ignore tool restrictions entirely** -- the
 spawned mngr subagent inherits the user's full Claude config. The
-v1 docstring on `SubagentProxyMode.DENY` and the `mngr-subagents`
+v1 docstring on `SubagentProxyMode.DENY` and the `mngr-proxy`
 skill both flag this as a known limitation.
 
 Fix path: extend `mngr create` (and the `mngr_claude` Claude
@@ -404,22 +436,46 @@ the proxy uses. For tool restrictions, register
 `mngr-proxy-child`-style agent types per frontmatter-declared
 permission profile and select the right one at `mngr create` time.
 
-#### Move provisioning artifacts (`mngr-proxy.md`, `mngr-subagents` SKILL.md) out of the worktree
+#### Provisioning artifacts and gitignore
 
-**Not yet possible cleanly.** The plugin currently writes two
-provisioning-time files into the agent's worktree:
+The plugin writes one provisioning-time file into the agent's worktree
+per mode:
 
-- PROXY mode: `<work_dir>/.claude/agents/mngr-proxy.md` (the Haiku
+- PROXY mode: `<work_dir>/.claude/agents/mngr-proxy/proxy.md` (the Haiku
   dispatcher agent definition).
-- DENY mode: `<work_dir>/.claude/skills/mngr-subagents/SKILL.md` (the
+- DENY mode: `<work_dir>/.claude/skills/mngr-proxy/SKILL.md` (the
   spawn-and-wait protocol skill).
 
-For git-tracked projects, both show up as untracked files in `git
-status` and trip clean-tree stop hooks
-(`imbue-code-guardian`'s `stop_hook_orchestrator.sh` is the canonical
-case). A move was attempted on this branch and reverted; the
-investigation findings are below so the next attempt doesn't redo
-them:
+For git-tracked projects, an unignored file here shows up as untracked
+in `git status` and trips clean-tree stop hooks (`imbue-code-guardian`'s
+`stop_hook_orchestrator.sh` is the canonical case). Two mitigations are
+in place:
+
+1. **Ignorable layout.** Both artifacts live under a `mngr-proxy/`
+   subdirectory (rather than flat in `agents/` / `skills/`), so a
+   single `.claude/agents/mngr-proxy/` or `.claude/skills/mngr-proxy/`
+   line in `.gitignore` covers each. The agent definition is still
+   discovered from the subdirectory because Claude Code scans
+   `.claude/agents/` recursively and identifies a subagent by its
+   frontmatter `name:` field, not its path. (Skills must keep the exact
+   `SKILL.md` entry filename and are named by their directory, so the
+   skill could not also adopt a `*.local.md` style suffix.)
+
+2. **Gitignore guard.** At provisioning the plugin runs
+   `_check_proxy_artifact_gitignored` (which shares the
+   `check_path_gitignore_status` helper in `mngr.api.git` with
+   mngr_claude's settings.local.json guard) and raises
+   `UnignoredProxyArtifactError` if the target path is not gitignored.
+   The error tells the user to
+   either add the path to `.gitignore` or disable the plugin for the
+   repo
+   (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).
+   This fails loudly instead of silently dirtying the worktree.
+
+Fully moving the artifacts *out* of the worktree (so no `.gitignore`
+entry is needed at all) is still not possible cleanly. A move was
+attempted on an earlier branch and reverted; the investigation findings
+are below so the next attempt doesn't redo them:
 
 **The symlink-traversal trap.** mngr_claude's
 `_sync_user_resources` (with default `symlink_user_resources=True`)
@@ -430,8 +486,8 @@ subdirs to `~/.claude/skills/` and `~/.claude/agents/`:
     <state_dir>/plugin/claude/anthropic/agents -> ~/.claude/agents
 
 So a naive "write to per-agent CLAUDE_CONFIG_DIR" approach
-(`<state_dir>/plugin/claude/anthropic/skills/mngr-subagents/SKILL.md`)
-follows the symlink and writes to `~/.claude/skills/mngr-subagents/SKILL.md`
+(`<state_dir>/plugin/claude/anthropic/skills/mngr-proxy/SKILL.md`)
+follows the symlink and writes to `~/.claude/skills/mngr-proxy/SKILL.md`
 -- polluting the user's global Claude config dir, persisting across
 all mngr agents, and visible to the user's primary `claude` session.
 Worse than worktree pollution, not better. Unit tests using
@@ -459,17 +515,19 @@ placement (as of May 2026):**
 
 - For the SKILL.md: plumb `--add-dir <state_dir>` through
   mngr_claude's Claude launcher, write SKILL.md to
-  `<state_dir>/.claude/skills/mngr-subagents/SKILL.md` (NOT through
+  `<state_dir>/.claude/skills/mngr-proxy/SKILL.md` (NOT through
   the symlink). Keeps both the worktree and user home clean. Requires
   changes outside this plugin (mngr_claude's claude invocation).
-- For mngr-proxy.md: no clean fix until Claude Code grows an
+- For the agent definition: no clean fix until Claude Code grows an
   escape hatch for agent discovery, OR we package the proxy
   definition as a Claude Code plugin installed in the per-agent
   plugin cache (a bigger refactor).
 
-Either way, the SKILL.md and mngr-proxy.md fix is **not a small
-local change** to this plugin; both need work in mngr_claude or
-Claude Code itself.
+Either way, fully relocating the SKILL.md and agent definition is
+**not a small local change** to this plugin; both need work in
+mngr_claude or Claude Code itself. Until then, the gitignore guard
+above keeps the worktree-resident files from silently dirtying the
+tree.
 
 #### Per-agent opt-in via a dedicated agent type
 

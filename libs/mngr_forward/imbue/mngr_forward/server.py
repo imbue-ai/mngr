@@ -162,12 +162,29 @@ def _parse_workspace_subdomain(host_header: str) -> AgentId | None:
 
 
 def _unauthenticated_subdomain_response(request: Request, port: int) -> Response:
-    """Redirect HTML navigations to the bare-origin landing page; 403 for everything else."""
+    """Redirect HTML navigations to the agent's /goto/ bridge; 403 for everything else.
+
+    The bridge re-mints a fresh subdomain auth token using the bare-origin
+    session cookie (which the host app refreshes on every restart) and
+    sets a new subdomain cookie before bouncing the browser back. Without
+    this, an agent-subdomain cookie that fails verification (stale
+    signing key after a host-app restart, expired window) would land the
+    user on the bare-origin landing instead of self-healing into the
+    workspace.
+
+    Falls back to the bare-origin landing if the host header does not
+    carry an ``agent-<hex>.localhost`` we can parse.
+    """
     accept = request.headers.get("accept", "")
-    if "text/html" in accept:
+    if "text/html" not in accept:
+        return Response(status_code=403, content="Not authenticated")
+    host_header = request.headers.get("host", "")
+    agent_id = _parse_workspace_subdomain(host_header)
+    if agent_id is None:
         location = f"http://localhost:{port}/"
-        return Response(status_code=302, headers={"Location": location})
-    return Response(status_code=403, content="Not authenticated")
+    else:
+        location = f"http://localhost:{port}/goto/{agent_id}/"
+    return Response(status_code=302, headers={"Location": location})
 
 
 # -- WebSocket forwarding helpers -----------------------------------------
