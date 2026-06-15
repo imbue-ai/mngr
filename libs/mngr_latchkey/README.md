@@ -72,6 +72,30 @@ Both fields are overridable via the matching env vars
 CLI flags (`--latchkey-directory`, `--latchkey-binary`). Precedence is
 CLI flag > env var > settings.toml > built-in default.
 
+### Logs
+
+`mngr latchkey forward` writes its logs under the plugin data directory
+(`<latchkey_directory>/mngr_latchkey/`):
+
+- `events.jsonl` -- the supervisor's **structured** log, written via the
+  standard mngr/minds JSONL sink: one flat JSON object per line with a
+  nanosecond `timestamp`, `level`, `message`, and source location,
+  size-rotated (rotated copies `events.jsonl.<timestamp>`, oldest
+  pruned). Read this when you need to observe timing. The shared
+  `latchkey gateway` subprocess's output is routed through the same log
+  (each line at `DEBUG`, prefixed with `[latchkey gateway]`), so it is
+  timestamped and rotated too rather than living in a separate unrotated
+  file.
+
+- `latchkey_forward.log` -- the raw stdout/stderr capture of the detached
+  supervisor process. Its file descriptor is handed straight to the
+  process, so it cannot be rotated mid-write; instead the supervisor is
+  spawned with `--quiet`, so in steady state it logs nothing here (all
+  logging goes to `events.jsonl`). This file therefore stays effectively
+  empty and only ever captures rare startup-failure output (Click errors
+  or a pre-logging traceback) that never reaches the structured log -- so
+  it is the place to look if the supervisor dies before it starts logging.
+
 ## Embedding
 
 Embedders (such as the minds desktop client) typically want a single

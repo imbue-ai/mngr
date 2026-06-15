@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in t
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+`mngr aws prepare` is now read-only-first: when the `mngr-aws` security group already exists with the required SSH ingress, it returns without issuing any write API call. A re-run on an already-prepared region therefore succeeds with a key that only has `ec2:DescribeSecurityGroups`; the `ec2:CreateSecurityGroup` / `ec2:AuthorizeSecurityGroupIngress` permissions are needed only when the group or a rule is actually missing. This lets callers safely run `prepare` before every create regardless of the key's privileges.
+
 ## 2026-06-12
 
 Declared the AWS provider's `allowed_ssh_cidrs` as a replace-by-default field so a

@@ -6,6 +6,14 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-06-15
+
+### Fixed
+
+- Fixed: Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store, so agents created *inside* a container (e.g. by an in-container `mngr create`) are visible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery. Previously such agents only showed up in `mngr list`, so onboarding messages to an in-container chat agent were never delivered. Each host's running state is derived from the same live read, removing a per-host inspect round-trip.
+
+## [v0.1.6] - 2026-06-13
+
 ### Added
 
 - Added: `MinimalVpsDockerProvider` (in `mngr_vps_docker.instance`) pairs with a `vps_client` whose provisioning calls raise (e.g. an `ExternallyManagedVpsClient` stub) -- provisioning is managed elsewhere and this provider only runs the post-provisioning host-setup machinery. Its `_parse_build_args` extracts `--git-depth=N` and forwards the rest to docker; the legacy `--vps-*` prefix is rejected with a migration error. Used by `mngr_imbue_cloud`'s slow path.
@@ -28,6 +36,7 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 - Fixed: `builder = "DEPOT"` builds, which were broken for all VPS backends (aws/vultr/ovh). The depot CLI installs to `$HOME/.depot/bin/depot` (not on the non-interactive shell's PATH), but `build_image_on_outer` invoked it by bare name (`depot build ...`), failing with `bash: line 1: depot: command not found`. The CLI is now resolved at run time: a `depot` already on PATH is preferred, otherwise it falls back to the installer's off-PATH default `$HOME/.depot/bin/depot`. The same resolved path drives both the idempotent install check and the `depot build` invocation.
 - Fixed: `mngr create` against the VPS Docker backends (aws/vultr/ovh) no longer fails the post-build git seed with `remote rejected ... refusing to update checked out branch` when the build context is a primary git checkout (`.git` is a directory) with linked worktrees. The remote-`docker build` flow now clones any local git context into a temp dir before upload; the fresh clone's `.git` is self-contained and carries no `.git/worktrees/` admin, so the operator's other branches are no longer baked into the image as "checked out". The operator's uncommitted edits are still overlaid onto the clone.
+- Fixed: vps-docker backups now capture data on every cycle instead of only the first. The outer-side btrfs snapshot helper (`snapshot_helper.sh`) creates each snapshot at a unique caller-named path (`snapshots/<name>`) and the inner `host_backup` service garbage-collects old snapshots; previously the helper reused a single fixed path, which under gVisor (runsc) made every snapshot read after the first delete+recreate come back empty (the gofer cached a handle to the first subvolume), so restic backed up nothing.
 
 ## [v0.1.5] - 2026-06-08
 

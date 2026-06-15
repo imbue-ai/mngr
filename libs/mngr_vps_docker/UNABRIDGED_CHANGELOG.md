@@ -4,6 +4,18 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store. The outer store is only written by the host-side mngr at agent-create time, so agents created *inside* a container (for example by an in-container `mngr create`) were never recorded there and were invisible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery -- even though `mngr list` showed them (it already read live). This caused, among other things, onboarding messages to an in-container chat agent to never be delivered. Discovery now uses the same live read that imbue_cloud already used, and derives each host's running state from that same read (removing a separate per-host inspect round-trip). If only the live read fails (for example a `docker exec` racing a container restart) after a host's record has already been read, that host still appears in the listing as offline rather than disappearing.
+
+## 2026-06-13
+
+Reworked the outer-side btrfs snapshot helper (`snapshot_helper.sh`) so vps-docker backups capture data on every cycle instead of only the first.
+
+Previously the helper snapshotted into a single fixed path (`snapshots/current`), deleting and recreating it each cycle. Under gVisor (runsc) the container reads that path through the gofer, which caches a handle to the first subvolume it opened -- so after the first delete+recreate every snapshot read came back empty and restic backed up nothing.
+
+The helper now creates each snapshot at a unique, caller-named path (`snapshots/<name>`), fails rather than overwriting on a name collision, and deletes old snapshots by name on request. Cleanup targets are validated to be a single path component (no `/` or `..`) so a malformed request can never escape the snapshots directory or touch the live subvolume. The inner `host_backup` service drives the new naming and garbage-collects old snapshots down to a retained count.
+
 ## 2026-06-12
 
 Fixed `builder = "DEPOT"` builds, which were broken for all VPS backends (aws/vultr/ovh).

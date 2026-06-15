@@ -335,6 +335,18 @@ deploy *args:
 # dev case. Refuses without activation so the recipe never silently
 # writes to the wrong env's data root.
 #
+# Install the minds desktop client's node deps (electron, etc.) using the Node
+# version apps/minds pins in apps/minds/.nvmrc -- selected via
+# select_node_version.sh so pnpm's engine-strict check passes regardless of the
+# shell's default node. Run this once before `just minds-start`; `minds-start`
+# points here when node_modules is missing. Never installs Node (errors with a
+# hint if the pinned version isn't available via nvm).
+minds-install:
+    #!/bin/bash
+    set -ueo pipefail
+    . apps/minds/scripts/select_node_version.sh || exit 2
+    cd apps/minds && pnpm install
+
 # Override agent_name / branch via positional args:
 #   just minds-start agent_name=foo branch=some-branch
 # Refuses to start if another minds-start is already running in this
@@ -428,8 +440,7 @@ minds-start agent_name="mindtest" branch="":
         echo "" >&2
         echo "error: minds desktop client isn't installed/built yet in this worktree." >&2
         echo "       Run:" >&2
-        echo "         cd apps/minds && pnpm install && cd -" >&2
-        echo "         just minds-build" >&2
+        echo "         just minds-install" >&2
         echo "       (~2 min on first run; subsequent rebuilds are seconds)." >&2
         echo "       Then re-run \`just minds-start\`." >&2
         exit 2
@@ -788,24 +799,40 @@ create-new-mind-repo repo_name parent_dir="$HOME/project":
 # dev / ci envs auto-resolve the DSN from their per-env secrets.toml. Activate a
 # minds env first:  eval "$(uv run minds env activate <name>)"
 
-# Bake one or more pre-provisioned pool hosts for the activated minds env.
+# Bake pre-provisioned OVH-VPS pool host(s) for the activated minds env.
 #
-# The baked version comes entirely from <workspace_dir> (a forever-claude-template
-# checkout) -- check it out at the branch/tag you want baked first. <attributes>
-# is only the lease-match label the desktop client sends (e.g. repo_branch_or_tag);
-# it does NOT select the baked version. Extra flags forward to `minds pool create`
-# (e.g. --no-recycle, --mngr-source <monorepo-root>).
+# The bake DERIVES the stamped identity (repo_url + repo_branch_or_tag) from its
+# source -- you no longer hand-type them, so the advertised identity always matches
+# what was baked. Two modes:
 #
-# Usage:
-#   eval "$(uv run minds env activate staging)"
-#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
-#   just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-EAST-VA ~/project/forever-claude-template 2
-bake-pool-host attributes region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
+#   DEV (best-effort label): bake from a working tree; identity = its origin remote
+#     + current branch (uncommitted changes included). Use this for iteration.
+#       eval "$(uv run minds env activate staging)"
+#       just bake-pool-host-dev US-WEST-OR ~/project/forever-claude-template
+#
+#   PROD (strict, tag): clone the FCT remote at an exact tag into a fresh temp dir
+#     and bake from that; identity = remote + tag (content provably equals the tag).
+#       just bake-pool-host-prod US-WEST-OR v0.3.0
+#
+# IMPORTANT for the fast path: a desktop-client create adopts a baked host only when
+# its canonical repo + branch + region match. For a DEV fast-path test, set the create
+# form's repository to the ACTUAL git remote (not a local clone path) and the branch to
+# the same branch you baked. Extra flags forward to `minds pool create` (e.g.
+# --no-recycle, --mngr-source <monorepo-root>, --attributes '{"cpus":2}').
+bake-pool-host-dev region workspace_dir="$HOME/project/forever-claude-template" count="1" *extra_args:
     uv run minds pool create \
         --count "{{count}}" \
         --region "{{region}}" \
-        --attributes '{{attributes}}' \
         --workspace-dir "{{workspace_dir}}" \
+        --skip-deferred-install-wait \
+        {{extra_args}}
+
+# Production OVH-VPS pool bake from an exact FCT tag (strict; see bake-pool-host-dev).
+bake-pool-host-prod region tag count="1" *extra_args:
+    uv run minds pool create \
+        --count "{{count}}" \
+        --region "{{region}}" \
+        --from-tag "{{tag}}" \
         {{extra_args}}
 
 # List pool_hosts rows for the activated minds env (read-only).

@@ -193,3 +193,75 @@ def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
     )
     assert result.exit_code != 0
     assert "KEY=VALUE" in result.output or "KEY=VALUE" in str(result.exception)
+
+
+def _slice_create_args(extra: list[str]) -> list[str]:
+    """Base ``pool create --backend slice`` argv (with a DSN so resolution succeeds).
+
+    Carries no identity attributes: repo_url / repo_branch_or_tag are derived from
+    the bake source (--from-tag / --workspace-dir), never passed in --attributes.
+    """
+    return [
+        "create",
+        "--backend",
+        "slice",
+        "--count",
+        "1",
+        "--region",
+        "US-EAST-VA",
+        "--database-url",
+        "postgres://example",
+        *extra,
+    ]
+
+
+def test_pool_create_requires_a_bake_source_selector() -> None:
+    """Neither --from-tag nor --workspace-dir is a usage error (exactly one is required)."""
+    result = CliRunner().invoke(pool, _slice_create_args([]))
+    assert result.exit_code != 0
+    assert "--from-tag" in result.output and "--workspace-dir" in result.output
+
+
+def test_pool_create_rejects_both_bake_source_selectors(tmp_path: Any) -> None:
+    """Passing both --from-tag and --workspace-dir is a usage error."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--from-tag", "v0.3.0", "--workspace-dir", str(tmp_path)]))
+    assert result.exit_code != 0
+    assert "exactly one" in result.output
+
+
+def test_pool_create_slice_backend_rejects_tag() -> None:
+    """``--tag`` is OVH-only; using it with ``--backend slice`` is a usage error before any work."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--tag", "k=v"]))
+    assert result.exit_code != 0
+    assert "--tag is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_slice_backend_rejects_management_key(tmp_path: Any) -> None:
+    """Slices authorize the pool key from POOL_SSH_PRIVATE_KEY, so the mgmt-key flag is rejected."""
+    key_file = tmp_path / "mgmt.pub"
+    key_file.write_text("ssh-ed25519 AAAA... operator@host\n")
+    result = CliRunner().invoke(pool, _slice_create_args(["--management-public-key-file", str(key_file)]))
+    assert result.exit_code != 0
+    assert "--management-public-key-file is not applicable to --backend slice" in result.output
+
+
+def test_pool_create_ovh_backend_requires_management_key() -> None:
+    """The OVH backend still requires the management public key (now validated, not click-required)."""
+    result = CliRunner().invoke(
+        pool,
+        [
+            "create",
+            "--count",
+            "1",
+            "--region",
+            "US-EAST-VA",
+            "--attributes",
+            "{}",
+            "--workspace-dir",
+            ".",
+            "--database-url",
+            "postgres://example",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--management-public-key-file is required for --backend ovh_vps" in result.output

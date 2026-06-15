@@ -99,6 +99,7 @@
     var apiKeyRow = document.getElementById('api-key-row');
     var apiKeyInput = document.getElementById('anthropic_api_key');
     var launchModeError = document.getElementById('launch-mode-account-error');
+    var awsCredentialsNote = document.getElementById('aws-credentials-note');
     var aiProviderError = document.getElementById('ai-provider-account-error');
     var backupSelect = document.getElementById('backup_provider');
     var backupApiKeyRow = document.getElementById('backup-api-key-row');
@@ -114,7 +115,7 @@
     var REGION_OPTIONS = {{ region_options_by_launch_mode | tojson }};
     var REGION_SELECTED = {{ region_selected_by_launch_mode | tojson }};
 
-    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', CLOUD: 'a cloud VM'};
+    var COMPUTE_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', DOCKER: 'Docker', LIMA: 'Lima', VULTR: 'Vultr', AWS: 'AWS'};
     var AI_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your Anthropic API key', SUBSCRIPTION: 'your Claude subscription'};
     var BACKUP_LABELS = {IMBUE_CLOUD: 'Imbue Cloud', API_KEY: 'your own storage', CONFIGURE_LATER: 'off for now'};
 
@@ -176,7 +177,7 @@
 
     function updateRegion() {
       // The region dropdown is only shown for providers that place a machine in
-      // a chosen region (imbue_cloud, vultr). For others it is hidden and
+      // a chosen region (imbue_cloud, vultr, aws). For others it is hidden and
       // disabled so no region value is submitted.
       var mode = launchSelect.value;
       var options = REGION_OPTIONS[mode];
@@ -231,6 +232,7 @@
       var aiInvalid = !hasAccount && aiProviderSelect.value === 'IMBUE_CLOUD';
       var backupInvalid = !hasAccount && backupValue === 'IMBUE_CLOUD';
       launchModeError.classList.toggle('hidden', !launchInvalid);
+      if (awsCredentialsNote) awsCredentialsNote.classList.toggle('hidden', launchSelect.value !== 'AWS');
       aiProviderError.classList.toggle('hidden', !aiInvalid);
       backupProviderError.classList.toggle('hidden', !backupInvalid);
       submitBtn.disabled = launchInvalid || aiInvalid || backupInvalid;
@@ -301,6 +303,12 @@
             </Select>
           </div>
           <p id="launch-mode-account-error" class="hidden mt-1 text-xs text-amber-600 text-right">imbue_cloud requires a selected account.</p>
+          <p id="aws-credentials-note" class="hidden mt-1 text-xs text-zinc-400">
+            AWS credentials are read from this machine's environment
+            (<code>AWS_ACCESS_KEY_ID</code> / <code>AWS_SECRET_ACCESS_KEY</code>,
+            or <code>AWS_PROFILE</code>, or <code>~/.aws/credentials</code>).
+            Pick a region under advanced settings.
+          </p>
         </div>
 
         <div>

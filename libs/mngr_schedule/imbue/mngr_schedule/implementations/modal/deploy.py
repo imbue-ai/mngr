@@ -733,7 +733,10 @@ def remove_modal_schedule(
         if app_id:
             with ConcurrencyGroup(name=f"modal-app-stop-{trigger_name}") as cg:
                 stop_result = cg.run_process_to_completion(
-                    ["uv", "run", "modal", "app", "stop", app_id, "--env", environment_name],
+                    # --yes: newer Modal CLIs prompt to confirm `app stop` and
+                    # abort with "no interactive terminal detected" when run
+                    # non-interactively (e.g. from a deploy script).
+                    ["uv", "run", "modal", "app", "stop", app_id, "--env", environment_name, "--yes"],
                     is_checked_after=False,
                     timeout=30.0,
                 )

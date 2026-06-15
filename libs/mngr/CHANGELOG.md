@@ -6,6 +6,20 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.14] - 2026-06-15
+
+### Changed
+
+- Changed: User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the existing colored `ERROR:` prefix. Suppressed when stderr is not a TTY or `NO_COLOR` is set; exit semantics are unchanged.
+
+### Fixed
+
+- Fixed: `mngr clone <agent> <name> --provider local` no longer fails with "destination path ... already exists and is not an empty directory"; the remote-source to local-target path now performs a mirror-style `git fetch` into the existing bare repo instead of `git clone --mirror`.
+- Fixed: `mngr clone` (and any agent creation) transferring a git repo between two remote hosts no longer fails with "Identity file ... not accessible" / "Host key verification failed"; the transfer now relays through a local bare mirror so source and target SSH credentials are used on the local orchestrator where those files exist.
+- Fixed: `mngr create`'s "branch already checked out" error now suggests `--transfer=none` instead of the removed `--in-place` flag.
+
+## [v0.2.13] - 2026-06-13
+
 ### Added
 
 - Added: Cross-plugin file-preservation API letting plugins declare a single list of paths to preserve, executed uniformly against either an online host or a stopped host's volume.
@@ -39,10 +53,12 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Changed: `mngr gc --provider <name>` now exits non-zero when an explicitly-named provider is unavailable; other selected providers still run to completion and the unavailable provider is reported in the summary. Empty providers (e.g. a fresh Modal per-user environment) remain silently skipped, and the automatic post-destroy gc path (which uses `--all-providers` and tolerates skips) is unaffected.
 - Changed: Event journals are now read through a unified host file-read interface instead of shelling out `find`/`cat` over SSH; host reads are byte-exact, removing the prior trailing-newline workaround.
 - Changed: Sending a message to a Claude agent now confirms submission as soon as it's accepted into the agent's queue (watching a fresh `enqueue` event in the transcript log concurrently with the existing `tmux wait-for` hook signal, in a single remote command) and returns as soon as either lands. Previously the call always blocked on the `UserPromptSubmit` hook, which only fires when the prompt reaches the model, so `mngr message` (and any caller of the send path, e.g. an HTTP front-end) to a busy agent could block up to the full submission timeout and exceed a front-door proxy timeout even though the message was already queued. TUIs that don't supply an acceptance-marker command keep the original hook-only wait.
+- Changed: Multi-provider discovery now fails loudly when a provider's backend is unreachable instead of silently skipping it -- commands that scan every provider (`mngr message`, `limit`, `snapshot`, `create`) propagate `ProviderUnavailableError` rather than quietly omitting agents on the down provider. Targeted commands (`mngr rsync`, `mngr git push`/`pull`, `mngr event <host>` / `@host[.provider]`) scope discovery to only the provider(s) that could hold the target (via the `.PROVIDER` qualifier and/or the agent name), so an unrelated down provider can't fail them.
 
 ### Removed
 
 - Removed: `-a` / `--all` / `--all-agents` flag on `mngr message` (alias `mngr msg`). Use the explicit `mngr list --ids | mngr msg -` pattern (optionally with `--include` / `--exclude` to scope the broadcast); the tutorial and CLI examples have been updated.
+- Removed: `--provider` flag on `mngr message` (alias `msg`); `--agent` / `--host` flags on `mngr snapshot create` / `list` / `destroy`. `mngr msg` now derives the providers to query from the agent addresses themselves (union of named providers, or full scan if any address omits its provider) -- previously `mngr msg agent@host.provider_a --provider provider_b` queried the wrong provider. `mngr snapshot` takes agent and host targets as a single positional list (`agent`, `agent@host[.provider]`, `@host[.provider]`, or bare `host-...`).
 
 ### Fixed
 
@@ -57,6 +73,8 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 - Fixed: `find_git_worktree_root`, `is_git_repository`, and `find_git_common_dir` no longer silently swallow unexpected `git` failures. Previously any `ProcessError` (non-zero exit, timeout, or failure to spawn the subprocess) was turned into a "not in a git repository" answer, so a transient or environmental git problem would silently drop the project-scope config layer (e.g. disabled plugins would not be blocked) or otherwise misreport repository state; only git's own "not a git repository" result now maps to that sentinel, and the detection calls force a C locale so a localized git cannot defeat the check.
 - Fixed: Regenerated CLI reference docs — `file` / `tmr` See-Also sections link to `mngr rsync` instead of the removed `push` / `pull` commands (fixing broken `[mngr help push](mngr help push)` / `[mngr help pull](mngr help pull)` markdown links), the `mngr kanpan` doc describes the new `--format json` / `--format jsonl` output, and the `mngr forward` doc reflects the dynamic-port behavior. `scripts/make_cli_docs.py --check` now fails on any See-Also reference that resolves to neither a known command nor a help topic.
 - Fixed: Removed a stale duplicate `type = "claude"` line in the e2e fixture's seeded `settings.local.toml` that was causing every release-tier e2e/tutorial test to fail with "Cannot overwrite a value".
+- Fixed: Docker GC could wipe per-host data when the Docker daemon was briefly unavailable. The Docker provider's `discover_hosts` now raises `ProviderUnavailableError` on a connection/timeout error instead of returning `[]`, so a briefly unreachable daemon can no longer be mistaken for "zero hosts" and trigger GC to delete every still-live volume; GC skips unavailable providers at its own boundary.
+- Fixed: DESCRIPTION (and other prose) sections of `mngr <command> --help` now indent to the man-page depth of seven spaces in interactive terminals (pager/rich path); previously they rendered flush-left, unlike the piped/plain output.
 
 ## [v0.2.12] - 2026-06-08
 

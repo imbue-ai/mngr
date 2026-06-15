@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.14] - 2026-06-15
+
+## [v0.2.13] - 2026-06-13
+
 ### Added
 
 - Added: Real OpenCode agent-type support at roughly `mngr_antigravity` parity (previously a bare config shell that ran the binary but reported WAITING forever, with no transcript, resume, or isolation). Each agent runs a headless `opencode serve` plus an `opencode attach` TUI client, driven by an in-process TypeScript plugin over the server's HTTP API: subagent-aware RUNNING/WAITING lifecycle, conversation resume across `mngr stop`/`start`, in-process raw and common transcripts (`emit_common_transcript`, default on), per-agent isolation (`OPENCODE_CONFIG_DIR`/`XDG_DATA_HOME`), and shared auth (the per-agent `auth.json` symlinks to the user's global login; `symlink_auth = false` for full isolation).

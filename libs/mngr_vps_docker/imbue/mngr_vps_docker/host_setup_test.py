@@ -10,7 +10,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
-from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_VERSION
 from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
 from imbue.mngr_vps_docker.host_setup import _remote_script_command
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
@@ -71,7 +71,13 @@ def test_build_host_setup_steps_minimal_order() -> None:
 def test_build_host_setup_steps_pins_docker_version() -> None:
     steps = build_host_setup_steps(install_gvisor_runtime=False, is_qemu_purge_enabled=False)
     docker_step = next(step for step in steps if "Docker" in step.description)
-    assert f"docker-ce={PINNED_DOCKER_APT_VERSION}" in docker_step.script
+    # The apt version is derived per-distro from /etc/os-release at run time (so
+    # the same step works on Debian-family Vultr/OVH/AWS outers and on GCP's
+    # Ubuntu), so assert the pinned core + the derivation rather than a literal.
+    assert PINNED_DOCKER_VERSION in docker_step.script
+    assert 'DOCKER_APT_VERSION="' in docker_step.script
+    assert "~${ID}.${VERSION_ID}~${VERSION_CODENAME}" in docker_step.script
+    assert 'docker-ce="${DOCKER_APT_VERSION}"' in docker_step.script
     assert "--allow-downgrades" in docker_step.script
     assert "get.docker.com" not in docker_step.script
 
