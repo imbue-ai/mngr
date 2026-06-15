@@ -372,16 +372,12 @@ def test_print_extras_status_runs_without_error() -> None:
     )
 
 
-@pytest.mark.flaky
+# Probes plugin / shell-completion / claude-plugin status, which can stall on a
+# contended CI sandbox and trip the global 10s pytest-timeout even though it runs
+# in well under a second locally. Bump the per-test timeout for headroom.
+@pytest.mark.timeout(30)
 def test_extras_no_args_shows_status(cli_runner: CliRunner) -> None:
-    """Running 'mngr extras' with no flags shows status.
-
-    Marked flaky: `_print_extras_status` invokes `_claude_native_plugin_status`,
-    which spawns a `claude` subprocess inside a `ConcurrencyGroup`. Under
-    CI load the subprocess startup occasionally exceeds pytest-timeout's
-    10s budget, with no obvious productive bound to make it tighter at
-    the test level. Offload retries it automatically.
-    """
+    """Running 'mngr extras' with no flags shows status."""
     result = cli_runner.invoke(extras, [])
     assert result.exit_code == 0
     assert "Extras" in result.output
