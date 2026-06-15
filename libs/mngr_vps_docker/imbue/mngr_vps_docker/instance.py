@@ -79,6 +79,7 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 from imbue.mngr_vps_docker.container_setup import CONTAINER_ENTRYPOINT_CMD
@@ -113,6 +114,7 @@ from imbue.mngr_vps_docker.container_setup import snapshot_trigger_volume_name_f
 from imbue.mngr_vps_docker.container_setup import start_container
 from imbue.mngr_vps_docker.container_setup import start_container_sshd
 from imbue.mngr_vps_docker.container_setup import stop_container
+from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
 from imbue.mngr_vps_docker.host_store import VpsHostConfig
 from imbue.mngr_vps_docker.host_store import open_host_store
@@ -363,44 +365,52 @@ def build_vps_tags(host_id: HostId, provider_name: str, extra_tags_raw: str) -> 
     return tags
 
 
+def _is_ready_marker_present(outer: OuterHostInterface) -> bool | None:
+    """Return True once the ``mngr-ready`` marker exists, else None (not-ready / transient SSH error).
+
+    Returning None (rather than False) keeps ``poll_for_value`` polling: a
+    ``HostConnectionError`` is the expected mid-bootstrap SSH disruption, not a
+    terminal failure.
+    """
+    try:
+        return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
+    except HostConnectionError as e:
+        logger.debug("Transient SSH error during host-bootstrap poll (will retry): {}", e)
+        return None
+
+
 def _wait_for_cloud_init_marker(
     outer: OuterHostInterface,
     timeout_seconds: float,
     *,
     poll_interval_seconds: float = 5.0,
     slow_threshold_seconds: float = 30.0,
-    clock: Callable[[], float] = time.monotonic,
-    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
-    """Poll the VPS for /var/run/mngr-ready, the cloud-init completion marker.
+    """Poll the VPS for the ``mngr-ready`` first-boot completion marker.
 
-    Returns once the marker file appears. Swallows ``HostConnectionError``
-    from each poll: cloud-init runs ``apt-get install`` and Docker setup
-    which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
-    writing the sshd tuning). Each poll's underlying retry budget already
-    absorbs single in-flight disruptions; a connection error that propagates
-    past that means the system is still settling. Keep polling --
-    ``timeout_seconds`` is the hard wall.
+    Returns once the marker file appears. The marker is written by whichever
+    first-boot mechanism the backend uses -- cloud-init ``runcmd`` (Vultr / AWS /
+    OVH) or the GCE ``startup-script`` (GCP). A ``HostConnectionError`` on a poll
+    counts as "not ready yet": the bootstrap runs ``apt-get install`` and Docker
+    setup which can momentarily disrupt SSH (e.g. ``systemctl restart ssh`` after
+    writing the sshd tuning), so keep polling until ``timeout_seconds`` -- the
+    hard wall.
 
-    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters
-    so tests can drive this without slow real-time waits; defaults preserve
-    the production cadence (poll every 5s, warn if total > 30s).
-
-    ``clock`` and ``sleeper`` are injected so tests can run against a
-    virtual clock and avoid any real-time sleep.
+    ``poll_interval_seconds`` and ``slow_threshold_seconds`` are parameters so
+    tests can drive this with short intervals; defaults preserve the production
+    cadence (poll every 5s, warn if total > 30s).
     """
-    start = clock()
-    while clock() - start < timeout_seconds:
-        try:
-            if check_file_exists_on_outer(outer, Path("/var/run/mngr-ready")):
-                elapsed = clock() - start
-                if elapsed > slow_threshold_seconds:
-                    logger.warning("Cloud-init took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
-                return
-        except HostConnectionError as e:
-            logger.debug("Transient SSH error during cloud-init poll (will retry): {}", e)
-        sleeper(poll_interval_seconds)
-    raise MngrError(f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS.")
+    value, _, elapsed = poll_for_value(
+        lambda: _is_ready_marker_present(outer),
+        timeout=timeout_seconds,
+        poll_interval=poll_interval_seconds,
+    )
+    if value is None:
+        raise MngrError(
+            f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
+        )
+    if elapsed > slow_threshold_seconds:
+        logger.warning("Host bootstrap took {:.1f}s (threshold: {:.0f}s)", elapsed, slow_threshold_seconds)
 
 
 class VpsDockerProvider(BaseProviderInstance):
@@ -927,6 +937,37 @@ class VpsDockerProvider(BaseProviderInstance):
             tags=tags,
         )
 
+    def _generate_bootstrap_payload(
+        self,
+        *,
+        host_private_key: str,
+        host_public_key: str,
+        authorized_user_public_key: str,
+    ) -> str:
+        """Render the first-boot bootstrap payload threaded into instance creation.
+
+        Default: cloud-init ``user-data``. GCP overrides this to render a GCE
+        ``startup-script`` (stock GCE images run the google-guest-agent, not
+        cloud-init). Both render the same shared ``host_setup`` steps and write the
+        same ``mngr-ready`` marker, so the rest of provisioning is backend-agnostic.
+        """
+        return generate_cloud_init_user_data(
+            host_private_key=host_private_key,
+            host_public_key=host_public_key,
+            install_gvisor_runtime=self.config.install_gvisor_runtime,
+            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
+            authorized_user_public_key=authorized_user_public_key,
+        )
+
+    def _wait_for_expected_host_key(self, vps_ip: str, expected_host_public_key: str, timeout_seconds: float) -> None:
+        """Hook to wait until the VPS serves our SSH host key before strict-checking.
+
+        Default no-op: cloud-init backends set the host key before sshd starts.
+        Backends that set it after boot (GCP's ``startup-script``) override this to
+        poll until the live key matches, closing the mismatch window.
+        """
+        return
+
     def _provision_vps(
         self,
         host_id: HostId,
@@ -943,22 +984,20 @@ class VpsDockerProvider(BaseProviderInstance):
 
         ``vps_public_key`` is the provider SSH public key already loaded by
         ``create_host`` (the sole caller); it is threaded in rather than re-read
-        from disk here. It is injected straight into root via cloud-init (in
-        addition to the copy-from-default-user step), which removes any reliance
-        on a cloud image's default-user key landing in root -- notably on GCE,
-        where the google guest agent provisions the key asynchronously and races
-        the runcmd copy.
+        from disk here. The bootstrap (``_generate_bootstrap_payload``) injects it
+        straight into root (in addition to the copy-from-default-user step), which
+        removes any reliance on a cloud image's default-user key landing in root --
+        notably on GCE, where the google guest agent provisions the key
+        asynchronously and races the copy.
 
         Provider-specific pre-create checks (``_validate_provider_args_for_create``)
         already ran in ``create_host`` before the first provider write, so by the
         time we get here the create preconditions are known to hold.
         """
         vps_host_private_key = vps_host_key_path.read_text()
-        user_data = generate_cloud_init_user_data(
+        user_data = self._generate_bootstrap_payload(
             host_private_key=vps_host_private_key,
             host_public_key=vps_host_public_key,
-            install_gvisor_runtime=self.config.install_gvisor_runtime,
-            auto_shutdown_seconds=self._get_effective_auto_shutdown_seconds(),
             authorized_user_public_key=vps_public_key,
         )
 
@@ -998,11 +1037,22 @@ class VpsDockerProvider(BaseProviderInstance):
         with log_span("Waiting for VPS SSH"):
             self._wait_for_sshd_on_vps(vps_ip, timeout_seconds=self.config.ssh_connect_timeout)
 
-        logger.log(LogLevel.BUILD.value, "Waiting for cloud-init to complete (Docker installation)...", source="vps")
-        with log_span("Waiting for cloud-init (Docker install)"):
+        # Backends that install the host key after sshd starts (GCP's
+        # startup-script) serve a boot-generated key first; wait for our key to
+        # land before the strict-host-key-checked connection below. No-op for
+        # cloud-init backends, which set the key pre-sshd.
+        with log_span("Waiting for expected VPS host key"):
+            self._wait_for_expected_host_key(
+                vps_ip, vps_host_public_key, timeout_seconds=self.config.ssh_connect_timeout
+            )
+
+        logger.log(
+            LogLevel.BUILD.value, "Waiting for host bootstrap to complete (Docker installation)...", source="vps"
+        )
+        with log_span("Waiting for host bootstrap (Docker install)"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
-        logger.log(LogLevel.BUILD.value, "Cloud-init complete, Docker is ready", source="vps")
+        logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")
 
         return vps_instance_id, vps_ip
 

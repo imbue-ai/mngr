@@ -88,6 +88,31 @@ def test_build_provider_instance_raises_provider_unavailable_without_project_any
         GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
 
 
+def test_generate_bootstrap_payload_is_gce_startup_script_not_cloud_init(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """GCP renders a GCE startup-script, since stock GCE images do not run cloud-init.
+
+    This is what makes the default Debian 12 image work: the google-guest-agent
+    executes the ``startup-script`` metadata on every image, unlike cloud-init's
+    ``user-data`` which the stock GCE Debian images ignore.
+    """
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project="p")
+    provider = GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+    assert isinstance(provider, GcpProvider)
+    payload = provider._generate_bootstrap_payload(
+        host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nk\n-----END OPENSSH PRIVATE KEY-----",
+        host_public_key="ssh-ed25519 AAAAhost host",
+        authorized_user_public_key="ssh-ed25519 AAAAaccess user@laptop",
+    )
+    assert payload.startswith("#!/bin/bash\n")
+    assert "#cloud-config" not in payload
+    # The provider key is injected straight into root (the guest agent races the
+    # default-user copy on GCE).
+    assert "'ssh-ed25519 AAAAaccess user@laptop'" in payload
+    assert "touch /var/run/mngr-ready" in payload
+
+
 def test_build_provider_instance_falls_back_to_adc_resolved_project(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -120,7 +145,7 @@ def test_build_provider_instance_prefers_configured_project_over_adc(
 class _FirewallStubClient(GcpVpsClient):
     """GcpVpsClient with firewall resolution stubbed, for hermetic create-hook tests.
 
-    The real ``resolve_firewall`` makes a GCE API call. The pre-create hook now
+    The real ``resolve_firewall`` makes a GCE API call, and the pre-create hook
     invokes it, so tests that exercise the hook stub it: ``resolve_firewall``
     returns the target tag, or (when ``stub_firewall_missing``) raises the same
     ``mngr gcp prepare`` MngrError the real method raises on a 404.
@@ -183,7 +208,7 @@ def test_validate_provider_args_under_pytest_raises_when_unset(temp_mngr_ctx: Mn
 
 def test_validate_provider_args_under_pytest_accepts_positive(temp_mngr_ctx: MngrContext) -> None:
     provider = _build_provider(temp_mngr_ctx, auto_shutdown_seconds=60)
-    # No exception raised (auto_shutdown set, firewall present).
+    # auto_shutdown set and firewall present, so the hook passes.
     provider._validate_provider_args_for_create()
 
 
