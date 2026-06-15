@@ -239,7 +239,7 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...], installed_names: 
 
     ``installed_names`` are the already-installed package names; together with
     the phase-1 selections they form the set of packages a DEPENDENT entry's
-    ``requires_packages`` is checked against.
+    ``RequiredPackagesGate`` is unlocked against.
 
     Returns the list of selected package names, or an empty list if cancelled.
     """
