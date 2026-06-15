@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+- Fixed: `mngr schedule remove` (and the redeploy path that calls it) now passes `--yes` when stopping a schedule's Modal app, so it no longer aborts with "no interactive terminal detected" under newer Modal CLIs when run non-interactively (e.g. from a deploy script).
+
 ## 2026-06-12
 
 Added a `--timezone` option to `mngr schedule add` that pins the IANA timezone

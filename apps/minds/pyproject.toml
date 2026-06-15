@@ -16,6 +16,7 @@ dependencies = [
     "jinjax>=0.45",
     "loguru",
     "imbue-mngr",
+    "imbue-mngr-aws",
     "imbue-mngr-forward",
     "imbue-mngr-latchkey",
     "imbue-mngr-ovh",
@@ -49,6 +50,7 @@ build-backend = "hatchling.build"
 [tool.uv.sources]
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
+imbue-mngr-aws = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
 imbue-mngr-ovh = { workspace = true }

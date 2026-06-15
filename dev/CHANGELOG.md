@@ -4,7 +4,24 @@ A concise, human-friendly summary of changes for repo-level dev tooling: CI work
 
 For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDGED_CHANGELOG.md).
 
-## [Unreleased]
+## 2026-06-14
+
+### Added
+
+- Added: `scripts/extract_antigravity_proto_schema.py` -- a developer tool that recovers antigravity's (`agy`) protobuf schema by scanning the `agy` binary for embedded `FileDescriptorProto`s (agy ships no `.proto` files). Promoted from an inline appendix in `libs/mngr_antigravity/dev/README.md` so the new antigravity schema-verification release test can invoke it directly.
+- Added: Implementation plan for the AWS minds compute provider under `blueprint/aws-minds-compute-provider/`.
+
+### Changed
+
+- Changed: The `dev` project's `CHANGELOG.md` is now date-organized (mirroring `UNABRIDGED_CHANGELOG.md`) instead of carrying an ever-growing `[Unreleased]` section; the nightly consolidation now summarizes each landed date independently into its own `## <date>` section, per `scripts/changelog_consolidation_prompt.md`.
+- Changed: Updated `uv.lock` to add the `anthropic` package (and its transitive `docstring-parser` dependency), newly required by `libs/mngr_claude` for the shared typed Claude stream-json envelope.
+
+### Fixed
+
+- Fixed: `scripts/changelog_deploy.sh` now stops *every* Modal app in the changelog schedule's isolated environment before redeploying (via a new `--stop-all-apps` action in `scripts/changelog_schedule_utils.py`). A past app-naming-scheme change had orphaned an old cron app that kept firing a second nightly `mngr/changelog-consolidation-*` branch; sweeping the whole environment makes redeploys orphan-proof.
+- Fixed: `modal app stop` invocations (in `scripts/modal_nuke.py` and the new changelog sweep) now pass `--yes`, so they no longer abort with "no interactive terminal detected" under newer Modal CLIs when run non-interactively.
+
+## 2026-06-13
 
 ### Added
 
