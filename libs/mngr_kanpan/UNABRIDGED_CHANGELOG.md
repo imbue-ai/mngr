@@ -4,6 +4,12 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+Fixed the kanpan footer flickering when a background refresh and a user action (e.g. deleting a marked agent) ran at the same time. The footer is now driven by a single writer that picks what to show by priority (transient notification > active action > refresh spinner > marked-agent summary > steady text), so overlapping spinner loops can no longer overwrite each other on alternating ticks.
+
+Batch operations in the kanpan TUI (delete, push, and markable custom commands) now surface failures instead of silently doing nothing. When `x` execution fails, the per-agent error detail (including a clear "timed out after Ns" message for timeouts) is listed at the bottom of the board, in the same place fetch errors appear, and persists until the next execution. The marks for failed agents are kept so you can retry.
+
 ## 2026-06-10
 
 `mngr kanpan --format json` now prints a single board snapshot instead of launching the TUI, for programmatic use. The JSON has the ordered columns, agents grouped into sections (with human labels), and any fetch errors; each agent carries both the pre-rendered cells (text/url/color) and the structured field values (PR number, CI status, commits-ahead count, etc.).

@@ -4,6 +4,32 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+Added **AWS** as a compute-provider option in the workspace create form, alongside Docker, Lima, Vultr, and Imbue Cloud. Selecting AWS launches the workspace in a runsc-hardened Docker container on an Amazon EC2 instance (the same outer-host/container model as the Vultr and OVH providers, so the secure latchkey gateway runs on the EC2 host outside the agent's container).
+
+- The create form requires picking an AWS region (from the regions with pinned default AMIs) and shows an inline note that AWS credentials are read from the environment (`AWS_*` / `AWS_PROFILE` / `~/.aws`).
+
+- The existing "Cloud" compute option was renamed to "Vultr" to name its provider plainly.
+
+- The workspace listing now shows a compute-provider label on every row (AWS, Vultr, Docker, Lima, Imbue Cloud).
+
+- AWS hosts are long-lived: they never idle-shut-down and have no max-lifetime timer.
+
+- minds writes one per-region AWS provider block into its mngr settings at startup (only when AWS credentials are present) and ensures the region's security group exists before each create.
+
+- minds now suppresses the default region-less `aws` provider in its mngr settings (the same way it already suppresses the default `imbue_cloud` provider), so `mngr list` no longer logs a spurious "credentials not configured" discovery warning every cycle. The usable AWS providers remain the per-region `aws-<region>` blocks.
+
+Destroying a workspace now reliably tears down its entire host, fixing a bug where a destroy could report success in the UI while the underlying cloud instance kept running (and billing).
+
+- Destroy always tears down the whole host (the workspace agent plus the per-host `system-services` agent), so the cloud instance is actually terminated. The previous single-agent fallback -- which could remove only the workspace agent and leave the host alive -- has been removed.
+
+- The destroy no longer shells out to a slow `mngr list` to find the workspace's host: the host id is immutable and already known from in-memory discovery. If the host genuinely can't be determined, the destroy is refused with a clear error instead of doing a partial teardown.
+
+- A workspace now stays visible (as "destroying", then "failed" if teardown didn't finish) until its host is confirmed gone, and is only removed from your account at that point. A failed or partial destroy no longer silently vanishes from the UI while the host keeps running.
+
+- The AWS region picker now offers only the US datacenters (`us-east-1`, `us-east-2`, `us-west-1`, `us-west-2`) by default. Each configured region adds a provider that `mngr list` queries every discovery cycle, and the non-US regions roughly doubled listing latency for little benefit.
+
 ## 2026-06-13
 
 Fixed: a stopped or unresponsive workspace could get stranded on the "Loading workspace" loader and never advance to the recovery page. The desktop shell decides to show the recovery page from a one-shot "system interface status" event; if the chrome window reloaded after a workspace went stuck, that status was lost and never replayed, so the auto-redirect never fired even though the backend had correctly detected the stuck workspace.

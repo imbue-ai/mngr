@@ -21,6 +21,9 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
+
 
 def spawn_detached_latchkey_ensure_browser(
     latchkey_binary: str,
@@ -94,9 +97,22 @@ def spawn_detached_mngr_latchkey_forward(
     internal ``_active`` list for zombie reaping, but never kills a
     still-running child during garbage collection, so the forward
     supervisor keeps running until something explicitly terminates it.
+
+    Two logs are produced. The process is pointed via ``--log-file`` at a
+    co-located structured JSONL log (:func:`forward_events_log_path`), which
+    carries nanosecond timestamps and is rotated mid-run by the standard mngr
+    file sink -- this is the log to read when you need to observe timing.
+    ``log_path`` is the raw stdout/stderr capture; its fd is handed straight to
+    the child so it cannot be rotated mid-write. We pass ``--quiet`` so the
+    child suppresses its loguru console handler (everything still goes to the
+    structured log), which keeps this raw file from accumulating in steady
+    state -- it then only ever captures rare startup-failure output (Click
+    errors, pre-logging tracebacks) that never reaches the structured log.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     latchkey_directory.mkdir(parents=True, exist_ok=True)
+
+    events_log_path = forward_events_log_path(_plugin_data_dir(latchkey_directory))
 
     env = dict(os.environ)
     if extra_env is not None:
@@ -115,6 +131,12 @@ def spawn_detached_mngr_latchkey_forward(
                 latchkey_binary,
                 "--mngr-binary",
                 mngr_binary,
+                "--log-file",
+                str(events_log_path),
+                # Suppress the detached child's loguru console handler so its
+                # raw stdout/stderr capture file stays empty in steady state;
+                # all logging still lands in the structured ``--log-file``.
+                "--quiet",
             ],
             stdin=subprocess.DEVNULL,
             stdout=log_file,

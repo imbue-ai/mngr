@@ -484,9 +484,11 @@ def provision_snapshot_helper_on_outer(
     enabled and active; the ``docker volume create`` is no-op-with-warning
     when the volume already exists.
 
-    Assumes ``inotify-tools`` and ``jq`` are already installed (both the
-    cloud-init and SSH host-setup paths install them via the shared
-    ``host_setup`` base-packages step).
+    Assumes ``inotify-tools`` and ``jq`` are already installed. The cloud-init
+    and SSH host-setup paths install both via the shared ``host_setup``
+    base-packages step; the slice path installs them in its lima VM provisioning
+    (``mngr_imbue_cloud.slices.lima_slice``: ``jq`` via the base lima script,
+    ``inotify-tools`` via its own provision step).
     """
     helper_script = load_resource_text("snapshot_helper.sh")
     helper_service = load_resource_text("snapshot_helper.service")
@@ -645,6 +647,19 @@ def prepare_btrfs_on_outer(
     ``outer_disk_reserved_gb``) is not positive, or if any setup step fails.
     """
     subvolume_path = btrfs_mount_path / host_id.get_uuid().hex
+
+    # Pre-mounted-btrfs case (slices): the btrfs filesystem is already mounted at
+    # ``btrfs_mount_path`` -- it's the VM's lima ``additionalDisk``, not a loop
+    # image we manage -- so there is nothing to allocate/mount/fstab. Detected as
+    # "mount present AND our loop file absent" so a normal loop-backed VPS re-run
+    # (loop file present) still takes the full path below. Just ensure btrfs-progs
+    # and the per-host subvolume, then return.
+    if is_path_mounted_on_outer(outer, btrfs_mount_path) and not check_file_exists_on_outer(outer, loop_file_path):
+        with log_span("Using pre-mounted btrfs at {} (no loop image)", btrfs_mount_path):
+            if not is_btrfs_progs_installed_on_outer(outer):
+                install_btrfs_progs_on_outer(outer)
+            ensure_btrfs_subvolume_on_outer(outer, subvolume_path)
+        return subvolume_path
 
     with log_span("Ensuring btrfs-progs is installed on outer"):
         if not is_btrfs_progs_installed_on_outer(outer):
