@@ -15,6 +15,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr_aws.backend import AWS_BACKEND_NAME
 from imbue.mngr_aws.backend import AwsProvider
 from imbue.mngr_aws.config import AwsProviderConfig
@@ -44,7 +45,9 @@ def _seed_stopped_host_record(provider: AwsProvider, host_id: HostId) -> None:
     provider._host_record_cache[host_id] = VpsDockerHostRecord(certified_host_data=certified)
 
 
-def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]:
+def _build_bucket_provider(
+    mngr_ctx: MngrContext, is_host_dir_synced_to_bucket: bool = True
+) -> tuple[AwsProvider, Stubber]:
     """Build an AwsProvider configured with an S3 state bucket (moto-backed) + a stubbed EC2.
 
     The EC2 stubber is queued with no responses: a bucket-mode test must make
@@ -55,6 +58,7 @@ def _build_bucket_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]
         default_ami_id="ami-x",
         auto_shutdown_seconds=3600,
         state_bucket_name=_BUCKET_NAME,
+        is_host_dir_synced_to_bucket=is_host_dir_synced_to_bucket,
     )
     session = boto3.Session(aws_access_key_id="testing", aws_secret_access_key="testing", region_name="us-east-1")
     ec2 = session.client("ec2", region_name="us-east-1")
@@ -230,3 +234,121 @@ def test_no_bucket_uses_legacy_tag_path(temp_mngr_ctx: MngrContext) -> None:
         stubber.deactivate()
     # All queued responses consumed => the legacy tag path ran (describe + create_tags).
     stubber.assert_no_pending_responses()
+
+
+# =============================================================================
+# Offline host_dir volume (get_volume_for_host / get_volume_reference_for_host)
+# =============================================================================
+
+
+def test_get_volume_reference_is_cheap_and_scoped_to_host_dir(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """The reference getter returns a host_dir-scoped volume with no S3 probe."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    bucket = provider._state_bucket()
+    assert bucket is not None
+    # Seed a file under the host's host_dir prefix and confirm the reference reads it.
+    hex_id = host_id.get_uuid().hex
+    boto3_session = bucket.session
+    boto3_session.client("s3", region_name="us-east-1").put_object(
+        Bucket=_BUCKET_NAME, Key=f"hosts/{hex_id}/host_dir/events/e.jsonl", Body=b"evt"
+    )
+    reference = provider.get_volume_reference_for_host(host_id)
+    assert reference is not None
+    assert reference.volume.read_file("events/e.jsonl") == b"evt"
+
+
+def test_get_volume_for_host_returns_none_when_prefix_empty(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """An empty host_dir prefix yields None (and the diagnostic runs, non-fatally)."""
+    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    # The diagnostic calls _find_instance_for_host, which lists instances, finds
+    # no match, refreshes the cache once, and lists again -> two describe calls,
+    # then returns early (no instance, so no IAM-profile probe).
+    stubber.add_response("describe_instances", {"Reservations": []})
+    stubber.add_response("describe_instances", {"Reservations": []})
+    stubber.activate()
+    try:
+        assert provider.get_volume_for_host(host_id) is None
+    finally:
+        stubber.deactivate()
+
+
+def test_get_volume_for_host_warns_when_instance_has_no_iam_profile(
+    aws_mock: None, temp_mngr_ctx: MngrContext
+) -> None:
+    """Empty host_dir + an instance with no IAM profile -> a 're-run prepare' WARNING (non-fatal)."""
+    provider, stubber = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    matching = {
+        "Reservations": [
+            {
+                "Instances": [
+                    {
+                        "InstanceId": "i-noprofile",
+                        "State": {"Name": "stopped"},
+                        "Tags": [{"Key": "mngr-host-id", "Value": str(host_id)}],
+                    }
+                ]
+            }
+        ]
+    }
+    # _find_instance_for_host: one list (cache populated this run on first call).
+    stubber.add_response("describe_instances", matching)
+    # get_instance_iam_profile_arn: a direct describe of the instance (no profile).
+    stubber.add_response("describe_instances", matching)
+    stubber.activate()
+    try:
+        with capture_log_warnings() as warnings:
+            assert provider.get_volume_for_host(host_id) is None
+    finally:
+        stubber.deactivate()
+    assert any("no attached IAM instance profile" in message for message in warnings)
+
+
+def test_get_volume_for_host_returns_volume_when_objects_present(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """A non-empty host_dir prefix yields a readable volume."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    bucket = provider._state_bucket()
+    assert bucket is not None
+    hex_id = host_id.get_uuid().hex
+    bucket.session.client("s3", region_name="us-east-1").put_object(
+        Bucket=_BUCKET_NAME, Key=f"hosts/{hex_id}/host_dir/logs/a.log", Body=b"a"
+    )
+    volume = provider.get_volume_for_host(host_id)
+    assert volume is not None
+    assert volume.volume.read_file("logs/a.log") == b"a"
+
+
+def test_host_dir_sync_instance_profile_returned_when_identity_exists(
+    aws_mock: None, temp_mngr_ctx: MngrContext
+) -> None:
+    """The create path attaches the provisioned identity's profile when it exists."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    identity = provider._host_identity()
+    assert identity is not None
+    identity.ensure_host_identity()
+    assert provider._host_dir_sync_instance_profile() == identity.identity_name
+
+
+def test_host_dir_sync_instance_profile_none_when_identity_absent(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """No attachment (None) when the identity was never provisioned by prepare."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx)
+    assert provider._host_dir_sync_instance_profile() is None
+
+
+def test_host_dir_sync_instance_profile_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """No attachment when host_dir sync is disabled, even if the identity exists."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    identity = provider._host_identity()
+    assert identity is not None
+    identity.ensure_host_identity()
+    assert provider._host_dir_sync_instance_profile() is None
+
+
+def test_get_volume_reference_is_none_when_feature_disabled(aws_mock: None, temp_mngr_ctx: MngrContext) -> None:
+    """With is_host_dir_synced_to_bucket=False, no offline host_dir volume is returned."""
+    provider, _stubber = _build_bucket_provider(temp_mngr_ctx, is_host_dir_synced_to_bucket=False)
+    assert provider.get_volume_reference_for_host(HostId.generate()) is None
+    assert provider.get_volume_for_host(HostId.generate()) is None

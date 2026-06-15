@@ -7,3 +7,13 @@ Added an optional S3 state bucket that holds mngr's control-plane state (the ful
 - When a state bucket is configured, the per-agent `mngr-agent-<id>-*` EC2 tags are no longer written; agent records and the full offline host record live in the bucket instead. This removes both the silent 256-char `labels` drop and the `TagLimitExceeded` failure at EC2's 50-tag ceiling. Without a configured bucket, the legacy EC2 tag mirror is retained unchanged as a graceful fallback.
 
 - A stopped host's full `VpsDockerHostRecord` is now reconstructed from the bucket (instead of the lossy tag subset) for `mngr list` / `mngr start` when a bucket is present.
+
+Added a Lima-style offline `host_dir`, **on by default** (new `is_host_dir_synced_to_bucket` provider config field, mirroring Lima's `is_host_data_volume_exposed`). A stopped instance's `host_dir` is now readable without SSH, so `mngr event` / `mngr transcript` work against a paused host.
+
+- `mngr aws prepare` gained a `--host-dir-identity {auto,require,skip}` option (default `auto`). It provisions a least-privilege IAM role + instance profile that lets an instance push its `host_dir` to the bucket: `auto` warns and continues if it lacks IAM permissions (the security group + bucket prepare still succeed), `require` fails the command if the identity can't be provisioned, and `skip` doesn't attempt it. The inline policy grants only `s3:PutObject` / `s3:GetObject` / `s3:DeleteObject` on the bucket's `hosts/*` prefix and `s3:ListBucket` on the bucket. Re-running `prepare --host-dir-identity require` after a bucket-only prepare adds just the identity.
+
+- `mngr aws cleanup` now also deletes the host-dir IAM identity (role + instance profile), best-effort and idempotent, after the bucket.
+
+- At host create, when the feature is on and the identity exists, the provisioned instance profile is attached so an on-box systemd daemon can `aws s3 sync` `host_dir` to `s3://<bucket>/hosts/<host_id>/host_dir/` every ~60s (and once on graceful stop) via IMDS credentials. The operator-supplied `iam_instance_profile`, if set, takes precedence. Attaching a profile at create requires `iam:PassRole`.
+
+- Offline `host_dir` reads use the operator's credentials (no instance identity needed to read). When the feature is on but a host's instance has no attached IAM profile (so it never pushed its `host_dir`), `get_volume_for_host` logs a clear warning pointing at `mngr aws prepare --host-dir-identity require` rather than silently returning an empty volume.

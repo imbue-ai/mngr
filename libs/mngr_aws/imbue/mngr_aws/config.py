@@ -15,6 +15,7 @@ from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.state_bucket import S3StateBucket
+from imbue.mngr_aws.state_bucket import S3StateHostIdentity
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 
@@ -174,6 +175,18 @@ class AwsProviderConfig(VpsDockerProviderConfig):
             "the bucket; without one, mngr falls back to the legacy tag mirror."
         ),
     )
+    is_host_dir_synced_to_bucket: bool = Field(
+        default=True,
+        description=(
+            "Whether the instance syncs its host_dir to the S3 state bucket so it is readable "
+            "while the instance is stopped (a Lima-style offline host_dir; mirrors Lima's "
+            "is_host_data_volume_exposed). On by default. When on (and a bucket is present), the "
+            "create path attaches the prepare-provisioned IAM instance profile, an on-box daemon "
+            "periodically `aws s3 sync`s host_dir to hosts/<host_id>/host_dir/, and "
+            "get_volume_for_host serves offline reads from the bucket. Set False to disable the "
+            "host_dir sync entirely (offline host metadata still works via the bucket)."
+        ),
+    )
     terminate_on_shutdown: bool = Field(
         default=False,
         description=(
@@ -258,3 +271,14 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         if bucket_name is None:
             return None
         return S3StateBucket(session=session, region=self.default_region, bucket_name=bucket_name)
+
+    def build_host_identity(self, session: boto3.Session) -> S3StateHostIdentity | None:
+        """Build the bucket-write ``S3StateHostIdentity`` when a bucket name is resolvable, else None.
+
+        The identity name is derived from the state-bucket name, so it shares the
+        bucket's per-region (or operator-overridden) scope.
+        """
+        bucket_name = self.resolve_state_bucket_name(session)
+        if bucket_name is None:
+            return None
+        return S3StateHostIdentity(session=session, region=self.default_region, bucket_name=bucket_name)

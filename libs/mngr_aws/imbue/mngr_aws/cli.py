@@ -17,6 +17,7 @@ command that produces a Debian + Docker + deps-baked AMI to skip the
 """
 
 from typing import Any
+from typing import Final
 from typing import assert_never
 
 import click
@@ -39,6 +40,8 @@ from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.state_bucket import S3StateBucket
 from imbue.mngr_aws.state_bucket import S3StateBucketError
+from imbue.mngr_aws.state_bucket import S3StateHostIdentity
+from imbue.mngr_aws.state_bucket import S3StateHostIdentityError
 
 
 class _AwsOperatorCliOptions(CommonCliOptions):
@@ -56,8 +59,22 @@ class _AwsOperatorCliOptions(CommonCliOptions):
     vpc_id: str | None
 
 
+# Tri-state for ``mngr aws prepare --host-dir-identity`` (Decisions 3 & 6):
+# whether/how to provision the bucket-write IAM identity that lets an instance
+# push its host_dir to the bucket for offline reads.
+_HOST_DIR_IDENTITY_AUTO: Final[str] = "auto"
+_HOST_DIR_IDENTITY_REQUIRE: Final[str] = "require"
+_HOST_DIR_IDENTITY_SKIP: Final[str] = "skip"
+_HOST_DIR_IDENTITY_CHOICES: Final[tuple[str, ...]] = (
+    _HOST_DIR_IDENTITY_AUTO,
+    _HOST_DIR_IDENTITY_REQUIRE,
+    _HOST_DIR_IDENTITY_SKIP,
+)
+
+
 class _AwsPrepareCliOptions(_AwsOperatorCliOptions):
     allowed_ssh_cidrs: tuple[str, ...]
+    host_dir_identity: str
 
 
 def _resolve_provider_config(mngr_ctx: MngrContext, provider_name: str) -> AwsProviderConfig:
@@ -190,6 +207,99 @@ def _ensure_state_bucket_best_effort(base: AwsProviderConfig, region: str | None
     return bucket.bucket_name, was_created
 
 
+def _build_host_identity(base: AwsProviderConfig, region: str | None) -> S3StateHostIdentity | None:
+    """Build the bucket-write IAM host identity for the operator commands, or None when unresolvable."""
+    session = base.get_session()
+    effective_region = region or base.default_region
+    bucket_name = base.resolve_state_bucket_name(session)
+    if bucket_name is None:
+        return None
+    return S3StateHostIdentity(session=session, region=effective_region, bucket_name=bucket_name)
+
+
+def _provision_host_identity(identity: S3StateHostIdentity | None, host_dir_identity: str) -> str | None:
+    """Provision the bucket-write IAM host identity per the tri-state flag, returning its name or None.
+
+    ``skip`` does nothing (returns None). ``auto`` attempts provisioning and
+    degrades a permission/API failure (or an unresolvable ``identity`` -- None)
+    to a WARNING so the security-group + bucket prepare still succeed -- offline
+    host_dir just won't work until prepare is re-run with sufficient IAM.
+    ``require`` raises a ``click.ClickException`` when the identity cannot be
+    provisioned, for a clean programmatic "this prepare must yield a working
+    offline host_dir". ``identity`` is None when the bucket name (and thus the
+    identity name) could not be resolved.
+    """
+    if host_dir_identity == _HOST_DIR_IDENTITY_SKIP:
+        return None
+    is_required = host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE
+    if identity is None:
+        message = (
+            "Could not resolve a state-bucket name (AWS account id unavailable), so the host-dir IAM "
+            "identity cannot be provisioned. Offline host_dir reads will be unavailable."
+        )
+        if is_required:
+            raise click.ClickException(message)
+        logger.warning(message)
+        return None
+    try:
+        return identity.ensure_host_identity()
+    except S3StateHostIdentityError as e:
+        if is_required:
+            raise click.ClickException(
+                f"Failed to provision the host-dir IAM identity {identity.identity_name!r} "
+                f"(needs iam:CreateRole / iam:PutRolePolicy / iam:CreateInstanceProfile / "
+                f"iam:AddRoleToInstanceProfile): {e}"
+            ) from e
+        logger.warning(
+            "Failed to provision the host-dir IAM identity {!r} (offline host_dir reads will be "
+            "unavailable until prepare is re-run with sufficient IAM): {}",
+            identity.identity_name,
+            e,
+        )
+        return None
+
+
+def _resolve_and_provision_host_identity(
+    base: AwsProviderConfig, region: str | None, host_dir_identity: str
+) -> str | None:
+    """Resolve credentials, build the host identity, then provision it per the tri-state flag.
+
+    Wraps ``_provision_host_identity`` with credential resolution: a
+    no-credentials / bad-environment error is treated like an unresolvable
+    identity (warn-and-continue for 'auto', raise for 'require'). 'skip' never
+    touches credentials.
+    """
+    if host_dir_identity == _HOST_DIR_IDENTITY_SKIP:
+        return None
+    try:
+        identity = _build_host_identity(base, region)
+    except (ValueError, BotoCoreError) as e:
+        if host_dir_identity == _HOST_DIR_IDENTITY_REQUIRE:
+            raise click.ClickException(f"Could not resolve credentials for the host-dir IAM identity: {e}") from e
+        logger.warning("Could not resolve credentials for the host-dir IAM identity; skipping it: {}", e)
+        return None
+    return _provision_host_identity(identity, host_dir_identity)
+
+
+def _perform_host_identity_cleanup(identity: S3StateHostIdentity | None) -> str | None:
+    """Delete the bucket-write IAM host identity, best-effort. Returns its name or None.
+
+    Idempotent: a missing role/instance-profile is a no-op. A permission/API
+    failure is logged at WARNING and swallowed so it never blocks the rest of
+    ``mngr aws cleanup`` (the SG + bucket teardown still proceed).
+    """
+    if identity is None:
+        return None
+    if not identity.host_identity_exists():
+        return None
+    try:
+        identity.delete_host_identity()
+    except S3StateHostIdentityError as e:
+        logger.warning("Failed to delete the host-dir IAM identity {!r}; skipping it: {}", identity.identity_name, e)
+        return None
+    return identity.identity_name
+
+
 def _perform_cleanup(client: AwsVpsClient) -> str | None:
     """Core of ``mngr aws cleanup``: refuse if any instance exists, else delete the SG.
 
@@ -237,15 +347,18 @@ def _output_prepare_result(
     region: str,
     state_bucket_name: str | None,
     was_bucket_created: bool,
+    host_identity_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr aws prepare`` in the requested format.
 
-    HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
-    ``prepared`` event. The structured forms carry ``created`` (SG) and
+    HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
+    ``prepared`` event. The structured forms carry ``created`` (SG),
     ``state_bucket_name`` / ``state_bucket_created`` (None when the bucket setup
-    was skipped, e.g. missing S3/STS permissions) so a caller can tell a
-    first-run create from an idempotent no-op.
+    was skipped, e.g. missing S3/STS permissions), and ``host_identity_name``
+    (None when the host-dir IAM identity was skipped or could not be
+    provisioned) so a caller can tell a first-run create from an idempotent
+    no-op.
     """
     data = {
         "security_group_id": result.security_group_id,
@@ -253,6 +366,7 @@ def _output_prepare_result(
         "created": result.was_created,
         "state_bucket_name": state_bucket_name,
         "state_bucket_created": was_bucket_created,
+        "host_identity_name": host_identity_name,
     }
     match output_format:
         case OutputFormat.JSON:
@@ -268,6 +382,8 @@ def _output_prepare_result(
                     state_bucket_name,
                     region,
                 )
+            if host_identity_name is not None:
+                write_human_line("Provisioned host-dir IAM identity {}", host_identity_name)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -276,20 +392,23 @@ def _output_cleanup_result(
     deleted_sg_id: str | None,
     region: str,
     deleted_bucket_name: str | None,
+    deleted_host_identity_name: str | None,
     output_format: OutputFormat,
 ) -> None:
     """Emit the result of ``mngr aws cleanup`` in the requested format.
 
-    HUMAN: one (or two) result lines to stdout. JSON: a single object. JSONL: a
+    HUMAN: one (or more) result lines to stdout. JSON: a single object. JSONL: a
     ``cleaned_up`` event. ``deleted`` is False when the security group was
     already absent; ``state_bucket_deleted`` carries the deleted bucket name (or
-    None when no bucket existed / setup was skipped).
+    None when no bucket existed / setup was skipped); ``host_identity_deleted``
+    carries the deleted IAM identity name (or None when none existed).
     """
     data = {
         "security_group_id": deleted_sg_id,
         "region": region,
         "deleted": deleted_sg_id is not None,
         "state_bucket_deleted": deleted_bucket_name,
+        "host_identity_deleted": deleted_host_identity_name,
     }
     match output_format:
         case OutputFormat.JSON:
@@ -303,6 +422,8 @@ def _output_cleanup_result(
                 write_human_line("Cleaned up AWS security group {} in region {}", deleted_sg_id, region)
             if deleted_bucket_name is not None:
                 write_human_line("Deleted S3 state bucket {} in region {}", deleted_bucket_name, region)
+            if deleted_host_identity_name is not None:
+                write_human_line("Deleted host-dir IAM identity {}", deleted_host_identity_name)
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -353,6 +474,21 @@ def aws_cli_group() -> None:
         "Defaults to the provider config's allowed_ssh_cidrs. Tighten for production."
     ),
 )
+@optgroup.option(
+    "--host-dir-identity",
+    "host_dir_identity",
+    type=click.Choice(_HOST_DIR_IDENTITY_CHOICES),
+    default=_HOST_DIR_IDENTITY_AUTO,
+    show_default=True,
+    help=(
+        "Whether to provision the bucket-write IAM identity (role + instance profile) that lets "
+        "an instance push its host_dir to the bucket for offline reads. 'auto': attempt it, but "
+        "degrade a missing-IAM-permission failure to a warning (SG + bucket prepare still succeed). "
+        "'require': fail the command if the identity can't be provisioned. 'skip': don't attempt it. "
+        "Needs iam:CreateRole / iam:PutRolePolicy / iam:CreateInstanceProfile / "
+        "iam:AddRoleToInstanceProfile when something is actually created."
+    ),
+)
 @add_common_options
 @click.pass_context
 def prepare(ctx: click.Context, **_kwargs: Any) -> None:
@@ -392,7 +528,14 @@ def prepare(ctx: click.Context, **_kwargs: Any) -> None:
     # warning so the SG prepare still succeeds (offline state then falls back
     # to the EC2 tag mirror).
     state_bucket_name, was_bucket_created = _ensure_state_bucket_best_effort(base, opts.region)
-    _output_prepare_result(result, client.region, state_bucket_name, was_bucket_created, output_opts.output_format)
+    # Provision the bucket-write IAM identity per --host-dir-identity (Decisions
+    # 3 & 6). 'auto' degrades a failure to a warning; 'require' raises; 'skip'
+    # returns None. The bucket-only steps above are unconditional, so a later
+    # `prepare --host-dir-identity require` adds just the identity.
+    host_identity_name = _resolve_and_provision_host_identity(base, opts.region, opts.host_dir_identity)
+    _output_prepare_result(
+        result, client.region, state_bucket_name, was_bucket_created, host_identity_name, output_opts.output_format
+    )
 
 
 @aws_cli_group.command(name="cleanup")
@@ -468,8 +611,17 @@ def cleanup(ctx: click.Context, **_kwargs: Any) -> None:
     except (ValueError, BotoCoreError) as e:
         raise click.ClickException(str(e)) from e
     deleted_bucket_name = _perform_state_bucket_cleanup(bucket)
+    # Delete the bucket-write IAM identity after the bucket (best-effort,
+    # idempotent). Build errors mirror the bucket-build credential errors.
+    try:
+        identity = _build_host_identity(base, opts.region)
+    except (ValueError, BotoCoreError) as e:
+        raise click.ClickException(str(e)) from e
+    deleted_host_identity_name = _perform_host_identity_cleanup(identity)
     deleted_sg_id = _perform_cleanup(client)
-    _output_cleanup_result(deleted_sg_id, client.region, deleted_bucket_name, output_opts.output_format)
+    _output_cleanup_result(
+        deleted_sg_id, client.region, deleted_bucket_name, deleted_host_identity_name, output_opts.output_format
+    )
 
 
 @aws_cli_group.command(name="ami")
