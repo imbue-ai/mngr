@@ -2,8 +2,9 @@
 
 ``decode_agy_transcript.py`` walks agy's ``gemini_coder.Step`` protobuf by hard-coded field
 numbers and enum values recovered from the binary's embedded descriptors (see
-``libs/mngr_antigravity/regenerating_protobuf_schema.md``). agy ships ~weekly and can renumber those, which would
-silently corrupt decoded transcripts. This test mechanizes step 1 of the README's
+``libs/mngr_antigravity/regenerating_protobuf_schema.md``). agy ships ~weekly; additive changes
+are tolerated automatically, but if a release ever reused one of those field numbers for a new
+meaning the number-keyed walk would silently mis-decode. This test mechanizes step 1 of the README's
 "Redoing this after an agy release" procedure: it runs ``scripts/extract_antigravity_proto_schema.py``
 against the live binary and asserts every field number / enum value the decoder relies on still
 matches -- turning the manual eyeball diff into an exact check.

@@ -117,7 +117,11 @@ uv run python -c "from pathlib import Path; from imbue.mngr_antigravity.resource
 
 ## Redoing this after an agy release
 
-agy ships ~weekly and can renumber fields/enums. To re-verify or update the field map:
+agy ships ~weekly. Releases are normally additive (new fields and enum values), which the
+number-keyed decoder tolerates automatically: unknown fields are skipped and unknown enum
+values fall back to `STEP_TYPE_<n>`. The case it cannot catch on its own is agy *reusing* an
+existing field number for a new meaning -- protobuf forbids that, but agy controls both ends --
+so re-verify or update the field map after each release:
 
 1. Run the release-marked verification test. It extracts the live binary's descriptors via
    `scripts/extract_antigravity_proto_schema.py` and asserts every field number / enum value the

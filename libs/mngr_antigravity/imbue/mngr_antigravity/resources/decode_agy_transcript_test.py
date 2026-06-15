@@ -185,8 +185,8 @@ def test_iso_timestamp_tolerates_out_of_range_seconds() -> None:
     """A seconds value outside the platform time_t range degrades to "" instead of raising.
 
     ``time.gmtime`` raises OverflowError (or OSError on some libc) for an out-of-range value;
-    created_at is informational, so a garbage timestamp -- e.g. from agy renumbering a field
-    into this slot -- must not propagate out and abort the whole pass (see
+    created_at is informational, so an out-of-range value -- from a corrupt or truncated payload
+    -- must not propagate out and abort the whole pass (see
     test_decode_step_with_garbage_timestamp_does_not_raise / the run_once resilience test).
     """
     # Pull the metadata sub-message (with created_at.seconds = 2**63, past time_t) back out of a
@@ -222,12 +222,15 @@ def test_run_once_garbage_timestamp_does_not_blackout_other_conversations(tmp_pa
     assert all(e["created_at"] == "" for e in events if e["content"] == "from bad")
 
 
-def test_iter_fields_handles_fixed_width_and_stops_on_invalid_wire() -> None:
+def test_iter_fields_handles_fixed_width_and_rejects_invalid_wire() -> None:
     # field 1 as fixed64 (wire 1, tag 0x09) then fixed32 (wire 5, tag 0x0d).
     fields = list(dat._iter_fields(b"\x09" + b"\x00" * 8 + b"\x0d" + b"\x01" * 4))
     assert [(f, w) for f, w, _v in fields] == [(1, 1), (1, 5)]
-    # An unsupported wire type (3) terminates iteration without raising.
-    assert list(dat._iter_fields(b"\x0b")) == []
+    # An unsupported wire type (3) cannot appear in a well-formed blob, so it is treated as
+    # truncation/corruption: raise _TruncatedError so the caller skips and retries the step
+    # rather than silently dropping every field that follows.
+    with pytest.raises(dat._TruncatedError):
+        list(dat._iter_fields(b"\x0b"))
 
 
 def test_read_varint_rejects_truncated_and_overlong_varints() -> None:

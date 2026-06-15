@@ -24,10 +24,13 @@ scans the binary for those, validates them, and writes them out. From the recove
 descriptors you can read the real field names/numbers and enum values that
 ``libs/mngr_antigravity/imbue/mngr_antigravity/resources/decode_agy_transcript.py`` keys off.
 
-antigravity ships ~weekly and may renumber fields, so re-run this against each new binary and
-diff the output (see ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the full procedure and the
-schema map). ``test_antigravity_proto_schema.py`` mechanizes that diff as a release-marked
-test that runs this script (as a subprocess) against the installed ``agy`` binary.
+antigravity ships ~weekly; releases are normally additive (which the number-keyed decoder
+tolerates on its own), but agy controls both ends and could in principle reuse a field number
+for a new meaning -- a change the decoder cannot detect by itself. So re-run this against each
+new binary and diff the output (see ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for
+the full procedure and the schema map). ``test_antigravity_proto_schema.py`` mechanizes that diff
+as a release-marked test that runs this script (as a subprocess) against the installed ``agy``
+binary.
 
 Usage
 -----

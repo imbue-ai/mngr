@@ -1,16 +1,22 @@
 """Decode agy's SQLite conversation store into the raw-transcript record stream.
 
 NOTE -- best-effort black magic, NOT a style exemplar for the rest of the repo. This module
-(and ``scripts/extract_antigravity_proto_schema.py``) reverse-engineers an *undocumented,
-version-unstable* format: agy publishes no ``.proto`` schema and renumbers fields roughly
-weekly, so the field/enum map below is recovered empirically from the binary and can silently
-break on any agy release (see ``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the recovery process and the release-marked
-re-verification test). The decode is deliberately defensive and lossy -- it degrades or skips
-malformed, truncated, or schema-drifted input (empty timestamps, dropped steps, ``utf-8``
-``"replace"``, broad "return on anything unexpected") rather than guaranteeing a faithful
-decode, because a best-effort transcript beats a crashed capture pipeline. Treat these
-trade-offs as specific to scraping a hostile, opaque format -- do *not* cargo-cult them as
-general repo conventions.
+(and ``scripts/extract_antigravity_proto_schema.py``) reverse-engineers an *undocumented*
+format: agy publishes no ``.proto`` schema, so the field/enum map below is recovered
+empirically from the binary's embedded descriptors. Protobuf keys compatibility on field
+*numbers*, and agy's ~weekly releases are normally *additive* (new fields/enum values), which a
+number-keyed wire-walk tolerates by construction -- unknown fields are skipped and unknown enum
+values fall back to ``STEP_TYPE_<n>``. The one change that would silently mis-decode is agy
+*reusing* an existing field number for a new meaning: the walk would still parse, just read the
+wrong bytes. Protobuf's own rules forbid that (it would break agy's stored ``.db``s too) and agy
+controls both ends, so rather than guard against it at runtime we pin every number/enum this
+decoder relies on against the live binary in a release-marked descriptor-diff test (see
+``libs/mngr_antigravity/regenerating_protobuf_schema.md`` for the recovery process and that
+test). The decode is otherwise deliberately defensive and lossy -- it degrades or skips
+malformed or truncated input (empty timestamps, dropped steps, ``utf-8`` ``"replace"``) rather
+than guaranteeing a faithful decode, because a best-effort transcript beats a crashed capture
+pipeline. Treat these trade-offs as specific to scraping a hostile, opaque format -- do *not*
+cargo-cult them as general repo conventions.
 
 Since agy 1.0.4 (2026-06-01) the interactive conversation store is a protobuf SQLite
 ``.db`` per conversation (``$ANTIGRAVITY_APP_DATA_DIR/conversations/<conv_id>.db``); earlier
@@ -170,7 +176,12 @@ def _iter_fields(blob: bytes) -> Iterator[tuple[int, int, object]]:
             yield field, wire, blob[index : index + 4]
             index += 4
         else:
-            return
+            # Wire types 3/4 (deprecated groups) and 6/7 (unused) cannot appear in a well-formed
+            # blob -- a generic wire-walk skips any *field* it does not know, so an unknown *wire
+            # type* means the bytes are truncated or corrupt, not merely schema-drifted (a renumber
+            # keeps the wire valid). Treat it like the truncation guards above: stop so the caller
+            # skips and retries the step, rather than silently emitting the fields parsed so far.
+            raise _TruncatedError(f"unknown wire type {wire}")
 
 
 def _first(blob: bytes, field_number: int) -> object | None:
@@ -218,8 +229,9 @@ def _iso_timestamp(metadata: bytes | None) -> str:
         return ""
     # A varint is unsigned and unbounded, but ``time.gmtime`` rejects values outside the
     # platform's ``time_t`` range (raising OverflowError, or OSError on some libc). created_at
-    # is informational, so a garbage value -- e.g. from agy renumbering a field into this slot
-    # -- must degrade to an empty timestamp, not propagate out and abort the whole decode pass.
+    # is informational, so an out-of-range value -- from a corrupt or truncated payload, not
+    # normal schema drift -- must degrade to an empty timestamp, not propagate out and abort the
+    # whole decode pass.
     try:
         return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
     except (OverflowError, OSError, ValueError):

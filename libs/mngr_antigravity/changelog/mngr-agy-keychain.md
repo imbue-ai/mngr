@@ -25,14 +25,14 @@ that reads new steps from each conversation `.db` and emits the same record shap
 JSONL had, so the common-transcript converter is unchanged (it now also accepts agy's clean,
 un-enveloped user text). The decoder needs no `protobuf` library or shipped schema -- it is a
 small wire-walk keyed to the field map recovered from the binary's embedded descriptors;
-`dev/README.md` documents that recovered schema and a repeatable process to re-verify it
-after each (roughly weekly) agy release. Assistant tool calls (name + args) are decoded too,
+`regenerating_protobuf_schema.md` documents that recovered schema and a repeatable process to
+re-verify it after each (roughly weekly) agy release. Assistant tool calls (name + args) are decoded too,
 so they surface on assistant messages. (Tool *results* are not yet captured as `tool_result`
 events: agy records command output in step types the converter does not map, and file-edit
 `CODE_ACTION` steps do not occur in practice -- a follow-up if needed.)
 
 Added a release-marked test (`test_antigravity_proto_schema.py`) that mechanizes the
-"re-verify the schema after each agy release" procedure from `dev/README.md`: it runs the
+"re-verify the schema after each agy release" procedure from `regenerating_protobuf_schema.md`: it runs the
 schema extractor against the installed `agy` binary and asserts every field number and enum
 value the transcript decoder hard-codes still matches. It requires `agy` on PATH (a missing
 binary is a hard failure, not a skip, since there is nothing to verify against without it).
@@ -53,13 +53,14 @@ store: it now passes through the clean typed text agy records in `CortexStepUser
 dropping the speculative `<USER_REQUEST>...</USER_REQUEST>` envelope stripping that existed
 only for the retired agy-1.0.0 JSONL format.
 
-Hardened the SQLite decoder against malformed/drifted protobuf so a single bad step can no
+Hardened the SQLite decoder against malformed/truncated protobuf so a single bad step can no
 longer take down transcript capture. A `created_at` timestamp outside the platform range now
 degrades to an empty timestamp instead of raising an uncaught error that aborted the entire
 decode pass (which, since the offset never advanced, blacked out every conversation on every
-cycle -- a likely failure mode if a future agy renumbers a field into the timestamp slot).
-Truncated fixed-width (32/64-bit) protobuf fields are now detected as truncation and retried,
-matching the existing length-delimited handling, rather than silently yielding corrupt data
-and advancing past the step. A corrupt per-conversation offset file now resets to the start
+cycle); such an out-of-range value comes from a corrupt or truncated payload, not from normal
+agy releases, which are additive and keep the wire format valid. Truncated fixed-width
+(32/64-bit) fields and unknown protobuf wire types are now detected as malformed and the step is
+retried, matching the existing length-delimited handling, rather than silently yielding corrupt
+data and advancing past the step. A corrupt per-conversation offset file now resets to the start
 instead of crashing. Validated end-to-end by decoding real agy 1.0.8 conversation stores
 (including the `ChatToolCall` name/args path the schema-verification test cannot reach).
