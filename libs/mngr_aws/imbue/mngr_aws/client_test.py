@@ -666,7 +666,9 @@ def test_ensure_security_group_skips_authorize_when_ingress_already_present(
         },
         expected_params={"Filters": [{"Name": "group-name", "Values": ["mngr-aws-test"]}]},
     )
-    assert client.ensure_security_group() == "sg-ready"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-ready"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_authorizes_when_one_port_missing(
@@ -708,7 +710,9 @@ def test_ensure_security_group_authorizes_when_one_port_missing(
         {},
         expected_params={"GroupId": "sg-partial", "IpPermissions": ANY},
     )
-    assert client.ensure_security_group() == "sg-partial"
+    result = client.ensure_security_group()
+    assert result.security_group_id == "sg-partial"
+    assert result.was_created is False
 
 
 def test_ensure_security_group_creates_sg_when_missing(
