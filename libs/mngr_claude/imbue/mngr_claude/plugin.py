@@ -1100,6 +1100,11 @@ def _load_claude_resource_script(filename: str) -> str:
 # It is omitted from the agent's commands/ dir entirely when the user opts out.
 _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: Final[str] = "common_transcript.sh"
 
+# The python converter that common_transcript.sh invokes (python3
+# <dir>/common_transcript_convert.py). Provisioned alongside the .sh so the
+# shell resolves it relative to itself; gated by the same emit_common_transcript.
+_CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: Final[str] = "common_transcript_convert.py"
+
 # The raw-transcript streamer (returned by ClaudeAgent.get_raw_transcript_scripts
 # per HasTranscriptMixin). Always provisioned: it tails Claude's native session
 # JSONL files into logs/claude_transcript/events.jsonl, which is read by the
@@ -1408,7 +1413,8 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
     def get_common_transcript_scripts(self) -> Mapping[str, str]:
         """Return only the script gated by ``emit_common_transcript``.
 
-        For Claude that's a single converter (``common_transcript.sh``).
+        For Claude that's a converter shell script (``common_transcript.sh``)
+        plus the python module it invokes (``common_transcript_convert.py``).
         The raw transcript streamer is on
         :meth:`get_raw_transcript_scripts` and the background
         orchestrator that supervises it is in
@@ -1416,7 +1422,11 @@ class ClaudeAgent(InteractiveTuiAgent[ClaudeAgentConfig], HasCommonTranscriptMix
         whether the common transcript is on.
         """
         return {
-            _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME: _load_claude_resource_script(_CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME)
+            name: _load_claude_resource_script(name)
+            for name in (
+                _CLAUDE_COMMON_TRANSCRIPT_SCRIPT_NAME,
+                _CLAUDE_COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME,
+            )
         }
 
     def _build_accept_marker_command(self) -> str:
