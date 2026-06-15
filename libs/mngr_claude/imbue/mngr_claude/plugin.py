@@ -178,8 +178,7 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
       * every preserved agent's ``projects/`` dir (preserve_sessions_on_destroy)
 
       All of these dirs are searched; a session ID matching in more than one is
-      rejected as ambiguous (the user must pass the full ``.jsonl`` path). The dir
-      order above is the order used when listing dirs in error messages.
+      rejected as ambiguous (the user must pass the full ``.jsonl`` path).
 
     Returns (session_id, source_project_dir).
     """
@@ -210,19 +209,16 @@ def _resolve_adopt_session(adopt_session_arg: str, mngr_ctx: MngrContext) -> tup
             search_dirs.append(candidate)
 
     matches: list[Path] = []
-    searched: list[Path] = []
     for projects_dir in search_dirs:
         if projects_dir.exists():
-            searched.append(projects_dir)
             matches.extend(projects_dir.glob(f"*/{adopt_session_arg}.jsonl"))
 
-    if not searched:
-        dirs_str = " or ".join(str(d) for d in search_dirs)
-        raise UserInputError(f"No projects directory found at {dirs_str}. Cannot find session to adopt.")
     if not matches:
-        dirs_str = " or ".join(str(d) for d in searched)
+        # Don't enumerate the searched dirs: there is one per local mngr agent, so the
+        # list can run to hundreds of paths. The --adopt-session help documents the
+        # search scope (current/user Claude config dirs, live agents, preserved agents).
         raise UserInputError(
-            f"Session {adopt_session_arg} not found in {dirs_str}. "
+            f"Session {adopt_session_arg} not found. "
             "Check that the session ID is correct, or pass a path to the .jsonl file."
         )
     if len(matches) > 1:
@@ -2639,6 +2635,15 @@ def on_before_create(args: OnBeforeCreateArgs, mngr_ctx: MngrContext) -> OnBefor
             "--adopt-session is incompatible with cloning via --from <agent>: both "
             "adopt a session into the new agent. Pick one."
         )
+
+    # Validate that every named session resolves *now* -- before any host or worktree
+    # is created. The real resolution happens again later in on_after_provisioning, but
+    # that runs inside provision_agent's ConcurrencyGroup, whose __exit__ would re-wrap a
+    # bad-ID UserInputError in a ConcurrencyExceptionGroup and surface it as an
+    # "Unexpected error" with a traceback. Resolving here (the session source is always
+    # local, so the result matches) makes a bad ID a clean, fail-fast user error.
+    for session_arg in adopt_session:
+        _resolve_adopt_session(session_arg, mngr_ctx)
 
     return None
 

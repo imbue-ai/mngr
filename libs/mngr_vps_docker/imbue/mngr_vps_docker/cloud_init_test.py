@@ -5,7 +5,7 @@ from inline_snapshot import snapshot
 
 from imbue.mngr_vps_docker.cloud_init import _indent
 from imbue.mngr_vps_docker.cloud_init import generate_cloud_init_user_data
-from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_APT_VERSION
+from imbue.mngr_vps_docker.host_setup import PINNED_DOCKER_VERSION
 from imbue.mngr_vps_docker.host_setup import PINNED_GVISOR_RELEASE
 
 # A realistic multi-line private key so the snapshot/YAML-parse tests exercise
@@ -89,13 +89,14 @@ runcmd:
   - |
       set -e
       export DEBIAN_FRONTEND=noninteractive
-      install -m 0755 -d /etc/apt/keyrings
-      curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-      chmod a+r /etc/apt/keyrings/docker.asc
       . /etc/os-release
-      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+      DOCKER_APT_VERSION="5:29.5.1-1~${ID}.${VERSION_ID}~${VERSION_CODENAME}"
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL https://download.docker.com/linux/${ID}/gpg -o /etc/apt/keyrings/docker.asc
+      chmod a+r /etc/apt/keyrings/docker.asc
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
       apt-get update
-      apt-get install -y --allow-downgrades docker-ce=5:29.5.1-1~debian.12~bookworm docker-ce-cli=5:29.5.1-1~debian.12~bookworm containerd.io docker-buildx-plugin docker-compose-plugin
+      apt-get install -y --allow-downgrades docker-ce="${DOCKER_APT_VERSION}" docker-ce-cli="${DOCKER_APT_VERSION}" containerd.io docker-buildx-plugin docker-compose-plugin
       systemctl enable docker
       systemctl start docker
   - |
@@ -138,8 +139,10 @@ def test_generate_cloud_init_installs_pinned_docker() -> None:
         install_gvisor_runtime=False,
     )
     # Pinned install via the official Docker apt repo (not the unpinned get.docker.com script).
-    assert "download.docker.com/linux/debian" in result
-    assert f"docker-ce={PINNED_DOCKER_APT_VERSION}" in result
+    # Repo + apt version are derived per-distro from /etc/os-release at run time.
+    assert "download.docker.com/linux/${ID}" in result
+    assert PINNED_DOCKER_VERSION in result
+    assert 'docker-ce="${DOCKER_APT_VERSION}"' in result
     assert "--allow-downgrades" in result
     assert "systemctl enable docker" in result
     assert "systemctl start docker" in result
@@ -170,6 +173,34 @@ def test_generate_cloud_init_forwards_ssh_key_to_root() -> None:
     assert "admin" in result
     assert "ec2-user" in result
     assert "ubuntu" in result
+
+
+def test_generate_cloud_init_omits_direct_root_key_by_default() -> None:
+    """Without ``authorized_user_public_key`` the direct-root-inject line is absent."""
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+    )
+    assert "printf '%s\\n'" not in result
+
+
+def test_generate_cloud_init_injects_authorized_user_public_key_into_root() -> None:
+    """With ``authorized_user_public_key`` set, the key is written straight into root.
+
+    Removes the dependency on a cloud image's default-user copy landing in root
+    -- notably on GCE, where the guest agent provisions the key asynchronously
+    and races the runcmd copy. The key is shell-quoted so its embedded space /
+    comment survive.
+    """
+    result = generate_cloud_init_user_data(
+        host_private_key="fake-key",
+        host_public_key="ssh-ed25519 AAAA host",
+        install_gvisor_runtime=False,
+        authorized_user_public_key="ssh-ed25519 AAAAaccess user@laptop",
+    )
+    assert "'ssh-ed25519 AAAAaccess user@laptop'" in result
+    assert ">> /root/.ssh/authorized_keys" in result
 
 
 def test_generate_cloud_init_disables_root_lockout() -> None:

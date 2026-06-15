@@ -1,4 +1,5 @@
 import base64
+import math
 from typing import Final
 
 from pydantic import Field
@@ -11,13 +12,20 @@ from imbue.mngr_vps_docker.errors import VpsProvisioningError
 
 # Exact Docker Engine version we install on every outer. Pinning makes bakes and
 # re-provisions reproducible instead of "whatever get.docker.com served that day".
-# ``PINNED_DOCKER_APT_VERSION`` is the full apt version string (epoch + Debian
-# revision + codename) that ``apt-get install docker-ce=<...>`` requires; confirm
-# it against the live repo with ``apt-cache madison docker-ce`` before deploying,
-# since the revision/codename suffix is repo-specific (this value targets Debian
-# 12 "bookworm", which both the Vultr and OVH base images use).
+#
+# The full apt version string is ``<core>~<id>.<version_id>~<codename>`` where the
+# trailing distro suffix is repo-specific. ``_PINNED_DOCKER_APT_VERSION_CORE`` is
+# the distro-independent prefix; ``_DOCKER_INSTALL_SCRIPT`` derives the suffix
+# from ``/etc/os-release`` at run time so the same step works on every Debian-
+# family outer (Debian 12 "bookworm" across all providers; the os-release
+# derivation also covers Ubuntu LTS images for anyone overriding the GCP image).
+# Confirm a new core against the live repo with ``apt-cache madison docker-ce``.
+# ``PINNED_DOCKER_APT_VERSION`` is the fully-rendered Debian 12 apt version
+# string, exported for any caller or test that needs the exact Debian value
+# rather than the runtime-derived suffix.
 PINNED_DOCKER_VERSION: Final[str] = "29.5.1"
-PINNED_DOCKER_APT_VERSION: Final[str] = "5:29.5.1-1~debian.12~bookworm"
+_PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.5.1-1"
+PINNED_DOCKER_APT_VERSION: Final[str] = f"{_PINNED_DOCKER_APT_VERSION_CORE}~debian.12~bookworm"
 
 # gVisor publishes date-stamped releases under
 # ``https://storage.googleapis.com/gvisor/releases/release/<yyyymmdd>/<arch>/``.
@@ -31,6 +39,25 @@ PINNED_GVISOR_RELEASE: Final[str] = "20260601"
 # of minutes on a fresh VPS; the gVisor download adds more, so keep this well
 # above the expected worst case to avoid failing an otherwise-fine provision.
 _HOST_SETUP_COMMAND_TIMEOUT_SECONDS: Final[float] = 600.0
+
+# First-boot completion marker. The bootstrap (cloud-init runcmd or the GCE
+# startup-script) ``touch``es this once Docker and the rest of host setup are in
+# place; ``instance._wait_for_cloud_init_marker`` polls for it before proceeding.
+# Single source of truth shared by every writer and the poller so the path can
+# never drift between them.
+MNGR_READY_MARKER_PATH: Final[str] = "/var/run/mngr-ready"
+
+
+def build_auto_shutdown_command(auto_shutdown_seconds: int) -> str:
+    """Return the in-guest ``shutdown -P +N`` command for an auto-shutdown deadline.
+
+    ``shutdown -P`` only accepts whole minutes. Round up so we never halt before the
+    deadline, and floor at 1 so any positive sub-minute value still schedules a shutdown.
+    Shared by both first-boot renderers (cloud-init ``runcmd`` and the GCE startup-script)
+    so the rounding policy and command text stay identical.
+    """
+    shutdown_minutes = max(1, math.ceil(auto_shutdown_seconds / 60))
+    return f"shutdown -P +{shutdown_minutes} 'mngr_vps_docker auto-shutdown after {shutdown_minutes} minutes'"
 
 
 class HostSetupStep(FrozenModel):
@@ -54,15 +81,16 @@ apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq"""
 # / buildx / compose track the repo's current build, matching Docker's own docs.
 _DOCKER_INSTALL_SCRIPT: Final[str] = f"""set -e
 export DEBIAN_FRONTEND=noninteractive
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
 . /etc/os-release
+DOCKER_APT_VERSION="{_PINNED_DOCKER_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/${{ID}}/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-https://download.docker.com/linux/debian ${{VERSION_CODENAME}} stable" > /etc/apt/sources.list.d/docker.list
+https://download.docker.com/linux/${{ID}} ${{VERSION_CODENAME}} stable" > /etc/apt/sources.list.d/docker.list
 apt-get update
 apt-get install -y --allow-downgrades \
-docker-ce={PINNED_DOCKER_APT_VERSION} docker-ce-cli={PINNED_DOCKER_APT_VERSION} \
+docker-ce="${{DOCKER_APT_VERSION}}" docker-ce-cli="${{DOCKER_APT_VERSION}}" \
 containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable docker
 systemctl start docker"""
