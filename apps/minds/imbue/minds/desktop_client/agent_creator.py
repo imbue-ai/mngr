@@ -1030,6 +1030,7 @@ class _MngrCreateAttemptParams(FrozenModel):
     on_output: OutputCallback
     latchkey_env: Mapping[str, str] | None
     account_email: str | None
+    repo_source: str | None
     branch_or_tag: str | None
     region: str | None
     anthropic_api_key: str | None
@@ -1053,14 +1054,13 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         on_output=params.on_output,
         latchkey_env=params.latchkey_env,
         imbue_cloud_account=params.account_email if is_imbue_cloud else None,
-        # Don't constrain the lease on ``repo_url`` here: ``repo_source`` is
-        # whatever the user picked in the UI (often a local FCT clone path),
-        # but pool hosts are operator-baked with whatever ``--attributes`` JSON
-        # the admin chose -- typically ``cpus``/``memory_gb``/
-        # ``repo_branch_or_tag`` and not ``repo_url``. Including ``repo_url``
-        # here would make every lease request fail the JSONB ``@>`` match.
-        # Constraining on ``repo_branch_or_tag`` (when minds knows it) is enough
-        # to pick the right pool generation.
+        # Pass the form's repository through verbatim (a remote URL in
+        # production, a local clone path in dev). The provider canonicalizes it
+        # -- resolving a local path to its ``origin`` remote -- so the fast path
+        # adopts a pool host only when the request's repo *and* branch genuinely
+        # match what was baked. minds must not canonicalize here (it shells out
+        # to ``mngr`` and cannot import the plugin).
+        imbue_cloud_repo_url=(params.repo_source if is_imbue_cloud and params.repo_source else None),
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
         imbue_cloud_fast_mode=fast_mode,
         # ``region`` is honored by IMBUE_CLOUD (-b region=), VULTR
@@ -1597,6 +1597,7 @@ class AgentCreator(MutableModel):
                     on_output=emit_log,
                     latchkey_env=latchkey_setup.env,
                     account_email=account_email,
+                    repo_source=repo_source,
                     branch_or_tag=branch_or_tag,
                     region=region,
                     anthropic_api_key=effective_anthropic_api_key,

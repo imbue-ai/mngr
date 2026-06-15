@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr usage [OPTIONS] [COMMAND]
+mngr usage [--stale-after DURATION] [--detail] [--since DURATION] [--no-preserved] [COMMAND]
 ```
 
 Show rolling-window usage / quota data from agent statusline events.
@@ -52,6 +52,13 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 ```
 **Options:**
 
+## Display
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--stale-after` | text | Warn when the snapshot file is older than this (e.g. '300', '5m', '2h'). Display warning only -- it does not change which events are aggregated (use --since for that). Default: from plugin config. | None |
+| `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost lines (human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown for terseness; the per-mode cost lines and window lines are unchanged. | `False` |
+
 ## Filtering
 
 | Name | Type | Description | Default |
@@ -68,6 +75,8 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | `--label` | text | Show only agents with this label (format: KEY=VALUE, repeatable) [experimental] | None |
 | `--host-label` | text | Show only agents on hosts with this host label (format: KEY=VALUE, repeatable) | None |
 | `--provider` | text | Show only agents from the given provider(s) (repeatable, e.g. --provider local) | None |
+| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the per-mode aggregates (`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h). | None |
+| `--preserved`, `--no-preserved` | boolean | Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). On by default so destroyed agents' spend still counts; pass --no-preserved to show only live agents. Preserved agents honor the same --provider/--project/--local/label filters. | `True` |
 
 ## Common
 
@@ -84,15 +93,6 @@ mngr usage [OPTIONS] COMMAND [ARGS]...
 | `--disable-plugin` | text | Disable a plugin [repeatable] | None |
 | `-S`, `--setting` | text | Override a config setting for this invocation (KEY=VALUE, dot-separated paths; append __extend to the leaf key to extend list/dict/set fields) [repeatable] | None |
 | `-h`, `--help` | boolean | Show this message and exit. | `False` |
-
-## Other Options
-
-| Name | Type | Description | Default |
-| ---- | ---- | ----------- | ------- |
-| `--max-age` | text | Stale-warning threshold (e.g. '300', '5m', '2h'). Default: from plugin config. | None |
-| `--since` | text | Recency window for per-session cost aggregation (e.g. '24h', '7d'). Sessions whose last event is older are dropped from `sessions[]` and from the per-mode aggregates (`subscription_cost.*` / `api_cost.*`) computed off them. Default: from plugin config (24h). | None |
-| `--detail` | boolean | Expand summary view: show per-session breakdown lines under each source's cost lines (human, tagged with `[sub]` or `[api]`), and include the `sessions[]` array under each source (JSON, each session carrying `cost_mode`). Default omits the per-session breakdown for terseness; the per-mode cost lines and window lines are unchanged. | `False` |
-| `--preserved`, `--no-preserved` | boolean | Include usage preserved from destroyed agents (under <local_host_dir>/preserved/). On by default so destroyed agents' spend still counts; pass --no-preserved to show only live agents. Preserved agents honor the same --provider/--project/--local/label filters. | `True` |
 
 ## mngr usage wait
 
@@ -260,7 +260,7 @@ $ mngr usage --since 7d
 **Treat the snapshot as stale after 60s (warning only)**
 
 ```bash
-$ mngr usage --max-age 60
+$ mngr usage --stale-after 60
 ```
 
 **Per-session breakdown (human + JSON, mode-tagged)**

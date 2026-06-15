@@ -212,6 +212,22 @@ _DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=15)
 
 
 # ---------------------------------------------------------------------------
+# Retry parameters for post-deploy function lookup
+# ---------------------------------------------------------------------------
+# Looking up a function immediately after deploying it can lose a
+# deploy-then-lookup eventual-consistency race: the freshly-deployed function is
+# not yet registered/propagated, so Modal raises NotFoundError when get_web_url
+# hydrates the object. The function shows up within a few seconds, so retry with
+# backoff. min=1/max=4 over 5 attempts gives ~11s of headroom, which keeps a
+# genuinely-missing function failing reasonably fast. The retry lives on
+# get_web_url rather than function_from_name because the latter is lazy: the
+# server lookup (and thus the NotFoundError) surfaces when get_web_url hydrates.
+_LOOKUP_RETRY = retry_if_exception_type(modal.exception.NotFoundError)
+_LOOKUP_STOP = stop_after_attempt(5)
+_LOOKUP_WAIT = wait_exponential(multiplier=1, min=1, max=4)
+
+
+# ---------------------------------------------------------------------------
 # Object implementations
 # ---------------------------------------------------------------------------
 
@@ -257,6 +273,7 @@ class DirectFunction(FunctionInterface):
     function: modal.Function = Field(description="The underlying modal.Function", repr=False)
 
     @_translate_exceptions
+    @retry(retry=_LOOKUP_RETRY, stop=_LOOKUP_STOP, wait=_LOOKUP_WAIT, reraise=True)
     def get_web_url(self) -> str | None:
         return self.function.get_web_url()
 

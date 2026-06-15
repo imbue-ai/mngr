@@ -141,3 +141,24 @@ def test_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
         resp = client.get("/tunnels", headers=admin)
         tunnel_names = [t["tunnel_name"] for t in resp.json()]
         assert tunnel_name not in tunnel_names
+
+
+def test_build_slice_teardown_commands_includes_disk_when_present() -> None:
+    commands = app_module.build_slice_teardown_commands("mngr-slice-abc", "mngr-slice-abc-data")
+    assert commands == (
+        "limactl delete --force mngr-slice-abc",
+        "limactl disk delete --force mngr-slice-abc-data",
+    )
+
+
+def test_build_slice_teardown_commands_omits_disk_when_absent() -> None:
+    commands = app_module.build_slice_teardown_commands("mngr-slice-abc", None)
+    assert commands == ("limactl delete --force mngr-slice-abc",)
+
+
+def test_build_slice_teardown_commands_quotes_unsafe_names() -> None:
+    # Defense-in-depth: instance/disk names flow into a shell command, so they
+    # must be shell-quoted.
+    commands = app_module.build_slice_teardown_commands("a b; rm -rf /", "d$x")
+    assert ";" not in commands[0].replace("'a b; rm -rf /'", "")
+    assert commands[0] == "limactl delete --force 'a b; rm -rf /'"

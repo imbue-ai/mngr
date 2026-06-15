@@ -62,6 +62,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
@@ -1066,7 +1067,7 @@ def get_stash_count(path: Path) -> int:
 
 def is_claude_installed() -> bool:
     """Check if the Claude Code CLI is installed and available on PATH."""
-    return shutil.which("claude") is not None
+    return CLAUDE.is_available()
 
 
 def write_executable_script(path: Path, content: str) -> None:

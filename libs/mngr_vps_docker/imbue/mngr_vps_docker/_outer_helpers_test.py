@@ -811,10 +811,13 @@ def test_prepare_btrfs_on_outer_is_idempotent_when_everything_in_place() -> None
 
 def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
     # Loop file missing forces the free-space check, which sees only 15 GiB < 20 GiB reserved.
+    # mountpoint -q fails: a fresh VPS is not yet mounted (so the pre-mounted-btrfs
+    # short-circuit does not apply and the loop-file path runs).
     outer = _scripted(
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("mountpoint -q", _fail()),
             ("df --output=avail", _ok(f"{15 * (1024**3)}\n")),
         ]
     )
@@ -830,10 +833,13 @@ def test_prepare_btrfs_on_outer_raises_when_free_space_below_reserve() -> None:
 
 def test_prepare_btrfs_on_outer_raises_when_free_space_equal_to_reserve() -> None:
     # Boundary: free == reserved means loop_file_size would be 0; reject.
+    # mountpoint -q fails: a fresh VPS is not yet mounted (so the pre-mounted-btrfs
+    # short-circuit does not apply and the loop-file path runs).
     outer = _scripted(
         [
             ("command -v mkfs.btrfs", _ok()),
             ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("mountpoint -q", _fail()),
             ("df --output=avail", _ok(f"{20 * (1024**3)}\n")),
         ]
     )
@@ -870,6 +876,38 @@ def test_prepare_btrfs_on_outer_skips_free_space_check_when_loop_file_present() 
     )
     joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
     assert "df --output=avail" not in joined
+
+
+def test_prepare_btrfs_on_outer_skips_loop_when_btrfs_already_mounted() -> None:
+    """Slice case: btrfs is already mounted (lima data disk) and no loop file exists.
+
+    The loop-file allocation/mkfs/mount/fstab must be skipped entirely; only the
+    per-host subvolume is ensured.
+    """
+    outer = _scripted(
+        [
+            ("mountpoint -q", _ok()),
+            ("test -f /var/lib/mngr-btrfs.img", _fail()),
+            ("command -v mkfs.btrfs", _ok()),
+            (f"test -d /mngr-btrfs/{_TEST_HOST_HEX}", _fail()),
+        ]
+    )
+    result = prepare_btrfs_on_outer(
+        outer,
+        host_id=_TEST_HOST_ID,
+        btrfs_mount_path=_TEST_MOUNT_PATH,
+        loop_file_path=_TEST_LOOP_FILE,
+        outer_disk_reserved_gb=_TEST_RESERVED_GB,
+    )
+    assert result == _TEST_MOUNT_PATH / _TEST_HOST_HEX
+    joined = "\n".join(cast(_ScriptedOuter, outer).recorded)
+    # No loop-file machinery ran...
+    assert "df --output=avail" not in joined
+    assert "fallocate" not in joined
+    assert "mount -o loop" not in joined
+    assert "/etc/fstab" not in joined
+    # ...but the per-host subvolume was created.
+    assert f"btrfs subvolume create /mngr-btrfs/{_TEST_HOST_HEX}" in joined
 
 
 # =========================================================================
