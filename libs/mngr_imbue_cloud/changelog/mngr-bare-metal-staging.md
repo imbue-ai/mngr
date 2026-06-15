@@ -17,3 +17,5 @@ Added the bare-metal purchase + provisioning lifecycle commands under `mngr imbu
 - `setup` — provisions a delivered box to `ready`: reinstalls our OS via `/dedicated/server/{s}/reinstall` (Debian, RAID1, pool SSH key; destructive), waits for the install, waits for SSH, then runs the existing box prep (qemu/lima/tooling/service user/stage image). Resumable via status.
 
 Together with `pricing`, this codifies the full RAM-pricing -> order -> deliver -> provision -> slice flow (previously the box was ordered and OS-installed by hand).
+
+The pool bake now waits for the FCT `deferred-install` service (heavy apt + Playwright/Chromium download, started at agent boot) to finish before stopping the services agent, on both the OVH-VPS and slice paths. Stopping mid-apt previously corrupted dpkg (a package left reinst-required), so the deferred install failed on every post-lease retry until repaired.

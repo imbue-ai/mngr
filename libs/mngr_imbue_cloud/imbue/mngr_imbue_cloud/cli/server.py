@@ -44,6 +44,7 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
+from imbue.mngr_imbue_cloud.bake.pool_bake import wait_for_deferred_install
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.data_types import BareMetalServer
@@ -546,6 +547,9 @@ def _bake_one_slice(
                     f"container={baked.ssh_port})"
                 )
             finalize_baked_pool_host(_slice_run_in_container, baked, host_name=host_name)
+            # Let the FCT deferred-install (heavy apt + browser download) finish before we stop the
+            # services agent: stopping mid-apt corrupts dpkg (see wait_for_deferred_install).
+            wait_for_deferred_install(_slice_run_in_container, baked, host_name=host_name)
             # Stop the services agent so it lands in the pool STOPPED, exactly like an
             # OVH pool host (which ``_create_single_pool_host`` stops via local mngr).
             # The fast-path lease then *starts* the adopted agent, which re-runs the

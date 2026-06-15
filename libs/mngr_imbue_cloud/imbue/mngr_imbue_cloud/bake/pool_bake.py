@@ -74,6 +74,13 @@ _SENTINEL_WAIT_TIMEOUT_SECONDS: Final[int] = 480
 # Exit code GNU ``timeout`` returns when it kills the wrapped command on timeout.
 _COMMAND_TIMEOUT_EXIT_CODE: Final[int] = 124
 
+# The FCT ``deferred-install`` service writes this marker on success; the bake waits
+# for it (see ``wait_for_deferred_install``) before stopping the services agent.
+_DEFERRED_INSTALL_MARKER: Final[str] = "/var/lib/minds/deferred-install/done.playwright"
+# Cap on how long the bake blocks for the deferred install (heavy apt + browser
+# download) to finish; on timeout the bake proceeds and the install retries on lease.
+_DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS: Final[int] = 900
+
 
 class PoolBakeError(RuntimeError):
     """Raised when a required pool-bake step fails irrecoverably."""
@@ -311,6 +318,48 @@ def bake_pool_host(
     baked = parse_baked_host(create_result.stdout, host_name=host_name)
     logger.info("  Baked services agent {} on host {}", baked.agent_id, baked.host_id)
     return baked
+
+
+def wait_for_deferred_install(
+    run_in_container: ContainerCommandRunner,
+    baked: BakedPoolHost,
+    *,
+    host_name: str,
+    timeout_seconds: int = _DEFERRED_INSTALL_WAIT_TIMEOUT_SECONDS,
+) -> None:
+    """Wait for the FCT ``deferred-install`` service to finish before the caller stops the services agent.
+
+    The deferred-install service kicks off a heavy apt + Playwright/Chromium install at agent boot.
+    Stopping the services agent mid-apt kills it, leaving dpkg half-unpacked (reinst-required) -- so the
+    install only completes after a repair on the post-lease retry. Calling this right before the stop
+    avoids that interruption. Both backends must call it before their respective ``mngr stop`` (OVH stops
+    before ``finalize_baked_pool_host``, slices after, so this is a standalone step rather than part of
+    finalize). Runs inside the container via the caller-supplied transport.
+
+    Blocks until either the success marker exists OR the ``deferred_install.sh`` process is no longer
+    running -- the latter so a not-yet-started or already-finished/failed install does not block us (it
+    runs or retries cleanly post-lease). Best-effort with a cap: on timeout we log and proceed.
+    """
+    # The bracket in '[d]eferred_install.sh' is the classic self-match guard: the regex still matches the
+    # real "bash scripts/deferred_install.sh" process, but this wait command's own command line contains
+    # "[d]eferred_install.sh" (not the literal), so pgrep does not match itself into an infinite loop.
+    poll = (
+        f"until test -f {_DEFERRED_INSTALL_MARKER} || "
+        f"! pgrep -f '[d]eferred_install.sh' >/dev/null 2>&1; do sleep 5; done"
+    )
+    wait_command = f"timeout {int(timeout_seconds)} bash -c {shlex.quote(poll)}"
+    rc, _out, err = run_in_container(baked, "deferred-install-wait", wait_command, float(timeout_seconds + 60))
+    if rc == 0:
+        # The install finished (or had not started / had already exited); safe to stop.
+        pass
+    elif rc == _COMMAND_TIMEOUT_EXIT_CODE:
+        logger.warning(
+            "deferred-install on {} did not finish within {}s; proceeding (it retries on first lease)",
+            host_name,
+            timeout_seconds,
+        )
+    else:
+        logger.warning("Could not wait for deferred-install on {} (exit {}): {}", host_name, rc, err.strip())
 
 
 def finalize_baked_pool_host(

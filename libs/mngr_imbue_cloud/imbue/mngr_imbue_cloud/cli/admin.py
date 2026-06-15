@@ -41,6 +41,7 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import bake_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import run_mngr_command
 from imbue.mngr_imbue_cloud.bake.pool_bake import sync_mngr_into_template
+from imbue.mngr_imbue_cloud.bake.pool_bake import wait_for_deferred_install
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
@@ -316,6 +317,9 @@ def _create_single_pool_host(
         raise PoolBakeError(f"baked OVH host {host_name} has no ssh_host; cannot insert pool row")
 
     full_address = f"{BAKED_SERVICES_AGENT_NAME}@{host_name}.ovh"
+    # Let the FCT deferred-install (heavy apt + browser download, kicked off at boot)
+    # finish before we stop the services agent: stopping mid-apt corrupts dpkg.
+    wait_for_deferred_install(_ovh_run_in_container, baked, host_name=host_name)
     # Stop the freshly-baked services agent (it boots during create); the user's
     # lease re-starts it, which re-runs the FCT bootstrap and re-creates the chat
     # agent under the lease's workspace name. (Slices do the equivalent stop inside

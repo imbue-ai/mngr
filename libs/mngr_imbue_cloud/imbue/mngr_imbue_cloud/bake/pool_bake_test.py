@@ -9,6 +9,7 @@ from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
 from imbue.mngr_imbue_cloud.bake.pool_bake import build_pool_create_command
 from imbue.mngr_imbue_cloud.bake.pool_bake import finalize_baked_pool_host
 from imbue.mngr_imbue_cloud.bake.pool_bake import parse_baked_host
+from imbue.mngr_imbue_cloud.bake.pool_bake import wait_for_deferred_install
 
 
 class _ScriptedRunner:
@@ -71,6 +72,28 @@ def test_finalize_raises_when_chat_destroy_fails() -> None:
     runner = _ScriptedRunner({"chat-destroy": (1, "", "skew")})
     with pytest.raises(PoolBakeError):
         finalize_baked_pool_host(runner, _baked(), host_name="slice-x", sentinel_timeout_seconds=5)
+
+
+def test_wait_for_deferred_install_polls_for_marker_or_finished_process() -> None:
+    runner = _ScriptedRunner({})
+    wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
+    assert [label for label, _cmd in runner.calls] == ["deferred-install-wait"]
+    command = runner.calls[0][1]
+    # The poll checks the success marker and uses a bracketed pgrep pattern (self-match guard).
+    assert "done.playwright" in command
+    assert "[d]eferred_install.sh" in command
+    assert "timeout 5" in command
+
+
+def test_wait_for_deferred_install_is_best_effort_on_timeout() -> None:
+    # Hitting the cap (timeout exit 124) must not fail the bake; it retries on lease.
+    runner = _ScriptedRunner({"deferred-install-wait": (124, "", "")})
+    wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
+
+
+def test_wait_for_deferred_install_is_best_effort_on_transport_error() -> None:
+    runner = _ScriptedRunner({"deferred-install-wait": (255, "", "ssh: connect failed")})
+    wait_for_deferred_install(runner, _baked(), host_name="slice-x", timeout_seconds=5)
 
 
 def test_build_pool_create_command_targets_the_given_provider_with_fct_templates() -> None:
