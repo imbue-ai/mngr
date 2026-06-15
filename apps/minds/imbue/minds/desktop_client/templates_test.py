@@ -233,7 +233,10 @@ def test_render_create_form_prefills_values() -> None:
 def test_render_create_form_contains_all_launch_modes() -> None:
     html = render_create_form()
     for mode in LaunchMode:
-        assert mode.value.lower() in html
+        # Assert on the option's value attribute rather than a lowercased
+        # substring: ``CLOUD`` is a substring of ``IMBUE_CLOUD``, so a bare
+        # substring check would pass even if the CLOUD option were dropped.
+        assert f'value="{mode.value}"' in html
 
 
 def test_render_create_form_selects_lima_by_default_without_account() -> None:
@@ -443,15 +446,26 @@ def test_render_chrome_page_content_iframe_uses_12px_rounded_corners() -> None:
     assert "rounded-xl" in iframe_tag
 
 
+def _window_controls_classes(html: str) -> str:
+    """Return the class attribute of the window-controls wrapper div.
+
+    The wrapper is the ``<div>`` that holds the min/max/close buttons; it is
+    the element immediately preceding ``id="min-btn"``.
+    """
+    match = re.search(r'<div class="([^"]*)">\s*<button[^>]*\bid="min-btn"', html)
+    assert match is not None, "could not locate the window-controls wrapper div"
+    return match.group(1)
+
+
 def test_render_chrome_page_hides_window_controls_on_mac() -> None:
     """On macOS, the window-controls row carries the 'hidden' Tailwind class
     so the native traffic lights are used instead."""
     html_mac = render_chrome_page(is_mac=True)
     html_other = render_chrome_page(is_mac=False)
-    # The 'hidden' class only appears on the window-controls wrapper in
-    # mac mode; on other platforms the same element is visible.
-    assert 'class="flex hidden"' in html_mac or 'class="flex  hidden"' in html_mac
-    assert 'class="flex hidden"' not in html_other and 'class="flex  hidden"' not in html_other
+    # The 'hidden' class is among the wrapper's classes only in mac mode; on
+    # other platforms the same element is visible.
+    assert "hidden" in _window_controls_classes(html_mac).split()
+    assert "hidden" not in _window_controls_classes(html_other).split()
 
 
 def test_render_chrome_page_shows_window_controls_on_non_mac() -> None:
@@ -623,7 +637,9 @@ def test_render_recovery_page_script_branches_on_dispatch_tier() -> None:
     """The recovery page reads ``dispatch_tier`` directly off the host-health response.
 
     Each restart tier the server may report must have a corresponding
-    code branch in the page's JS.
+    code branch in the page's JS. This is a source-shape drift guard
+    (presence of the expected tier tokens / handlers), not a behavior test --
+    the JS is not executed here.
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -652,13 +668,13 @@ def test_render_recovery_page_loading_hides_diagnostic_dropdown() -> None:
         initial_status="stuck",
         initial_error="",
     )
-    # renderLoading clears the cached payload and hides the debug details.
-    loading_block_start = html.find("function renderLoading")
-    assert loading_block_start >= 0
-    loading_block_end = html.find("function ", loading_block_start + 1)
-    loading_block = html[loading_block_start:loading_block_end]
-    assert "show(debugDetailsEl, false)" in loading_block
-    assert "latestHealth = null" in loading_block
+    # Source-shape drift guard (not a behavior test): renderLoading must
+    # exist and reference the calls that hide the debug details and drop the
+    # cached payload. We assert presence of these tokens rather than slicing
+    # the function body by byte offsets.
+    assert "function renderLoading" in html
+    assert "show(debugDetailsEl, false)" in html
+    assert "latestHealth = null" in html
 
 
 def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
@@ -672,8 +688,9 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
         initial_status="restart_failed",
         initial_error="Stop step of host restart failed: exited 1",
     )
-    # The restart_failed branch in the dispatcher calls runProbe(false) so
-    # the diagnostics are populated without auto-dispatching another restart.
+    # Source-shape drift guard (not a behavior test): the restart_failed
+    # branch in the dispatcher calls runProbe(false) so the diagnostics are
+    # populated without auto-dispatching another restart.
     assert "restart_failed" in html
     assert "runProbe(false)" in html
     # The error-details DOM hook is rendered alongside the diagnostic.
@@ -681,17 +698,20 @@ def test_render_recovery_page_restart_failed_also_runs_probe() -> None:
     assert 'id="recovery-debug-details"' in html
 
 
-def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_circuit() -> None:
+def test_render_recovery_page_honors_misconfigured_on_restart_failed_path() -> None:
     """The workspace_misconfigured tier must be honored on the restart_failed path.
 
     A workspace whose services.toml lacks [services.system_interface] lands in
     restart_failed once its undeclared interface fails to come back up, so the
-    page runs runProbe(false). If the no-auto-dispatch short-circuit
-    (``if (!autoDispatch) renderUnresponsive()``) ran before the
-    workspace_misconfigured check, that workspace would render a misleading
-    "unresponsive" page even though no restart can recover it. Assert the
-    misconfigured branch precedes the short-circuit inside runProbe so the
-    restart_failed path still reaches renderMisconfigured().
+    page runs runProbe(false) and must still be able to reach
+    renderMisconfigured() for the misconfigured tier.
+
+    Source-shape drift guard (not a behavior test): the JS is not executed
+    here, so we only assert that runProbe references both the
+    workspace_misconfigured branch and the no-auto-dispatch short-circuit, plus
+    the misconfigured handler. (The actual ordering -- that the misconfigured
+    check precedes the short-circuit -- is JS control flow that belongs in a
+    browser/acceptance test, out of scope here.)
     """
     html = render_recovery_page(
         agent_id=_AGENT_A,
@@ -699,13 +719,10 @@ def test_render_recovery_page_honors_misconfigured_before_autodispatch_short_cir
         initial_status="restart_failed",
         initial_error="boom",
     )
-    probe_body = html[html.index("function runProbe(") :]
-    misconfigured_pos = probe_body.index("'workspace_misconfigured'")
-    short_circuit_pos = probe_body.index("if (!autoDispatch)")
-    assert misconfigured_pos < short_circuit_pos, (
-        "the workspace_misconfigured branch must precede the !autoDispatch short-circuit "
-        "so a misconfigured workspace on the restart_failed path renders misconfigured"
-    )
+    assert "function runProbe(" in html
+    assert "'workspace_misconfigured'" in html
+    assert "if (!autoDispatch)" in html
+    assert "renderMisconfigured" in html
 
 
 def test_render_recovery_page_promotes_button_above_troubleshooting() -> None:

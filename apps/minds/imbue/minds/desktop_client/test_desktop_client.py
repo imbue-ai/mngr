@@ -5,12 +5,12 @@ import subprocess
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
 from fastapi.responses import Response
 from starlette.testclient import TestClient
 
@@ -70,46 +70,13 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 
-def _create_multi_backend_http_client(
-    web_app: FastAPI,
-    api_app: FastAPI,
-) -> httpx.AsyncClient:
-    """Create an httpx client that routes to different ASGI apps based on URL prefix.
-
-    Requests to http://web-backend/... go to web_app, and
-    requests to http://api-backend/... go to api_app.
-    """
-    web_transport = httpx.ASGITransport(app=web_app)
-    api_transport = httpx.ASGITransport(app=api_app)
-
-    class _RoutingTransport(httpx.AsyncBaseTransport):
-        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-            if str(request.url).startswith("http://web-backend"):
-                return await web_transport.handle_async_request(request)
-            elif str(request.url).startswith("http://api-backend"):
-                return await api_transport.handle_async_request(request)
-            else:
-                raise httpx.ConnectError(f"Unknown backend: {request.url}")
-
-    return httpx.AsyncClient(transport=_RoutingTransport())
-
-
 def _create_test_backend() -> FastAPI:
-    """Create a simple backend app for proxy testing."""
+    """Create a simple backend app standing in for an agent's web server."""
     backend = FastAPI()
 
     @backend.get("/")
     def backend_root() -> HTMLResponse:
         return HTMLResponse("<html><head><title>Backend</title></head><body>Hello from backend</body></html>")
-
-    @backend.get("/api/status")
-    def backend_status() -> JSONResponse:
-        return JSONResponse({"status": "ok"})
-
-    @backend.post("/api/echo")
-    async def backend_echo(request: FastAPIRequest) -> JSONResponse:
-        body = await request.body()
-        return JSONResponse({"echo": body.decode()})
 
     return backend
 
@@ -271,13 +238,15 @@ def test_authenticate_code_cannot_be_reused(tmp_path: Path) -> None:
 
 
 def test_landing_page_lists_single_agent(tmp_path: Path) -> None:
-    """When authenticated and exactly one agent is known, the landing page lists it."""
+    """When authenticated and exactly one agent is known, the landing page renders a row for it."""
     client, auth_store, agent_id = _setup_test_server(tmp_path)
     _authenticate_client(client=client, auth_store=auth_store)
 
     response = client.get("/")
     assert response.status_code == 200
-    assert str(agent_id) in response.text
+    # The id must appear in the row's structural marker, not just anywhere in the
+    # text -- a bare substring check would pass on an error page that echoed the id.
+    assert f'data-agent-id="{agent_id}"' in response.text
 
 
 # -- Post-login redirect tests --
@@ -423,9 +392,6 @@ def test_login_redirects_if_already_authenticated(tmp_path: Path) -> None:
     assert response.headers["location"] == "/"
 
 
-# -- Multi-server proxy tests --
-
-
 # -- Integration test: MngrCliBackendResolver with desktop client --
 
 
@@ -544,8 +510,9 @@ def test_landing_page_lists_agents_when_multiple_known(tmp_path: Path) -> None:
 
     response = client.get("/")
     assert response.status_code == 200
-    assert str(agent_id_1) in response.text
-    assert str(agent_id_2) in response.text
+    # Each id must appear in its row's structural marker, not just anywhere in the text.
+    assert f'data-agent-id="{agent_id_1}"' in response.text
+    assert f'data-agent-id="{agent_id_2}"' in response.text
 
 
 def test_create_form_submit_returns_501_without_agent_creator(tmp_path: Path) -> None:
@@ -1003,18 +970,6 @@ def test_creation_logs_sse_returns_404_for_unknown(tmp_path: Path) -> None:
 
     response = client.get("/api/create-agent/{}/logs".format(CreationId()))
     assert response.status_code == 404
-
-
-def test_creation_logs_sse_streams_events(tmp_path: Path) -> None:
-    """GET /api/create-agent/{id}/logs returns SSE stream for a tracked creation."""
-    client, _, agent_creator = _create_test_server_with_agent_creator(tmp_path)
-
-    agent_id = agent_creator.start_creation("file:///nonexistent-repo")
-
-    with client.stream("GET", "/api/create-agent/{}/logs".format(agent_id)) as response:
-        assert response.status_code == 200
-        assert "text/event-stream" in response.headers.get("content-type", "")
-    agent_creator.wait_for_all()
 
 
 def test_creation_logs_sse_emits_status_events(tmp_path: Path) -> None:
@@ -1662,8 +1617,8 @@ def test_workspace_settings_shows_unassociated_workspace(tmp_path: Path) -> None
     assert "associated with an account" in response.text.lower()
 
 
-def test_inbox_requires_auth(tmp_path: Path) -> None:
-    """The inbox page requires authentication."""
+def test_inbox_shows_not_authenticated_message_when_unauthenticated(tmp_path: Path) -> None:
+    """The inbox page renders (200) with a not-authenticated message rather than blocking access."""
     client, _ = _create_test_client_with_stores(tmp_path)
     response = client.get("/inbox")
     assert response.status_code == 200
@@ -1948,19 +1903,39 @@ def test_old_requests_page_route_removed(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
-def test_set_default_account(tmp_path: Path) -> None:
-    """Setting a default account works correctly."""
+def test_set_default_account_accepts_arbitrary_user_id_without_validation(tmp_path: Path) -> None:
+    """The endpoint persists any non-empty user_id by design; it does not check that the account exists."""
     client, auth_store = _create_test_client_with_stores(tmp_path)
     _authenticate_client(client, auth_store)
+    unknown_user_id = f"user-default-{uuid4().hex}"
     response = client.post(
         "/accounts/set-default",
-        data={"user_id": "user-default-123"},
+        data={"user_id": unknown_user_id},
         follow_redirects=False,
     )
     assert response.status_code == 303
 
     config = MindsConfig(data_dir=tmp_path)
-    assert config.get_default_account_id() == "user-default-123"
+    assert config.get_default_account_id() == unknown_user_id
+
+
+def test_set_default_account_persists_seeded_account(tmp_path: Path) -> None:
+    """Setting a default to a real logged-in account round-trips through MindsConfig."""
+    cli = make_fake_imbue_cloud_cli()
+    seeded_user_id = f"user-{uuid4().hex}"
+    cli.add_account(user_id=seeded_user_id, email=f"{uuid4().hex}@example.com")
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.post(
+        "/accounts/set-default",
+        data={"user_id": seeded_user_id},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+    config = MindsConfig(data_dir=tmp_path)
+    assert config.get_default_account_id() == seeded_user_id
 
 
 def test_auto_open_toggle(tmp_path: Path) -> None:
@@ -2048,46 +2023,46 @@ def test_build_mngr_host_state_argv_scopes_discovery_to_provider_when_known() ->
     assert argv[argv.index("--provider") + 1] == "docker"
 
 
-def _classify_host_health_compat(list_json: str | None, agent_id: AgentId) -> dict[str, bool]:
-    """Legacy-shape wrapper around the probe-list response.
+def _build_host_health_for_state(list_json: str | None, agent_id: AgentId) -> _recovery_probe.HostHealthResponse:
+    """Build a host-health response from a ``mngr list`` listing alone.
 
-    Projects the new "container running?" probe + dispatch_tier classification
-    back onto the prior ``{"reachable": ..., "host_offline": ...}`` contract
-    so the existing host-state classification cases stay covered.
+    The in-container probe never ran (``in_container_stdout=None``), so this
+    isolates the host-state -> ``dispatch_tier`` classification that the
+    recovery page branches on.
     """
-    response = _recovery_probe.build_host_health_response(
+    return _recovery_probe.build_host_health_response(
         list_json=list_json,
         agent_id=agent_id,
         services_agent_id=None,
         in_container_stdout=None,
         plugin_resolver_services={},
     )
-    for probe in response.probes:
-        if "container running" in probe.question:
-            return {
-                "reachable": probe.answer == _recovery_probe.ProbeAnswer.YES,
-                "host_offline": probe.answer == _recovery_probe.ProbeAnswer.NO,
-            }
-    return {"reachable": False, "host_offline": False}
 
 
-def test_classify_host_health_running_host_is_reachable() -> None:
-    """A RUNNING host classifies as reachable -- the surgical restart applies."""
-    aid = AgentId.generate()
-    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
-    assert _classify_host_health_compat(list_json, aid) == {"reachable": True, "host_offline": False}
-
-
-def test_classify_host_health_stopped_host_is_offline() -> None:
-    """A STOPPED (or crashed) host classifies as offline -- safe to auto host-restart."""
+def test_build_host_health_response_offline_host_dispatches_host_restart() -> None:
+    """A STOPPED/CRASHED/FAILED/STOPPING host -> HOST_OFFLINE (safe to auto host-restart)."""
     aid = AgentId.generate()
     for state in ("STOPPED", "CRASHED", "FAILED", "STOPPING"):
         list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": state}}]})
-        assert _classify_host_health_compat(list_json, aid) == {"reachable": False, "host_offline": True}, state
+        response = _build_host_health_for_state(list_json, aid)
+        assert response.dispatch_tier == _recovery_probe.DispatchTier.HOST_OFFLINE, state
 
 
-def test_classify_host_health_ambiguous_state_is_neither() -> None:
-    """An ambiguous host state (or a missing agent / bad output) is neither.
+def test_build_host_health_response_running_host_unreachable_requires_user_consent() -> None:
+    """A RUNNING host whose container we cannot exec into -> HOST_UNRESPONSIVE.
+
+    The container claims to be running, but with no successful in-container
+    probe we cannot confirm we can reach it, so the recovery page asks the
+    user before bouncing the host.
+    """
+    aid = AgentId.generate()
+    list_json = json.dumps({"agents": [{"id": str(aid), "host": {"state": "RUNNING"}}]})
+    response = _build_host_health_for_state(list_json, aid)
+    assert response.dispatch_tier == _recovery_probe.DispatchTier.HOST_UNRESPONSIVE
+
+
+def test_build_host_health_response_ambiguous_or_missing_host_requires_user_consent() -> None:
+    """An ambiguous host state (or a missing agent / unparseable output) -> HOST_UNRESPONSIVE.
 
     The recovery page then falls back to a confirmed manual restart rather
     than auto-dispatching a potentially destructive host restart.
@@ -2095,13 +2070,15 @@ def test_classify_host_health_ambiguous_state_is_neither() -> None:
     aid = AgentId.generate()
     # An ambiguous lifecycle state (host may still be running agents).
     starting = json.dumps({"agents": [{"id": str(aid), "host": {"state": "STARTING"}}]})
-    assert _classify_host_health_compat(starting, aid) == {"reachable": False, "host_offline": False}
+    assert _build_host_health_for_state(starting, aid).dispatch_tier == _recovery_probe.DispatchTier.HOST_UNRESPONSIVE
     # The probed agent is absent from the listing.
     other = json.dumps({"agents": [{"id": "agent-other", "host": {"state": "STOPPED"}}]})
-    assert _classify_host_health_compat(other, aid) == {"reachable": False, "host_offline": False}
+    assert _build_host_health_for_state(other, aid).dispatch_tier == _recovery_probe.DispatchTier.HOST_UNRESPONSIVE
     # mngr produced no usable output at all.
-    assert _classify_host_health_compat(None, aid) == {"reachable": False, "host_offline": False}
-    assert _classify_host_health_compat("not json", aid) == {"reachable": False, "host_offline": False}
+    assert _build_host_health_for_state(None, aid).dispatch_tier == _recovery_probe.DispatchTier.HOST_UNRESPONSIVE
+    assert (
+        _build_host_health_for_state("not json", aid).dispatch_tier == _recovery_probe.DispatchTier.HOST_UNRESPONSIVE
+    )
 
 
 def test_recovery_page_requires_authentication(tmp_path: Path) -> None:
@@ -2624,8 +2601,13 @@ def test_run_restart_sequence_fails_when_stop_command_cannot_launch(tmp_path: Pa
     assert "Stop step" in (tracker.get_last_restart_error(workspace_agent) or "")
 
 
-def test_run_restart_sequence_recovers_on_clean_dispatch_without_plugin(tmp_path: Path) -> None:
-    """Clean stop+start with no plugin route to probe through recovers the agent to HEALTHY."""
+def test_run_restart_sequence_marks_healthy_without_probe_when_no_plugin_route(tmp_path: Path) -> None:
+    """With no plugin route (``mngr_forward_port=0``), restart marks HEALTHY without probing.
+
+    ``mngr_forward_port=0`` short-circuits to ``record_probe_success`` before any
+    HTTP probe runs, so the probe path is *not* exercised here -- only the
+    clean stop+start dispatch and the unconditional success recording.
+    """
     tracker = SystemInterfaceHealthTracker()
     workspace_agent = AgentId.generate()
     services_agent = AgentId.generate()

@@ -651,6 +651,7 @@ class _RecordingNotificationDispatcher(NotificationDispatcher):
 
 def _make_test_creator(
     tmp_path,
+    root_concurrency_group: ConcurrencyGroup,
     *,
     mngr_forward_port: int = 0,
     preauth_cookie: str = "",
@@ -663,11 +664,9 @@ def _make_test_creator(
     backup_setup_retry_wait_seconds: float = 0.0,
 ) -> AgentCreator:
     paths = WorkspacePaths(data_dir=tmp_path)
-    cg = ConcurrencyGroup(name="agent-creator-test")
-    cg.__enter__()
     return AgentCreator(
         paths=paths,
-        root_concurrency_group=cg,
+        root_concurrency_group=root_concurrency_group,
         notification_dispatcher=notification_dispatcher
         or NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         mngr_forward_port=mngr_forward_port,
@@ -718,7 +717,9 @@ def _start_scripted_server(not_ready_count: int) -> tuple[HTTPServer, threading.
     return server, thread, port
 
 
-def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) -> None:
+def test_provision_backups_notifies_user_after_retry_budget_exhausted(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """A backup setup that keeps failing notifies the user once the retry budget is spent.
 
     Uses an API_KEY request with no RESTIC_REPOSITORY, which fails deterministically
@@ -729,6 +730,7 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
     dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
     creator = _make_test_creator(
         tmp_path,
+        root_concurrency_group,
         notification_dispatcher=dispatcher,
         backup_setup_retry_budget_seconds=0.0,
         backup_setup_retry_wait_seconds=0.0,
@@ -746,9 +748,11 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
     assert notification.title == "Backup setup failed"
 
 
-def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
+def test_wait_for_workspace_ready_short_circuits_when_disabled(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """Default construction (``mngr_forward_port=0``) skips the probe entirely."""
-    creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
+    creator = _make_test_creator(tmp_path, root_concurrency_group, mngr_forward_port=0, preauth_cookie="anything")
     log_q: queue.Queue[str] = queue.Queue()
     aid = AgentId.generate()
     started = time.monotonic()
@@ -758,9 +762,11 @@ def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None
     assert log_q.empty()
 
 
-def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> None:
+def test_wait_for_workspace_ready_short_circuits_when_no_preauth(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """Empty preauth cookie also disables the probe (the plugin requires auth)."""
-    creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
+    creator = _make_test_creator(tmp_path, root_concurrency_group, mngr_forward_port=8421, preauth_cookie="")
     log_q: queue.Queue[str] = queue.Queue()
     aid = AgentId.generate()
     started = time.monotonic()
@@ -769,12 +775,15 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     assert log_q.empty()
 
 
-def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
+def test_wait_for_workspace_ready_returns_when_probe_succeeds(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """The probe stops as soon as the (subdomain) endpoint returns 200."""
     server, _thread, port = _start_scripted_server(not_ready_count=2)
     try:
         creator = _make_test_creator(
             tmp_path,
+            root_concurrency_group,
             mngr_forward_port=port,
             preauth_cookie="any-preauth",
             timeout_seconds=2.0,
@@ -799,7 +808,9 @@ def test_wait_for_workspace_ready_returns_when_probe_succeeds(tmp_path) -> None:
     assert any("System interface is ready" in line for line in drained)
 
 
-def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) -> None:
+def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """Regression: a successful readiness probe must propagate to the health tracker.
 
     Without the ``record_probe_success`` call, the agent stays enrolled as a
@@ -821,6 +832,7 @@ def test_wait_for_workspace_ready_calls_record_probe_success_on_ready(tmp_path) 
     try:
         creator = _make_test_creator(
             tmp_path,
+            root_concurrency_group,
             mngr_forward_port=port,
             preauth_cookie="any-preauth",
             timeout_seconds=2.0,
@@ -895,12 +907,15 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
     assert status == 503
 
 
-def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
+def test_wait_for_workspace_ready_publishes_anyway_on_timeout(
+    tmp_path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """If the probe times out, we still return so the caller can publish the redirect."""
     server, _thread, port = _start_scripted_server(not_ready_count=10**6)
     try:
         creator = _make_test_creator(
             tmp_path,
+            root_concurrency_group,
             mngr_forward_port=port,
             preauth_cookie="any-preauth",
             timeout_seconds=0.3,
@@ -978,12 +993,12 @@ def _make_fake_repo(tmp_path: Path) -> Path:
     return repo_dir
 
 
-def _make_creator_with_cli(tmp_path: Path, cli: _RecordingImbueCloudCli) -> AgentCreator:
-    cg = ConcurrencyGroup(name="agent-creator-test")
-    cg.__enter__()
+def _make_creator_with_cli(
+    tmp_path: Path, cli: _RecordingImbueCloudCli, root_concurrency_group: ConcurrencyGroup
+) -> AgentCreator:
     return AgentCreator(
         paths=WorkspacePaths(data_dir=tmp_path),
-        root_concurrency_group=cg,
+        root_concurrency_group=root_concurrency_group,
         notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
@@ -1001,15 +1016,18 @@ def _wait_until_finished(creator: AgentCreator, creation_id: CreationId, deadlin
     raise AssertionError(f"creation {creation_id} did not finish within {deadline_seconds}s")
 
 
-def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_path: Path) -> None:
+def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """The AIProvider.IMBUE_CLOUD branch must mint a LiteLLM key even when the compute
     provider is not IMBUE_CLOUD. The actual ``mngr create`` invocation will fail (no
-    real binary / no real repo) but the key-mint must happen first."""
+    real binary / no real repo) but the key-mint must happen first, so the creation
+    ends up FAILED only *after* getting past the mint."""
     cli = _RecordingImbueCloudCli(
         parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
-    creator = _make_creator_with_cli(tmp_path, cli)
+    creator = _make_creator_with_cli(tmp_path, cli, root_concurrency_group)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
@@ -1020,24 +1038,38 @@ def test_start_creation_imbue_cloud_ai_with_local_compute_mints_litellm_key(tmp_
     )
     _wait_until_finished(creator, creation_id)
 
+    # The mint happened, then ``mngr create`` failed (no real binary / repo),
+    # so the creation must have progressed past the mint to FAILED rather than
+    # erroring out before minting.
+    info = creator.get_creation_info(creation_id)
+    assert info is not None
+    assert info.status is AgentCreationStatus.FAILED
+
     assert len(cli.create_calls) == 1
     assert cli.create_calls[0]["account"] == "alice@imbue.com"
     assert cli.create_calls[0]["metadata"] == {"host_name": "my-workspace"}
+    # NOTE: that the minted key/base_url are injected into the ``mngr create``
+    # subprocess env (``ANTHROPIC_API_KEY`` / ``ANTHROPIC_BASE_URL``) is NOT
+    # asserted here. The minted material flows from ``effective_anthropic_*``
+    # in ``_create_agent_background`` into ``run_mngr_create``, which only
+    # writes it into the real ``subprocess.run`` env (see
+    # ``run_mngr_create`` in agent_creator.py, ~lines 826-831). The
+    # ``_RecordingImbueCloudCli`` double records the *mint* call but offers no
+    # seam to observe the subprocess env, and that env-injection is not yet
+    # covered by any test. Adding a seam would require invasive production
+    # plumbing, so it is left as a known coverage gap.
 
 
-# Flaky under heavy CI load: this is a sync unit test but its setup spins up
-# fresh ConcurrencyGroups and a recording http-server fixture; the combined
-# work occasionally exceeds the 10s pytest-timeout when offload sandboxes are
-# contended. Offload retries flaky tests automatically.
-@pytest.mark.flaky
-def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
+def test_start_creation_api_key_ai_does_not_mint_litellm_key(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """The API_KEY branch uses the user-supplied key directly and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
         parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
-    creator = _make_creator_with_cli(tmp_path, cli)
+    creator = _make_creator_with_cli(tmp_path, cli, root_concurrency_group)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
@@ -1051,14 +1083,16 @@ def test_start_creation_api_key_ai_does_not_mint_litellm_key(tmp_path: Path) -> 
     assert cli.create_calls == []
 
 
-def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path) -> None:
+def test_start_creation_subscription_ai_does_not_mint_litellm_key(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """The SUBSCRIPTION branch injects no Anthropic creds and must never call
     ``create_litellm_key``."""
     cli = _RecordingImbueCloudCli(
         parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
-    creator = _make_creator_with_cli(tmp_path, cli)
+    creator = _make_creator_with_cli(tmp_path, cli, root_concurrency_group)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),
@@ -1071,14 +1105,16 @@ def test_start_creation_subscription_ai_does_not_mint_litellm_key(tmp_path: Path
     assert cli.create_calls == []
 
 
-def test_start_creation_api_key_ai_without_key_fails_with_clear_message(tmp_path: Path) -> None:
+def test_start_creation_api_key_ai_without_key_fails_with_clear_message(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
     """The API_KEY branch must reject an empty key with a specific error rather than
     silently falling through to mngr create with no key set."""
     cli = _RecordingImbueCloudCli(
         parent_concurrency_group=ConcurrencyGroup(name="recording-cli"),
         connector_url=FAKE_CONNECTOR_URL,
     )
-    creator = _make_creator_with_cli(tmp_path, cli)
+    creator = _make_creator_with_cli(tmp_path, cli, root_concurrency_group)
 
     creation_id = creator.start_creation(
         repo_source=str(_make_fake_repo(tmp_path)),

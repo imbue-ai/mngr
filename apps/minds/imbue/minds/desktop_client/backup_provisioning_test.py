@@ -98,7 +98,8 @@ def test_env_text_defines_restic_password_ignores_comment_and_absence() -> None:
 def test_generate_workspace_password_is_long_and_unique() -> None:
     first = generate_workspace_password()
     second = generate_workspace_password()
-    assert len(first) >= 32
+    # token_urlsafe(32) encodes 32 random bytes as base64url, yielding 43 chars.
+    assert len(first) >= 43
     assert first != second
 
 
@@ -178,13 +179,13 @@ def test_resolve_imbue_cloud_builds_repo_and_creds() -> None:
 
 def test_resolve_imbue_cloud_requires_cli() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="a@b.com")
-    with pytest.raises(BackupProvisioningError):
+    with pytest.raises(BackupProvisioningError, match="imbue_cloud_cli"):
         _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)
 
 
 def test_resolve_imbue_cloud_requires_account() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.IMBUE_CLOUD, account_email="")
-    with pytest.raises(BackupProvisioningError):
+    with pytest.raises(BackupProvisioningError, match="account"):
         _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=_make_cli())
 
 
@@ -209,5 +210,5 @@ def test_resolve_api_key_rejects_restic_password() -> None:
 
 def test_resolve_api_key_requires_repository() -> None:
     request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="AWS_ACCESS_KEY_ID=k\n")
-    with pytest.raises(BackupProvisioningError):
+    with pytest.raises(BackupProvisioningError, match="RESTIC_REPOSITORY"):
         _resolve_repository_and_backend_env(request, "host-abc", imbue_cloud_cli=None)

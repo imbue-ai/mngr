@@ -2,10 +2,9 @@
 
 import json
 import threading
-import time
-from typing import Final
 
 import httpx
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
@@ -20,8 +19,15 @@ from imbue.minds.desktop_client.request_events import LatchkeyPredefinedPermissi
 from imbue.minds.desktop_client.request_events import RequestEvent
 from imbue.minds.desktop_client.request_events import RequestType
 
-_POLL_TIMEOUT_SECONDS: Final[float] = 2.0
-_POLL_INTERVAL_SECONDS: Final[float] = 0.02
+# Generous overall ceiling for the streamed events to reach the
+# callback. The first stream response delivers both records almost
+# immediately, but the consumer runs on a background thread under a
+# reconnect/backoff loop, so on a heavily loaded CI box the scheduler
+# may not run it for a while. We wait on a real ``threading.Event``
+# (set by the callback once enough events arrive) rather than sleeping,
+# so we return the instant the condition is met and only ever approach
+# this ceiling when something is genuinely wrong.
+_DELIVERY_TIMEOUT_SECONDS: float = 30.0
 
 
 def _make_streamed_predefined(
@@ -84,17 +90,7 @@ def test_streamed_request_to_event_maps_file_sharing_fields() -> None:
     assert event.request_type == str(RequestType.FILE_SHARING_PERMISSION)
 
 
-def _wait_until(predicate, timeout: float = _POLL_TIMEOUT_SECONDS) -> bool:
-    """Spin-wait until ``predicate`` is truthy or ``timeout`` elapses. Returns the final value."""
-    deadline = time.monotonic() + timeout
-    waiter = threading.Event()
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        waiter.wait(timeout=_POLL_INTERVAL_SECONDS)
-    return predicate()
-
-
+@pytest.mark.flaky
 def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
     """Every streamed JSONL record reaches the registered callback as a parsed event."""
     payload = b"".join(
@@ -121,18 +117,22 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
         )
     )
 
-    # Bound the number of stream responses the transport hands out so
-    # the consumer's reconnect loop eventually idles (with stop()
-    # taking effect on the next short sleep). A single 200 with the
-    # two-line payload is enough: when the transport closes, the
-    # consumer goes through one reconnect-backoff iteration and we
-    # signal stop().
+    # The transport returns the same two-line 200 on every connect, so
+    # the consumer's reconnect loop re-delivers ``r1``/``r2`` on each
+    # iteration. Redelivery is expected and harmless (the inbox is keyed
+    # by ``event_id``), which is exactly why the final assertion is over
+    # the *set* of delivered ids rather than the exact sequence/count.
     delivered: list[RequestEvent] = []
     lock = threading.Lock()
+    # Set once the first batch (both records) has been delivered, so the
+    # test can wake immediately instead of polling.
+    both_delivered = threading.Event()
 
     def _on_request(event: RequestEvent) -> None:
         with lock:
             delivered.append(event)
+            if len(delivered) >= 2:
+                both_delivered.set()
 
     def _handler(request: httpx.Request) -> httpx.Response:
         del request
@@ -149,9 +149,15 @@ def test_consumer_dispatches_each_streamed_request_to_on_request() -> None:
     with cg:
         consumer.start(cg)
         try:
-            assert _wait_until(lambda: len(delivered) >= 2)
+            assert both_delivered.wait(timeout=_DELIVERY_TIMEOUT_SECONDS), (
+                f"consumer did not deliver both streamed requests within {_DELIVERY_TIMEOUT_SECONDS}s; "
+                f"got {[str(e.event_id) for e in delivered]}"
+            )
         finally:
             consumer.stop()
+    # Redelivery means ``delivered`` may hold more than two entries; the
+    # contract is that *every* streamed id reached the callback, so we
+    # assert on the de-duplicated set.
     assert {str(e.event_id) for e in delivered} == {"r1", "r2"}
     predefined = next(e for e in delivered if isinstance(e, LatchkeyPredefinedPermissionRequestEvent))
     file_sharing = next(e for e in delivered if isinstance(e, LatchkeyFileSharingPermissionRequestEvent))

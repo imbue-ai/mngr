@@ -132,6 +132,16 @@ class SystemInterfaceHealthTracker(MutableModel):
         default=_DEFAULT_STUCK_THRESHOLD_SECONDS,
         description="Seconds of continuous probe failures before HEALTHY -> STUCK fires.",
     )
+    monotonic_source: Callable[[], float] = Field(
+        default=time.monotonic,
+        exclude=True,
+        repr=False,
+        description=(
+            "Monotonic clock used to time probe-failure runs. Defaults to time.monotonic; "
+            "tests inject a controllable clock to advance time deterministically. Excluded from "
+            "serialization since a callable is not serializable."
+        ),
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _records: dict[str, _AgentRecord] = PrivateAttr(default_factory=dict)
@@ -211,7 +221,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             record = self._records.get(aid_str)
             if record is None or record.health != AgentHealth.HEALTHY:
                 return
-            now = time.monotonic()
+            now = self.monotonic_source()
             if record.failure_run_started_at is None:
                 record.failure_run_started_at = now
             elapsed = now - record.failure_run_started_at

@@ -237,6 +237,58 @@ def test_services_toml_probe_unknown_when_probe_did_not_run() -> None:
     assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
 
 
+def test_sentinel_without_json_line_yields_unknown_in_container_probes() -> None:
+    """Sentinel printed but no JSON payload line: in-container probes answer UNKNOWN.
+
+    The exec reached the container (sentinel landed, so "run a command" is YES),
+    but the batched script emitted no parseable payload, so every probe that
+    depends on payload fields falls back to its "no data" UNKNOWN output rather
+    than concluding NO.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=PROBE_SENTINEL + "\nnot-json\n",
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "run a command") == ProbeAnswer.YES
+    toml_probe = _probe_for(response, "services.toml")
+    assert toml_probe.answer == ProbeAnswer.UNKNOWN
+    assert toml_probe.output == "(no declaration data returned)"
+    # inner_port is absent from the (missing) payload, so the port and curl
+    # probes report the unparsed-port fallback rather than crashing.
+    port_probe = _probe_for(response, "listening on the system-interface inner port")
+    assert port_probe.answer == ProbeAnswer.UNKNOWN
+    assert port_probe.output == "(could not parse inner port from services.toml command)"
+    curl_probe = _probe_for(response, "GET /")
+    assert curl_probe.answer == ProbeAnswer.UNKNOWN
+    assert curl_probe.output == "(could not parse inner port from services.toml command)"
+
+
+def test_sentinel_with_non_dict_payload_yields_unknown_in_container_probes() -> None:
+    """Sentinel present but the JSON payload is a list, not a dict: probes answer UNKNOWN.
+
+    A non-dict payload is treated like a missing payload -- ``sentinel_seen`` is
+    still True (exec reached the container) but no fields are extracted, so the
+    payload-dependent probes fall back to their "no data" UNKNOWN outputs.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=PROBE_SENTINEL + "\n" + json.dumps([1, 2, 3]) + "\n",
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "run a command") == ProbeAnswer.YES
+    toml_probe = _probe_for(response, "services.toml")
+    assert toml_probe.answer == ProbeAnswer.UNKNOWN
+    assert toml_probe.output == "(no declaration data returned)"
+    curl_probe = _probe_for(response, "GET /")
+    assert curl_probe.answer == ProbeAnswer.UNKNOWN
+    assert curl_probe.output == "(could not parse inner port from services.toml command)"
+
+
 def test_curl_probe_yes_for_200() -> None:
     response = build_host_health_response(
         list_json=_list_json(),
@@ -261,6 +313,50 @@ def test_curl_probe_no_for_non_200() -> None:
         plugin_resolver_services={},
     )
     assert _answer(response, "GET /") == ProbeAnswer.NO
+
+
+def test_curl_probe_no_with_error_output_when_curl_errored() -> None:
+    """A curl error (no status captured) answers NO and surfaces the error text.
+
+    ``curl_error`` takes precedence over a missing status: the inner port parsed
+    fine, so we are past the unknown-port guard, and a transport-level failure is
+    a definitive "the server did not answer".
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout(
+            {
+                "services_toml_declares_system_interface": True,
+                "inner_port": 8000,
+                "curl_error": "connection refused",
+            }
+        ),
+        plugin_resolver_services={},
+    )
+    curl_probe = _probe_for(response, "GET /")
+    assert curl_probe.answer == ProbeAnswer.NO
+    assert curl_probe.output == "error: connection refused"
+
+
+def test_curl_probe_unknown_when_no_status_and_no_error() -> None:
+    """A parsed port but neither a status nor an error yields UNKNOWN, no response captured.
+
+    Distinct from the unparsed-port UNKNOWN: here the port is known, so we fall
+    through to the final "(no response captured)" fallback rather than the
+    port-parse fallback.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=_probe_stdout({"services_toml_declares_system_interface": True, "inner_port": 8000}),
+        plugin_resolver_services={},
+    )
+    curl_probe = _probe_for(response, "GET /")
+    assert curl_probe.answer == ProbeAnswer.UNKNOWN
+    assert curl_probe.output == "(no response captured)"
 
 
 def test_port_listener_probe_yes_when_listener_present() -> None:
@@ -353,6 +449,25 @@ def test_dispatch_tier_misconfigured_beats_other_signals() -> None:
         plugin_resolver_services={"system_interface": "http://127.0.0.1:9100"},
     )
     assert response.dispatch_tier == DispatchTier.WORKSPACE_MISCONFIGURED
+
+
+def test_dispatch_tier_unknown_services_toml_does_not_trigger_misconfigured() -> None:
+    """Only a definite NO services.toml short-circuits to WORKSPACE_MISCONFIGURED.
+
+    With the in-container probe absent the services.toml answer is UNKNOWN, not
+    NO, so the misconfigured guard must not fire. The container claims RUNNING
+    but exec failed, so this lands on HOST_UNRESPONSIVE instead.
+    """
+    response = build_host_health_response(
+        list_json=_list_json(host_state="RUNNING"),
+        agent_id=_AGENT_ID,
+        services_agent_id=_SERVICES_AGENT_ID,
+        in_container_stdout=None,
+        plugin_resolver_services={},
+    )
+    assert _answer(response, "services.toml") == ProbeAnswer.UNKNOWN
+    assert response.dispatch_tier == DispatchTier.HOST_UNRESPONSIVE
+    assert response.dispatch_tier != DispatchTier.WORKSPACE_MISCONFIGURED
 
 
 def test_dispatch_tier_host_unresponsive_for_ambiguous_host_state() -> None:

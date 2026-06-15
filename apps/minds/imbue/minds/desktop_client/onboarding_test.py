@@ -1,7 +1,9 @@
 import base64
 import json
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import PrivateAttr
 
@@ -21,6 +23,7 @@ from imbue.minds.desktop_client.onboarding import build_user_context_document
 from imbue.minds.desktop_client.onboarding import expected_creation_duration_seconds
 from imbue.minds.desktop_client.onboarding import resolve_local_user_name
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import seed_agent_creator_creation
 from imbue.minds.primitives import CreationId
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import UserDataPreference
@@ -91,6 +94,7 @@ def _make_applier(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
+    user_name_resolver: Callable[[], str] | None = None,
 ) -> OnboardingApplier:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_creator = AgentCreator(
@@ -104,6 +108,7 @@ def _make_applier(
         paths=paths,
         message_sender=MngrMessageSender(mngr_binary="mngr"),
         root_concurrency_group=root_concurrency_group,
+        user_name_resolver=user_name_resolver or resolve_local_user_name,
     )
 
 
@@ -112,7 +117,16 @@ def test_user_context_scan_writes_json_file(
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    applier = _make_applier(tmp_path, root_concurrency_group, notification_dispatcher)
+    # Inject a fixed resolver so the scan is hermetic (no real git / GECOS /
+    # getpass lookup) and the written name is exactly what we control, which
+    # would catch a name/details field swap.
+    resolved_name = f"Test User {uuid4().hex}"
+    applier = _make_applier(
+        tmp_path,
+        root_concurrency_group,
+        notification_dispatcher,
+        user_name_resolver=lambda: resolved_name,
+    )
     creation_id = CreationId()
 
     applier._run_user_context_scan(creation_id)
@@ -120,7 +134,7 @@ def test_user_context_scan_writes_json_file(
     context_path = tmp_path / "user_context" / f"{creation_id}.json"
     assert context_path.exists()
     document = json.loads(context_path.read_text())
-    assert document["name"] != ""
+    assert document["name"] == resolved_name
     assert document["details"] == USER_CONTEXT_PLACEHOLDER_DETAILS
 
 
@@ -176,9 +190,12 @@ def test_q2_and_q3_are_applied_concurrently(
     creation_id = CreationId()
     # Seed a tracked creation with a host name so the Q2 strand has a target
     # (otherwise it would short-circuit and only one strand would run).
-    with agent_creator._lock:
-        agent_creator._statuses[str(creation_id)] = AgentCreationStatus.WAITING_FOR_READY
-        agent_creator._host_names[str(creation_id)] = "assistant"
+    seed_agent_creator_creation(
+        agent_creator,
+        creation_id,
+        status=AgentCreationStatus.WAITING_FOR_READY,
+        host_name="assistant",
+    )
 
     applier = _HandshakeApplier(
         agent_creator=agent_creator,

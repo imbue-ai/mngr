@@ -16,6 +16,9 @@ def _bash_squote(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+# These two tests only verify exit-code plumbing; the ``-m``/``--`` argv
+# construction is covered in predefined_test.py
+# (``test_mngr_message_sender_invokes_message_subcommand``).
 def test_try_send_returns_true_on_success(tmp_path: Path) -> None:
     sender = MngrMessageSender(mngr_binary=str(_make_fake_mngr(tmp_path, exit_code=0)))
     assert sender.try_send("some-agent", "hello") is True

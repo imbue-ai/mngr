@@ -320,7 +320,9 @@ def test_grant_with_unknown_credentials_invokes_auth_browser(tmp_path: Path) -> 
     )
 
     assert result.outcome == GrantOutcome.GRANTED
-    assert len(_read_recording(auth_recording)) == 1
+    recording = _read_recording(auth_recording)
+    assert len(recording) == 1
+    assert recording[0]["argv"] == ["auth", "browser", "slack"]
 
 
 def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path) -> None:
@@ -473,17 +475,18 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
     assert "latchkey auth set slack" in result.set_credentials_example
 
 
-def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path: Path) -> None:
-    """User-facing command must write into the same store the desktop client uses.
+@pytest.mark.parametrize("dir_name", ["pinned latchkey dir", "shared-latchkey"])
+def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Path, dir_name: str) -> None:
+    """The suggested command always carries the pinned, shell-quoted ``LATCHKEY_DIRECTORY=``.
 
     The desktop client passes ``LATCHKEY_DIRECTORY`` to all its own latchkey
     invocations; if we don't tell the user to do the same, ``latchkey auth
     set`` writes credentials into ``~/.latchkey`` while the desktop client
     keeps reading from the pinned directory and the second Approve click
-    still reports ``MISSING``.
+    still reports ``MISSING``. The space-containing directory also pins that
+    the path is shell-quoted so it survives a copy-paste into a terminal.
     """
-    pinned = tmp_path / "pinned latchkey dir"
-    pinned.mkdir()
+    pinned = tmp_path / dir_name
     base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
     handler = _build_handler(
         tmp_path,
@@ -503,42 +506,8 @@ def test_grant_prefixes_set_example_with_latchkey_directory_when_pinned(tmp_path
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
     assert result.set_credentials_example is not None
-    # The directory contains a space, so the path must be shell-quoted to
-    # survive a copy-paste into a terminal.
-    expected_prefix = f"LATCHKEY_DIRECTORY={shlex.quote(str(pinned))} "
-    assert result.set_credentials_example.startswith(expected_prefix)
+    assert result.set_credentials_example.startswith(f"LATCHKEY_DIRECTORY={shlex.quote(str(pinned))} ")
     assert result.set_credentials_example.endswith(base_example)
-
-
-def test_grant_prefixes_set_example_with_pinned_latchkey_directory(tmp_path: Path) -> None:
-    """The suggested command always carries the pinned ``LATCHKEY_DIRECTORY=``.
-
-    ``Latchkey`` requires a ``latchkey_directory``, so the user's
-    terminal-run ``latchkey auth set`` must point at the same store
-    the desktop client uses; otherwise upstream latchkey would write
-    credentials to its own default ``~/.latchkey`` and the desktop
-    client would never see them.
-    """
-    base_example = 'latchkey auth set slack -H "Authorization: Bearer <token>"'
-    pinned = tmp_path / "shared-latchkey"
-    handler = _build_handler(
-        tmp_path,
-        credential_status="missing",
-        auth_options_json=json.dumps(["set"]),
-        set_credentials_example=base_example,
-        latchkey_directory=pinned,
-    )
-
-    result = handler.grant(
-        request_event_id="evt-abc",
-        agent_id=AgentId(),
-        host_id=HostId(),
-        service_info=_SLACK_SERVICE_INFO,
-        granted_permissions=("slack-read-all",),
-    )
-
-    assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
-    assert result.set_credentials_example == f"LATCHKEY_DIRECTORY={pinned} {base_example}"
 
 
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
@@ -739,14 +708,13 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     display name.
     """
     fake_client = FakeLatchkeyGatewayClient()
-    handler = _build_handler(tmp_path, credential_status="valid")
-    # Swap in a gateway client that records delete calls so we can
-    # assert the pending request was torn down.
+    latchkey = _make_latchkey_with_status(tmp_path, credential_status="valid")
+    mngr_binary = _make_recording_binary(tmp_path, "mngr", exit_code=0)
     handler = LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
-        latchkey=handler.latchkey,
+        latchkey=latchkey,
         services_catalog=_build_slack_services_catalog(),
-        mngr_message_sender=handler.mngr_message_sender,
+        mngr_message_sender=MngrMessageSender(mngr_binary=str(mngr_binary)),
         gateway_client=fake_client,
     )
     agent_id = AgentId()

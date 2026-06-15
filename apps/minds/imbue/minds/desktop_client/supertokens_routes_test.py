@@ -32,7 +32,13 @@ def test_read_unknown_flow_returns_none() -> None:
 
 def test_record_overwrites_previous_status_for_same_flow() -> None:
     deadline = time.monotonic() + 60
-    _record_oauth_status("flow-bbb", _OAuthFlowStatus(state="running", deadline=deadline))
+    # The first record sets ``error`` but no ``user_id``; the second record
+    # sets ``user_id`` but no ``error``. After overwriting, the status must
+    # reflect the second record wholesale (replaced), not a merge of both.
+    _record_oauth_status(
+        "flow-bbb",
+        _OAuthFlowStatus(state="error", error="boom", deadline=deadline),
+    )
     _record_oauth_status(
         "flow-bbb",
         _OAuthFlowStatus(
@@ -46,13 +52,31 @@ def test_record_overwrites_previous_status_for_same_flow() -> None:
     assert fetched is not None
     assert fetched.state == "done"
     assert fetched.email == "alice@example.com"
+    assert fetched.user_id == "user-xyz"
+    # The stale ``error`` from the first record must not survive the overwrite.
+    assert fetched.error is None
 
 
 def test_expired_flows_are_pruned_on_next_read() -> None:
-    """A flow whose deadline has passed is dropped on the next access."""
+    """The read path prunes an expired flow.
+
+    ``_record_oauth_status`` prunes *before* inserting, so recording an
+    already-expired flow still stores it (its own deadline is not yet in the
+    map when pruning runs). Reading it back with no intervening record is
+    therefore the only thing that can drop it, which isolates the read path's
+    pruning behavior.
+    """
     expired_deadline = time.monotonic() - 1
     _record_oauth_status("flow-ccc", _OAuthFlowStatus(state="done", deadline=expired_deadline))
-    # Recording another flow triggers pruning of the expired one.
+    assert _read_oauth_status("flow-ccc") is None
+
+
+def test_expired_flows_are_pruned_on_next_record() -> None:
+    """The record path prunes other flows that have already expired."""
+    expired_deadline = time.monotonic() - 1
+    _record_oauth_status("flow-ccc", _OAuthFlowStatus(state="done", deadline=expired_deadline))
+    # Recording a *different* flow runs pruning before the insert, dropping the
+    # already-stored expired flow.
     _record_oauth_status("flow-ddd", _OAuthFlowStatus(state="running", deadline=time.monotonic() + 60))
     assert _read_oauth_status("flow-ccc") is None
     assert _read_oauth_status("flow-ddd") is not None

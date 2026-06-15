@@ -26,6 +26,7 @@ import os
 import pwd
 import threading
 import time
+from collections.abc import Callable
 from typing import Final
 
 from loguru import logger
@@ -227,6 +228,15 @@ class OnboardingApplier(MutableModel):
         frozen=True,
         description="Sleep between polls while waiting for the canonical id / chat agent.",
     )
+    user_name_resolver: Callable[[], str] = Field(
+        default=resolve_local_user_name,
+        frozen=True,
+        description=(
+            "Resolves the local user's name for the Q1 user-context scan. Defaults to "
+            "``resolve_local_user_name`` (which shells out to git / GECOS / getpass); "
+            "injectable so tests can run the scan hermetically without a real git binary."
+        ),
+    )
 
     def start_apply(self, creation_id: CreationId, answers: OnboardingAnswers) -> None:
         """Apply ``answers`` on a detached background thread; returns immediately.
@@ -318,7 +328,7 @@ class OnboardingApplier(MutableModel):
 
     def _run_user_context_scan(self, creation_id: CreationId) -> None:
         """Resolve the user's name and write the per-creation user-context JSON file."""
-        user_name = resolve_local_user_name()
+        user_name = self.user_name_resolver()
         document = build_user_context_document(user_name)
         context_dir = self.paths.data_dir / USER_CONTEXT_DIR_NAME
         context_dir.mkdir(parents=True, exist_ok=True)

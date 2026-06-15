@@ -4,13 +4,52 @@ import threading
 
 import pytest
 
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.system_interface_health import should_enroll_suspect_for_backend_failure
 from imbue.mngr.primitives import AgentId
 
-# Short STUCK threshold so the probe-failure-run tests don't have to sleep 5s.
+# STUCK threshold used by the probe-failure-run tests. A fake clock drives the
+# elapsed time, so this value never has to elapse in real wall-clock time.
 _FAST_THRESHOLD: float = 0.05
+
+
+class _FakeClock(MutableModel):
+    """A controllable monotonic clock injected as ``monotonic_source``.
+
+    Calling the instance returns the current time; ``advance`` moves it forward.
+    This lets probe-failure-run tests cross the STUCK threshold deterministically
+    instead of relying on real sleeps landing on the right side of it.
+    """
+
+    now: float = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _make_tracker_and_clock(
+    stuck_threshold_seconds: float = _FAST_THRESHOLD,
+) -> tuple[SystemInterfaceHealthTracker, _FakeClock]:
+    clock = _FakeClock()
+    tracker = SystemInterfaceHealthTracker(
+        stuck_threshold_seconds=stuck_threshold_seconds,
+        monotonic_source=clock,
+    )
+    return tracker, clock
+
+
+def _drive_to_stuck(tracker: SystemInterfaceHealthTracker, clock: _FakeClock, aid: AgentId) -> None:
+    """Drive ``aid`` to STUCK the way the probe loop would: an envelope, then a
+    run of probe failures spanning the stuck threshold (advanced via ``clock``)."""
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid)
+    clock.advance(_FAST_THRESHOLD + 0.02)
+    tracker.record_probe_failure(aid)
 
 
 @pytest.mark.parametrize(
@@ -34,19 +73,6 @@ _FAST_THRESHOLD: float = 0.05
 )
 def test_should_enroll_suspect_for_backend_failure(status_code: int | None, expected: bool) -> None:
     assert should_enroll_suspect_for_backend_failure(status_code) is expected
-
-
-def _sleep(seconds: float) -> None:
-    threading.Event().wait(timeout=seconds)
-
-
-def _drive_to_stuck(tracker: SystemInterfaceHealthTracker, aid: AgentId) -> None:
-    """Drive ``aid`` to STUCK the way the probe loop would: an envelope, then a
-    run of probe failures spanning the stuck threshold."""
-    tracker.record_failure(aid)
-    tracker.record_probe_failure(aid)
-    _sleep(_FAST_THRESHOLD + 0.02)
-    tracker.record_probe_failure(aid)
 
 
 def test_default_health_is_healthy() -> None:
@@ -88,12 +114,12 @@ def test_single_probe_failure_does_not_stick() -> None:
 
 def test_sustained_probe_failures_transition_to_stuck() -> None:
     """A run of probe failures spanning the threshold transitions HEALTHY -> STUCK."""
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[tuple[AgentId, AgentHealth]] = []
     tracker.add_on_change_callback(lambda a, h: seen.append((a, h)))
 
-    _drive_to_stuck(tracker, aid)
+    _drive_to_stuck(tracker, clock, aid)
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
     assert seen == [(aid, AgentHealth.STUCK)]
@@ -105,11 +131,11 @@ def test_probe_failure_without_record_is_ignored() -> None:
     The probe loop only polls enrolled agents, but a record can be dropped
     (by a concurrent recovering probe) between the snapshot and the probe.
     """
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
 
     tracker.record_probe_failure(aid)
-    _sleep(_FAST_THRESHOLD + 0.02)
+    clock.advance(_FAST_THRESHOLD + 0.02)
     tracker.record_probe_failure(aid)
 
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -138,14 +164,14 @@ def test_probe_success_resets_the_failure_run() -> None:
     This is the spurious-recovery-flash guard: an ephemeral blip that briefly
     fails probing cannot accumulate toward STUCK once a later probe succeeds.
     """
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
     tracker.record_failure(aid)
     tracker.record_probe_failure(aid)
-    _sleep(_FAST_THRESHOLD + 0.02)
+    clock.advance(_FAST_THRESHOLD + 0.02)
     # A success here clears the run -- the elapsed time so far must not count.
     tracker.record_probe_success(aid)
 
@@ -160,12 +186,12 @@ def test_probe_success_resets_the_failure_run() -> None:
 
 
 def test_probe_success_after_stuck_transitions_back_to_healthy() -> None:
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
-    _drive_to_stuck(tracker, aid)
+    _drive_to_stuck(tracker, clock, aid)
     assert tracker.get_health(aid) == AgentHealth.STUCK
 
     tracker.record_probe_success(aid)
@@ -190,14 +216,14 @@ def test_repeated_failure_envelopes_enroll_once() -> None:
 
 def test_probe_failure_does_not_disturb_restarting_agent() -> None:
     """A failed probe while a restart is in flight must not flip the agent to STUCK."""
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     tracker.add_on_change_callback(lambda _a, h: seen.append(h))
 
     tracker.mark_restarting(aid)
     tracker.record_probe_failure(aid)
-    _sleep(_FAST_THRESHOLD + 0.02)
+    clock.advance(_FAST_THRESHOLD + 0.02)
     tracker.record_probe_failure(aid)
 
     assert tracker.get_health(aid) == AgentHealth.RESTARTING
@@ -209,7 +235,7 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
 
     After the restart the agent recovers; no leftover run may then re-stick it.
     """
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
 
     tracker.record_failure(aid)
@@ -218,7 +244,9 @@ def test_mark_restarting_clears_pending_failure_run() -> None:
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
 
-    # A single fresh probe failure starts a brand-new run -- not enough yet.
+    # A single fresh probe failure starts a brand-new run -- not enough yet,
+    # even though more than the threshold has elapsed since the abandoned run.
+    clock.advance(_FAST_THRESHOLD + 0.02)
     tracker.record_failure(aid)
     tracker.record_probe_failure(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
@@ -395,7 +423,7 @@ def test_snapshot_probe_targets_excludes_restarting_agents() -> None:
 def test_concurrent_failure_envelopes_then_one_stuck_event() -> None:
     """Concurrent failure envelopes enroll the agent once; a probe-failure run
     then produces exactly one STUCK event."""
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[AgentHealth] = []
     seen_lock = threading.Lock()
@@ -413,7 +441,7 @@ def test_concurrent_failure_envelopes_then_one_stuck_event() -> None:
         t.join()
 
     tracker.record_probe_failure(aid)
-    _sleep(_FAST_THRESHOLD + 0.02)
+    clock.advance(_FAST_THRESHOLD + 0.02)
     tracker.record_probe_failure(aid)
 
     assert tracker.get_health(aid) == AgentHealth.STUCK
@@ -425,7 +453,7 @@ def test_on_recovery_callback_fires_only_on_non_healthy_to_healthy() -> None:
     """The recovery callback fires on the STUCK -> HEALTHY transition, not on
     every HEALTHY observation.
     """
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     recovered: list[AgentId] = []
     tracker.add_on_recovery_callback(lambda a: recovered.append(a))
@@ -434,7 +462,7 @@ def test_on_recovery_callback_fires_only_on_non_healthy_to_healthy() -> None:
     tracker.record_probe_success(aid)
     assert recovered == []
 
-    _drive_to_stuck(tracker, aid)
+    _drive_to_stuck(tracker, clock, aid)
     assert tracker.get_health(aid) == AgentHealth.STUCK
     tracker.record_probe_success(aid)
     assert recovered == [aid]
@@ -445,7 +473,7 @@ def test_on_recovery_callback_fires_only_on_non_healthy_to_healthy() -> None:
 
 
 def test_on_recovery_callback_exception_does_not_break_subsequent_callbacks() -> None:
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    tracker, clock = _make_tracker_and_clock()
     aid = AgentId.generate()
     seen: list[AgentId] = []
 
@@ -458,7 +486,7 @@ def test_on_recovery_callback_exception_does_not_break_subsequent_callbacks() ->
     tracker.add_on_recovery_callback(bad_cb)
     tracker.add_on_recovery_callback(good_cb)
 
-    _drive_to_stuck(tracker, aid)
+    _drive_to_stuck(tracker, clock, aid)
     tracker.record_probe_success(aid)
     assert seen == [aid]
 

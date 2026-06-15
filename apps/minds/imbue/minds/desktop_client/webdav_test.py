@@ -1,6 +1,5 @@
 """Unit tests for the /api/v1/files WebDAV mount."""
 
-import os
 import tempfile
 from pathlib import Path
 from uuid import uuid4
@@ -36,10 +35,10 @@ def _auth_headers(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
-# Path used for "outside the home + /tmp shares" tests. ``/etc`` is
-# always present on macOS and Linux, never readable as part of the
-# WebDAV mount, and not a parent of either share root.
-_OUTSIDE_SHARE_PATH = "/api/v1/files/etc/hostname"
+# Path used for "outside the home + /tmp shares" tests. ``/etc`` is not a
+# parent of either share root, so the WebDAV mount must refuse to serve it
+# regardless of whether any file actually exists there.
+_OUTSIDE_SHARE_PATH = "/api/v1/files/etc/definitely-not-a-share"
 
 
 # -- Auth --
@@ -190,11 +189,6 @@ def test_share_root_with_uppercase_chars_resolves_to_provider(tmp_path: Path) ->
 
 def test_paths_outside_share_roots_return_404(tmp_path: Path) -> None:
     """Paths outside ``Path.home()`` and ``/tmp`` are not served."""
-    if not os.path.exists("/etc/hostname"):
-        # Defensive: skip on hosts without the canonical /etc layout. The
-        # share-root constraint is what's under test, not the existence
-        # of any particular file.
-        return
     client, api_key = _build_authenticated_client(tmp_path)
     response = client.get(_OUTSIDE_SHARE_PATH, headers=_auth_headers(api_key))
     # WsgiDAV returns 404 when no provider matches the URL prefix.

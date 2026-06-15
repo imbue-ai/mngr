@@ -9,6 +9,8 @@ from imbue.minds.desktop_client.notification import DispatchChannel
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.notification import _TKINTER
+from imbue.minds.desktop_client.notification import _URGENCY_COLOR_BY_LEVEL
 from imbue.minds.desktop_client.notification import _build_osascript_notification
 from imbue.minds.desktop_client.notification import _build_toast_widgets
 from imbue.minds.desktop_client.notification import _dispatch_electron_notification
@@ -27,11 +29,18 @@ def _make_fake_tk() -> Any:
     """
 
     class _FakeWidget:
-        """Minimal stand-in for tkinter widgets (Frame, Label, and Tk root)."""
+        """Minimal stand-in for tkinter widgets (Frame, Label, and Tk root).
+
+        Records the construction kwargs (e.g. ``text=``, ``bg=``) so tests can
+        introspect the widget tree built by ``_build_toast_widgets``, and the
+        geometry spec passed to ``geometry`` so tests can assert on positioning.
+        """
 
         def __init__(self, *args: object, **kwargs: object) -> None:
             self._children: list["_FakeWidget"] = []
             self._bindings: dict[str, object] = {}
+            self.kwargs: dict[str, object] = dict(kwargs)
+            self.geometry_spec: str | None = None
             # Register as a child of the parent widget (first positional arg),
             # mirroring real tkinter widget parent-child relationships.
             if args and isinstance(args[0], _FakeWidget):
@@ -59,7 +68,7 @@ def _make_fake_tk() -> Any:
             pass
 
         def geometry(self, spec: str) -> None:
-            pass
+            self.geometry_spec = spec
 
         def overrideredirect(self, flag: bool) -> None:
             pass
@@ -155,16 +164,6 @@ def test_electron_notification_omits_title_when_none(capsys: pytest.CaptureFixtu
     assert "title" not in event
 
 
-def test_dispatcher_routes_to_electron_when_configured() -> None:
-    dispatcher = NotificationDispatcher(is_electron=True)
-    assert dispatcher.is_electron is True
-
-
-def test_dispatcher_routes_to_tkinter_when_not_electron() -> None:
-    dispatcher = NotificationDispatcher(is_electron=False)
-    assert dispatcher.is_electron is False
-
-
 def test_dispatch_electron_via_dispatcher(capsys: pytest.CaptureFixture[str]) -> None:
     """Verify the full dispatch path for Electron notifications."""
     dispatcher = NotificationDispatcher(is_electron=True)
@@ -235,13 +234,11 @@ def test_dispatcher_create_defaults_is_electron_false(capsys: pytest.CaptureFixt
 
 
 def test_dispatcher_default_constructor_resolves_tkinter() -> None:
-    """NotificationDispatcher() resolves tkinter at construction via model_post_init."""
-    # The _tk private attr should be set to the auto-detected _TKINTER value.
-    # We can't know if tkinter is available, so just verify _tk is not uninitialized.
+    """NotificationDispatcher() resolves _tk to the module-level _TKINTER via model_post_init."""
     dispatcher = NotificationDispatcher(is_electron=False)
-    # _tk is set by model_post_init; it will be a ModuleType or None (if tkinter is absent)
-    # Just verify the attribute is accessible (not undefined)
-    _ = dispatcher._tk
+    # model_post_init sets _tk to the auto-detected module-level _TKINTER value
+    # (a ModuleType when tkinter is importable, or None on headless hosts).
+    assert dispatcher._tk is _TKINTER
 
 
 # -- macOS notification tests --
@@ -303,59 +300,51 @@ def test_dispatcher_create_with_is_macos_override() -> None:
 # -- _build_toast_widgets and _position_toast_window tests with fake tkinter --
 
 
-def test_build_toast_widgets_returns_frame_and_content() -> None:
-    """_build_toast_widgets constructs frame/content widgets using the provided tk module."""
+@pytest.mark.parametrize(
+    "urgency",
+    [NotificationUrgency.LOW, NotificationUrgency.NORMAL, NotificationUrgency.CRITICAL],
+)
+def test_build_toast_widgets_colors_indicator_by_urgency_and_renders_text(urgency: NotificationUrgency) -> None:
+    """_build_toast_widgets colors the urgency indicator per _URGENCY_COLOR_BY_LEVEL
+    and renders the agent name, title, and message into the content labels."""
     tk = _make_fake_tk()
     root = tk.Frame()
+
     frame, content = _build_toast_widgets(
         root=root,
-        title="Test Title",
-        message="Test message",
-        urgency=NotificationUrgency.NORMAL,
-        agent_display_name="test-agent",
+        title="Build Failed",
+        message="The CI pipeline did not complete.",
+        urgency=urgency,
+        agent_display_name="agent-build",
         tk=tk,
     )
-    assert frame is not None
-    assert content is not None
+
+    # The indicator is the first child Frame of the outer frame; its bg encodes urgency.
+    indicator = frame.winfo_children()[0]
+    assert indicator.kwargs["bg"] == _URGENCY_COLOR_BY_LEVEL[urgency]
+
+    # The content frame holds the text labels; collect their rendered text.
+    label_texts = [child.kwargs["text"] for child in content.winfo_children()]
+    assert "From: agent-build" in label_texts
+    assert "Build Failed" in label_texts
+    assert "The CI pipeline did not complete." in label_texts
 
 
-def test_build_toast_widgets_with_critical_urgency() -> None:
-    """_build_toast_widgets uses the critical urgency color when urgency is CRITICAL."""
+def test_position_toast_window_sets_computed_bottom_right_geometry() -> None:
+    """_position_toast_window sets a WxH+X+Y geometry spec computed from the
+    screen size, the window's requested height, and the bottom-right offsets."""
     tk = _make_fake_tk()
     root = tk.Frame()
-    frame, content = _build_toast_widgets(
-        root=root,
-        title="Alert",
-        message="Critical notification",
-        urgency=NotificationUrgency.CRITICAL,
-        agent_display_name="agent-x",
-        tk=tk,
-    )
-    assert frame is not None
-    assert content is not None
+    width = 320
 
+    _position_toast_window(root, width=width)
 
-def test_build_toast_widgets_with_low_urgency() -> None:
-    """_build_toast_widgets does not raise for LOW urgency."""
-    tk = _make_fake_tk()
-    root = tk.Frame()
-    frame, content = _build_toast_widgets(
-        root=root,
-        title="Info",
-        message="Low priority notification",
-        urgency=NotificationUrgency.LOW,
-        agent_display_name="agent-y",
-        tk=tk,
-    )
-    assert frame is not None
-    assert content is not None
-
-
-def test_position_toast_window_calls_geometry() -> None:
-    """_position_toast_window calls root.geometry() to position the window."""
-    tk = _make_fake_tk()
-    root = tk.Frame()
-    _position_toast_window(root, width=320)
+    # Expected values mirror the production formula in _position_toast_window,
+    # using the fake widget's reqheight/screen dimensions.
+    height = root.winfo_reqheight()
+    x_position = root.winfo_screenwidth() - width - 20
+    y_position = root.winfo_screenheight() - height - 60
+    assert root.geometry_spec == f"{width}x{height}+{x_position}+{y_position}"
 
 
 def test_run_tkinter_toast_with_fake_tk_raises_tclerror() -> None:
