@@ -60,6 +60,7 @@ Only after doing all of the above should you begin writing code.
 - Do NOT create tests for test utilities (e.g. never create `testing_test.py`). Code in `testing.py` and `conftest.py` is exercised by the tests that use it and does not need its own test file.
 - Do NOT create tests that code raises NotImplementedError.
 - If you see a flaky test, YOU MUST HIGHLIGHT THIS IN YOUR RESPONSE. Mark it with `@pytest.mark.flaky` so offload retries it automatically. Then try to fix the underlying flakiness in a separate commit.
+- Do NOT mark a test that fails because of a timeout with `@pytest.mark.flaky`. Instead, investigate a root-cause fix that does not erode the correctness of the test (e.g. make things faster or increase parallelism). Only if such a fix is not feasible should you bump the timeout.
 - Do not add TODO or FIXME unless explicitly asked to do so
 - Code must work on both macOS and Linux. It's ok if it doesn't work on Windows.
 - `mngr` is installed by end users from PyPI, so the built wheel must be self-contained: it only packages the `imbue` package (`packages = ["imbue"]`), so production code must not read files outside it at runtime unless they're shipped into the package (e.g. via wheel `force-include`, as the help-topic docs are).

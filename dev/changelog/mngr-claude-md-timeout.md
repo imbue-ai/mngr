@@ -1,0 +1,1 @@
+Clarified CLAUDE.md test guidance: tests that fail because of a timeout should not be marked `@pytest.mark.flaky`. Instead, pursue a root-cause fix that does not erode test correctness (e.g. make things faster or increase parallelism), and only bump the timeout if no such fix is feasible.
