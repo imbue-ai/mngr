@@ -101,9 +101,10 @@ IMDS — no separate endpoint needed.
   (`ec2 stop-instances`, wait for `stopped`) and `start_instance(instance_id) -> new_ip`
   (`ec2 start-instances`, wait for `running`, return the new public IP). These are AWS-only
   methods; `VpsClientInterface` is **not** modified (AwsProvider calls `self.aws_client.…`).
-- `AwsProvider.stop_host` (override): call `super().stop_host(host, create_snapshot=False)` to
-  stop the container and update the record (no docker-commit — the filesystem persists on the
-  stopped volume), set `stop_reason` (`PAUSED` vs `STOPPED`), then `self.aws_client.stop_instance(...)`.
+- `AwsProvider.stop_host` (override): call `super().stop_host(host, create_snapshot=False,
+  stop_reason=STOPPED)` to stop the container and update the record in a single write (no
+  docker-commit — the filesystem persists on the stopped volume; the `stop_reason` rides along in
+  that write), then `self.aws_client.stop_instance(...)`.
 - `AwsProvider.start_host` (override): `self.aws_client.start_instance(...)` first (instance must
   be running before we can SSH), persist the new `vps_ip` into the host record + refresh
   known_hosts, then call `super().start_host(...)` to start the container against the refreshed IP.
@@ -235,7 +236,7 @@ Two sub-parts, with an open decision on the second:
   stop/start-instances. `vps_ip` in `VpsDockerHostRecord` becomes mutable across a stop/start and
   is refreshed on resume.
 - No new snapshot records (EBS snapshots dropped). `stop_reason` already exists on
-  `CertifiedHostData` and drives the offline `PAUSED`/`STOPPED` state derivation
+  `CertifiedHostData` and drives the offline `STOPPED` state derivation
   (`supports_shutdown_hosts=True` is already set for vps_docker).
 
 ## Out of scope / future

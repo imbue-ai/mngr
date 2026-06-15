@@ -347,6 +347,7 @@ class AwsProvider(VpsDockerProvider):
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
     ) -> None:
         """Stop the agent container *and* the EC2 instance, preserving the EBS volume.
 
@@ -358,19 +359,20 @@ class AwsProvider(VpsDockerProvider):
 
         ``create_snapshot`` is intentionally ignored -- native EC2 stop preserves
         the whole filesystem, so the base's docker-commit snapshot would be
-        redundant. The base container-stop + record-write is reused via
-        ``super()``; we then record ``stop_reason=STOPPED`` so the offline-state
-        derivation reports STOPPED (not CRASHED) while the instance is down, and
-        finally stop the instance. The ``stop_reason`` write must happen *before*
-        the instance stops, since the volume is unreachable once it does.
+        redundant. The base container-stop + record-write is reused via ``super()``,
+        passing ``stop_reason=STOPPED`` so that single write marks the host STOPPED
+        (so the offline-state derivation reports STOPPED, not CRASHED, while the
+        instance is down) -- no second record write is needed. The write lands
+        before the instance stops, since the volume is unreachable once it does.
         """
         del create_snapshot
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
         if host_record is None or host_record.config is None or host_record.vps_ip is None:
             raise HostNotFoundError(self.name, host_id)
-        super().stop_host(host, create_snapshot=False, timeout_seconds=timeout_seconds)
-        self._record_stop_reason(host_id, host_record, HostState.STOPPED)
+        super().stop_host(
+            host, create_snapshot=False, timeout_seconds=timeout_seconds, stop_reason=stop_reason or HostState.STOPPED
+        )
         with log_span("Stopping EC2 instance"):
             self.aws_client.stop_instance(host_record.config.vps_instance_id)
 
@@ -473,28 +475,6 @@ class AwsProvider(VpsDockerProvider):
         """Return every cached non-terminated instance tagged ``mngr-host-id=<host_id>``."""
         wanted_tag = f"mngr-host-id={host_id}"
         return [instance for instance in self._list_instances_cached() if wanted_tag in instance.get("tags", ())]
-
-    def _record_stop_reason(
-        self,
-        host_id: HostId,
-        host_record: VpsDockerHostRecord,
-        state: HostState,
-    ) -> None:
-        """Persist ``stop_reason`` on the host record while the instance is still reachable."""
-        if host_record.config is None or host_record.vps_ip is None:
-            raise HostNotFoundError(self.name, host_id)
-        certified = host_record.certified_host_data
-        updated_data = certified.model_copy_update(
-            to_update(certified.field_ref().stop_reason, state.value),
-            to_update(certified.field_ref().updated_at, datetime.now(timezone.utc)),
-        )
-        updated_record = host_record.model_copy_update(
-            to_update(host_record.field_ref().certified_host_data, updated_data)
-        )
-        with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
-            host_store = open_host_store(outer, host_record.config.volume_name)
-            host_store.write_host_record(updated_record)
-        self._host_record_cache[host_id] = updated_record
 
     def _rebind_known_hosts(self, record: VpsDockerHostRecord, new_ip: str) -> None:
         """Re-point local known_hosts at ``new_ip`` using the instance's preserved host keys.

@@ -1257,6 +1257,7 @@ class VpsDockerProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         create_snapshot: bool = True,
         timeout_seconds: float = 60.0,
+        stop_reason: HostState | None = None,
     ) -> None:
         host_id = host.id if isinstance(host, HostInterface) else host
         host_record = self._find_host_record(host_id)
@@ -1279,13 +1280,21 @@ class VpsDockerProvider(BaseProviderInstance):
             with log_span("Stopping container on VPS"):
                 stop_container(outer, host_record.config.container_name, timeout_seconds=int(timeout_seconds))
 
-            # Update host record
+            # Update the host record (bump updated_at). A subclass that stops more
+            # than the container -- e.g. AWS stopping the EC2 instance -- passes a
+            # ``stop_reason`` so the offline-state derivation reports it correctly
+            # (STOPPED, not CRASHED) while the host is down; this single write
+            # carries it, so the subclass needs no second write. The write must
+            # land before any deeper stop, since the volume is unreachable after.
             host_store = open_host_store(outer, host_record.config.volume_name)
-            now = datetime.now(timezone.utc)
-            updated_data = host_record.certified_host_data.model_copy(update={"updated_at": now})
+            record_updates: dict[str, object] = {"updated_at": datetime.now(timezone.utc)}
+            if stop_reason is not None:
+                record_updates["stop_reason"] = stop_reason.value
+            updated_data = host_record.certified_host_data.model_copy(update=record_updates)
             updated_record = host_record.model_copy(update={"certified_host_data": updated_data})
             host_store.write_host_record(updated_record)
 
+        self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
 
     # =========================================================================
