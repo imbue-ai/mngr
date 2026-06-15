@@ -110,14 +110,20 @@ Modal's state volume.
    to R2, orchestrated by minds and gated behind a per-workspace password held minds-side; reusing
    it would force `mngr` core to shell out to `restic restore` with a password it does not own — the
    wrong layer. The `mngr_imbue_cloud` R2 bucket abstraction is Cloudflare-connector-specific (API
-   tokens, not native AWS/Azure creds) and does not apply. We reuse the **btrfs snapshot helper**
-   (already shipped for host-backup) only to get a consistent point-in-time copy of `host_dir` to
-   sync.
-5. **`host_dir` sync = periodic `aws s3 sync` / `az storage blob sync` + final consistent sync on
-   stop**, not a FUSE mount (mountpoint-s3 / blobfuse). Periodic incremental sync mirrors Modal's
-   60 s `sync` daemon, is robust to crashes (offline data is "as of last sync"), and avoids a FUSE
-   dependency in the image. The stop-time sync takes a btrfs snapshot first (via the existing helper)
-   for a clean final state.
+   tokens, not native AWS/Azure creds) and does not apply.
+5. **`host_dir` sync = periodic `aws s3 sync` / `az storage blob sync` + final sync on stop**, not a
+   FUSE mount (mountpoint-s3 / blobfuse). Periodic incremental sync mirrors Modal's 60 s `sync`
+   daemon, is robust to crashes (offline data is "as of last sync"), and avoids a FUSE dependency in
+   the image.
+   - **Btrfs-snapshot-before-sync was descoped (as-built).** Earlier drafts of this decision had the
+     sync read a consistent btrfs snapshot (via the existing host-backup helper) first. The
+     implementation syncs the **live** `host_dir` tree directly on both providers, and does not touch
+     the `mngr_vps_docker` snapshot helper. Rationale: the stop-time sync runs *after* the container
+     is stopped (`super().stop_host` first), so `host_dir` is already quiesced and the final copy is
+     consistent without a snapshot; the periodic sync accepts the same "as-of-last-sync" freshness a
+     snapshot would not improve on. Taking a snapshot would mean wiring into the helper's
+     event/docker-volume-triggered protocol for no correctness gain. If a future need for a strictly
+     point-in-time periodic copy arises, reuse that helper.
 6. **`prepare` reintroduces IAM/identity provisioning** that `aws-ec2-stop-start-lifecycle`
    deliberately removed (it made `prepare` security-group-only). The bucket-write role is the reason.
    To keep `prepare` usable for operators without IAM permissions, identity provisioning is a
@@ -194,11 +200,12 @@ existing `OfflineHostWithVolume` machinery (the same interface `ModalVolume` imp
 
 ### Component 3 — `host_dir` offline volume (fixes c)
 
-- **On-box sync daemon** shipped like the existing idle-watcher / snapshot-helper (cloud-init +
-  systemd in `mngr_vps_docker` / provider overrides). Loop: take a consistent `host_dir` snapshot
-  (reuse the btrfs snapshot helper where available; direct read otherwise), then
-  `aws s3 sync` / `az storage blob sync` to `hosts/<id>/host_dir/`. Interval configurable
-  (default 60 s). Also triggered on graceful stop before the instance powers off.
+- **On-box sync daemon** installed over SSH from the post-create finalize hook (the same pattern as
+  the existing AWS idle-watcher systemd install — *not* cloud-init), as a systemd `.timer` + oneshot
+  `.service` in the provider override. Each tick runs `aws s3 sync` / `azcopy sync` of the live
+  `host_dir` tree to `hosts/<id>/host_dir/` (see Decision 5 — no btrfs snapshot; the tree is synced
+  directly). Interval configurable (default 60 s). Also triggered synchronously on graceful stop
+  (after the container is stopped, so the final copy is consistent) before the instance powers off.
 - **Credentials:** the instance profile / managed identity from Decision 3 grants the daemon
   bucket-write. No long-lived keys on the box.
 - **Offline read:** `AwsProvider.get_volume_for_host` / `AzureProvider.get_volume_for_host` return
