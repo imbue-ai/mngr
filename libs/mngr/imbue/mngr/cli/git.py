@@ -70,10 +70,15 @@ def _resolve_remote_endpoint(
             "for local-only operations"
         )
 
+    # Scope to the target's provider/agent so an unrelated down provider isn't queried.
+    provider_names: tuple[str, ...] | None = None
+    if parsed.host is not None and parsed.host.provider is not None:
+        provider_names = (str(parsed.host.provider),)
+    agent_identifiers = (str(parsed.agent),) if parsed.agent is not None else None
     agents_by_host, _ = discover_hosts_and_agents(
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
+        provider_names=provider_names,
+        agent_identifiers=agent_identifiers,
         include_destroyed=False,
         reset_caches=False,
     )

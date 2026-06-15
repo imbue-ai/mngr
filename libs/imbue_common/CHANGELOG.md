@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.20] - 2026-06-13
+
+### Changed
+
+- Changed: Constrained `primitives` types and the `RegexPattern` validator now raise dedicated `InvalidPrimitiveValueError` / `InvalidRegexPatternError` instead of `ValueError`.
+
+### Fixed
+
+- Fixed: `PREVENT_BUILTIN_EXCEPTION_RAISES` ratchet regex now catches `raise ValueError("literal")` and `raise OSError()` forms (a trailing `\b` after the opening paren had limited it to raises whose first arg started with a word character) and excludes test files.
+
 ## [v0.1.19] - 2026-06-05
 
 ### Added

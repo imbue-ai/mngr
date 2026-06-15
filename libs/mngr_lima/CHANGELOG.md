@@ -6,6 +6,10 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.7] - 2026-06-15
+
+## [v0.1.6] - 2026-06-13
+
 ### Added
 
 - Added: `is_run_as_root` config field on the Lima provider — when enabled, mngr runs the agent in the VM as root (uid 0), so a coding agent can `apt install` and write anywhere with no `sudo`. mngr injects a root client key, enables key-based root login, and SSHes in as root. Requires the btrfs additional-disk layout (`is_host_data_volume_exposed=false`); the invalid combination with the 9p bind-mount layout is rejected at config construction.

@@ -2,21 +2,51 @@
 name = "minds-desktop"
 version = "0.1.0"
 requires-python = "==3.12.13"
+# All workspace packages must be listed as direct dependencies so uv honors
+# the tool-uv-sources path overrides. uv ignores source overrides for
+# transitive-only packages and falls back to PyPI, which silently installs
+# stale published versions instead of our freshly built wheels.
+# This list (both [project] dependencies and [tool.uv.sources]) is mirrored
+# in scripts/build.js, electron/env-setup.js, and scripts/build_test.py; the
+# drift guard test_workspace_package_lists_are_consistent in build_test.py
+# fails if any of them disagree, so update all four together.
 dependencies = [
     "minds>=0.1.0",
+    "imbue-mngr>=0.2.0",
     "imbue-mngr-claude>=0.2.0",
+    "imbue-mngr-forward>=0.1.0",
+    "imbue-mngr-imbue-cloud>=0.1.0",
+    "imbue-mngr-latchkey>=0.1.0",
+    "imbue-mngr-lima>=0.1.0",
     "imbue-mngr-modal>=0.2.0",
+    "imbue-mngr-ovh>=0.1.0",
+    "imbue-mngr-vps-docker>=0.1.0",
+    "imbue-common>=0.1.0",
+    "concurrency-group>=0.1.0",
+    "resource-guards>=0.1.0",
+    "modal-proxy>=0.1.0",
 ]
 
-# Supply-chain hardening: refuse to resolve any distribution published less
-# than 14 days ago, so a freshly-compromised release cannot be pulled into an
-# end-user install during first-launch `uv sync`. Applies to all dependencies,
-# including transitive ones. Only affects resolution (e.g. re-locking), not
-# installation from an already-pinned lockfile.
+# Supply-chain hardening: rolling 14-day cooldown. Refuses any wheel /
+# source-dist resolved with an upload-time newer than `now - 14d`. Mirrors
+# the pnpm-workspace.yaml minimumReleaseAge gate so a freshly-compromised
+# release can't be pulled in before being noticed and yanked. Only bites
+# during resolution (`uv lock`); a frozen install replays the lockfile.
 [tool.uv]
 exclude-newer = "14 days"
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
+imbue-mngr = { path = "../../../../libs/mngr", editable = true }
 imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
+imbue-mngr-forward = { path = "../../../../libs/mngr_forward", editable = true }
+imbue-mngr-imbue-cloud = { path = "../../../../libs/mngr_imbue_cloud", editable = true }
+imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true }
+imbue-mngr-lima = { path = "../../../../libs/mngr_lima", editable = true }
 imbue-mngr-modal = { path = "../../../../libs/mngr_modal", editable = true }
+imbue-mngr-ovh = { path = "../../../../libs/mngr_ovh", editable = true }
+imbue-mngr-vps-docker = { path = "../../../../libs/mngr_vps_docker", editable = true }
+imbue-common = { path = "../../../../libs/imbue_common", editable = true }
+concurrency-group = { path = "../../../../libs/concurrency_group", editable = true }
+resource-guards = { path = "../../../../libs/resource_guards", editable = true }
+modal-proxy = { path = "../../../../libs/modal_proxy", editable = true }

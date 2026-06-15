@@ -4,6 +4,26 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+Fixed the kanpan footer flickering when a background refresh and a user action (e.g. deleting a marked agent) ran at the same time. The footer is now driven by a single writer that picks what to show by priority (transient notification > active action > refresh spinner > marked-agent summary > steady text), so overlapping spinner loops can no longer overwrite each other on alternating ticks.
+
+Batch operations in the kanpan TUI (delete, push, and markable custom commands) now surface failures instead of silently doing nothing. When `x` execution fails, the per-agent error detail (including a clear "timed out after Ns" message for timeouts) is listed at the bottom of the board, in the same place fetch errors appear, and persists until the next execution. The marks for failed agents are kept so you can retry.
+
+## 2026-06-10
+
+`mngr kanpan --format json` now prints a single board snapshot instead of launching the TUI, for programmatic use. The JSON has the ordered columns, agents grouped into sections (with human labels), and any fetch errors; each agent carries both the pre-rendered cells (text/url/color) and the structured field values (PR number, CI status, commits-ahead count, etc.).
+
+`--format jsonl` is also supported: it emits one agent record per line in board order, followed by any error lines.
+
+Previously `--format json` was accepted but silently ignored.
+
+The GitHub data source now pages through PR search results instead of fetching only the first 100. Boards tracking more than 100 agents previously hit GitHub's hard per-page cap and silently rendered "Create PR" for the overflow agents; kanpan now follows the search cursor and fetches every page (up to GitHub's ~1000-result ceiling, beyond which it surfaces an explicit error).
+
+Each page request is also retried with exponential backoff when GitHub returns a transient failure (HTTP 403 secondary rate limit, 5xx, or an unparseable body). A failure on a later page keeps the pages already fetched and retries only the failing page, so earlier results are never re-fetched.
+
+Raised the stale coverage floor from 83% to 85% to match the coverage CI already measures (~86%).
+
 ## 2026-06-04
 
 Adopted the new repo-wide `per-file host uploads inside loops` ratchet check (flags write_file/write_text_file/put_file calls inside loops, which should use a single rsync via host.copy_directory instead). No production code change in this project.

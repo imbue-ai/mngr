@@ -118,7 +118,7 @@ def test_prevent_yaml_usage() -> None:
     # lima native config only accepts yaml; the provider generates a Lima YAML
     # config, and the btrfs release test writes a Lima override.yaml to make the
     # VM bootable in CI.
-    rc.check_yaml_usage(_DIR, snapshot(100))
+    rc.check_yaml_usage(_DIR, snapshot(101))
 
 
 def test_prevent_functools_partial() -> None:

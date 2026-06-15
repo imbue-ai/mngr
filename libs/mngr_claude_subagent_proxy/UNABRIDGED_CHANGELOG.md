@@ -4,6 +4,40 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+# Reuse the shared assistant-text extractor
+
+`subagent_wait.extract_assistant_text` now delegates to the shared
+`imbue.mngr_claude.stream_json.assistant_text` typed boundary rather than duplicating its own
+content-block scan. Behavior is unchanged (it still returns the concatenation of the assistant
+message's text blocks, or the empty string), but the envelope-parsing logic now lives in one place.
+
+## 2026-06-12
+
+Internal: routed `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now in `imbue.mngr.hosts.common`). No behavior change.
+
+The plugin's provisioning artifacts now live under a `mngr-proxy/` subdirectory and are guarded against dirtying a tracked worktree:
+
+- The PROXY-mode agent definition moved from `.claude/agents/mngr-proxy.md` to `.claude/agents/mngr-proxy/proxy.md`, and the DENY-mode skill moved from `.claude/skills/mngr-subagents/SKILL.md` to `.claude/skills/mngr-proxy/SKILL.md` (the DENY skill is correspondingly renamed from `mngr-subagents` to `mngr-proxy`). A single `.claude/agents/mngr-proxy/` or `.claude/skills/mngr-proxy/` line in `.gitignore` now covers each artifact. Discovery is unaffected: Claude Code identifies the subagent by its frontmatter `name:` field.
+
+- At provisioning the plugin now refuses to write either artifact into a git-tracked worktree where the path is not gitignored, raising a clear error instead of silently leaving an untracked file. The error tells you to either gitignore the path or disable the plugin for the repository (`mngr config set --scope project plugins.claude_subagent_proxy.enabled false`).
+
+## 2026-06-11
+
+The `claude_subagent_proxy` plugin is now **disabled by default** and must be explicitly opted into. It only loads when a config layer sets:
+
+```toml
+[plugins.claude_subagent_proxy]
+enabled = true
+```
+
+This inverts the usual plugin default (load-unless-disabled) because the plugin is very experimental and interferes with a lot of other tooling -- it intercepts Claude Code's built-in `Task` tool. The README documents the new opt-in requirement and behavior.
+
+## 2026-06-10
+
+Raised the stale coverage floor from 66% to 70% to match the coverage CI already measures (~71%).
+
 ## 2026-06-09
 
 Updated the destroyed-agent fallback to read the preserved common transcript from its new

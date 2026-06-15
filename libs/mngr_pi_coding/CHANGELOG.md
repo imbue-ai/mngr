@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.11] - 2026-06-15
+
+## [v0.1.10] - 2026-06-13
+
+### Added
+
+- Added: `pi` alias for the `pi-coding` agent type (`mngr create my-agent pi` is equivalent to `mngr create my-agent pi-coding`).
+- Added: Real pi-coding lifecycle parity, driven by a single mngr-owned pi extension loaded with `pi -e` (pi has no shell hooks): `mngr list` RUNNING/WAITING (correct even when an agent spawns a nested `pi`), `mngr transcript` with raw + common transcripts (`emit_common_transcript` / `emit_raw_transcript`, default on), `mngr stop`/`start` session resume (`resume_session`, default on), a real readiness sentinel instead of banner-scraping, remote npm auto-install (`@earendil-works/pi-coding-agent`), reliable message delivery via a watched per-agent inbox file (`pi.sendUserMessage`) instead of tmux keystrokes (TUI still viewable via `mngr connect`), pi 0.79+ "Trust project folder?" handling by pre-seeding `trust.json` (gated like claude/antigravity; silent under `--yes` / `auto_dismiss_dialogs`, else prompts), and syncing the `agents/` resource dir from `~/.pi/agent/`.
+- Added: Conformance test asserting pi's emitted common-transcript records validate against the canonical envelope schema (`imbue.mngr.agents.common_transcript_records`), run on the shared agent release-lifecycle harness.
+
 ## [v0.1.9] - 2026-06-08
 
 ## [v0.1.8] - 2026-06-05

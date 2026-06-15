@@ -62,6 +62,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PATTERN
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import wait_for
@@ -1066,7 +1067,7 @@ def get_stash_count(path: Path) -> int:
 
 def is_claude_installed() -> bool:
     """Check if the Claude Code CLI is installed and available on PATH."""
-    return shutil.which("claude") is not None
+    return CLAUDE.is_available()
 
 
 def write_executable_script(path: Path, content: str) -> None:
@@ -1502,6 +1503,19 @@ def local_sshd(
     authorized_keys_path = sshd_dir / "authorized_keys"
     authorized_keys_path.write_text(authorized_keys_content)
 
+    # Isolate git's global/system config for sessions on this sshd. mngr runs
+    # `git config --global ...` over SSH when preparing a remote target (e.g.
+    # `git config --global --add safe.directory <target>` in
+    # Host._transfer_git_repo and add_safe_directory_on_remote). That command
+    # runs inside the SSH login, which sees the real user's $HOME -- the
+    # HOME-redirection done by isolate_home()/setup_git_config cannot reach
+    # across the SSH hop, so without this those writes would land in the
+    # developer's real ~/.gitconfig. Point GIT_CONFIG_GLOBAL at a throwaway file
+    # inside the sshd sandbox and GIT_CONFIG_SYSTEM at /dev/null so the session
+    # git is fully isolated from the host's real config.
+    git_global_config_path = sshd_dir / "git_global_config"
+    git_global_config_path.touch()
+
     # Create sshd_config
     sshd_config_path = etc_dir / "sshd_config"
     current_user = os.environ.get("USER", "root")
@@ -1518,6 +1532,7 @@ PidFile {run_dir}/sshd.pid
 StrictModes no
 Subsystem sftp {_sftp_server_path()}
 AllowUsers {current_user}
+SetEnv GIT_CONFIG_GLOBAL={git_global_config_path} GIT_CONFIG_SYSTEM=/dev/null
 """
     sshd_config_path.write_text(sshd_config)
 
@@ -1623,6 +1638,18 @@ def write_discovery_snapshot_to_path(
         "hosts": hosts,
     }
     events_path.write_text(json.dumps(event) + "\n")
+
+
+class FakeTtyStream(StringIO):
+    """A StringIO that reports itself as a TTY, for exercising color logic.
+
+    Used by tests that need ``should_use_color`` (and the code paths gated on it,
+    e.g. ``MngrError.show``) to take the colored branch even though the test's
+    real streams are not terminals.
+    """
+
+    def isatty(self) -> bool:
+        return True
 
 
 def walk_concrete_subclasses(cls: type) -> list[type]:
