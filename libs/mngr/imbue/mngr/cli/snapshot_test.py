@@ -1,6 +1,7 @@
 import json
 from datetime import datetime
 from datetime import timezone
+from typing import Callable
 
 import pluggy
 import pytest
@@ -11,6 +12,8 @@ from imbue.mngr.cli.snapshot import SnapshotCreateCliOptions
 from imbue.mngr.cli.snapshot import SnapshotDestroyCliOptions
 from imbue.mngr.cli.snapshot import SnapshotListCliOptions
 from imbue.mngr.cli.snapshot import _agent_identifiers_for_targets
+from imbue.mngr.cli.snapshot import _check_create_future_options
+from imbue.mngr.cli.snapshot import _check_list_future_options
 from imbue.mngr.cli.snapshot import _emit_create_result
 from imbue.mngr.cli.snapshot import _emit_destroy_dry_run
 from imbue.mngr.cli.snapshot import _emit_destroy_result
@@ -615,3 +618,129 @@ def test__agent_identifiers_for_targets_collects_when_all_agents() -> None:
 
 def test__agent_identifiers_for_targets_empty_input_returns_none() -> None:
     assert _agent_identifiers_for_targets([]) is None
+
+
+# =============================================================================
+# Tests for [future] flag guards
+# =============================================================================
+
+
+def _make_snapshot_create_opts(
+    identifiers: tuple[str, ...] = ("agent1",),
+    name: str | None = None,
+    on_error: str = "abort",
+    tag: tuple[str, ...] = (),
+    description: str | None = None,
+    restart_if_larger_than: str | None = None,
+    pause_during: bool = True,
+    wait: bool = True,
+    output_format: str = "human",
+    quiet: bool = False,
+    verbose: int = 0,
+    log_file: str | None = None,
+    log_commands: bool | None = None,
+    plugin: tuple[str, ...] = (),
+    disable_plugin: tuple[str, ...] = (),
+) -> SnapshotCreateCliOptions:
+    """Construct a SnapshotCreateCliOptions with safe defaults, allowing overrides."""
+    return SnapshotCreateCliOptions(
+        identifiers=identifiers,
+        name=name,
+        on_error=on_error,
+        tag=tag,
+        description=description,
+        restart_if_larger_than=restart_if_larger_than,
+        pause_during=pause_during,
+        wait=wait,
+        output_format=output_format,
+        quiet=quiet,
+        verbose=verbose,
+        log_file=log_file,
+        log_commands=log_commands,
+        plugin=plugin,
+        disable_plugin=disable_plugin,
+    )
+
+
+def _make_snapshot_list_opts(
+    identifiers: tuple[str, ...] = ("agent1",),
+    limit: int | None = 10,
+    after: str | None = None,
+    before: str | None = None,
+    output_format: str = "json",
+    quiet: bool = False,
+    verbose: int = 0,
+    log_file: str | None = None,
+    log_commands: bool | None = None,
+    plugin: tuple[str, ...] = (),
+    disable_plugin: tuple[str, ...] = (),
+) -> SnapshotListCliOptions:
+    """Construct a SnapshotListCliOptions with safe defaults, allowing overrides."""
+    return SnapshotListCliOptions(
+        identifiers=identifiers,
+        limit=limit,
+        after=after,
+        before=before,
+        output_format=output_format,
+        quiet=quiet,
+        verbose=verbose,
+        log_file=log_file,
+        log_commands=log_commands,
+        plugin=plugin,
+        disable_plugin=disable_plugin,
+    )
+
+
+@pytest.mark.parametrize(
+    ("flag", "build_opts"),
+    [
+        ("--tag", lambda: _make_snapshot_create_opts(tag=("k=v",))),
+        ("--description", lambda: _make_snapshot_create_opts(description="anything")),
+        ("--restart-if-larger-than", lambda: _make_snapshot_create_opts(restart_if_larger_than="5G")),
+        ("--no-pause-during", lambda: _make_snapshot_create_opts(pause_during=False)),
+        ("--no-wait", lambda: _make_snapshot_create_opts(wait=False)),
+    ],
+)
+def test_snapshot_create_future_flags_raise_not_implemented_error(
+    flag: str, build_opts: Callable[[], SnapshotCreateCliOptions]
+) -> None:
+    """`mngr snapshot create`'s `[future]` flags must still raise NotImplementedError.
+
+    The synopsis at `mngr snapshot create`'s ``CommandHelpMetadata``
+    intentionally omits these flags because they're unimplemented stubs.
+    When a case below stops raising NotImplementedError, the flag has
+    been implemented. Please:
+        1. Add the flag to `mngr snapshot create`'s
+           ``CommandHelpMetadata.synopsis`` in ``snapshot.py``.
+        2. Drop the `[future]` suffix from the option's ``--help`` text.
+        3. Remove the offending case from this test (and the matching
+           branch in ``_check_create_future_options``).
+    """
+    with pytest.raises(NotImplementedError):
+        _check_create_future_options(build_opts())
+
+
+@pytest.mark.parametrize(
+    ("flag", "build_opts"),
+    [
+        ("--after", lambda: _make_snapshot_list_opts(after="2026-01-01")),
+        ("--before", lambda: _make_snapshot_list_opts(before="2026-01-01")),
+    ],
+)
+def test_snapshot_list_future_flags_raise_not_implemented_error(
+    flag: str, build_opts: Callable[[], SnapshotListCliOptions]
+) -> None:
+    """`mngr snapshot list`'s `[future]` flags must still raise NotImplementedError.
+
+    The synopsis at `mngr snapshot list`'s ``CommandHelpMetadata``
+    intentionally omits these flags because they're unimplemented stubs.
+    When a case below stops raising NotImplementedError, the flag has
+    been implemented. Please:
+        1. Add the flag to `mngr snapshot list`'s
+           ``CommandHelpMetadata.synopsis`` in ``snapshot.py``.
+        2. Drop the `[future]` suffix from the option's ``--help`` text.
+        3. Remove the offending case from this test (and the matching
+           branch in ``_check_list_future_options``).
+    """
+    with pytest.raises(NotImplementedError):
+        _check_list_future_options(build_opts())
