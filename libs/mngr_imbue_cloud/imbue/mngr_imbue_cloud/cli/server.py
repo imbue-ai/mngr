@@ -382,8 +382,6 @@ def slice_advertised_attributes(sizing: dict[str, int]) -> dict[str, Any]:
     return {"memory_gb": sizing["advertised_memory_gb"], "cpus": sizing["vcpus"]}
 
 
-# Default FCT workspace checkout to bake from when --workspace-dir is omitted.
-_DEFAULT_FCT_WORKSPACE: Path = Path.home() / "project" / "forever-claude-template"
 # Provider instance name the slice bake targets; -S overrides under this key
 # carry the box address + per-slice carve sizing into the create.
 _SLICE_PROVIDER_INSTANCE: str = "imbue_cloud_slice"
@@ -652,7 +650,7 @@ def allocate_slices(
     count: int,
     lease_attributes: dict[str, Any],
     region: str,
-    workspace_dir: str | None,
+    workspace_dir: Path,
     mngr_source: str | None,
     database_url: str,
     is_dry_run: bool,
@@ -706,21 +704,16 @@ def allocate_slices(
         )
         return
 
-    # Resolve the source trees (default to this checkout for mngr, and the
-    # conventional FCT checkout for the workspace).
+    # Resolve the mngr source tree (default to this checkout). The workspace dir
+    # is already resolved + validated by the caller's bake-source context.
     repo_root = Path(__file__).resolve().parents[5]
     resolved_mngr_source = Path(mngr_source) if mngr_source else repo_root
-    resolved_workspace_dir = Path(workspace_dir) if workspace_dir else _DEFAULT_FCT_WORKSPACE
-    if not resolved_workspace_dir.is_dir():
-        raise click.UsageError(
-            f"FCT workspace not found at {resolved_workspace_dir}; pass --workspace-dir explicitly."
-        )
     if not server.public_address:
         raise click.UsageError(f"server {server.id} has no public_address; cannot bake")
 
     # Vendor this branch's mngr into the FCT workspace once (the baked container
     # builds its mngr from vendor/mngr); the parallel bakes then share it.
-    sync_mngr_into_template(resolved_mngr_source, resolved_workspace_dir)
+    sync_mngr_into_template(resolved_mngr_source, workspace_dir)
 
     with _pool_private_key_path() as private_key_path:
         pool_public_key = _derive_public_key(private_key_path)
@@ -743,7 +736,7 @@ def allocate_slices(
                     sizing=sizing,
                     lease_attributes=lease_attributes,
                     region=region,
-                    workspace_dir=resolved_workspace_dir,
+                    workspace_dir=workspace_dir,
                     pool_public_key=pool_public_key,
                     private_key_path=private_key_path,
                     database_url=database_url,

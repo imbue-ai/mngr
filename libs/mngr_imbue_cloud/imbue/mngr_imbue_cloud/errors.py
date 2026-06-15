@@ -91,6 +91,16 @@ class InvalidBuildArgError(ImbueCloudError, ValueError):
     """Raised when a recognized imbue_cloud build arg has a malformed value."""
 
 
+class RepoIdentityError(ImbueCloudError, ValueError):
+    """Raised when a repository's canonical identity cannot be established.
+
+    Covers an empty/malformed URL, a local path whose ``origin`` remote is
+    missing, and a local checkout on a detached HEAD. Callers decide how to
+    surface it: the fast path wraps it as ``FastPathUnavailableError`` (so it
+    falls back to the slow path); the bake tooling lets it fail the command.
+    """
+
+
 class FixedAgentIdError(ImbueCloudError, ValueError):
     """Raised when a caller requests an agent id that conflicts with the lease's pre-baked id."""
 

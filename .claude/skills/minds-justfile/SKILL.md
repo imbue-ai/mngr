@@ -59,12 +59,18 @@ Environments / deploy:
   deploys need `--yes-i-mean-<tier>`).
 
 Pool hosts (OVH-backed, leased mode):
-- `just bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra flags]`
-  -- bake pre-provisioned pool host(s) via `minds pool create`. The baked
-  version comes from the `workspace_dir` checkout (a forever-claude-template
-  checkout at the tag/branch you want); `<attributes>` is only the lease-match
-  label. Extra flags forward to `minds pool create` (e.g. `--no-recycle`,
-  `--mngr-source`).
+- `just bake-pool-host-dev <region> [workspace_dir] [count] [extra flags]` -- DEV
+  bake from a working tree; the stamped identity (`repo_url` + `repo_branch_or_tag`)
+  is DERIVED from the folder's `origin` remote + current branch (best-effort label,
+  uncommitted changes included).
+- `just bake-pool-host-prod <region> <tag> [count] [extra flags]` -- PRODUCTION
+  bake: clones the FCT remote at an exact `<tag>` and bakes from that (content
+  provably equals the tag); identity = canonical remote + tag.
+  - Identity is never hand-typed in `--attributes` anymore (those are non-identity
+    only, e.g. resources). For a DEV fast-path match, the create form's repository
+    must be the ACTUAL git remote + the baked branch -- a local clone path resolves
+    to the same canonical remote, but the form value the client sends must match.
+    Extra flags forward to `minds pool create` (e.g. `--no-recycle`, `--mngr-source`).
 - `just list-pool-hosts` -- list `pool_hosts` rows for the activated env.
 - `just destroy-pool-host <pool-host-id>` -- cancel one host's OVH VPS + drop its
   row (manual single-host teardown; steady-state release is automatic via the

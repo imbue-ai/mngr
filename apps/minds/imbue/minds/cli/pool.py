@@ -103,8 +103,11 @@ def build_create_admin_args(
     env_name: str,
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     management_public_key_file: str,
     database_url: str | None,
     mngr_source: str | None,
@@ -115,6 +118,11 @@ def build_create_admin_args(
     Auto-injects ``--tag minds_env=<env_name>``; forwards every other
     user-supplied flag verbatim. Split out from the click command so
     tests can exercise the wiring without faking a subprocess.
+
+    The bake source is exactly one of ``--from-tag`` (production, clones a tag)
+    or ``--workspace-dir`` (dev, a working tree); the admin CLI derives the
+    canonical ``repo_url`` / ``repo_branch_or_tag`` from it, so ``--attributes``
+    carries only non-identity attributes (and may be omitted).
 
     ``--database-url`` is forwarded only when ``database_url`` is non-None.
     The caller (``pool_create`` via :func:`resolve_host_pool_dsn`) supplies a
@@ -133,13 +141,19 @@ def build_create_admin_args(
         region,
         "--tag",
         f"minds_env={env_name}",
-        "--attributes",
-        attributes_json,
-        "--workspace-dir",
-        workspace_dir,
         "--management-public-key-file",
         management_public_key_file,
     ]
+    if from_tag is not None:
+        args.extend(["--from-tag", from_tag])
+    if repo_url is not None:
+        args.extend(["--repo-url", repo_url])
+    if workspace_dir is not None:
+        args.extend(["--workspace-dir", workspace_dir])
+    if repo_branch_or_tag_override is not None:
+        args.extend(["--repo-branch-or-tag", repo_branch_or_tag_override])
+    if attributes_json is not None:
+        args.extend(["--attributes", attributes_json])
     if database_url is not None:
         args.extend(["--database-url", database_url])
     if mngr_source is not None:
@@ -458,16 +472,39 @@ def pool() -> None:
     ),
 )
 @click.option(
-    "--attributes",
-    "attributes_json",
-    required=True,
-    help='Lease-attributes JSON for the new pool rows (e.g. \'{"version":"v1.2.3","cpus":2,"memory_gb":4}\')',
+    "--from-tag",
+    "from_tag",
+    default=None,
+    help="[production] Clone --repo-url at this tag and bake from it. Mutually exclusive with --workspace-dir.",
+)
+@click.option(
+    "--repo-url",
+    "repo_url",
+    default=None,
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
 )
 @click.option(
     "--workspace-dir",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(exists=True),
-    help="Path to the template repo checkout",
+    help="[dev] Bake from this template repo working tree. Mutually exclusive with --from-tag.",
+)
+@click.option(
+    "--repo-branch-or-tag",
+    "repo_branch_or_tag_override",
+    default=None,
+    help="[--workspace-dir only] Override the stamped branch label (default: the folder's current branch).",
+)
+@click.option(
+    "--attributes",
+    "attributes_json",
+    required=False,
+    default=None,
+    help=(
+        'Optional non-identity lease-attributes JSON (e.g. \'{"cpus":2,"memory_gb":4}\'). repo_url and '
+        "repo_branch_or_tag are derived from the bake source, not passed here."
+    ),
 )
 @click.option(
     "--management-public-key-file",
@@ -508,8 +545,11 @@ def pool() -> None:
 def pool_create(
     count: int,
     region: str,
-    attributes_json: str,
-    workspace_dir: str,
+    from_tag: str | None,
+    repo_url: str | None,
+    workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
@@ -541,8 +581,11 @@ def pool_create(
                 env_name=env_name,
                 count=count,
                 region=region,
-                attributes_json=attributes_json,
+                from_tag=from_tag,
+                repo_url=repo_url,
                 workspace_dir=workspace_dir,
+                repo_branch_or_tag_override=repo_branch_or_tag_override,
+                attributes_json=attributes_json,
                 management_public_key_file=effective_mgmt_pub_path,
                 database_url=effective_database_url,
                 mngr_source=mngr_source,

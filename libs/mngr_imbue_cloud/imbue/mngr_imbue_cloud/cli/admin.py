@@ -34,6 +34,10 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
+from imbue.mngr_imbue_cloud.bake.bake_source import BakeSourceError
+from imbue.mngr_imbue_cloud.bake.bake_source import DEFAULT_FCT_REPO_URL
+from imbue.mngr_imbue_cloud.bake.bake_source import merge_bake_identity_attributes
+from imbue.mngr_imbue_cloud.bake.bake_source import resolved_bake_source
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.bake.pool_bake import BakedPoolHost
 from imbue.mngr_imbue_cloud.bake.pool_bake import PoolBakeError
@@ -46,6 +50,7 @@ from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
 from imbue.mngr_imbue_cloud.cli._common import resolve_pool_database_url
 from imbue.mngr_imbue_cloud.cli.server import allocate_slices
+from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
 from imbue.mngr_ovh.iam_tags import MNGR_PROVIDER_TAG_KEY
@@ -401,13 +406,20 @@ def _create_single_pool_host(
     ),
 )
 @click.option(
-    "--attributes",
-    "attributes_json",
-    required=True,
+    "--from-tag",
+    "from_tag",
+    default=None,
     help=(
-        'Lease-attributes JSON for the new pool rows (e.g. \'{"repo_branch_or_tag":"main"}\'). For '
-        "``slice`` the per-box size (``memory_gb`` / ``cpus``) is computed and stamped on top of these."
+        "[production bake] Clone --repo-url at exactly this tag into a fresh temp dir and bake from it. "
+        "Stamps repo_url=canonical(--repo-url) and repo_branch_or_tag=<tag>; the content provably equals the "
+        "tag. Mutually exclusive with --workspace-dir; errors if <tag> is not a real tag."
     ),
+)
+@click.option(
+    "--repo-url",
+    "repo_url",
+    default=DEFAULT_FCT_REPO_URL,
+    help="[--from-tag only] Canonical repo to clone the tag from (default: the FCT remote).",
 )
 @click.option(
     "--workspace-dir",
@@ -415,8 +427,26 @@ def _create_single_pool_host(
     default=None,
     type=click.Path(exists=True),
     help=(
-        "Path to the template (FCT) repo checkout to bake from. Required for ``ovh_vps``; for ``slice`` "
-        "it defaults to $HOME/project/forever-claude-template."
+        "[dev bake] Bake content from this working tree (uncommitted changes included). Stamps "
+        "repo_url=canonical(origin of the folder) and repo_branch_or_tag=<folder's current branch> "
+        "(override with --repo-branch-or-tag). Mutually exclusive with --from-tag; errors without an origin."
+    ),
+)
+@click.option(
+    "--repo-branch-or-tag",
+    "repo_branch_or_tag_override",
+    default=None,
+    help="[--workspace-dir only] Override the branch label stamped (default: the folder's current branch).",
+)
+@click.option(
+    "--attributes",
+    "attributes_json",
+    required=False,
+    default=None,
+    help=(
+        "Optional non-identity lease-attributes JSON for the new pool rows. The identity keys repo_url and "
+        "repo_branch_or_tag are NOT allowed here -- they are derived from the bake source (--from-tag / "
+        "--workspace-dir). For slice the per-box size (memory_gb / cpus) is computed and stamped automatically."
     ),
 )
 @click.option(
@@ -471,28 +501,28 @@ def pool_create(
     backend: str,
     region: str,
     tags: tuple[str, ...],
-    attributes_json: str,
+    from_tag: str | None,
+    repo_url: str,
     workspace_dir: str | None,
+    repo_branch_or_tag_override: str | None,
+    attributes_json: str | None,
     management_public_key_file: str | None,
     database_url: str | None,
     mngr_source: str | None,
     is_recycle_enabled: bool,
     is_dry_run: bool,
 ) -> None:
-    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice)."""
-    resolved_database_url = resolve_pool_database_url(database_url)
-    try:
-        parsed_attributes = _json.loads(attributes_json)
-    except _json.JSONDecodeError as exc:
-        logger.error("Invalid --attributes JSON: {}", exc)
-        fail_with_json(f"Invalid --attributes JSON: {exc}", error_class="UsageError")
-    if not isinstance(parsed_attributes, dict):
-        fail_with_json("--attributes must be a JSON object", error_class="UsageError")
+    """Create pre-provisioned pool hosts on the chosen backend (OVH VPS or bare-metal slice).
 
-    # Slice backend: the machine is a lima VM on a registered box. Reject the
-    # OVH-only flags, then hand off to the shared slice provisioning path (which
-    # merges the per-box size onto these lease attributes and uses --region as the
-    # row's lease-region label).
+    The bake source -- exactly one of ``--from-tag`` (production, clones a tag) or
+    ``--workspace-dir`` (dev, a working tree) -- determines the content baked and
+    the canonical ``repo_url`` / ``repo_branch_or_tag`` stamped into each row, so
+    the advertised identity always describes what is actually baked.
+    """
+    resolved_database_url = resolve_pool_database_url(database_url)
+    parsed_attributes = _parse_optional_attributes_json(attributes_json)
+
+    # Backend-specific flag validation, done before the (clone-heavy) source resolve.
     if backend == "slice":
         if tags:
             fail_with_json("--tag is not applicable to --backend slice", error_class="UsageError")
@@ -504,44 +534,97 @@ def pool_create(
             )
         if not is_recycle_enabled:
             fail_with_json("--no-recycle is not applicable to --backend slice", error_class="UsageError")
-        allocate_slices(
-            count=count,
-            lease_attributes=parsed_attributes,
-            region=region,
-            workspace_dir=workspace_dir,
-            mngr_source=mngr_source,
-            database_url=resolved_database_url,
-            is_dry_run=is_dry_run,
-        )
-        return
+    elif backend == "ovh_vps":
+        if is_dry_run:
+            fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
+        if not management_public_key_file:
+            fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
+        # Validate ``--tag`` shapes up front so we don't bake the first host and
+        # then trip over a typo on the second one.
+        try:
+            build_extra_tags_env_value(tags)
+        except click.UsageError as exc:
+            fail_with_json(str(exc), error_class="UsageError")
+    else:
+        # ``--backend`` is a click.Choice, so this is unreachable in practice.
+        fail_with_json(f"unknown --backend {backend!r}", error_class="UsageError")
 
-    # OVH VPS backend.
-    if is_dry_run:
-        fail_with_json("--dry-run is only supported for --backend slice", error_class="UsageError")
-    if not workspace_dir:
-        fail_with_json("--workspace-dir is required for --backend ovh_vps", error_class="UsageError")
-    if not management_public_key_file:
-        fail_with_json("--management-public-key-file is required for --backend ovh_vps", error_class="UsageError")
-    # Validate ``--tag`` shapes up front so we don't bake the first
-    # host and then trip over a typo on the second one.
+    # Resolve the bake source and derive the identity attributes to stamp. The
+    # context manager cleans up any temp clone (--from-tag) on exit; both the
+    # dry-run report and the real bake go through it, so they cannot disagree.
     try:
-        build_extra_tags_env_value(tags)
-    except click.UsageError as exc:
+        with resolved_bake_source(
+            from_tag=from_tag,
+            workspace_dir=workspace_dir,
+            repo_url=repo_url,
+            repo_branch_or_tag_override=repo_branch_or_tag_override,
+        ) as bake_source:
+            attributes = merge_bake_identity_attributes(parsed_attributes, bake_source)
+            if backend == "slice":
+                allocate_slices(
+                    count=count,
+                    lease_attributes=attributes,
+                    region=region,
+                    workspace_dir=bake_source.workspace_dir,
+                    mngr_source=mngr_source,
+                    database_url=resolved_database_url,
+                    is_dry_run=is_dry_run,
+                )
+            else:
+                _create_ovh_vps_pool_hosts(
+                    count=count,
+                    region=region,
+                    tags=tags,
+                    attributes=attributes,
+                    workspace_dir=bake_source.workspace_dir,
+                    management_public_key_file=management_public_key_file,
+                    database_url=resolved_database_url,
+                    mngr_source=mngr_source,
+                    is_recycle_enabled=is_recycle_enabled,
+                )
+    except (BakeSourceError, RepoIdentityError) as exc:
         fail_with_json(str(exc), error_class="UsageError")
 
+
+def _parse_optional_attributes_json(attributes_json: str | None) -> dict[str, Any]:
+    """Parse the optional --attributes JSON object, defaulting to empty when absent."""
+    if not attributes_json:
+        return {}
+    try:
+        parsed = _json.loads(attributes_json)
+    except _json.JSONDecodeError as exc:
+        logger.error("Invalid --attributes JSON: {}", exc)
+        fail_with_json(f"Invalid --attributes JSON: {exc}", error_class="UsageError")
+    if not isinstance(parsed, dict):
+        fail_with_json("--attributes must be a JSON object", error_class="UsageError")
+    return parsed
+
+
+def _create_ovh_vps_pool_hosts(
+    *,
+    count: int,
+    region: str,
+    tags: tuple[str, ...],
+    attributes: dict[str, Any],
+    workspace_dir: Path,
+    management_public_key_file: str,
+    database_url: str,
+    mngr_source: str | None,
+    is_recycle_enabled: bool,
+) -> None:
+    """Bake ``count`` OVH-VPS pool hosts from ``workspace_dir`` with the derived attributes."""
     management_public_key = Path(management_public_key_file).read_text().strip()
     if not management_public_key:
         fail_with_json("Management public key file is empty", error_class="UsageError")
 
-    workspace_path = Path(workspace_dir)
     if mngr_source is not None:
-        sync_mngr_into_template(Path(mngr_source), workspace_path)
+        sync_mngr_into_template(Path(mngr_source), workspace_dir)
 
     logger.info(
         "Creating {} pool host(s) with region={}, attributes={}, tags={}",
         count,
         region,
-        parsed_attributes,
+        attributes,
         list(tags),
     )
 
@@ -551,10 +634,10 @@ def pool_create(
         logger.info("[{}/{}]", i, count)
         try:
             is_success = _create_single_pool_host(
-                workspace_dir=workspace_path,
-                attributes=parsed_attributes,
+                workspace_dir=workspace_dir,
+                attributes=attributes,
                 management_public_key=management_public_key,
-                database_url=resolved_database_url,
+                database_url=database_url,
                 region=region,
                 extra_tags=tags,
                 is_recycle_enabled=is_recycle_enabled,

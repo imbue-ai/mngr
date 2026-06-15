@@ -196,7 +196,11 @@ def test_pool_create_rejects_malformed_tag(tmp_path: Any) -> None:
 
 
 def _slice_create_args(extra: list[str]) -> list[str]:
-    """Base ``pool create --backend slice`` argv (with a DSN so resolution succeeds)."""
+    """Base ``pool create --backend slice`` argv (with a DSN so resolution succeeds).
+
+    Carries no identity attributes: repo_url / repo_branch_or_tag are derived from
+    the bake source (--from-tag / --workspace-dir), never passed in --attributes.
+    """
     return [
         "create",
         "--backend",
@@ -205,12 +209,24 @@ def _slice_create_args(extra: list[str]) -> list[str]:
         "1",
         "--region",
         "US-EAST-VA",
-        "--attributes",
-        '{"repo_branch_or_tag":"main"}',
         "--database-url",
         "postgres://example",
         *extra,
     ]
+
+
+def test_pool_create_requires_a_bake_source_selector() -> None:
+    """Neither --from-tag nor --workspace-dir is a usage error (exactly one is required)."""
+    result = CliRunner().invoke(pool, _slice_create_args([]))
+    assert result.exit_code != 0
+    assert "--from-tag" in result.output and "--workspace-dir" in result.output
+
+
+def test_pool_create_rejects_both_bake_source_selectors(tmp_path: Any) -> None:
+    """Passing both --from-tag and --workspace-dir is a usage error."""
+    result = CliRunner().invoke(pool, _slice_create_args(["--from-tag", "v0.3.0", "--workspace-dir", str(tmp_path)]))
+    assert result.exit_code != 0
+    assert "exactly one" in result.output
 
 
 def test_pool_create_slice_backend_rejects_tag() -> None:

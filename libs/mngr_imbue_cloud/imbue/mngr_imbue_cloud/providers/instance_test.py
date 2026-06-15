@@ -1,5 +1,7 @@
 """Unit tests for the imbue_cloud provider instance helpers."""
 
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -13,9 +15,48 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
 from imbue.mngr_imbue_cloud.data_types import LeasedHostInfo
+from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
+from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attributes
+
+
+def test_resolve_fast_path_attributes_canonicalizes_remote_url_and_keeps_branch() -> None:
+    resolved = _resolve_fast_path_attributes(
+        LeaseAttributes(
+            repo_url="git@github.com:imbue-ai/forever-claude-template.git",
+            repo_branch_or_tag="v0.3.0",
+            cpus=4,
+        )
+    )
+    assert resolved.repo_url == "github.com/imbue-ai/forever-claude-template"
+    assert resolved.repo_branch_or_tag == "v0.3.0"
+    # Non-identity attributes are preserved.
+    assert resolved.cpus == 4
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        LeaseAttributes(repo_branch_or_tag="v0.3.0"),
+        LeaseAttributes(repo_url="https://github.com/imbue-ai/forever-claude-template"),
+        LeaseAttributes(),
+    ],
+)
+def test_resolve_fast_path_attributes_requires_both_repo_and_branch(attributes: LeaseAttributes) -> None:
+    with pytest.raises(FastPathUnavailableError):
+        _resolve_fast_path_attributes(attributes)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git required")
+def test_resolve_fast_path_attributes_errors_on_local_path_without_origin(tmp_path: Path) -> None:
+    repo_dir = tmp_path / "no_origin"
+    repo_dir.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo_dir)], check=True)
+    with pytest.raises(FastPathUnavailableError):
+        _resolve_fast_path_attributes(LeaseAttributes(repo_url=str(repo_dir), repo_branch_or_tag="main"))
 
 
 class _StubImbueCloudProvider(ImbueCloudProvider):

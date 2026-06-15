@@ -48,6 +48,7 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
@@ -108,6 +109,7 @@ from imbue.mngr_imbue_cloud.data_types import parse_imbue_cloud_build_args
 from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
+from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -116,11 +118,36 @@ from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_ra
 from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provider
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
+from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
 from imbue.mngr_vps_docker.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps_docker.instance import VpsDockerProvider
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 
 _SSH_WAIT_TIMEOUT_SECONDS: Final[float] = 120.0
+
+
+def _resolve_fast_path_attributes(attributes: LeaseAttributes) -> LeaseAttributes:
+    """Canonicalize repo_url and require repo_url + repo_branch_or_tag for the fast path.
+
+    The fast path adopts a pre-baked host only when the request's repo and branch
+    genuinely match what was baked (decision 6 of the fast-path-matching spec): it
+    must never match on a subset. Any failure to establish a sound identity --
+    missing repo_url/branch, or a local path with no resolvable ``origin`` --
+    raises ``FastPathUnavailableError`` so the caller falls back to the slow path
+    (which rebuilds the user's exact spec) rather than adopting the wrong host.
+    """
+    if not attributes.repo_url or not attributes.repo_branch_or_tag:
+        raise FastPathUnavailableError(
+            "fast_mode=require needs both a repo_url and a repo_branch_or_tag to match a pool host; "
+            f"got repo_url={attributes.repo_url!r}, repo_branch_or_tag={attributes.repo_branch_or_tag!r}"
+        )
+    try:
+        canonical_repo_url = canonicalize_repo_source(attributes.repo_url)
+    except RepoIdentityError as exc:
+        raise FastPathUnavailableError(
+            f"cannot establish a canonical repo identity for fast_mode=require: {exc}"
+        ) from exc
+    return attributes.model_copy_update(to_update(attributes.field_ref().repo_url, canonical_repo_url))
 
 
 def _rewrite_container_host_name(
@@ -997,7 +1024,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     )
                 return self._create_host_fast_path(
                     name=name,
-                    attributes=parsed.attributes,
+                    attributes=_resolve_fast_path_attributes(parsed.attributes),
                     token=token,
                     region=parsed.region,
                 )
