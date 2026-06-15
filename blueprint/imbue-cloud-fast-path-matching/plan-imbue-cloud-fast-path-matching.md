@@ -75,7 +75,17 @@ The bake derives `repo_url` + `repo_branch_or_tag` from the **bake source** and 
 - **Production bake (strict, from a tag):** clone (or `git archive`) the canonical repo at an exact tag into a fresh temp dir and bake from that; stamp `repo_url=<canonical repo>`, `repo_branch_or_tag=<tag>`. No working-tree folder is used, so the baked content provably equals the tag. Reject anything that isn't a real tag.
 - **Dev/debug bake (from a folder/branch):** take content from an explicit `--workspace-dir` (may contain uncommitted changes); stamp `repo_url=<canonical(origin of that folder)>` and `repo_branch_or_tag=<that folder's current branch>` (or an explicit override). The label is best-effort -- it identifies the branch, not a byte-exact commit.
 
-**Open implementation choice (flags):** introduce an explicit mode selector (e.g. `--from-tag <tag>` for production vs `--workspace-dir <dir>` for dev, mutually exclusive), with the resource sizing (slice `cpus`/`memory_gb`) auto-stamped as today. The existing free-form `--attributes` should no longer carry `repo_url`/`repo_branch_or_tag` (those are derived); keep it only for any remaining non-identity attributes, or drop it.
+**Flag design (locked):** the bake takes exactly one of two mutually-exclusive source selectors, and the identity attributes are always derived (never hand-passed):
+
+- `--from-tag <tag>` -- **production** mode. Clones the repo at `--repo-url <url>` (default: the canonical FCT remote `https://github.com/imbue-ai/forever-claude-template.git`) at exactly `<tag>` into a fresh temp dir and bakes from that. Stamps `repo_url=canonical(<repo-url>)`, `repo_branch_or_tag=<tag>`. Errors if `<tag>` is not a real tag on the repo. Content provably equals the tag.
+- `--workspace-dir <dir>` -- **dev/debug** mode. Bakes content from the working tree at `<dir>` (uncommitted changes included). Stamps `repo_url=canonical(origin of <dir>)` and `repo_branch_or_tag=<dir's current branch>`, overridable with `--repo-branch-or-tag <ref>`. Errors if `<dir>` has no `origin` remote (no canonical identity). The label is best-effort (identifies the branch, not a byte-exact commit).
+
+Rules:
+
+- Exactly one of `--from-tag` / `--workspace-dir` is required; passing both, or neither, is an error.
+- `repo_url` and `repo_branch_or_tag` are **always derived** by the bake (per the mode above) and must **not** be accepted in `--attributes`; passing either key in `--attributes` is an error (it would let the label drift from the content -- the bug this spec removes).
+- `--attributes` is retained only for non-identity attributes (today: none, since slice `cpus`/`memory_gb` are auto-stamped from sizing). It may be omitted; an empty/absent `--attributes` is valid.
+- Slice resource sizing (`cpus`/`memory_gb`) continues to be auto-stamped from the box's per-slice sizing, in both modes.
 
 ### Storage / connector
 
