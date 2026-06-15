@@ -157,6 +157,12 @@ def _build_self_deallocate_script(sentinel_on_outer: str) -> str:
         '"https://management.azure.com${rid}/deallocate?api-version=2024-07-01"; then\n'
         "    exit 0\n"
         "fi\n"
+        # The deallocate failed (no managed-identity token, no role assignment, or
+        # ARM unreachable). Log to the journal -- otherwise the fallback poweroff is
+        # silent, and an OS poweroff does NOT halt Azure compute billing, so the VM
+        # would keep billing while looking "stopped".
+        'echo "mngr: self-deallocate failed (missing token/role or ARM unreachable); '
+        'falling back to poweroff -- VM stays ALLOCATED and keeps billing compute" >&2\n'
         "shutdown -P now\n"
     )
 
