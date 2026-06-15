@@ -95,6 +95,24 @@ class LimaSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("limactl", "--version")
 
 
+class AwsSignalCheck(SignalCheck):
+    """Detects whether the AWS CLI is installed."""
+
+    command: tuple[str, ...] = ("aws", "--version")
+
+
+class GcloudSignalCheck(SignalCheck):
+    """Detects whether the Google Cloud CLI is installed."""
+
+    command: tuple[str, ...] = ("gcloud", "--version")
+
+
+class AzureSignalCheck(SignalCheck):
+    """Detects whether the Azure CLI is installed."""
+
+    command: tuple[str, ...] = ("az", "--version")
+
+
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
@@ -103,6 +121,9 @@ _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
+_AWS_SIGNAL: Final[AwsSignalCheck] = AwsSignalCheck()
+_GCLOUD_SIGNAL: Final[GcloudSignalCheck] = GcloudSignalCheck()
+_AZURE_SIGNAL: Final[AzureSignalCheck] = AzureSignalCheck()
 
 
 class CatalogEntry(FrozenModel):
@@ -189,12 +210,16 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-aws",
         description="AWS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        signal=_AWS_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="gcp",
         package_name="imbue-mngr-gcp",
         description="GCP Compute Engine provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        signal=_GCLOUD_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="ovh",
@@ -207,6 +232,8 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         package_name="imbue-mngr-azure",
         description="Azure Virtual Machines provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
+        signal=_AZURE_SIGNAL,
+        is_recommended=True,
     ),
     CatalogEntry(
         entry_point_name="tutor",
