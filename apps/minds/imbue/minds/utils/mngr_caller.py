@@ -3,8 +3,7 @@
 Spawning a fresh ``mngr`` subprocess pays a large fixed cost on every call: a
 brand-new Python interpreter plus importing ``imbue.mngr.main`` and every
 enabled plugin (measured at roughly 1.3-3.3s depending on filesystem cache
-warmth). For UI actions like clicking "Approve"/"Deny", that startup latency
-dominates the actual work.
+warmth).
 
 :class:`MngrCaller` avoids it by running the CLI in a child forked from a
 ``multiprocessing`` forkserver that has already imported ``imbue.mngr.main``.

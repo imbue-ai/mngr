@@ -80,11 +80,7 @@ class MngrMessageSender(MutableModel):
     def send(self, agent_id: AgentId, text: str) -> None:
         """Fire-and-forget nudge: dispatch the message without blocking the caller.
 
-        The permission Approve/Deny handlers call this *after* the response
-        event is already persisted, so delivery is best-effort and its latency
-        (a ~2s SSH round-trip to the agent's host) must not delay the HTTP
-        response. The send runs on a thread tracked by :attr:`concurrency_group`
-        and never raises -- failures are logged.
+        The send runs on a thread tracked by :attr:`concurrency_group` and never raises -- failures are logged.
         """
         self.concurrency_group.start_new_thread(
             self._send_and_log,
