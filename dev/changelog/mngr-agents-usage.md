@@ -7,3 +7,5 @@ live two-turn `pi-coding` agent confirmed pi reports cost natively
 (`usage.cost.total`, matching the canonical Anthropic prices exactly) with
 non-overlapping cache-exclusive token buckets, so pi is reported-cost (estimate
 only as a fallback), leaving Codex as the only purely token-derived harness.
+
+Documented the install-wizard surfacing of the usage plugins: added an "Install-wizard recommendation" section to `specs/agent-usage-plugins/spec.md`, and recorded the antigravity gap (the one agent type with no usage provider, so the wizard offers none for it) in the `specs/agent-plugin-parity/spec.md` current-state matrix (new "Usage tracking plugin" row) and its observations.

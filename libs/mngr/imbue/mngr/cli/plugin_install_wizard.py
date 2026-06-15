@@ -187,14 +187,54 @@ def _get_accepted_signals(selected: list[CatalogEntry]) -> set[SignalCheck]:
     return {entry.signal for entry in selected if entry.signal is not None}
 
 
-def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
+@pure
+def _is_dependent_visible(
+    entry: CatalogEntry,
+    accepted_signals: set[SignalCheck],
+    present_packages: frozenset[str],
+) -> bool:
+    """Whether a DEPENDENT entry should appear in phase 2.
+
+    Package-gated entries (``requires_packages`` set) appear only when every
+    required package is present -- already installed or selected in phase 1.
+    Signal-gated entries (the legacy path) appear when their signal was among
+    those accepted in phase 1.
+    """
+    if entry.requires_packages:
+        return all(package in present_packages for package in entry.requires_packages)
+    return entry.signal in accepted_signals
+
+
+@pure
+def _phase2_dependent_entries(
+    dependent: tuple[CatalogEntry, ...],
+    phase1_selected: list[CatalogEntry],
+    installed_names: frozenset[str],
+) -> tuple[CatalogEntry, ...]:
+    """The DEPENDENT entries to show in phase 2, given phase-1 selections.
+
+    A package is "present" if it is already installed or was selected in
+    phase 1; a package-gated entry is shown only when all of its
+    ``requires_packages`` are present.
+    """
+    accepted_signals = _get_accepted_signals(phase1_selected)
+    present_packages = installed_names | frozenset(e.package_name for e in phase1_selected)
+    return tuple(e for e in dependent if _is_dependent_visible(e, accepted_signals, present_packages))
+
+
+def _run_two_phase_wizard(available: tuple[CatalogEntry, ...], installed_names: frozenset[str]) -> list[str]:
     """Run the two-phase install wizard.
 
     Phase 1: Recommended INDEPENDENT plugins. Preselected based on signal
              detection (or always if no signal).
     Phase 2: Everything else -- non-recommended INDEPENDENT plugins plus
-             DEPENDENT plugins whose signal was accepted in phase 1.
-             Preselection based on is_recommended.
+             DEPENDENT plugins that are unlocked by phase 1 (signal accepted,
+             or all required packages now present). Preselection based on
+             is_recommended.
+
+    ``installed_names`` are the already-installed package names; together with
+    the phase-1 selections they form the set of packages a DEPENDENT entry's
+    ``requires_packages`` is checked against.
 
     Returns the list of selected package names, or an empty list if cancelled.
     """
@@ -216,11 +256,8 @@ def _run_two_phase_wizard(available: tuple[CatalogEntry, ...]) -> list[str]:
     else:
         phase1_result = []
 
-    # Determine which signals were accepted in phase 1
-    accepted_signals = _get_accepted_signals(phase1_result)
-
-    # Phase 2: non-recommended INDEPENDENT + DEPENDENT (filtered by accepted signals)
-    visible_dependent = tuple(e for e in dependent if e.signal in accepted_signals)
+    # Phase 2: non-recommended INDEPENDENT + DEPENDENT unlocked by phase 1
+    visible_dependent = _phase2_dependent_entries(dependent, phase1_result, installed_names)
     phase2_plugins = rest_independent + visible_dependent
 
     if phase2_plugins:
@@ -306,7 +343,7 @@ def install_wizard_impl() -> None:
         write_human_line(_RELAUNCH_HINT)
         return
 
-    selected = _run_two_phase_wizard(available)
+    selected = _run_two_phase_wizard(available, installed_names)
 
     write_human_line(_RELAUNCH_HINT)
 
@@ -353,8 +390,10 @@ CommandHelpMetadata(
 Phase 1 shows agent types and providers (BASIC tier). Tools detected
 on your system are pre-selected.
 
-Phase 2 shows optional extras, filtered to only include extras related
-to the agent types you selected. Recommended extras are pre-selected.
+Phase 2 shows optional extras unlocked by phase 1 -- extras related to
+the agent types you selected, plus per-agent usage providers when you
+have both the agent plugin and the base usage plugin. Recommended extras
+are pre-selected.
 
 Use Space to toggle selections, Enter to confirm, and q or Ctrl+C
 to cancel.""",
