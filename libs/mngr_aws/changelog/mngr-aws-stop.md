@@ -18,12 +18,4 @@ A new `terminate_on_shutdown` config field controls the stop-vs-terminate behavi
 
 Offline `mngr label` on a stopped AWS host now actually persists: the compact `mngr-agent-<id>` tag includes the agent's `labels` when they fit the 256-char tag limit (previously only `id`/`name`/`type` were stored, so an offline label update reported success but was silently dropped). If a particular agent's labels are too large to fit, they are dropped and a warning is logged rather than silently no-op'ing.
 
-Security hardening of the stop/start lifecycle (each gated on an attacker holding account-level `ec2:CreateTags`):
-
-- Resume no longer reads SSH host keys from EC2 tags. The host keys were stashed in account-writable tags and written into `known_hosts` before the first connection, so a tampered tag could substitute an attacker's host key and MITM the resumed session. `start_host` now rebinds `known_hosts` from mngr's locally-held host keypairs (the same keys injected into the instance at create), and the host-key tags are removed entirely.
-
-- Offline discovery skips an instance whose `mngr-host-id`/`Name` tag is malformed (logging a warning) instead of letting one corrupt tag abort the whole `mngr list` / `mngr start` discovery sweep.
-
-- Resolving a host's instance by tag now refuses (raises) when more than one non-terminated instance carries the same `mngr-host-id`, rather than silently acting on the first match (which a duplicate tag could otherwise steer onto an attacker-controlled instance).
-
-The in-container idle-watcher relaunch on resume moved into the shared `mngr_vps_docker` `start_host` (so it now also covers Vultr/OVH), and resume refreshes host activity so a resumed idle host is not immediately re-stopped by the freshly-relaunched watcher.
+For security, `start_host` rebinds `known_hosts` for the instance's new IP from mngr's locally-held host keypairs (injected into the instance at create), not from EC2 tags -- account-writable tags must not be a source of SSH host-key trust. Offline discovery also tolerates a malformed `mngr-host-id`/`Name` tag (it skips that instance with a warning rather than aborting the whole `mngr list` sweep), and resolving an instance by `mngr-host-id` refuses an ambiguous duplicate-tag match rather than acting on the first one.
