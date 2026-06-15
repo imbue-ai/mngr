@@ -1,11 +1,11 @@
 [project]
 name = "imbue-mngr-vps-docker"
-version = "0.1.5"
+version = "0.1.6"
 description = "VPS Docker provider base classes for mngr"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "imbue-mngr==0.2.12",
+    "imbue-mngr==0.2.13",
 ]
 
 [build-system]
@@ -52,7 +52,10 @@ omit = [
 ]
 
 [tool.coverage.report]
-# Floor pinned just below CI-measured coverage; raise incrementally as tests are added.
+# Lower than concrete provider packages (e.g. mngr_vultr at 60%) because
+# most of `instance.py` is host-lifecycle code (create, snapshot, exec,
+# destroy) that's exercised end-to-end by each concrete provider's release
+# tests rather than at the unit level.
 fail_under = 45
 omit = [
   "*_test.py",
