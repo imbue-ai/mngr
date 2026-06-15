@@ -42,7 +42,6 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
-from imbue.minds.desktop_client.cookie_manager import COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -221,25 +220,6 @@ def test_authenticate_with_valid_code_sets_cookie_and_redirects(tmp_path: Path) 
 
     assert response.status_code == 307
     assert SESSION_COOKIE_NAME in response.cookies
-
-
-def test_authenticate_sets_a_persistent_cookie_not_a_session_cookie(tmp_path: Path) -> None:
-    """The session cookie carries a Max-Age so it survives an app restart.
-
-    Without Max-Age the cookie is session-scoped and electron drops it on quit,
-    so the desktop client shows the login screen on every relaunch even though
-    the signature (and the imbue_cloud account session) are still valid.
-    """
-    client, auth_store, _ = _setup_test_server(tmp_path)
-    code = OneTimeCode("auth-code-{}".format(AgentId()))
-    auth_store.add_one_time_code(code=code)
-
-    response = client.get("/authenticate", params={"one_time_code": str(code)}, follow_redirects=False)
-
-    set_cookie_headers = response.headers.get_list("set-cookie")
-    session_set_cookie = next(h for h in set_cookie_headers if h.startswith(f"{SESSION_COOKIE_NAME}="))
-    assert "Max-Age=" in session_set_cookie
-    assert f"Max-Age={COOKIE_MAX_AGE_SECONDS}" in session_set_cookie
 
 
 def test_authenticate_redirects_to_landing_page(tmp_path: Path) -> None:

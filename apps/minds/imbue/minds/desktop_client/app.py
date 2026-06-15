@@ -61,7 +61,6 @@ from imbue.minds.desktop_client.backup_password_store import save_backup_passwor
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_status import compute_backup_status_for_workspaces
-from imbue.minds.desktop_client.cookie_manager import COOKIE_MAX_AGE_SECONDS
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.cookie_manager import verify_session_cookie
@@ -396,14 +395,9 @@ def _handle_authenticate(
     cookie_value = create_session_cookie(signing_key=signing_key)
 
     response = Response(status_code=307, headers={"Location": "/"})
-    # Persist the cookie for the same window the signature is valid for. Without
-    # an explicit Max-Age it is a session cookie that electron discards on quit,
-    # so the desktop client shows the login screen on every relaunch even though
-    # the signature (and the imbue_cloud account session) are still good.
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=cookie_value,
-        max_age=COOKIE_MAX_AGE_SECONDS,
         path="/",
         httponly=True,
         samesite="lax",

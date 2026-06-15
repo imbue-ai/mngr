@@ -20,12 +20,7 @@ SESSION_COOKIE_NAME: Final[str] = "minds_session"
 
 _SESSION_PAYLOAD: Final[str] = "authenticated"
 
-# Lifetime of the session cookie, used BOTH for the signature's validity window
-# (verify_session_cookie's max_age) AND the Set-Cookie Max-Age the browser stores
-# it for. They must match: a shorter Set-Cookie age silently logs the user out
-# before the signature expires (and an omitted age makes it a session cookie that
-# electron drops on quit -- the desktop client looks logged out on every relaunch).
-COOKIE_MAX_AGE_SECONDS: Final[int] = 30 * 24 * 60 * 60
+_COOKIE_MAX_AGE_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
 
 def create_session_cookie(signing_key: CookieSigningKey) -> str:
@@ -44,7 +39,7 @@ def verify_session_cookie(
         payload = serializer.loads(
             cookie_value,
             salt=_COOKIE_SALT,
-            max_age=COOKIE_MAX_AGE_SECONDS,
+            max_age=_COOKIE_MAX_AGE_SECONDS,
         )
     except BadSignature:
         return False
