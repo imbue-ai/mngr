@@ -1,0 +1,5 @@
+Cut minds `0.3.1` and standardize the release tag convention on the `minds-v<version>` prefix across both repos.
+
+- The minds release now tags **both** `imbue-ai/mngr` and `imbue-ai/forever-claude-template` with the same `minds-v<version>` tag (e.g. `minds-v0.3.1`). mngr already used the `minds-` prefix (`minds-v0.3.0`, `minds-v0.2.4`); FCT was the odd one out on a bare `v<version>` (`v0.3.0`). The `minds-` prefix namespaces minds-app releases so they don't collide with either repo's own `v<version>` / package versioning.
+- Bumped `apps/minds/package.json` `version` to `0.3.1` and `templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"` (the FCT tag the shipped binary clones at runtime).
+- Rewrote `apps/minds/docs/release.md`: the artifact table and procedure now use `minds-v<version>`, step 4 cuts the tag on both repos (FCT pilot HEAD + the green mngr SHA its `vendor/mngr` was archived from), and the failure-mode notes reflect the prefixed tag in the `git checkout` / "Remote branch not found" messages.

@@ -4,13 +4,13 @@ A release ships three pinned artifacts together:
 
 | Artifact | Pinned where |
 |---|---|
-| mngr code | a SHA on the release branch (`main`, or a release/* branch if cutting from a divergent state) |
-| FCT template | the `v<version>` annotated tag on the `pilot` branch of `forever-claude-template` |
+| mngr code | a SHA on the release branch (`main`, or a release/* branch if cutting from a divergent state), tagged `minds-v<version>` |
+| FCT template | the `minds-v<version>` annotated tag on the `pilot` branch of `forever-claude-template` |
 | Built `.app` bundle | a ToDesktop build keyed by that mngr SHA |
 
-The binary clones the FCT tag at runtime via `FALLBACK_BRANCH` baked into `apps/minds/imbue/minds/desktop_client/templates.py`. Tag immutability is what makes a shipped binary always clone the snapshot it was verified against, even as `pilot` keeps moving.
+Both repos use the **`minds-v<version>`** tag prefix (e.g. `minds-v0.3.1`). The `minds-` prefix namespaces minds-app releases so they don't collide with either repo's own `v<version>` / package versioning. The binary clones the FCT tag at runtime via `FALLBACK_BRANCH` baked into `apps/minds/imbue/minds/desktop_client/templates.py`. Tag immutability is what makes a shipped binary always clone the snapshot it was verified against, even as `pilot` keeps moving.
 
-A release iterates on a single version (e.g. `v0.2.35`) by re-cutting the FCT tag at progressively newer pilot SHAs and rebuilding the binary. The version only bumps when you decide to call a build "shipped".
+A release iterates on a single version (e.g. `minds-v0.3.1`) by re-cutting the FCT tag at progressively newer pilot SHAs and rebuilding the binary. The version only bumps when you decide to call a build "shipped".
 
 ## File reference
 
@@ -31,8 +31,8 @@ A release iterates on a single version (e.g. `v0.2.35`) by re-cutting the FCT ta
 
 If shipping the current version unchanged (iteration), leave both alone. If bumping:
 
-- Edit `apps/minds/package.json` `version` to the new value, e.g. `0.2.36`.
-- Edit `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` to `"v0.2.36"`.
+- Edit `apps/minds/package.json` `version` to the new value, e.g. `0.3.1`.
+- Edit `apps/minds/imbue/minds/desktop_client/templates.py` `FALLBACK_BRANCH` to `"minds-v0.3.1"` (this is the FCT tag the binary clones, so it must match the tag cut in step 4).
 - Commit both together; push.
 
 ### 2. Get traditional CI green on the release branch
@@ -65,19 +65,30 @@ git commit -m "vendor/mngr: refresh from wz/minds_onboard $(git -C "$MNGR" rev-p
 
 `git archive HEAD | tar -x` mirrors tracked files only — no `__pycache__`, `uv.lock`, `.venv`, or other working-tree cruft. Do not exclude `apps/minds/`; the pilot needs it.
 
-### 4. Push pilot and re-cut the tag
+### 4. Push pilot and cut the `minds-v<version>` tag on BOTH repos
+
+The tag name is the same on both repos (`minds-v<version>`), so a shipped binary
+and its FCT snapshot share one identifier.
 
 ```bash
 export GH_TOKEN=$(gh auth token --user weishi-imbue)
-git push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git pilot
+VERSION=minds-v0.3.1   # whatever you're shipping (always `minds-v` prefixed)
 
-VERSION=v0.2.36   # whatever you're shipping
+# --- FCT (forever-claude-template): tag the refreshed pilot HEAD ---
+cd "$FCT"
+git push https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git pilot
 git tag -d "$VERSION" 2>/dev/null || true
-git tag -a "$VERSION" HEAD -m "minds binary $VERSION: pilot $(git rev-parse --short HEAD) (vendor/mngr from wz/minds_onboard $(git -C "$MNGR" rev-parse --short HEAD))"
+git tag -a "$VERSION" HEAD -m "minds binary $VERSION: pilot $(git rev-parse --short HEAD) (vendor/mngr from $(git -C "$MNGR" rev-parse --short HEAD))"
 git push --force https://x-access-token:$GH_TOKEN@github.com/imbue-ai/forever-claude-template.git refs/tags/"$VERSION"
+
+# --- mngr: tag the green release SHA that the FCT vendor/mngr was built from ---
+cd "$MNGR"
+git tag -d "$VERSION" 2>/dev/null || true
+git tag -a "$VERSION" HEAD -m "minds binary $VERSION: mngr $(git rev-parse --short HEAD) (FCT pilot $(git -C "$FCT" rev-parse --short HEAD))"
+git push --force https://x-access-token:$GH_TOKEN@github.com/imbue-ai/mngr.git refs/tags/"$VERSION"
 ```
 
-The tag must be **annotated** (`-a`) — a lightweight tag won't carry the message and breaks downstream tooling that inspects tag objects.
+The tag must be **annotated** (`-a`) — a lightweight tag won't carry the message and breaks downstream tooling that inspects tag objects. Tag the **same logical release** on both: the mngr SHA whose tree was archived into FCT `vendor/mngr` in step 3, and the FCT pilot HEAD that archive produced.
 
 ### 5. Trigger `minds-launch-to-msg.yml` on the mngr SHA × FCT tag
 
@@ -123,10 +134,10 @@ Auto-updater will pick up the new build on the next user launch.
 
 ## Failure modes worth knowing
 
-- **`test-docker-electron` aborts on `git checkout v<version>` with dirty `.mngr/settings.toml`.** The test fixture flips a pytest opt-in in the FCT shallow clone before the spawned `mngr create` does its in-place checkout. The runner now pre-checks-out the clone to `FALLBACK_BRANCH` after the tag fetch so the in-place checkout is a no-op even with the dirty file. If you bump `FALLBACK_BRANCH`, make sure the tag is reachable on FCT origin before this runs.
+- **`test-docker-electron` aborts on `git checkout minds-v<version>` with dirty `.mngr/settings.toml`.** The test fixture flips a pytest opt-in in the FCT shallow clone before the spawned `mngr create` does its in-place checkout. The runner now pre-checks-out the clone to `FALLBACK_BRANCH` after the tag fetch so the in-place checkout is a no-op even with the dirty file. If you bump `FALLBACK_BRANCH`, make sure the tag is reachable on FCT origin before this runs.
 - **`gh workflow run` creates a duplicate run.** See step 5 — always invoke from the mngr cwd.
 - **Old workflow's sidebar entry sticks after a rename.** GHA only unregisters the entry once all its runs are deleted. Disable via `PUT /repos/.../actions/workflows/{id}/disable` then `DELETE /repos/.../actions/runs/{run_id}` for each old run; the entry then disappears.
-- **`mngr create` fails with "Remote branch v<version> not found".** The shallow clone in CI doesn't fetch tags by default; the runner now runs `git fetch --depth 1 --tags origin` after clone. If you see this on a fresh runner, confirm the tag was actually pushed in step 4.
+- **`mngr create` fails with "Remote branch minds-v<version> not found".** The shallow clone in CI doesn't fetch tags by default; the runner now runs `git fetch --depth 1 --tags origin` after clone. If you see this on a fresh runner, confirm the tag was actually pushed in step 4.
 
 ## Pre-flight check before any push
 
