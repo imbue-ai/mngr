@@ -88,6 +88,31 @@ def test_build_provider_instance_raises_provider_unavailable_without_project_any
         GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
 
 
+def test_generate_bootstrap_payload_is_gce_startup_script_not_cloud_init(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """GCP renders a GCE startup-script, since stock GCE images do not run cloud-init.
+
+    This is what makes the default Debian 12 image work: the google-guest-agent
+    executes the ``startup-script`` metadata on every image, unlike cloud-init's
+    ``user-data`` which the stock GCE Debian images ignore.
+    """
+    config = _StubAdcConfig(stub_has_credentials=True, stub_resolved_project="p")
+    provider = GcpProviderBackend.build_provider_instance(ProviderInstanceName("gcp-test"), config, temp_mngr_ctx)
+    assert isinstance(provider, GcpProvider)
+    payload = provider._generate_bootstrap_payload(
+        host_private_key="-----BEGIN OPENSSH PRIVATE KEY-----\nk\n-----END OPENSSH PRIVATE KEY-----",
+        host_public_key="ssh-ed25519 AAAAhost host",
+        authorized_user_public_key="ssh-ed25519 AAAAaccess user@laptop",
+    )
+    assert payload.startswith("#!/bin/bash\n")
+    assert "#cloud-config" not in payload
+    # The provider key is injected straight into root (the guest agent races the
+    # default-user copy on GCE).
+    assert "'ssh-ed25519 AAAAaccess user@laptop'" in payload
+    assert "touch /var/run/mngr-ready" in payload
+
+
 def test_build_provider_instance_falls_back_to_adc_resolved_project(
     temp_mngr_ctx: MngrContext,
 ) -> None:

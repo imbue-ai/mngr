@@ -45,12 +45,10 @@ MNGR_PROVIDER_LABEL_KEY: Final[str] = "mngr-provider"
 # tests do not have to constrain host naming: any agent name works.
 GCP_PYTEST_LAUNCHED_LABEL: Final[str] = "mngr-pytest-launched"
 
-# SSH metadata is injected as ``<user>:<public-key>``. ``ubuntu`` is the default
-# user on the GCE Ubuntu LTS images the provider targets (Ubuntu, not Debian,
-# because the stock GCE Debian images do not run cloud-init). The shared
-# ``generate_cloud_init_user_data`` writes the provider key straight into root's
-# authorized_keys and also copies the ``ubuntu`` user's, so mngr's root SSH works
-# regardless of which the guest agent provisions first.
+# SSH metadata is injected as ``<user>:<public-key>``. The google-guest-agent
+# creates whatever user is named here, so ``ubuntu`` works on any image (including
+# the default Debian 12) without pre-existing. The startup-script also writes the
+# key into root's authorized_keys, where mngr actually connects.
 GCE_SSH_USERNAME: Final[str] = "ubuntu"
 
 _STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -490,7 +488,11 @@ class GcpVpsClient(VpsClientInterface):
             ssh_metadata_lines.append(f"{GCE_SSH_USERNAME}:{public_key}")
         ssh_metadata_value = "\n".join(ssh_metadata_lines)
         metadata_items = [
-            compute_v1.Items(key="user-data", value=user_data),
+            # GCP bootstraps via the ``startup-script`` metadata (run by the
+            # google-guest-agent on every image), not cloud-init ``user-data``,
+            # which stock GCE Debian images ignore. ``user_data`` is the
+            # startup-script bash (see ``GcpProvider._generate_bootstrap_payload``).
+            compute_v1.Items(key="startup-script", value=user_data),
             # Disable OS Login and project-wide SSH keys so only the per-instance
             # ssh-keys metadata grants access (no inherited project keys).
             compute_v1.Items(key="enable-oslogin", value="FALSE"),
