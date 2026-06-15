@@ -90,7 +90,11 @@ def test_transcript_assistant_event_to_stream_json() -> None:
     message = converted["message"]
     assert isinstance(message, dict)
     assert message["role"] == "assistant"
-    assert message["content"] == [{"type": "text", "text": "hi"}]
+    # The inner message is dumped from the anthropic Python SDK's Message, so the text block also
+    # carries that model's optional `citations` field (null here). This is a known, documented
+    # departure from the real `claude` binary, which omits `citations` entirely -- see the
+    # `imbue.mngr_claude.stream_json` module docstring.
+    assert message["content"] == [{"type": "text", "text": "hi", "citations": None}]
 
 
 def test_transcript_user_event_to_stream_json() -> None:
@@ -112,11 +116,15 @@ def test_transcript_assistant_event_with_tool_use_emits_tool_use_block() -> None
     converted = transcript_event_to_stream_json(event, "sess-1")
     assert converted is not None
     content = converted["message"]["content"]
-    # The text block comes first, then one tool_use block per tool call with the
-    # input_preview parsed back into structured JSON.
+    # The text block comes first, then one tool_use block per tool call with the input_preview
+    # parsed back into structured JSON. Both blocks are dumped from the anthropic Python SDK's
+    # Message, so they also carry that model's optional null-here fields (`citations` on text,
+    # `caller` on tool_use). These are known, documented departures from the real `claude` binary
+    # (which omits `citations` and emits a populated `caller`) -- see the
+    # `imbue.mngr_claude.stream_json` module docstring.
     assert content == [
-        {"type": "text", "text": "look"},
-        {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {"cmd": "ls"}},
+        {"type": "text", "text": "look", "citations": None},
+        {"type": "tool_use", "id": "call-1", "name": "Bash", "input": {"cmd": "ls"}, "caller": None},
     ]
 
 

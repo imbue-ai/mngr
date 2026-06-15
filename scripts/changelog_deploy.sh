@@ -12,10 +12,13 @@ set -euo pipefail
 # depend on the deploying machine's local timezone. The
 # orchestration steps live in scripts/changelog_consolidation_prompt.md and
 # are executed by claude itself (running changelog_consolidate.py, summarizing
-# each project's new dated sections into its per-project CHANGELOG.md
-# [Unreleased], committing, spawning one or more subagents to review the new
-# bullets for factual accuracy against the code, pushing a branch, opening a
-# PR). Claude's final assistant message is a single JSON object describing the
+# each project's new dated sections into its per-project CHANGELOG.md -- the
+# publishable libs/apps projects accumulate under [Unreleased] until release,
+# while the dev project (never released) gets one summarized "## <date>"
+# section per landed date, mirroring its UNABRIDGED_CHANGELOG.md -- committing,
+# spawning one or more subagents to
+# review the new bullets for factual accuracy against the code,
+# pushing a branch, opening a PR). Claude's final assistant message is a single JSON object describing the
 # outcome (status, with pr_url on success or notes on failure) -- visible in
 # `mngr schedule run` stdout and Modal logs.
 #
@@ -101,8 +104,19 @@ export IS_SANDBOX=1
 # sync about which plugins must be disabled around `mngr schedule` invocations.
 DISABLE_PLUGIN_ARGS=$(uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --print-disable-plugin-args)
 
+# Stop *every* Modal app in the changelog schedule's isolated environment(s)
+# before redeploying. `mngr schedule remove` below only stops the app whose
+# name matches the *current* naming scheme, so a past naming-scheme change once
+# left an orphaned app firing a second nightly run. The schedule has its own
+# dedicated environment, so sweeping the whole environment is safe and
+# guarantees no orphaned cron app survives the redeploy.
+echo "Stopping any existing Modal apps in the changelog environment(s)..."
+uv run python "${REPO_ROOT}/scripts/changelog_schedule_utils.py" --stop-all-apps
+
 # Always remove an existing trigger before recreating, so the deployed
 # schedule reflects the current source no matter what was deployed before.
+# (This also deletes the schedule's creation record from the state volume,
+# which the app sweep above does not touch.)
 EXISTING=$(uv run mngr schedule list --provider "$PROVIDER" --all --format json $DISABLE_PLUGIN_ARGS 2>/dev/null || echo '{"schedules":[]}')
 if echo "$EXISTING" | python3 -c "
 import json, sys
