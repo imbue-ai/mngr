@@ -221,37 +221,45 @@ class MngrCaller(MutableModel):
         resolved_timeout = self.default_timeout_seconds if timeout is None else timeout
         context = self._get_context()
         receive_conn, send_conn = context.Pipe(duplex=False)
-        child = context.Process(
-            target=_run_mngr_cli_in_child,
-            args=(send_conn, tuple(argv), dict(env_overrides or {})),
-            name="mngr-call",
-        )
-        child.start()
-        # The parent keeps only the receiving end; closing our copy of the send
-        # end lets ``recv`` see EOF if the child dies without sending.
-        send_conn.close()
+        # Outer try guarantees both pipe ends are closed even if Process
+        # construction or start() raises (e.g. the OS refuses the fork). Pipe
+        # ``close`` is idempotent, so the explicit ``send_conn.close()`` after a
+        # successful start does not conflict with the finally.
         try:
-            if receive_conn.poll(resolved_timeout):
-                try:
-                    returncode, stdout, stderr = receive_conn.recv()
-                    return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr)
-                except EOFError:
-                    return MngrCallResult(
-                        returncode=1,
-                        stderr="mngr child process exited without returning a result",
-                    )
-            child.terminate()
-            return MngrCallResult(
-                returncode=_TIMEOUT_RETURNCODE,
-                is_timed_out=True,
-                stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
+            child = context.Process(
+                target=_run_mngr_cli_in_child,
+                args=(send_conn, tuple(argv), dict(env_overrides or {})),
+                name="mngr-call",
             )
+            child.start()
+            # The parent keeps only the receiving end; closing our copy of the
+            # send end lets ``recv`` see EOF if the child dies without sending.
+            send_conn.close()
+            try:
+                if receive_conn.poll(resolved_timeout):
+                    try:
+                        returncode, stdout, stderr = receive_conn.recv()
+                        return MngrCallResult(returncode=returncode, stdout=stdout, stderr=stderr)
+                    except EOFError:
+                        return MngrCallResult(
+                            returncode=1,
+                            stderr="mngr child process exited without returning a result",
+                        )
+                child.terminate()
+                return MngrCallResult(
+                    returncode=_TIMEOUT_RETURNCODE,
+                    is_timed_out=True,
+                    stderr=f"mngr {' '.join(argv)} timed out after {resolved_timeout:.0f}s",
+                )
+            finally:
+                # Always reap the child so it never lingers as a zombie.
+                child.join(_TERMINATE_JOIN_SECONDS)
+                if child.is_alive():
+                    child.kill()
+                    child.join()
         finally:
+            send_conn.close()
             receive_conn.close()
-            child.join(_TERMINATE_JOIN_SECONDS)
-            if child.is_alive():
-                child.kill()
-                child.join()
 
 
 _DEFAULT_CALLER_HOLDER: dict[str, MngrCaller | None] = {"caller": None}
