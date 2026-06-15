@@ -1,8 +1,6 @@
 # `specs/provider-shape.md` — Core Provider Shape
 
-**Status.** Draft, forward-looking. Companion to `specs/provider-uniformity-review.md` (which is descriptive — what providers do today — written 2026-06-11). This file is prescriptive: what a provider OUGHT to do so users get a uniform experience across the nine implementations we currently ship.
-
-**Branch.** `mngr/reviewer-providers`. Citations point at code on that branch.
+**Status.** Forward-looking, prescriptive. Companion to `specs/provider-uniformity-review.md` (descriptive — what providers do today) and `specs/provider-release-tests.md` (release-test trip proposal). For dev-facing walkthrough of how to actually implement a new provider, see `specs/implementing-a-provider.md`.
 
 ---
 
@@ -46,7 +44,7 @@ These are the behaviors a user MUST be able to rely on from every provider. The 
 
 ### 1.4 `mngr stop <agent> --stop-host`
 
-**MUST.** Either (a) stop the compute so the user stops paying for it, OR (b) refuse loudly via `HostShutdownNotSupportedError`. There is no acceptable third option. A `mngr stop --stop-host` that silently leaves the VM running while reporting "Stopped host: my-agent" is a cost leak that masquerades as success — Azure and GCP today inherit the base path that does exactly this, and that is the single most expensive uniformity gap in the codebase (see `specs/provider-uniformity-review.md` F-STOP-1).
+**MUST.** Either (a) stop the compute so the user stops paying for it, OR (b) refuse loudly via `HostShutdownNotSupportedError`. There is no acceptable third option. A `mngr stop --stop-host` that silently leaves the VM running while reporting "Stopped host: my-agent" is a cost leak that masquerades as success. Azure, GCP, Vultr, and OVH today inherit the base path that does exactly this.
 
 **Right (loud refusal).** Modal raises `HostShutdownNotSupportedError`: refusal is honest about a missing capability. The corresponding pattern: set `supports_shutdown_hosts=False` and let the CLI error before the work begins.
 
@@ -98,9 +96,9 @@ The interface was designed for this from the start: every persist/list/remove si
 
 **Honest cap.** AWS's per-field tag mirror caps at EC2's 50-tag limit (~16 agents). Beyond that, `persist_agent_data` raises `NotImplementedError` with a clear message (`libs/mngr_aws/imbue/mngr_aws/backend.py:677-685`) — this is the right shape: surface the limit, don't silently drop data. Providers with similar caps SHOULD do the same.
 
-**Current state (round 2):**
+**Per-provider tiers (today):**
 - **Tier A (verified working):** Modal, Lima, Docker, local — per-agent storage, tested.
-- **Tier B (live works since `8cca7406d`; offline mirror missing or capped):** AWS (offline mirror works for ≤16 agents), Azure/GCP/Vultr/OVH (offline mirror raises `HostNotFoundError` when VPS is unreachable).
+- **Tier B (live works; offline mirror missing or capped):** AWS (offline mirror works for ≤16 agents — EC2 50-tag wall, raises `NotImplementedError` beyond), Azure/GCP/Vultr/OVH (offline mirror raises `HostNotFoundError` when VPS is unreachable; data is intact on the volume).
 - **Tier B (no offline view at all):** SSH — agents enumerated only via live SSH; if the host is unreachable, all agents fall out of discovery (`libs/mngr/imbue/mngr/providers/ssh/instance.py:208-216` FIXME).
 - **Tier C (single-agent by construction):** none in tree.
 
@@ -154,11 +152,11 @@ The `supports_*` flags on `ProviderInstanceInterface` (`libs/mngr/imbue/mngr/int
 
 The values below are how a provider can be opinionated *and* still feel uniform. Two providers can pick different default regions, but they MUST pick fail-closed network defaults and they MUST land on roughly the same compute shape.
 
-### 3.1 Security defaults — CIDR / SSH ingress (key-only SSH; cloud-firewall is the operator's tightening knob)
+### 3.1 Security defaults — CIDR / SSH ingress
 
-**Standard (as of 2026-06-15).** The cloud-trio default is `allowed_ssh_cidrs = ("0.0.0.0/0",)` with a runtime warning. AWS has been here from the start; Azure and GCP flipped to match in commits `f58b71939` and `16fdec0cb`. Earlier round-2 of this review (`specs/provider-uniformity-review-v2.md`) recommended fail-closed; that recommendation is **superseded** by the design decision the code now embodies. The §3.1 contract below describes the chosen standard, not a critique of it.
+**Standard.** The cloud-trio default is `allowed_ssh_cidrs = ("0.0.0.0/0",)` with a runtime warning. SSH is key-only on every cloud-created host (password auth disabled in sshd + cloud-init), so opening tcp/22 to the world exposes the port but not a usable login — defense-in-depth, not the primary control.
 
-**MUST.** SSH MUST be key-only on every cloud-created host. Password auth MUST be disabled in the sshd config and in cloud-init. With that invariant, opening tcp/22 to the world exposes the port but not a usable login — defense-in-depth, not the primary control.
+**MUST.** SSH MUST be key-only on every cloud-created host. Password auth MUST be disabled in the sshd config and in cloud-init.
 
 **MUST.** When `allowed_ssh_cidrs` resolves to a wide range (anything containing `0.0.0.0/0` or larger than `/24`), the provider MUST log a WARNING at firewall-creation time naming the resolved range and pointing at the config key to tighten. AWS at `libs/mngr_aws/imbue/mngr_aws/client.py` does this; Azure and GCP MUST land the same warning now that they share the default. Silent open-by-default is the anti-pattern, not open-by-default itself.
 
@@ -213,11 +211,11 @@ Field name varies by cloud convention and that's fine:
 
 ### 3.7 Image / OS defaults
 
-**MUST** be a cloud-init-capable image. Bookworm-slim is the default container image (`libs/mngr_vps_docker/imbue/mngr_vps_docker/config.py:18-20`); GCP uses the Ubuntu 22.04 LTS family because the stock GCE Debian images don't run cloud-init (`config.py:68-77`). This is a real constraint, not a preference.
+**MUST** support whatever bootstrap mechanism the cloud uses (cloud-init for AWS/Azure/Vultr/OVH; GCE startup-scripts for GCP since commit `a9bbd4725`). The cloud-trio fleet is now uniformly Debian 12 (AWS `libs/mngr_aws/imbue/mngr_aws/config.py`, Azure `libs/mngr_azure/imbue/mngr_azure/config.py:29-32`, GCP `libs/mngr_gcp/imbue/mngr_gcp/config.py:26`). The container image is uniformly `debian:bookworm-slim` (`libs/mngr_vps_docker/imbue/mngr_vps_docker/config.py:18-20`).
 
 **MUST** pin a specific image SKU/version. Drifting "latest" defaults make `mngr create` non-reproducible and can break the install path silently.
 
-**SHOULD** expose per-region image override if the cloud's image identifiers are regional (AWS AMIs are; GCE image families are global). AWS's `default_ami_by_region` (`config.py:107-110`) is the pattern.
+**SHOULD** expose per-region image override if the cloud's image identifiers are regional (AWS AMIs are; GCE image families are global; Azure URNs are global). AWS's `default_ami_by_region` is the pattern; GCP gained `--gcp-image` per-host override in commit `8a0fd81de`.
 
 ### 3.8 Tagging conventions
 
@@ -457,10 +455,4 @@ These are the things this spec doesn't take a position on yet. Resolving them MA
 6. **`mngr <provider> list` as a pluggy contract?** OVH ships one; the cloud trio would benefit. Could be a new method on `ProviderBackendInterface` or a separate plugin.
 7. **For local providers (Lima, Docker, SSH), should `--auto-shutdown-seconds` be rejected at parse time** rather than silently ignored? The flag has no meaning when the user owns the compute.
 8. **For SSH provider, should `mngr create --provider ssh` be rejected at config-validation time** rather than at command-execution time (then `NotImplementedError`)? A surfaced "this provider doesn't create hosts" error in `mngr create --help` would be friendlier.
-9. **`supports_multi_agent_hosts` flag?** §1.8 says every provider MUST support N agents per host. The interface is plumbed for it (per-agent `persist_agent_data` / `list_persisted_agent_data_for_host` / `remove_persisted_agent_data`), Modal exercises it in production, AWS gained per-agent tag mirroring in commit `446d6a964`. But cloud-VPS providers inheriting `VpsDockerProvider.persist_agent_data` may not actually round-trip N agents safely today. Pending verification (release-tests Trip 1b): either every provider gets the test, or providers that don't honestly support multi-agent return `False` from a new `supports_multi_agent_hosts` flag and the CLI gates `mngr exec --new-agent` on it. The latter is the parity escape hatch matching `supports_shutdown_hosts`.
-
----
-
-## Appendix: relationship to the existing review
-
-`specs/provider-uniformity-review.md` (2026-06-11) describes what providers *do today*. This document describes what providers *ought to do*. Where the two diverge, this document's prescription wins for new providers and for the deliberate-evolution PRs that close the gaps the review enumerated. Where this document is silent on something the review covered, treat that as "no strong opinion yet — preserve current behavior".
+9. **`supports_multi_agent_hosts` flag?** §1.8 says every provider MUST support N agents per host. The interface is plumbed for it (per-agent `persist_agent_data` / `list_persisted_agent_data_for_host` / `remove_persisted_agent_data`); Modal exercises it in production; AWS does per-field tag mirroring. Cloud-VPS providers inheriting `VpsDockerProvider.persist_agent_data` may not actually round-trip N agents safely today, especially in the offline view. Either every provider gets release-tests Trip 1b coverage, or providers that don't honestly support multi-agent return `False` from a new `supports_multi_agent_hosts` flag and the CLI gates `mngr exec --new-agent` on it. The latter is the parity escape hatch matching `supports_shutdown_hosts`.
