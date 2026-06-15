@@ -154,14 +154,14 @@ def _access_human_label(access: str) -> str:
 def _format_granted_message(file_path: str, access: str) -> str:
     return (
         f"Your {_access_human_label(access)} file-sharing permission request for "
-        f"'{file_path}' was granted. Please retry the call that was blocked."
+        f"'{file_path}' was granted."
     )
 
 
 def _format_denied_message(file_path: str, access: str) -> str:
     return (
         f"Your {_access_human_label(access)} file-sharing permission request for "
-        f"'{file_path}' was denied. Do not retry the blocked call."
+        f"'{file_path}' was denied."
     )
 
 
