@@ -14,9 +14,9 @@ A git commit as used in the mngr/minds system. The term appears in two distinct 
 
 ### 1.2 All usages
 
-- `libs/mngr/imbue/mngr/utils/git_utils.py`: `get_head_commit()` returns the `HEAD` SHA string; `count_commits_between(base, target)` counts reachable commits.
-- `libs/mngr/imbue/mngr/utils/git_utils.py`: `is_ancestor(candidate_ancestor, candidate_descendant, ctx)` tests commit ancestry.
-- `libs/mngr/imbue/mngr/api/git.py`: the commit history of an agent's branch is what `git_push()` / `git_pull()` transfer. `git_push` calls `git push <ssh_url> HEAD:<branch>`.
+- `libs/mngr/imbue/mngr/utils/git_utils.py`: `get_head_commit(path, cg)` returns the `HEAD` SHA string (or None); `count_commits_between(path, base_ref, head_ref, cg)` counts reachable commits.
+- `libs/mngr/imbue/mngr/utils/git_utils.py`: `is_ancestor(path, ancestor_commit, descendant_commit, cg)` tests commit ancestry. (These helpers now take an explicit repo `path` and a `ConcurrencyGroup` rather than a `ctx`.)
+- `libs/mngr/imbue/mngr/api/git.py`: the commit history of an agent's branch is what `git_push()` / `git_pull()` transfer. With no explicit refspec, `git_push` pushes `<local_current_branch>:<remote_current_branch>` to the constructed URL (it no longer hard-codes `HEAD:<branch>`).
 - `.external_worktrees/forever-claude-template/scripts/git_hooks/post-commit`: the single git hook fires after every commit, auto-pushing the branch to `origin` in the background when `GH_TOKEN` is set.
 - `.external_worktrees/forever-claude-template/scripts/claude_prevent_commit_rewrite.sh`: PreToolUse hook that blocks `git rebase`, `git pull --rebase`, `git commit --amend`, `git commit --fixup` with exit code 2 (hard block). The hook does NOT prevent ordinary commits.
 - `libs/mngr/imbue/mngr/plugins/hookspecs.py`: mngr's pluggy hooks `on_before_provisioning` / `on_after_provisioning` fire around agent setup, not around git commits.
@@ -66,11 +66,11 @@ So the canonical branch for agent `"myagent"` is `mngr/myagent`.
 
 - `libs/mngr/imbue/mngr/primitives.py:334–338`: `DEFAULT_BRANCH_PREFIX = "mngr/"`, `default_branch_name()`.
 - `libs/mngr/imbue/mngr/primitives.py`: `DiscoveredAgent.created_branch_name: str | None` — field on a discovered agent struct; None when no branch was created during provisioning.
-- `libs/mngr/imbue/mngr/utils/git_utils.py`: `get_current_branch(ctx)` returns the current branch name; `delete_git_branch(branch, ctx)` deletes by name.
+- `libs/mngr/imbue/mngr/utils/git_utils.py`: `get_current_branch(path, cg)` returns the current branch name; `delete_git_branch(branch_name, source_repo_path, cg)` deletes by name.
 - `libs/mngr/imbue/mngr/primitives.py`: `TransferMode.GIT_WORKTREE` and `TransferMode.GIT_MIRROR` — transfer modes that depend on branches. Worktree mode creates a worktree tracking the branch; mirror mode copies all branch refs via `GIT_MIRROR_PUSH_REFSPECS`.
 - `libs/mngr/imbue/mngr/utils/git_utils.py`: `GIT_MIRROR_PUSH_REFSPECS = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]` — mirror pushes all branches.
 - `.external_worktrees/forever-claude-template/scripts/git_hooks/post-commit`: skips auto-push for detached HEAD and `mindsbackup/*` branches (line pattern `"mindsbackup/"` excluded).
-- `libs/mngr/imbue/mngr/api/git.py`: `git_push(ctx, branch, ...)` and `git_pull(ctx, branch, ...)` both accept an explicit branch name string.
+- `libs/mngr/imbue/mngr/api/git.py`: `git_push(local_path, remote_host, remote_path, extra_args, cg)` and `git_pull(...)` take pass-through `extra_args`; a branch/refspec is supplied through `extra_args` (defaulting to current-branch-to-current-branch), not as a dedicated parameter.
 - `libs/mngr/imbue/mngr/utils/git_utils.py`: `parse_worktree_git_file()`, `find_source_repo_of_worktree()` — for worktree-mode branches where the agent workdir is a git worktree pointing at a branch in the source repo.
 
 ### 2.3 Competing definitions
@@ -162,7 +162,7 @@ A git remote as referenced by mngr. Three distinct remote-like concepts exist:
 ### 4.2 All usages
 
 **origin / SSH remote:**
-- `libs/mngr/imbue/mngr/api/git.py`: `_build_ssh_git_url(host_interface) -> str` builds `ssh://user@host:port<path>/.git` for push/pull. No explicit remote name "origin" is used here — it is the URL argument passed directly to `git push <url>`.
+- `libs/mngr/imbue/mngr/api/git.py`: `_build_ssh_git_url(ssh_info, remote_path) -> str` builds `ssh://user@host:port<remote_path>/.git` for push/pull. The wrapper `_build_git_url_and_env()` returns the bare local path for local hosts and this SSH URL (plus a `GIT_SSH_COMMAND` env) for remote hosts. No explicit remote name "origin" is used here — the URL is passed as a positional argument directly to `git push <url>` / `git fetch <url>`.
 - `libs/mngr/imbue/mngr/utils/git_utils.py`: `derive_project_name_from_path()` — tries to infer project name from `git remote get-url origin` first, then falls back to directory name.
 - `.external_worktrees/forever-claude-template/scripts/git_hooks/post-commit`: runs `git push origin HEAD:$(git rev-parse --abbrev-ref HEAD)` in background when `GH_TOKEN` is set.
 
@@ -171,8 +171,9 @@ A git remote as referenced by mngr. Three distinct remote-like concepts exist:
 - Not a git-level remote; it is a TOML config file read by skill scripts.
 
 **mngr git remote:**
-- `libs/mngr/imbue/mngr/api/git.py:git_push()`: sets `receive.denyCurrentBranch=updateInstead` on the remote so push to checked-out branch works.
-- `libs/mngr/imbue/mngr/cli/git.py`: `mngr git push` / `mngr git pull` reject bare local paths; require an agent name or host.
+- `libs/mngr/imbue/mngr/api/git.py`: `git_push()` calls `_configure_push_destination()`, which sets `receive.denyCurrentBranch=updateInstead` on the destination repo so a push to its checked-out branch is applied to the working tree on a fast-forward. With no refspec, `git_push` defaults to `<local_current_branch>:<remote_current_branch>` (via `_default_push_refspec()`), not `HEAD:<branch>`.
+- `git_push(local_path, remote_host, remote_path, extra_args, cg)` and `git_pull(...)` take a local path, the target `OnlineHostInterface`, a remote path, pass-through `extra_args`, and a concurrency group — there is no `ctx` parameter and no named `branch` parameter; flags/refspecs flow through `extra_args`.
+- `libs/mngr/imbue/mngr/cli/git.py`: `mngr git push` / `mngr git pull` reject bare local paths (`_resolve_remote_endpoint()` rejects addresses with no agent and no host); the target is a host-location address `AGENT[@HOST[.PROVIDER]][:PATH]`.
 
 **Git common dir / trust across remotes:**
 - `libs/mngr/imbue/mngr/utils/git_utils.py`: `find_git_common_dir()` and `find_git_source_path()` — resolves the real `.git` dir even for worktrees, ensuring trust grants apply to all worktrees of the same repo.
@@ -189,7 +190,7 @@ A git remote as referenced by mngr. Three distinct remote-like concepts exist:
 
 ### 4.5 DOC/CODE divergences
 
-- `_build_ssh_git_url()` builds a URL that is passed directly to git as a positional argument, not stored as a named remote in `.git/config`. The push/pull is therefore "remoteless" from git's config perspective, even though conceptually it is a remote operation. This could confuse operators inspecting `.git/config` on an agent.
+- `_build_ssh_git_url(ssh_info, remote_path)` builds a URL that is passed directly to git as a positional argument, not stored as a named remote in `.git/config`. The push/pull is therefore "remoteless" from git's config perspective, even though conceptually it is a remote operation. This could confuse operators inspecting `.git/config` on an agent. Note that mngr's git push/pull now also supports host-to-host transfers (the module abstracts "run git here or on a remote host" via `GitContextInterface` / `RemoteGitContext`), so the "remote" in a push target is a remote *host*, distinct from a git remote.
 
 ### 4.6 Recommended canonical term
 
@@ -201,51 +202,57 @@ A git remote as referenced by mngr. Three distinct remote-like concepts exist:
 
 ### 5.1 Canonical definition
 
-An "AI provider" in the mngr/minds context is the authentication + routing layer through which a coding agent (currently Claude Code) calls LLM APIs. Three distinct auth modes exist, determined at provisioning time by which credentials are present in the agent environment.
+An "AI provider" in the mngr/minds context is the authentication + routing layer through which a coding agent (currently Claude Code) obtains its Anthropic credentials. This is now a **typed enum**, `AIProvider`, defined in `apps/minds/imbue/minds/primitives.py:72`, with three members: `IMBUE_CLOUD`, `API_KEY`, `SUBSCRIPTION`. Its docstring: "How the workspace agent should obtain its Anthropic credentials. Decoupled from the compute provider so any combination is valid: e.g. a user can run on a local container while still using an imbue_cloud-minted LiteLLM key for inference." The selected provider is chosen at agent-creation time in the minds desktop client and drives credential injection.
 
 ### 5.2 All usages and modes
 
-**Mode 1 — LiteLLM virtual key (imbue_cloud managed):**
-- The imbue cloud backend mints per-agent LiteLLM virtual keys via `ImbueCloudClient.create_litellm_key()` (`libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/client.py`).
+The three modes correspond one-to-one to the `AIProvider` enum members. Resolution happens in `apps/minds/imbue/minds/desktop_client/agent_creator.py` (the `match ai_provider:` block around line 1520), with the enum also threaded through `templates.py` and the desktop client `app.py` (request handlers read `ai_provider` from the submitted form, defaulting to `AIProvider.SUBSCRIPTION`).
+
+**Mode 1 — `AIProvider.IMBUE_CLOUD` (LiteLLM virtual key, imbue_cloud managed):**
+- In minds, `agent_creator.py` mints a fresh per-agent LiteLLM virtual key via `imbue_cloud_cli.create_litellm_key(...)` and injects it as the effective `ANTHROPIC_API_KEY` with a matching `ANTHROPIC_BASE_URL` (requires a selected `account_email`).
+- The imbue cloud backend mints keys via `ImbueCloudClient.create_litellm_key()` (`libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/client.py`).
 - `_build_patch_claude_config_command()` in `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/host.py` writes the key into `.claude.json` as `primaryApiKey`, pointing Claude Code at the LiteLLM proxy base URL.
 - The local dev proxy is at `litellm_proxy/config.yaml`; production is on Modal at `apps/modal_litellm/app.py` (comment in config.yaml: "model_list MUST stay in sync with apps/modal_litellm/app.py's LITELLM_CONFIG").
 - `ENABLE_CLAUDEAI_MCP_SERVERS=false` is set in FCT host_env (`.external_worktrees/forever-claude-template/.mngr/settings.toml`), which disables Claude.ai MCP server integration that would conflict with LiteLLM routing.
 
-**Mode 2 — raw ANTHROPIC_API_KEY:**
+**Mode 2 — `AIProvider.API_KEY` (raw ANTHROPIC_API_KEY):**
+- In minds, `agent_creator.py` uses the user-supplied `anthropic_api_key` directly and sets no `ANTHROPIC_BASE_URL`, so the agent talks to the official Anthropic API (raises if no key is supplied).
 - `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/host.py` (docstring): "claude config when `ANTHROPIC_API_KEY` is set anywhere in env (the LiteLLM key flows through `--pass-host-env` for minds, so...". Raw Anthropic key bypasses LiteLLM entirely.
 - `litellm_proxy/config.yaml`: all models use `api_key: os.environ/ANTHROPIC_API_KEY` at the proxy level. So even the proxy mode ultimately uses a raw key — but at the proxy layer, not per-agent.
 
-**Mode 3 — Claude.ai OAuth subscription credentials:**
+**Mode 3 — `AIProvider.SUBSCRIPTION` (Claude.ai OAuth subscription credentials):**
+- In minds, `agent_creator.py` injects neither key nor base URL; the user signs in to Claude interactively once the workspace starts.
 - `libs/mngr_claude/imbue/mngr_claude/claude_config.py`: `get_user_claude_config_dir()` reads `ORIGINAL_CLAUDE_CONFIG_DIR` to locate the user's original `~/.claude/` dir with OAuth tokens (from `mngr login` / Claude Code's web-based login).
 - `libs/mngr_claude/imbue/mngr_claude/resources/sync_keychain_credentials.py`: `build_credential_sync_hooks_config()` writes a `Notification:auth_success` hook to sync macOS Keychain credentials back to the user's config after OAuth refresh.
 - `ClaudeAgentConfig.sync_claude_credentials: bool` — when True, copies OAuth credentials from `ORIGINAL_CLAUDE_CONFIG_DIR` to the agent's isolated config dir at provisioning time.
 
-**mngr plugin catalog — AI provider signal checks:**
-- `libs/mngr/imbue/mngr/plugin_catalog.py`: `ClaudeSignalCheck` (checks `claude --version`), `OpenCodeSignalCheck` (checks `opencode --version`), `AntigravitySignalCheck` (checks `agy --version`) — mngr detects which coding agent binaries are present and enables/disables corresponding plugins.
+**mngr plugin catalog — coding-agent signal checks:**
+- `libs/mngr/imbue/mngr/plugin_catalog.py`: `ClaudeSignalCheck` (checks `claude --version`), `OpenCodeSignalCheck` (checks `opencode --version`), `CodexSignalCheck` (checks `codex --version`), `AntigravitySignalCheck` (checks `agy --version`), `PiSignalCheck` (probes `pi --help`) — mngr detects which coding agent binaries are present and enables/disables corresponding plugins. Note these detect *compute/coding-agent* binaries, not the minds `AIProvider` credential mode.
 
 ### 5.3 Competing definitions / terminology variants
 
 | Term | Where used | Meaning |
 |---|---|---|
 | `provider` (mngr) | `ImbueCloudProviderConfig`, `VpsDockerProviderConfig` | Compute host provider (cloud/docker/local), NOT LLM provider |
-| AI provider | Informal docs | LLM API routing layer |
+| `AIProvider` (minds) | `apps/minds/imbue/minds/primitives.py:72` | Typed enum for the credential mode: `IMBUE_CLOUD` / `API_KEY` / `SUBSCRIPTION` |
 | LiteLLM | Code | Proxy that virtualizes LLM API calls |
 | `primaryApiKey` | `.claude.json` | The key written into Claude Code's config — could be a LiteLLM virtual key OR a raw Anthropic key |
 
-The word "provider" in mngr almost always means *compute* provider (who runs the machine), not LLM provider. This is a major source of confusion.
+The word "provider" in mngr almost always means *compute* provider (who runs the machine). In minds, "AI provider" is now its own typed concept (`AIProvider`), decoupled from the compute provider — but the two senses of "provider" remain a source of confusion.
 
 ### 5.4 Ambiguities
 
-- There is no enum or typed field in `ClaudeAgentConfig` that says "which AI auth mode are you using?" The mode is determined by which env vars are present at provisioning time — a runtime-only distinction, not statically typed.
+- The credential mode is now statically typed in minds as the `AIProvider` enum (`IMBUE_CLOUD` / `API_KEY` / `SUBSCRIPTION`), selected at agent-creation time. This typing lives in the minds desktop client, not in mngr's `ClaudeAgentConfig`; mngr itself still receives the *result* (env vars like `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL`) rather than the enum, so at the mngr provisioning layer the distinction remains env-determined.
 - The LiteLLM proxy URL is not stored in a single canonical constant; it is assembled from the `connector_url` field and inferred config.
 
 ### 5.5 DOC/CODE divergences
 
-- Documentation may refer to "imbue_cloud provider" meaning the compute layer. Users reading this as "AI provider" (LLM routing) will be confused. There is no doc that explicitly names and separates the three auth modes.
+- Documentation may refer to "imbue_cloud provider" meaning the compute layer. The same name `IMBUE_CLOUD` is *also* an `AIProvider` member (the LiteLLM-key mode) *and* a `LaunchMode`/`BackupProvider` member, so "imbue_cloud" now denotes at least three orthogonal axes. The enum docstrings stress these are decoupled, but the shared member name invites conflation.
+- Terminology tension with the code: this taxonomy's prior guidance was to reserve "provider" strictly for compute providers and never say "AI provider." The merged code contradicts that by naming the enum `AIProvider` (and its values `IMBUE_CLOUD` / `API_KEY` / `SUBSCRIPTION`). The canonical type name in code is now `AIProvider`.
 
 ### 5.6 Recommended canonical term
 
-**"LLM auth mode"** or **"AI credential mode"** for the three-way distinction. Reserve **"provider"** strictly for compute host providers. Use **"LiteLLM virtual key"**, **"raw Anthropic API key"**, and **"OAuth subscription credentials"** when naming the three modes.
+**`AIProvider`** (matching the code) for the three-way credential-mode distinction; its members are **`IMBUE_CLOUD`** (LiteLLM virtual key), **`API_KEY`** (raw Anthropic API key), and **`SUBSCRIPTION`** (OAuth subscription credentials). Reserve bare **"provider"** for compute host providers, and qualify as **"AI provider"** vs **"compute provider"** when both are in scope. Canonical location: `apps/minds/imbue/minds/primitives.py:72`.
 
 ---
 
@@ -464,7 +471,7 @@ Exit code semantics (Claude Code):
 hookspec = pluggy.HookspecMarker("mngr")
 ```
 
-Full list of hookspecs: `register_provider_backend`, `register_agent_type`, `on_before_host_create`, `on_host_created`, `on_before_host_destroy`, `on_host_destroyed`, `on_before_initial_file_copy`, `on_after_initial_file_copy`, `on_agent_state_dir_created`, `on_before_provisioning`, `on_after_provisioning`, `on_agent_created`, `on_before_agent_destroy`, `on_agent_destroyed`, `register_cli_options`, `on_load_config`, `register_cli_commands`, `register_help_topics`, `override_command_options`, `get_files_for_deploy`, `modify_env_vars_for_deploy`, `agent_field_generators`, `offline_agent_field_generators`, `on_before_create`, `on_post_install`, `on_startup`, `on_before_command`, `on_after_command`, `on_error`, `on_shutdown`, `register_hookspecs`.
+Full list of hookspecs: `register_provider_backend`, `register_agent_type`, `register_agent_aliases`, `on_before_host_create`, `on_host_created`, `on_before_host_destroy`, `on_host_destroyed`, `on_before_initial_file_copy`, `on_after_initial_file_copy`, `on_agent_state_dir_created`, `on_before_provisioning`, `on_after_provisioning`, `on_agent_created`, `on_before_agent_destroy`, `on_agent_destroyed`, `register_cli_options`, `on_load_config`, `register_cli_commands`, `register_help_topics`, `override_command_options`, `get_files_for_deploy`, `modify_env_vars_for_deploy`, `agent_field_generators`, `offline_agent_field_generators`, `on_before_create`, `on_post_install`, `on_startup`, `on_before_command`, `on_after_command`, `on_error`, `on_shutdown`, `register_hookspecs`. (`register_agent_aliases` is the newer hookspec that maps short alias names like `agy`/`pi` to canonical agent types.)
 
 These are Python-level hooks in mngr's plugin system, completely separate from Claude Code event hooks.
 
@@ -478,7 +485,7 @@ These are Python-level hooks in mngr's plugin system, completely separate from C
 - The directory `/mngr/code/scripts/git_hooks/` is a global hooksPath, meaning it applies to all git operations on the container, not just one repo.
 
 **Antigravity hooks:**
-- `libs/mngr_antigravity/imbue/mngr_antigravity/antigravity_config.py`: `build_antigravity_hooks_config()` writes `$HOME/.gemini/config/hooks.json` with `PreInvocation` (sets active marker) and `Stop` (clears when idle) hooks for the `agy` agent.
+- `libs/mngr_antigravity/imbue/mngr_antigravity/antigravity_config.py`: `build_antigravity_hooks_config()` writes `$HOME/.gemini/config/hooks.json` with a single `PreInvocation` handler (running `capture_conversation_id.sh` to record the conversation IDs this agent touches, for transcript scoping). The agent's RUNNING/WAITING lifecycle is no longer hook-driven — it is driven by the mngr-owned `statusLine` command (`build_antigravity_statusline_settings`), and permission auto-approval goes through the per-agent `settings.json` permissions block / `--dangerously-skip-permissions` rather than a hook.
 
 ### 9.3 Competing definitions summary
 
@@ -525,12 +532,16 @@ Two completely distinct plugin systems coexist and are both called "plugins":
 hookspec = pluggy.HookspecMarker("mngr")
 ```
 
-- `libs/mngr/imbue/mngr/plugin_catalog.py`: `PLUGIN_CATALOG` — tuple of `CatalogEntry` objects for all known mngr plugins. Entries include: `claude`, `opencode`, `antigravity`, `pi_coding`, `modal`, `lima`, `vultr`, `tutor`, `code_guardian`, `fixme_fairy`, `headless_claude`, `ttyd`, `file`, `kanpan`, `notifications`, `pair`, `recursive`, `schedule`, `tmr`, `wait`.
+- `libs/mngr/imbue/mngr/plugin_catalog.py`: `PLUGIN_CATALOG` — tuple of `CatalogEntry` objects for all known mngr plugins (each keyed by `entry_point_name`). Entries: `claude`, `opencode`, `codex`, `antigravity`, `pi_coding`, `modal`, `lima`, `vultr`, `aws`, `gcp`, `ovh`, `tutor`, `code_guardian`, `fixme_fairy`, `headless_claude`, `ttyd`, `file`, `kanpan`, `notifications`, `pair`, `recursive`, `schedule`, `tmr`, `wait`.
 - `libs/mngr/imbue/mngr/config/plugin_registry.py`: `_plugin_config_registry: dict[PluginName, type[PluginConfig]]` — runtime registry mapping plugin name → config class. `register_plugin_config()`, `get_plugin_config_class()`, `list_registered_plugins()`.
 - Each mngr plugin is a separate Python package under `libs/mngr_<name>/`. The plugin is activated when its package is installed and its `hookimpl`-decorated functions are discovered by pluggy.
-- Signal checks: `ClaudeSignalCheck` (`claude --version`), `OpenCodeSignalCheck` (`opencode --version`), `AntigravitySignalCheck` (`agy --version`) — mngr auto-detects which coding agent binaries are present and enables/disables plugins accordingly.
+- Signal checks: `ClaudeSignalCheck` (`claude --version`), `OpenCodeSignalCheck` (`opencode --version`), `CodexSignalCheck` (`codex --version`), `AntigravitySignalCheck` (`agy --version`), `PiSignalCheck` (probes `pi --help`), plus `ModalSignalCheck` / `LimaSignalCheck` for compute plugins — mngr auto-detects which binaries/credentials are present and enables/disables plugins accordingly.
+
+**Agent types and aliases:**
+- mngr plugins register agent types via the `register_agent_type` pluggy hookspec (`libs/mngr/imbue/mngr/plugins/hookspecs.py`), returning `(agent_type_name, agent_class, config_class)`. The agent-type registry records which plugin owns each type via `register_agent_type_owner()` in `libs/mngr/imbue/mngr/config/agent_plugin_registry.py` (invoked internally by `agents/agent_registry.py`). `codex`, `opencode`, `pi_coding`, and `antigravity` are now real agent-type implementations rather than stubs.
+- A separate `register_agent_aliases` hookspec lets a plugin expose short alternate names that resolve to a canonical agent type before any registry lookup. The antigravity plugin maps `agy` → `antigravity` (`libs/mngr_antigravity/.../plugin.py`), and the pi_coding plugin maps `pi` → `pi-coding` (`libs/mngr_pi_coding/.../plugin.py`). An alias is a name-resolution entry only (never a distinct type); `resolve_agent_type()` in `libs/mngr/imbue/mngr/config/agent_config_registry.py` resolves an alias to its canonical type, which then shares that type's class, config, and disabled-plugin handling. Aliases that collide with an existing type or alias, or point at an unregistered target, are skipped.
 - `UNPUBLISHED_PACKAGES: frozenset` — set of packages not on PyPI; these require local path installation.
-- FCT `disable_plugin__extend = ["recursive", "ttyd", "claude_subagent_proxy"]` (`.external_worktrees/forever-claude-template/.mngr/settings.toml`) — disables specific mngr plugins for FCT deployments.
+- FCT `disable_plugin__extend = ["recursive", "ttyd", "claude_subagent_proxy"]` (`.external_worktrees/forever-claude-template/.mngr/settings.toml`) — disables specific mngr plugins for FCT deployments. Note `claude_subagent_proxy` is now **disabled by default** in mngr itself (it only loads when a config layer sets `[plugins.claude_subagent_proxy] enabled = true`), because it is experimental and intercepts Claude Code's built-in `Task` tool; the FCT entry is therefore belt-and-suspenders.
 
 **System B — Claude Code plugins:**
 
@@ -577,7 +588,7 @@ hookspec = pluggy.HookspecMarker("mngr")
 
 ## Cross-cutting inconsistencies (headline findings)
 
-- **"provider" means two things**: In mngr, `provider` always means *compute host provider* (cloud/docker/local). In LLM contexts, people say "AI provider" meaning LLM routing. The codebase never defines an "AI provider" type; the LLM auth mode is implicit and untyped.
+- **"provider" means two things**: In mngr, `provider` always means *compute host provider* (cloud/docker/local). The credential/routing axis is now a separate typed concept in minds: the `AIProvider` enum (`apps/minds/imbue/minds/primitives.py:72`) with members `IMBUE_CLOUD` / `API_KEY` / `SUBSCRIPTION`, explicitly decoupled from the compute provider. The `IMBUE_CLOUD` member name is shared across `AIProvider`, `LaunchMode`, and `BackupProvider`, so the *value* name still invites conflation even though the types are distinct.
 
 - **"plugin" is maximally ambiguous**: `disable_plugin__extend` (mngr pluggy) and `enabledPlugins` (Claude Code npm) are both called "plugins", both appear in FCT config, and both affect what a Claude agent can do — but they are entirely different systems with different registries, languages, and install mechanisms.
 

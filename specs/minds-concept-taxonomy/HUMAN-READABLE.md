@@ -78,11 +78,11 @@ this.
   thing you talk to." Strongly consider **not** showing users the word "agent" at all and
   using "assistant"/"chat"/"mind" instead.
 
-- **launch mode** (DOCKER / LIMA / CLOUD / IMBUE_CLOUD) — **[user]** Plain language:
+- **launch mode** (DOCKER / LIMA / VULTR / AWS / IMBUE_CLOUD) — **[user]** Plain language:
   *"Where your mind runs — on this computer, or in the cloud."*
   ⚠ Naming decision: today the creation form exposes raw enum-ish names (DOCKER, LIMA,
-  CLOUD, IMBUE_CLOUD). Non-technical users won't know Docker from Lima. Candidates for the
-  user-facing framing:
+  VULTR, AWS, IMBUE_CLOUD). Non-technical users won't know Docker from Lima, or Vultr from
+  AWS. Candidates for the user-facing framing:
   - by *location*: "On this Mac" / "In the cloud" (hide the engine entirely).
   - by *plan*: "Local (free, uses your computer)" / "Hosted (we run it for you)."
   The technical mode can stay as an advanced detail. **This needs a real decision** — the
@@ -107,11 +107,13 @@ this.
   it, and roll back."* Most users won't touch git directly. ⚠ If surfaced, call it
   **"history"** or **"versions"**, not "commits/branches."
 
-- **LLM auth mode** (LiteLLM key / raw API key / subscription) — **[power]** Plain
-  language: *"How your mind pays for and connects to its AI."* ⚠ Naming decision: users
+- **LLM auth mode** (code: `AIProvider` — IMBUE_CLOUD / API_KEY / SUBSCRIPTION) — **[power]**
+  Plain language: *"How your mind pays for and connects to its AI."* ⚠ Naming decision: users
   care about the *choice* ("use my Claude subscription" vs "use an API key" vs "use Minds'
   included credits"), so the user-facing framing should be **"AI connection"** or
-  **"AI billing,"** not "auth mode." The three options need friendly names.
+  **"AI billing,"** not "auth mode." The three options need friendly names. (Note: the code
+  now names the underlying enum `AIProvider`, which collides with the compute "provider" —
+  keep the *user-facing* label clear of the word "provider.")
 
 - **model / model alias** (`opus[1m]`) — **[user]** Plain language: *"Which AI brain your
   mind uses — smarter ones are slower and cost more."* ⚠ The raw string `opus[1m]` is

@@ -132,8 +132,8 @@ Session files are discovered via `$AGENT_STATE_DIR/claude_session_id_history` (F
 
 Delivery of text into a running agent's tmux stdin via `mngr message`. The canonical code path:
 
-- `libs/mngr/imbue/mngr/api/message.py:46` — `send_message_to_agents()`: discovers hosts/agents via `discover_hosts_and_agents()`, filters by CEL, and calls `agent.send_message(message_content)` per agent (concurrently)
-- `libs/mngr/imbue/mngr/cli/message.py:52` — `mngr message` CLI command; the `MessageResult` model tracks successful/failed agents
+- `libs/mngr/imbue/mngr/api/message.py:42` — `send_message_to_agents()`: takes a pre-resolved set of `AgentMatch` objects (`agents_to_message`), groups them by host via `group_agents_by_host()`, and calls `agent.send_message(message_content)` per agent (concurrently). Host/agent discovery and filtering happen in the caller (the CLI obtains `agents_to_message` from `find_all_agents()`), not inside this function.
+- `libs/mngr/imbue/mngr/cli/message.py:53` — `mngr message` CLI command; resolves agent addresses via `find_all_agents()` (`cli/message.py:143`) and passes the matches to `send_message_to_agents()`. The `MessageResult` model tracks successful/failed agents
 - FCT `agent_discovery.py:send_message` — thin wrapper used by `welcome_resend.py`
 - FCT `models.py:27-36` — `SendMessageRequest` / `SendMessageResponse` (REST body/response)
 - FCT `server.py` — `POST /api/agents/{id}/message` endpoint
@@ -170,7 +170,7 @@ Three distinct senses all use "message":
 3. **notification message** — the body text of a desktop notification (`NotificationRequest.message`)
 
 Additionally:
-- `mngr_message_sender` in minds `latchkey/handlers/messaging.py` (file found, not fully read) — a handler for messaging-related permission requests; uses "message" in yet another sense (a communication channel permission)
+- `MngrMessageSender` in minds `latchkey/handlers/messaging.py:55` — a wrapper around `mngr message <agent-id> <text>`, shared by the predefined and file-sharing permission handlers to notify the waiting agent (via `mngr message`) once its permission request is resolved. This is the same "send a message to an agent's stdin" sense (A) above, not a distinct one.
 
 ### 4. Terminology Variants
 
@@ -286,7 +286,7 @@ The inbox is an event-sourced aggregate: it replays `RequestEvent` and `RequestR
 - `app.py` (minds desktop client) — stores `RequestInbox` on `app.state`; updated by event stream consumers
 
 **Template rendering:**
-- `templates.py:464-514` — `render_inbox_page()`, `render_inbox_list_fragment()`, `render_inbox_unavailable_fragment()`
+- `templates.py:474-518` — `render_inbox_page()`, `render_inbox_list_fragment()`, `render_inbox_unavailable_fragment()`
 - Template function signatures show the inbox is rendered from `cards` (a sequence of dicts), `selected_id`, and `detail_html`
 
 **Gateway consumer:**
@@ -317,7 +317,7 @@ The word "inbox" appears only in the context of permission requests. There is no
 
 - `request_events.py:1` module docstring mentions `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl` as the source for agent-written request events. However, since latchkey 2.9.0, the primary source is the streaming `GET /permission-requests?follow=true` gateway endpoint (via `PermissionRequestsConsumer`), not JSONL files written by agents. The JSONL path is still used for response events (written by the desktop client), but request events now flow primarily via the gateway stream. The docstring is partially out of date.
 
-  **DOC/CODE DIVERGENCE**: `request_events.py:1-11` says "Agents write request events to `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl`" but `permission_requests_consumer.py:7-8` states this is the pre-latchkey-2.9.0 path; requests now come from the gateway stream.
+  **DOC/CODE DIVERGENCE**: `request_events.py:1-12` says "Agents write request events to `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl`" but `permission_requests_consumer.py:6-9` states this is the pre-latchkey-2.9.0 path; requests now come from the gateway stream.
 
 ### 7. Recommended Canonical Term + Definition
 
@@ -363,7 +363,7 @@ class RequestStatus(UpperCaseStrEnum):
     DENIED = auto()
 ```
 
-Note: there is no `FAILED` status in the code. The docstring of `request_events.py` mentions "granted/denied/failed" but the actual enum has only `GRANTED` and `DENIED`.
+Note: there is no `FAILED` status in the code. The enum has only `GRANTED` and `DENIED`. (The task description / `Minds_concepts.md` lists a "failed" outcome, but no such value exists anywhere in `request_events.py` — neither the enum nor the module docstring mentions it.)
 
 ### 2. All Usages
 
@@ -398,7 +398,7 @@ Note: there is no `FAILED` status in the code. The docstring of `request_events.
 ### 3. Competing / Multiple Definitions
 
 - The `RequestType` enum (`request_events.py:39`) defines `PERMISSIONS`, `LATCHKEY_PERMISSION`, `FILE_SHARING_PERMISSION`. The first (`PERMISSIONS`) is a generic type; the latter two are latchkey-specific.
-- The gateway (`GET /permission-requests?follow=true`) uses its own payload types: `PredefinedRequestPayload` and `FileSharingRequestPayload` (`permission_requests_consumer.py:38-39`), translated into the inbox's `RequestEvent` hierarchy at ingestion.
+- The gateway (`GET /permission-requests?follow=true`) uses its own payload types: `PredefinedRequestPayload` (`gateway_client.py:92`) and `FileSharingRequestPayload` (`gateway_client.py:120`), imported into `permission_requests_consumer.py:38,41` and translated into the inbox's `RequestEvent` hierarchy at ingestion.
 
 ### 4. Terminology Variants
 
@@ -421,7 +421,7 @@ Note: there is no `FAILED` status in the code. The docstring of `request_events.
 
 **DOC/CODE DIVERGENCE**: The task description (Minds_concepts.md) lists "granted/denied/failed outcomes" but `RequestStatus` (`request_events.py:47`) has only `GRANTED` and `DENIED`. No `FAILED` enum value exists.
 
-**DOC/CODE DIVERGENCE** (partial): `request_events.py:6-7` says agents write request events to `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl`, but `permission_requests_consumer.py:7` clarifies this was pre-latchkey-2.9.0; the modern path is the gateway stream.
+**DOC/CODE DIVERGENCE** (partial): `request_events.py:3-7` says agents write request events to `$MNGR_AGENT_STATE_DIR/events/requests/events.jsonl`, but `permission_requests_consumer.py:6-9` clarifies this was pre-latchkey-2.9.0; the modern path is the gateway stream.
 
 ### 7. Recommended Canonical Term + Definition
 
@@ -491,7 +491,7 @@ The REST endpoint is `POST /api/v1/agents/{agent_id}/notifications` (`api_v1.py:
 
 ### 5. Ambiguities / Inconsistencies
 
-- The `NotificationRequest.url` field (`notification.py:77`) is defined and serialized to the Electron channel but is not used by the macOS (`osascript`) or tkinter (`_show_tkinter_toast`) dispatch paths — they ignore `url`. This means click-to-navigate only works in Electron.
+- The `NotificationRequest.url` field (`notification.py:76`) is defined and serialized to the Electron channel but is not used by the macOS (`osascript`) or tkinter (`_show_tkinter_toast`) dispatch paths — they ignore `url`. This means click-to-navigate only works in Electron.
 - `NotificationRequest` is named "Request" though it is also the data model for what gets dispatched — it is both the input and the internal representation (no separate "Notification" vs "NotificationRequest" split).
 
 ### 6. DOC/CODE DIVERGENCES

@@ -41,14 +41,16 @@ Each concrete provider plugin implements `hookimpl` on `register_provider_backen
 | `"local"` | `LocalProviderBackend` | `LocalProviderInstance` | `libs/mngr/imbue/mngr/providers/local/backend.py:18` |
 | `"docker"` | `DockerProviderBackend` | `DockerProviderInstance` | `libs/mngr/imbue/mngr/providers/docker/backend.py:31` |
 | `"ssh"` | `SSHProviderBackend` | `SSHProviderInstance` | `libs/mngr/imbue/mngr/providers/ssh/backend.py:19` |
-| `"modal"` | `ModalProviderBackend` | `ModalProviderInstance` | `libs/mngr_modal/imbue/mngr_modal/backend.py:49` |
+| `"modal"` | `ModalProviderBackend` | `ModalProviderInstance` | `libs/mngr_modal/imbue/mngr_modal/backend.py:245` |
 | `"lima"` | `LimaProviderBackend` | `LimaProviderInstance` | `libs/mngr_lima/imbue/mngr_lima/backend.py:17` |
-| `"vultr"` | `VultrProviderBackend` | `VultrProvider` (subclass of `VpsDockerProvider`) | `libs/mngr_vultr/imbue/mngr_vultr/backend.py:73` |
-| `"ovh"` | `OvhProviderBackend` | (subclass of `VpsDockerProvider`) | `libs/mngr_ovh/imbue/mngr_ovh/backend.py` |
+| `"vultr"` | `VultrProviderBackend` | `VultrProvider` (subclass of `VpsDockerProvider`) | `libs/mngr_vultr/imbue/mngr_vultr/backend.py:86` |
+| `"ovh"` | `OvhProviderBackend` | `OvhProvider` (subclass of `VpsDockerProvider`) | `libs/mngr_ovh/imbue/mngr_ovh/backend.py:603` |
+| `"aws"` | `AwsProviderBackend` | `AwsProvider` (subclass of `VpsDockerProvider`) | `libs/mngr_aws/imbue/mngr_aws/backend.py:227` |
+| `"gcp"` | `GcpProviderBackend` | `GcpProvider` (subclass of `VpsDockerProvider`) | `libs/mngr_gcp/imbue/mngr_gcp/backend.py:290` |
 | `"imbue_cloud"` | `ImbueCloudProviderBackend` | `ImbueCloudProvider` (subclass of `BaseProviderInstance`) | `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/backend.py:22` |
-| `"vps_docker"` | — (no standalone backend; shared base class) | `VpsDockerProvider` | `libs/mngr_vps_docker/imbue/mngr_vps_docker/instance.py` |
+| `"vps_docker"` | — (no standalone backend; shared base class) | `VpsDockerProvider` | `libs/mngr_vps_docker/imbue/mngr_vps_docker/instance.py:413` |
 
-Note: `vps_docker` is a shared provider base used by both `vultr` and `ovh`; it does NOT register its own backend name. Both Vultr and OVH subclass `VpsDockerProvider`.
+Note: `vps_docker` is a shared provider base used by `vultr`, `ovh`, `aws`, and `gcp`; it does NOT register its own backend name. All four subclass `VpsDockerProvider`.
 
 The `local` provider name is also defined as a compile-time constant:
 ```python
@@ -71,17 +73,17 @@ LOCAL_PROVIDER_NAME: Final[ProviderInstanceName] = ProviderInstanceName("local")
 | `ProviderBackendName` | `SafeName` subclass; the string key for a backend type | `primitives.py:342` |
 | `ProviderInstanceName` | `SafeName` subclass; the string key for an instance in config | `primitives.py:328` |
 | `PluginKind.PROVIDER` | Enum value for provider-type plugins | `primitives.py:238` |
-| `backend` | Field name in `ProviderInstanceConfig.backend` (references backend by name) | `config/data_types.py:445` |
+| `backend` | Field name in `ProviderInstanceConfig.backend` (references backend by name) | `config/data_types.py:488` |
 
 ### 1.5 Definition Ambiguities / Inconsistencies
 
 - The term **"provider"** is used at both levels interchangeably in docs, comments and CLI strings. In config TOML the `[providers.my_instance] backend = "docker"` syntax correctly separates instance from backend, but conversational text conflates them (e.g., "the docker provider" can mean the backend or any instance using it).
-- `VpsDockerProvider` acts as a shared abstract base for Vultr and OVH but lives in `libs/mngr_vps_docker/` as if it were a concrete provider — it has no `register_provider_backend()` hookimpl and is not usable directly by end users.
+- `VpsDockerProvider` acts as a shared abstract base for Vultr, OVH, AWS, and GCP but lives in `libs/mngr_vps_docker/` as if it were a concrete provider — it has no `register_provider_backend()` hookimpl and is not usable directly by end users.
 - `VultrProvider` subclasses `VpsDockerProvider` but is named `VultrProvider` not `VultrProviderInstance`/`VultrProviderBackend`, inconsistent with other provider naming.
 
 ### 1.6 Doc/Code Divergences
 
-None found for this concept. The `ImbueCloudProviderBackend.get_description()` docstring says "Imbue Cloud (leased pool hosts via remote_service_connector)" — this accurately matches the code at `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/backend.py:33`.
+None found for this concept. The `ImbueCloudProviderBackend.get_description()` return value is "Imbue Cloud (leased pool hosts via remote_service_connector)" — this accurately matches the code at `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/backend.py:31`.
 
 ### 1.7 Recommended Canonical Term + Definition
 
@@ -114,33 +116,47 @@ default_region: str | None = Field(default=None,
 ```
 Used as `--region` start arg passed to Modal's sandbox API (`instance.py:259`, `1351`, `1374`, `1783`, `2044`).
 
-**Vultr** — `libs/mngr_vultr/imbue/mngr_vultr/config.py:21`
+**Vultr** — `libs/mngr_vultr/imbue/mngr_vultr/config.py:26`
 ```python
 default_region: str = Field(default="ewr",
     description="Default Vultr region (e.g., 'ewr' for New Jersey)")
 ```
-Also exposed as a `--vps-region=REGION` start arg in the Vultr create path.
+Also exposed as a `--vultr-region=REGION` per-host build arg in the Vultr create path (renamed from the retired shared `--vps-region=` prefix).
 
 **OVH** — `libs/mngr_ovh/imbue/mngr_ovh/config.py:69`
 ```python
-default_region: str = Field(default="US-EAST-VA",
+default_region: str = Field(default=_DEFAULT_REGION,  # _DEFAULT_REGION = "US-EAST-VA"
     description="Default VPS datacenter (e.g. US-EAST-VA, US-WEST-OR for US accounts).")
 ```
-The default `"US-EAST-VA"` matches one of `KNOWN_OVH_US_REGIONS`.
+The default `"US-EAST-VA"` (`config.py:14`) matches one of `KNOWN_OVH_US_REGIONS`. Exposed as a `--ovh-region=` / `--ovh-datacenter=` per-host build arg.
 
-**imbue_cloud** — `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/data_types.py:82`
+**AWS** — `libs/mngr_aws/imbue/mngr_aws/config.py:90`
+```python
+default_region: str = Field(default="us-east-1",
+    description="Default AWS region (e.g., 'us-east-1').")
+```
+EC2's API is per-region, so minds writes one `[providers.aws-<region>]` block per configured region at startup; the create address selects the region-specific provider. Exposed as a `--aws-region=` per-host build arg.
+
+**GCP** — `libs/mngr_gcp/imbue/mngr_gcp/config.py:106` (region) and `:114` (zone)
+```python
+default_region: str | None = Field(default=None, ...)  # validates the resolved zone; derived from zone when unset
+default_zone: str | None = Field(default=None, ...)     # GCE VMs are zonal, e.g. "us-west1-a"; falls back to "us-west1-a"
+```
+GCE VMs are zonal (`<region>-<suffix>`), so the zone is primary and the region is derived from it via `resolve_zone_and_region()` (`config.py:258`). The per-host placement knob is `--gcp-zone=ZONE` (not a region flag), threaded through `ParsedVpsBuildOptions.region` which the GCP client interprets as the zone.
+
+**imbue_cloud** — `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/data_types.py:83`
 ```python
 region: str | None = Field(default=None,
     description="``-b region=<dc>`` hard region requirement: only lease a host in this OVH datacenter...")
 ```
 Validated against `KNOWN_OVH_US_REGIONS` in `parse_imbue_cloud_build_args()`. Passed to `client.lease_host(..., region=region)`.
 
-**minds (desktop client)** — `apps/minds/imbue/minds/desktop_client/agent_creator.py:604`
+**minds (desktop client)** — `apps/minds/imbue/minds/desktop_client/agent_creator.py:677`
 ```python
 if region:
-    mngr_command.extend(["-b", f"--vps-region={region}"])
+    mngr_command.extend(["-b", f"--vultr-region={region}"])  # LaunchMode.VULTR
 ```
-Applied only in `LaunchMode.CLOUD` (Vultr path).
+`_build_mngr_create_command` threads the user-picked region per launch mode (`match launch_mode` at `agent_creator.py:664`): `LaunchMode.VULTR` → `--vultr-region=` (line 678), `LaunchMode.AWS` → `--aws-region=` (line 687), `LaunchMode.IMBUE_CLOUD` → `region=` (line 712). The old `LaunchMode.CLOUD` member was renamed to `VULTR`.
 
 **Local / Docker / Lima / SSH** — No region concept.
 
@@ -149,22 +165,25 @@ Applied only in `LaunchMode.CLOUD` (Vultr path).
 - OVH uses the format `"US-EAST-VA"` (uppercase with hyphens).
 - Vultr uses the format `"ewr"` (lowercase airport code).
 - Modal uses the format `"us-east"` (lowercase with hyphens, different taxonomy).
+- AWS uses the format `"us-east-1"` (lowercase, hyphenated, numeric suffix — EC2 region codes).
+- GCP is zonal: zone `"us-west1-a"` (region `"us-west1"` derived as the `<region>-<suffix>` prefix).
 - imbue_cloud validates only `KNOWN_OVH_US_REGIONS` = `{"US-EAST-VA", "US-WEST-OR"}`, which is a subset of OVH regions.
 
-All three formats are untyped `str` with no shared enum.
+All of these formats are untyped `str` with no shared enum.
 
 ### 2.4 Terminology Variants
 
 | Term | Context |
 |---|---|
-| `default_region` (config field) | Modal, Vultr, OVH config classes |
+| `default_region` (config field) | Modal, Vultr, OVH, AWS, GCP config classes |
+| `default_zone` (config field) | GCP only (GCE VMs are zonal) |
 | `region` (build arg key) | imbue_cloud `-b region=` |
-| `--vps-region=` (build arg format) | Vultr, passed by minds agent_creator |
+| `--vultr-region=` / `--aws-region=` / `--ovh-region=` (alias `--ovh-datacenter=`) / `--gcp-zone=` (per-provider build arg) | Replaced the retired shared `--vps-region=` prefix; minds agent_creator passes `--vultr-region=` (VULTR) and `--aws-region=` (AWS) |
 | `KNOWN_OVH_US_REGIONS` | frozenset constant for imbue_cloud validation |
 
 ### 2.5 Definition Ambiguities / Inconsistencies
 
-- **Three incompatible region naming conventions** across providers: OVH (`"US-EAST-VA"`), Vultr (`"ewr"`), Modal (`"us-east"`).
+- **Five incompatible region naming conventions** across providers: OVH (`"US-EAST-VA"`), Vultr (`"ewr"`), Modal (`"us-east"`), AWS (`"us-east-1"`), and GCP zones (`"us-west1-a"`).
 - The imbue_cloud region validation (`KNOWN_OVH_US_REGIONS`) is implicitly OVH-specific but lives in `mngr_imbue_cloud/primitives.py`, which could mislead maintainers into thinking it applies broadly.
 - Modal's `region` config is a provider-level default; imbue_cloud's `region` is a per-create build arg. This asymmetry is undocumented at the mngr level.
 
@@ -174,7 +193,7 @@ None found. All config field descriptions accurately describe their purpose.
 
 ### 2.7 Recommended Canonical Term + Definition
 
-There is no single canonical region concept; each provider has its own region semantics. To standardize, a `RegionName` `SafeName` subtype (or at minimum a provider-specific validated type) should be introduced per provider. The build arg `--vps-region` in Vultr should be normalized to match the OVH region format or clearly documented as a separate namespace. The imbue_cloud `KNOWN_OVH_US_REGIONS` constant should be co-located with OVH config rather than imbue_cloud primitives.
+There is no single canonical region concept; each provider has its own region semantics. To standardize, a `RegionName` `SafeName` subtype (or at minimum a provider-specific validated type) should be introduced per provider. The per-provider build args (`--vultr-region=`, `--aws-region=`, `--ovh-region=`, `--gcp-zone=`) live in separate namespaces by design after the `--vps-region=` retirement; this is now clearly documented per provider. The imbue_cloud `KNOWN_OVH_US_REGIONS` constant should be co-located with OVH config rather than imbue_cloud primitives.
 
 ---
 
@@ -233,7 +252,7 @@ imbue_cloud leases pre-baked VPS hosts from a centrally managed pool. The "pool 
 
 ```python
 # ImbueCloudProvider.create_host → calls client.lease_host(...)
-# libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/instance.py:1124
+# libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/instance.py:1113 (lease_host at :1208 / :1291)
 ```
 
 The pool is maintained server-side in a `pool_hosts` database table, not in client code. The `mngr imbue_cloud admin bake` command creates and registers pool hosts.
@@ -262,7 +281,7 @@ The pool is maintained server-side in a `pool_hosts` database table, not in clie
 
 ### 3.6 Doc/Code Divergences
 
-- `CertifiedHostData._handle_backwards_compatibility()` silently normalizes old `host_name` values (`"@local"`, `"local"`, `"unknown-host-at-local"`) to `"localhost"` (`interfaces/data_types.py:280–304`). No docs or changelog mention this normalization; it could surprise callers reading `certified_data.host_name` and expecting it to equal what was set at host creation.
+- `CertifiedHostData._handle_backwards_compatibility()` silently normalizes old `host_name` values (`"@local"`, `"local"`, `"unknown-host-at-local"`) to `"localhost"` (`interfaces/data_types.py:282–304`). No docs or changelog mention this normalization; it could surprise callers reading `certified_data.host_name` and expecting it to equal what was set at host creation.
 
 ### 3.7 Recommended Canonical Term + Definition
 
@@ -290,7 +309,7 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
     agent_config: AgentConfigT
 ```
 
-Agents are persisted as `data.json` files inside a per-agent state directory on the host. The concrete implementation is `BaseAgent` in `libs/mngr/imbue/mngr/agents/base_agent.py:63`.
+Agents are persisted as `data.json` files inside a per-agent state directory on the host. The concrete implementation is `BaseAgent` in `libs/mngr/imbue/mngr/agents/base_agent.py:64`.
 
 **AgentId** — `libs/mngr/imbue/mngr/primitives.py:281`
 ```python
@@ -322,7 +341,7 @@ Labels are arbitrary `dict[str, str]` key-value pairs attached to an agent and s
 
 ```python
 # BaseAgent.get_labels() / set_labels()
-# libs/mngr/imbue/mngr/agents/base_agent.py:171-178
+# libs/mngr/imbue/mngr/agents/base_agent.py:172-178
 def get_labels(self) -> dict[str, str]:
     data = self._read_data()
     return data.get("labels", {})
@@ -331,20 +350,20 @@ def get_labels(self) -> dict[str, str]:
 The labels `workspace` and `is_primary` are mngr **conventions** applied by Minds:
 
 ```python
-# apps/minds/imbue/minds/desktop_client/agent_creator.py:548-562
+# apps/minds/imbue/minds/desktop_client/agent_creator.py:616-630
 "--label", f"workspace={host_name}",
 "--label", "is_primary=true",
 ```
 
 These labels are NOT enforced or typed by mngr core — they are plain strings. Minds' `backend_resolver.py` filters on them:
 ```python
-# apps/minds/imbue/minds/desktop_client/backend_resolver.py:721
+# apps/minds/imbue/minds/desktop_client/backend_resolver.py:742
 if "workspace" in agent.labels and "is_primary" in agent.labels
 ```
 
 The `workspace` label value is set to the host name (not a boolean `"true"`), while `is_primary` is set to the string `"true"`.
 
-Note: in some tests the `workspace` label value is `"true"` (`backend_resolver_test.py:314`) and in others it is the workspace name (`providers_panel_test.py:365`). See Section 4.5.
+Note: in some tests the `workspace` label value is `"true"` (`backend_resolver_test.py:315`) and in others it is the workspace name (`providers_panel_test.py:362`). See Section 4.5.
 
 ### 4.3 Agent Creation (mngr create / launch-task)
 
@@ -369,7 +388,7 @@ There is no separate "launch-task" concept at the mngr core level; `mngr create`
 | `AgentNameOrId` | union alias `AgentId | AgentName` | `primitives.py:362` |
 | `AgentAddress` | parsed `NAME[@HOST[.PROVIDER]]` | `primitives.py:410` |
 | `AgentInterface` | abstract base | `interfaces/agent.py:39` |
-| `BaseAgent` | concrete implementation | `agents/base_agent.py:63` |
+| `BaseAgent` | concrete implementation | `agents/base_agent.py:64` |
 | `DiscoveredAgent` | lightweight discovery record | `primitives.py:560` |
 | `AgentDetails` | full listing data | `interfaces/data_types.py:534` |
 | `CreateAgentOptions` | options passed to `create_agent_state` | `interfaces/host.py:932` |
@@ -379,7 +398,7 @@ There is no separate "launch-task" concept at the mngr core level; `mngr create`
 
 ### 4.5 Definition Ambiguities / Inconsistencies
 
-- **`workspace` label value inconsistency**: In `agent_creator.py:549`, `workspace` is set to `{host_name}` (the actual workspace/host name string). But in `backend_resolver_test.py:314`, the test fixture uses `{"workspace": "true", "is_primary": "true"}`. The `backend_resolver.py` code only checks `"workspace" in agent.labels` (key presence, not value), so functionally it doesn't matter — but the inconsistent value in tests could confuse maintainers.
+- **`workspace` label value inconsistency**: In `agent_creator.py:617`, `workspace` is set to `{host_name}` (the actual workspace/host name string). But in `backend_resolver_test.py:315`, the test fixture uses `{"workspace": "true", "is_primary": "true"}`. The `backend_resolver.py` code only checks `"workspace" in agent.labels` (key presence, not value), so functionally it doesn't matter — but the inconsistent value in tests could confuse maintainers.
 - **Agent type vs. agent implementation**: `agent_type` is a string field (`AgentTypeName`) on `AgentInterface`. The actual Python class implementing the agent is found via a separate registry (`config/agent_class_registry.py`). These two things — the string name and the class — are decoupled, which is correct but underdocumented.
 - **`pre_baked_agent_id` on HostInterface** (`interfaces/host.py:53-65`): This field links a host to an agent that was already baked into the host image (imbue_cloud fast path). It is on `HostInterface` but is only non-None for `ImbueCloudHost`. This bleeds imbue_cloud-specific semantics into the core interface.
 
@@ -441,16 +460,16 @@ class AgentLifecycleState(UpperCaseStrEnum):
 - `DiscoveredHost.host_state: "HostState | None"` — `primitives.py:555`
 - `HostInterface.get_state() -> HostState` — `interfaces/host.py:183`
 - Provider-specific state computation:
-  - `ImbueCloudProvider._map_docker_status_to_host_state()` — `mngr_imbue_cloud/instance.py:256`
-  - `ImbueCloudProvider._derive_host_state_from_raw()` — `mngr_imbue_cloud/instance.py:212`
+  - `_map_docker_status_to_host_state()` — `mngr_imbue_cloud/instance.py:257`
+  - `_derive_host_state_from_raw()` — `mngr_imbue_cloud/instance.py:213`
 - Listing/display: `libs/mngr/imbue/mngr/api/list.py` (consumed for UI badges)
 
 **AgentLifecycleState** is used in:
 - `AgentDetails.state: AgentLifecycleState` — `interfaces/data_types.py:559`
 - `AgentInterface.get_lifecycle_state() -> AgentLifecycleState` — `interfaces/agent.py:141`
 - `BaseAgent.get_lifecycle_state()` — `agents/base_agent.py`
-- `determine_lifecycle_state()` pure function — `hosts/common.py:323` (determines state from tmux info + ps output)
-- `build_agent_details_from_offline_ref()` hardcodes `AgentLifecycleState.STOPPED` for offline agents — `interfaces/provider_instance.py:247`
+- `determine_lifecycle_state()` pure function — `hosts/common.py:342` (determines state from tmux info + ps output)
+- `build_agent_details_from_offline_ref()` hardcodes `AgentLifecycleState.STOPPED` for offline agents — `interfaces/provider_instance.py:246`
 
 ### 5.3 Idle Detection and Shutdown
 
@@ -520,7 +539,7 @@ Agent lifecycle:
 
 ### 5.7 Definition Ambiguities / Inconsistencies
 
-- **`HostState.UNKNOWN`** vs **`HostDetails.state: HostState | None`**: The `UNKNOWN` enum value means "provider discovery failed transiently" (`primitives.py:258-261`), while `None` on `HostDetails.state` means "not observed / not applicable". These two "unknown" representations are semantically different but easily confused.
+- **`HostState.UNKNOWN`** vs **`HostDetails.state: HostState | None`**: The `UNKNOWN` enum value means "provider discovery failed transiently" (`primitives.py:256-259`), while `None` on `HostDetails.state` means "not observed / not applicable". These two "unknown" representations are semantically different but easily confused.
 - **`stop_reason` is untyped `str | None`** while the rest of the lifecycle state is typed. The comment says the values are `"PAUSED"`, `"STOPPED"`, or `None` — these should be an enum or at least `Literal` typed.
 - **`AgentLifecycleState` has no CREATED/CREATING state**: the `mngr create` operation is in-progress before the agent is in `STOPPED` or `RUNNING` state. During creation, the agent is not discoverable, so there is no state for "currently being provisioned".
 - **`RUNNING_UNKNOWN_AGENT_TYPE`** is a catch-all for "agent type unknown but process running." It is a valid state but conflates two conditions: the process IS running (RUNNING), but we cannot verify it's the right process.
@@ -545,7 +564,7 @@ The following are the most important findings that span multiple concepts:
 
 1. **Provider backend vs. instance naming confusion**: The two-level provider abstraction (backend = factory, instance = configured endpoint) is architecturally sound but the term "provider" is used interchangeably in docs and comments for both levels. `VultrProvider` is named like an instance but plays both roles.
 
-2. **No shared region type**: Three incompatible region string formats (`"US-EAST-VA"`, `"ewr"`, `"us-east"`) exist across OVH, Vultr, and Modal with no shared validation or enum. The imbue_cloud `KNOWN_OVH_US_REGIONS` constant is OVH-specific but lives in the imbue_cloud package, not the OVH package.
+2. **No shared region type**: Five incompatible region string formats (`"US-EAST-VA"`, `"ewr"`, `"us-east"`, `"us-east-1"`, and GCP zone `"us-west1-a"`) exist across OVH, Vultr, Modal, AWS, and GCP with no shared validation or enum. The imbue_cloud `KNOWN_OVH_US_REGIONS` constant is OVH-specific but lives in the imbue_cloud package, not the OVH package.
 
 3. **`workspace` label value inconsistency**: Minds sets `workspace=<host_name>` in production but some tests use `workspace="true"`. The filtering logic (`"workspace" in agent.labels`) passes either way, hiding a documentation-level bug.
 

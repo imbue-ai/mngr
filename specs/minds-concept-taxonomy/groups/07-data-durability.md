@@ -310,8 +310,8 @@ From `REPO/CLAUDE.md` (project instructions):
 ### 2. ALL USAGES
 
 **Per-PR entries** (observed):
-- `REPO/apps/minds/changelog/gabriel-app-quit-behavior.md` — example entry: long bullet-list format with blank lines between bullets
-- `REPO/libs/mngr/changelog/` — directory exists with branch-named files
+- `REPO/apps/minds/changelog/mngr-gcp.md` — example entry (branch-named, slashes replaced by dashes)
+- `REPO/libs/mngr/changelog/` — directory exists with branch-named files (e.g. `mngr-gcp.md`, `mngr-usage-filter-by-age.md`)
 
 **Consolidated changelogs**:
 - `REPO/apps/minds/CHANGELOG.md` — concise AI-generated summary
@@ -323,7 +323,7 @@ From `REPO/CLAUDE.md` (project instructions):
 - `apps/` subdirectories (e.g. `apps/minds/`)
 - Synthetic `dev/` for root-level changes (`scripts/`, `.github/`, `justfile`)
 
-**CI enforcement**: CLAUDE.md states "CI will fail if any are missing" — enforced by a CI check, not a test file (no test file found for this).
+**CI enforcement**: CLAUDE.md states "CI will fail if any are missing" — enforced by `test_pr_has_changelog_entry()` in `REPO/test_meta_ratchets.py`, which requires `<project_dir>/changelog/<branch-name>.md` for every project the branch touches (slashes replaced by dashes), skipping branches whose prefix is in `_CHANGELOG_EXEMPT_BRANCH_PREFIXES = ("mngr/changelog-consolidation",)`. A companion `test_every_project_has_changelog_layout()` requires each project to ship `CHANGELOG.md`, `UNABRIDGED_CHANGELOG.md`, and a `changelog/.gitkeep`. Project ownership of paths is resolved via `scripts/changelog_projects.py`.
 
 **FCT changelogs**: FCT has its own `changelog/` directory (separate from the monorepo) following the same convention, since FCT is a separate git repo.
 
@@ -348,8 +348,8 @@ From `REPO/CLAUDE.md` (project instructions):
 
 ### 6. DOC/CODE DIVERGENCES
 
-- No code was found that enforces the changelog requirement programmatically (no `test_changelog.py` or similar). The CI check is not visible in the mngr test files. The requirement is documented in CLAUDE.md but enforcement mechanism is opaque from the codebase.
-- `REPO/apps/minds/changelog/gabriel-app-quit-behavior.md` uses bullets with blank lines between them, consistent with CLAUDE.md's "If the entry uses a list, separate the bullets with a double newline." No code enforces this format.
+- The changelog requirement IS enforced programmatically: `test_pr_has_changelog_entry()` in `REPO/test_meta_ratchets.py` fails CI when a touched project lacks its per-PR entry. The consolidation tooling (`scripts/changelog_consolidate.py`, `scripts/changelog_projects.py`, with `*_test.py` coverage) fans entries into the summary files. No divergence on enforcement.
+- The double-newline bullet format ("If the entry uses a list, separate the bullets with a double newline") is a CLAUDE.md convention; no code enforces this format.
 
 ### 7. RECOMMENDED CANONICAL TERM + DEFINITION
 
@@ -360,7 +360,7 @@ The current system is well-defined. No renaming needed.
 - **Changelog**: `CHANGELOG.md` (concise, auto-summarized)
 - **Unabridged changelog**: `UNABRIDGED_CHANGELOG.md` (verbatim fan-in)
 
-What must change: the CI enforcement check should be made visible (perhaps as a ratchet or an explicit test), so it's not opaque to contributors.
+What must change: nothing structural. Enforcement is now an explicit meta-ratchet (`test_pr_has_changelog_entry()` in `REPO/test_meta_ratchets.py`), so it is no longer opaque to contributors.
 
 ---
 
@@ -414,7 +414,7 @@ LOG_FILE = Path("/tmp/runtime-backup.log")
 
 **Minds desktop** (outside container):
 - `REPO/apps/minds/imbue/minds/desktop_client/backup_env_store.py` — canonical `restic.env` at `backup_envs/<agent_id>.env`; "never auto-deleted -- not even on workspace destroy"
-- `REPO/apps/minds/imbue/minds/desktop_client/backup_provisioning.py` — `_RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"` (line 57); two providers: `BackupProvider.IMBUE_CLOUD`, `BackupProvider.API_KEY`
+- `REPO/apps/minds/imbue/minds/desktop_client/backup_provisioning.py` — `_RESTIC_ENV_REMOTE_PATH = "runtime/secrets/restic.env"` (line 57); providers (`BackupProvider`): `IMBUE_CLOUD`, `API_KEY`, `CONFIGURE_LATER`
 - `REPO/apps/minds/imbue/minds/desktop_client/backup_password_store.py` — master password never enters workspace; `save_backup_password_if_absent` with `O_EXCL` write-once semantics; one password shared across all workspaces
 - `REPO/apps/minds/imbue/minds/desktop_client/backup_status.py` — `compute_backup_status_for_workspace()` reads canonical env, calls `restic_cli.is_backup_in_progress()` and `get_latest_snapshot_time()`
 - `REPO/apps/minds/imbue/minds/desktop_client/backup_export.py` — uses `restic restore` (parallel) not `restic dump` (sequential); exports to `/tmp/minds-backup-export-<host_id>.zip`
@@ -559,9 +559,11 @@ File sharing is implemented via WsgiDAV, mounted as an ASGI app at `/api/v1/file
 
 `REPO/apps/minds/imbue/minds/desktop_client/webdav.py` line 142-153:
 ```python
-def get_file_sharing_roots() -> tuple[Path, Path]:
+def get_file_sharing_roots() -> tuple[Path, ...]:
     return (Path.home(), Path(tempfile.gettempdir()))
 ```
+
+This is the single source of truth for shareable paths: the WebDAV mount is built from it, and the latchkey file-sharing permission handler (`REPO/apps/minds/imbue/minds/desktop_client/latchkey/handlers/file_sharing.py`) validates a requested or user-edited path against these roots before it reaches the gateway.
 
 URL mapping: filesystem path mirrors URL path (e.g. `/home/<user>/foo.txt` → `/api/v1/files/home/<user>/foo.txt`).
 
@@ -796,8 +798,8 @@ class BufferBehavior(Enum):
 - For agents: `agents/<agent_id>/events` as subpath
 - For hosts: `events` as subpath
 
-**Backup event types** (from `FCT/libs/host_backup/src/host_backup/events.py`):
-- `backup_started`, `snapshot_created`, `snapshot_deleted`, `restic_backup_succeeded`, `restic_backup_failed`, `forget_completed`, `prune_completed`, `prune_skipped`, `config_reloaded`, `tick_skipped_due_to_missing_secrets`, `tick_error`
+**Backup event types** (13, from `FCT/libs/host_backup/src/host_backup/events.py` `BackupEventType`):
+- `backup_started`, `snapshot_created`, `snapshot_deleted`, `restic_backup_succeeded`, `restic_backup_failed`, `forget_completed`, `prune_completed`, `prune_skipped`, `config_reloaded`, `repo_init_attempted`, `repo_init_succeeded`, `tick_skipped_due_to_missing_secrets`, `tick_error`
 
 **In-memory SSE events** (System B):
 - `FCT/apps/system_interface/imbue/system_interface/event_queues.py`: `AgentEventQueues.broadcast()`; `BufferBehavior` determines replay buffering

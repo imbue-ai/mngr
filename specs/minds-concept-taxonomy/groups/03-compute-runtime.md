@@ -12,9 +12,9 @@ A **workspace** is a persistent agent container created by the desktop client (`
 
 The desktop client discovers workspaces by filtering the mngr discovery stream for agents bearing **both** `workspace` and `is_primary` labels.
 
-- `apps/minds/imbue/minds/desktop_client/backend_resolver.py:711-722` — `list_known_workspace_ids` filters `DiscoveredAgent` records for `"workspace" in agent.labels and "is_primary" in agent.labels`.
-- `apps/minds/imbue/minds/desktop_client/agent_creator.py:549,558,563` — `_build_mngr_create_command` appends `--label workspace={host_name}` and `--label is_primary=true`.
-- `.external_worktrees/forever-claude-template/.mngr/settings.toml:113` — `[agent_types.main]` is the services-agent type; `command = "sleep infinity && claude"` keeps window 0 dormant (bootstrap runs separately).
+- `apps/minds/imbue/minds/desktop_client/backend_resolver.py:732-743` — `list_known_workspace_ids` filters `DiscoveredAgent` records for `"workspace" in agent.labels and "is_primary" in agent.labels`.
+- `apps/minds/imbue/minds/desktop_client/agent_creator.py:616-617,629-630` — `_build_mngr_create_command` appends `--label workspace={host_name}` and `--label is_primary=true`.
+- `.external_worktrees/forever-claude-template/.mngr/settings.toml:86` — `[agent_types.main]` is the services-agent type; `command = "sleep infinity && claude"` (line 102) keeps window 0 dormant (bootstrap runs separately).
 
 ### "Mind" in Code
 
@@ -22,7 +22,7 @@ The desktop client discovers workspaces by filtering the mngr discovery stream f
 - **UI surface strings** and **function names** in the desktop client that expose liveness state to the landing page:
   - `apps/minds/imbue/minds/desktop_client/mind_liveness.py:55` — `class MindLiveness(UpperCaseStrEnum)` with values `RUNNING / STOPPED / UNKNOWN`.
   - `apps/minds/imbue/minds/desktop_client/mind_liveness.py:114` — `compute_mind_liveness_by_agent_id(...)`.
-  - `apps/minds/imbue/minds/desktop_client/templates.py:198` — `mind_liveness_by_agent_id` kwarg to `render_landing_page`.
+  - `apps/minds/imbue/minds/desktop_client/templates.py:183` — `mind_liveness_by_agent_id` kwarg to `render_landing_page`.
 - The **package name** `imbue.minds` and **app name** `minds` (user-facing product).
 
 There is no Python class named `Mind`. The code object is an `AgentId` (the system-services agent's id). "Mind" in UI copy is a synonym for "workspace".
@@ -34,11 +34,11 @@ There is no Python class named `Mind`. The code object is an `AgentId` (the syst
 | `MindLiveness` enum (RUNNING/STOPPED/UNKNOWN) | `mind_liveness.py:55` |
 | `compute_mind_liveness_by_agent_id` | `mind_liveness.py:114` |
 | `get_shutdown_capable_workspace_agent_ids` | `mind_liveness.py:95` |
-| `mind_liveness_by_agent_id` render kwarg | `templates.py:198` |
-| workspace label filtering in `list_known_workspace_ids` | `backend_resolver.py:711` |
-| workspace label filtering in `list_active_workspace_ids` | `backend_resolver.py:724` |
-| `--label workspace={host_name}` at create time | `agent_creator.py:549` |
-| `--label is_primary=true` at create time | `agent_creator.py:563` |
+| `mind_liveness_by_agent_id` render kwarg | `templates.py:183` |
+| workspace label filtering in `list_known_workspace_ids` | `backend_resolver.py:732` |
+| workspace label filtering in `list_active_workspace_ids` | `backend_resolver.py:745` |
+| `--label workspace={host_name}` at create time | `agent_creator.py:616` |
+| `--label is_primary=true` at create time | `agent_creator.py:629` |
 
 ### Competing/Multiple Definitions
 
@@ -59,12 +59,12 @@ There is no Python class named `Mind`. The code object is an `AgentId` (the syst
 
 1. `list_known_workspace_ids` returns the **system-services** agent id (the `is_primary=true` agent), not the chat agent id. Yet users think of "the workspace" as the chat session. The primary agent id is the workspace's canonical identifier even though it runs `sleep infinity`.
 2. The term "mind" is used in `mind_liveness.py` but never defined as a type. Code comments explain "container liveness of a mind" without grounding it in a class.
-3. `LaunchMode` in `primitives.py:35` says `DOCKER / CLOUD / LIMA / IMBUE_CLOUD` — these are compute providers, not the workspace itself, but are documented as "How a workspace agent should be launched".
-4. `SYSTEM_SERVICES_AGENT_NAME = "system-services"` (`backend_resolver.py:37`) is the agent name inside every workspace host, but minds' create command builds the address as `system-services@{host_name}.{provider}` — so the host name is the workspace identity.
+3. `LaunchMode` in `primitives.py:62` says `DOCKER / VULTR / LIMA / IMBUE_CLOUD / AWS` — these are compute providers, not the workspace itself, but are documented as "How a workspace agent should be launched". (A separate `AIProvider` enum at `primitives.py:72` — `IMBUE_CLOUD / API_KEY / SUBSCRIPTION` — decouples credential source from the compute provider.)
+4. `SYSTEM_SERVICES_AGENT_NAME = "system-services"` (`backend_resolver.py:40`) is the agent name inside every workspace host, but minds' create command builds the address as `system-services@{host_name}.{provider}` — so the host name is the workspace identity.
 
 ### DOC/CODE DIVERGENCES
 
-- `concepts doc:30` says "labeled workspace=" implying the label value is truthy. Code at `backend_resolver.py:721` checks `"workspace" in agent.labels` (key presence, not value), but `agent_creator.py:549` sets `workspace={host_name}` (value = host name string). The label check is purely for presence, not the string "true". No actual divergence, but the doc is imprecise.
+- `concepts doc:30` says "labeled workspace=" implying the label value is truthy. Code at `backend_resolver.py:742` checks `"workspace" in agent.labels` (key presence, not value), but `agent_creator.py:617` sets `workspace={host_name}` (value = host name string). The label check is purely for presence, not the string "true". No actual divergence, but the doc is imprecise.
 
 ### Recommended Canonical Term
 
@@ -87,17 +87,17 @@ Templates are two distinct things that share the name:
 
 **2b. The forever-claude-template (FCT)**: The git repository at `.external_worktrees/forever-claude-template/` that serves as the default workspace source code. It is the template *repo* that gets cloned into workspace containers.
 
-- `apps/minds/imbue/minds/desktop_client/templates.py:245` — `_FALLBACK_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"` is the default create-form git URL.
+- `apps/minds/imbue/minds/desktop_client/templates.py:242` — `_FALLBACK_GIT_URL = "https://github.com/imbue-ai/forever-claude-template.git"` is the default create-form git URL.
 
 ### Template Stacking (2a)
 
 Template stacking means passing multiple `--template` flags: `--template main --template docker`. The `apply_create_template` function iterates `template_names` in order and applies each template's options to the params accumulator.
 
-- `libs/mngr/imbue/mngr/cli/common_opts.py:769-838` — the loop `for template_name in template_names`.
+- `libs/mngr/imbue/mngr/cli/common_opts.py:777-838` — the loop `for template_name in template_names`.
 - Merge semantics per template:
   - **Scalar fields**: latest-wins; CLI-provided scalars always override template values (checked via `ParameterSource.DEFAULT`).
   - **Aggregate fields** (list/tuple/dict/set): assign-by-default, guarded by narrowing check. Use `key__extend` in the template definition to opt into additive concatenation.
-- `apps/minds/imbue/minds/desktop_client/agent_creator.py:591,611` — minds always passes `["--template", "main", "--template", "<provider_mode>"]` for DOCKER/LIMA/CLOUD/IMBUE_CLOUD modes.
+- `apps/minds/imbue/minds/desktop_client/agent_creator.py:666-694` — minds always passes `["--template", "main", "--template", "<provider_mode>"]` for DOCKER/LIMA/VULTR/AWS/IMBUE_CLOUD modes (the per-mode template name matches the lowercased `LaunchMode`).
 
 ### All `create_templates` Defined in FCT `.mngr/settings.toml`
 
@@ -163,7 +163,7 @@ restart = "never" | "on-failure"   # default: "never" if absent
 | `"never"` | Default. Exited service stays dead. |
 | `"on-failure"` | Restart when exit status is non-zero. A clean exit (status 0) is left alone. |
 
-- `manager.py:676-692` — `_compute_restarts`: only restarts when `restart == "on-failure"` AND `status != "0"`.
+- `manager.py:667-691` — `_compute_restarts`: only restarts when `restart == "on-failure"` AND `status != "0"`.
 
 ### Reconciliation Mechanism
 
@@ -254,8 +254,8 @@ The desktop client accesses applications through the `mngr forward` plugin using
 `app-watcher` emits events of type `"service_registered"` / `"service_deregistered"` for **application** registrations. The `ServiceRegisteredEvent` and `ServiceDeregisteredEvent` classes in `app_watcher/watcher.py:43,50` use the word "service" for what the TOML file calls "application". This is a significant naming collision:
 
 - `watcher.py:39-40` — `_EVENT_TYPE_REGISTERED = EventType("service_registered")`, `_EVENT_TYPE_DEREGISTERED = EventType("service_deregistered")`.
-- `backend_resolver.py:30` — `SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"`.
-- `backend_resolver.py:64` — `ServiceLogRecord.service` field = the application name.
+- `backend_resolver.py:33` — `SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"`.
+- `backend_resolver.py:67` — `ServiceLogRecord.service` field = the application name.
 
 DOC/CODE DIVERGENCE: the concepts doc calls this concept "applications / ports" but the event types and log records all use "service" terminology. The `services.toml` "service" and the `applications.toml` "application" are distinct concepts in the data model but conflated in event naming.
 
@@ -274,7 +274,7 @@ DOC/CODE DIVERGENCE: the concepts doc calls this concept "applications / ports" 
 **Deferred installs** are packages too heavy to bake into the Docker image that are installed on first container boot by the `deferred-install` service (a `services.toml` entry). The contract uses per-package marker files under `/var/lib/minds/deferred-install/done.<package>` to gate idempotent installation.
 
 - `scripts/deferred_install.sh` (FCT) — the implementation. `MARKER_DIR=/var/lib/minds/deferred-install`.
-- `services.toml:43-46` (FCT) — the service entry: `command = "bash scripts/deferred_install.sh"` with no `restart` (defaults to `"never"`).
+- `services.toml:44-45` (FCT) — the service entry: `command = "bash scripts/deferred_install.sh"` with no `restart` (defaults to `"never"`).
 
 ### Deferral Contract
 
@@ -286,7 +286,7 @@ DOC/CODE DIVERGENCE: the concepts doc calls this concept "applications / ports" 
 Currently the only deferred package is **Playwright + Chromium** (`_install_playwright`).
 
 - `deferred_install.sh:46-68` — `_install_playwright`: runs `uv run playwright install --with-deps chromium` from `$REPO_ROOT=/mngr/code`.
-- `deferred_install.sh:36-44` — `_recover_interrupted_dpkg`: handles pool host scenario.
+- `deferred_install.sh:31-44` — `_recover_interrupted_dpkg`: handles pool host scenario.
 
 ### Vendored Dependencies
 
@@ -409,7 +409,7 @@ class AgentHealth(str, Enum):  # system_interface_health.py:80
 6. Does the inner web server answer GET /? — curl inside container.
 7. Has the system interface registered with the plugin resolver? — plugin resolver snapshot in minds.
 
-**Dispatch tier classification** (`recovery_probe.py:575-602`):
+**Dispatch tier classification** (`recovery_probe.py:117-140` for the enum; `_classify_dispatch_tier` at `recovery_probe.py:573-602`):
 ```python
 class DispatchTier(str, Enum):
     INTERFACE_UNRESPONSIVE = "interface_unresponsive"  # in-place agent restart
@@ -430,7 +430,7 @@ class DispatchTier(str, Enum):
 
 **Mechanism**: `probe_workspace_through_plugin(mngr_forward_port, preauth_cookie, agent_id, ...)` — same HTTP probe as 6b but called during creation, waiting up to `workspace_ready_timeout_seconds` (default 300s) with `workspace_ready_poll_interval_seconds` (default 0.5s) between attempts.
 
-- `agent_creator.py:1054-1065` — `workspace_ready_timeout_seconds = 300.0`, `workspace_ready_poll_interval_seconds = 0.5`, `workspace_ready_probe_timeout_seconds = 2.0`.
+- `agent_creator.py:1189-1208` — `workspace_ready_timeout_seconds = 300.0`, `workspace_ready_poll_interval_seconds = 0.5`, `workspace_ready_probe_timeout_seconds = 2.0`.
 - On success: calls `system_interface_health_tracker.record_probe_success(agent_id)` to clear any probe-failure run accumulated during the warmup window (preventing a false STUCK transition right after creation).
 
 ---

@@ -362,6 +362,96 @@ The "browsers — tabs where you can have a (partially agent-controlled) browser
 
 ---
 
+## Concept 5: Workspace Color / Accent
+
+### 5.1 Canonical Definition
+
+A **workspace color** (surfaced in the UI as the workspace's **accent**) is a per-workspace `#rrggbb` hex chosen by the user. It is stored as the `color` **label** on the primary workspace's mngr agent and drives the titlebar background, the sidebar workspace-row dot, the homepage tile, the inbox card accent, and the `--workspace-accent` / `--titlebar-bg` / `--titlebar-fg` CSS variables. Unlike the layout/terminal/service concepts (which live in the FCT `system_interface`), this is a **Minds-app concept**: it lives entirely in `apps/minds/imbue/minds/desktop_client/`.
+
+**File citations:**
+- Palette + pure helpers: `apps/minds/imbue/minds/desktop_client/workspace_color.py` — `WORKSPACE_PALETTE` (12 colors, `workspace_color.py:43-56`), `DEFAULT_WORKSPACE_COLOR_NAME = "confusion"` (`workspace_color.py:63-64`)
+- Stored as the `color` agent label: `backend_resolver.py:809-838` (`get_workspace_color` reads `agent.labels.get("color")` and normalizes), `backend_resolver.py:840-862` (`set_workspace_color_locally`)
+- Resolution with default fallback: `app.py:420-430` (`_resolved_workspace_color`)
+
+### 5.2 The Palette
+
+The palette is **server-side only** (`WORKSPACE_PALETTE` in `workspace_color.py`): 11 named entries sourced from a Figma node (`356:4113`) plus a literal `#ffffff` white. Names are kebab-case (`confusion`, `courage`, `envy`, `peace`, `belonging`, `energy`, `strength`, `comfort`, `inspiration`, `clarity`, `indifference`, `white`) and are not shown visually — the picker renders unlabeled swatches, and the names are used only as `ColorSwatch` `aria-label`s and to name the default. The 10 chromatic entries come first; the two achromatic neutrals (`indifference` = black, `white`) are grouped last so `pick_unused_create_color` hands out a real color before the neutrals.
+
+There is intentionally **no JS palette mirror**: the swatches are server-rendered and carry `data-color` attributes that the picker JS reads. A guard test (`templates_test.py`) asserts the JS never reintroduces a palette mirror and keeps exporting only the two pure helpers.
+
+**File citations:**
+- Palette + default: `workspace_color.py:43-64`
+- Create-form preselect logic: `workspace_color.py:76-97` (`pick_unused_create_color`)
+- Server-rendered swatches: `templates/ColorSwatch.jinja` (`role="radio"`, `data-color`, `aria-label`)
+
+### 5.3 The Two Pure Helpers (Python + JS mirror)
+
+Two pure functions are mirrored between Python (`workspace_color.py`) and JS (`static/workspace_accent.js`, exposed as `window.mindsAccent`) so the picker pages can validate input and preview the titlebar foreground locally without a server round-trip:
+
+| Python (`workspace_color.py`) | JS (`workspace_accent.js`) | Purpose |
+|---|---|---|
+| `normalize_workspace_color` (`101-117`) | `normalizeHex` | Lenient hex parser: accepts `#fff` / `fff` / `#ffffff` / `ffffff` (any case, whitespace tolerated), returns canonical `#rrggbb` lowercase or `None`. Alpha (`#rrggbbaa`) is rejected. |
+| `pick_workspace_foreground` (`130-146`) | `pickForegroundForHex` | WCAG-luminance contrast picker: returns `"0 0 0"` or `"255 255 255"` for the titlebar foreground (`--titlebar-fg`), thresholded at relative luminance `0.179`. |
+
+**File citations:**
+- Python helpers: `workspace_color.py:100-146`
+- JS mirror: `static/workspace_accent.js:19-57` (`window.mindsAccent = { normalizeHex, pickForegroundForHex }`)
+
+### 5.4 How a Color is Set
+
+There are two write paths, both ultimately writing the `color` label:
+
+1. **At create time**: the create form posts a hidden `color` input (the picker's selected swatch). `_color_for_new_workspace` (`app.py:432-450`) leniently parses it (malformed or missing → default), and the value is threaded into agent creation. `_suggested_create_color` (`app.py:453-464`) preselects the first unused palette entry.
+2. **Via workspace settings**: the settings page renders the picker (12 swatches + an always-visible hex input; selecting a swatch saves immediately, no Save button). `static/workspace_settings.js` POSTs `{"hex": "<rrggbb>"}` to `POST /api/workspaces/<agent_id>/color`, handled by `_handle_set_workspace_color_api` (`app.py:1864-1979`), which writes `color=<hex>` via `mngr label` (CLI merge semantics, preserving other labels) and optimistically updates the resolver snapshot so the next SSE `workspaces` tick reflects the new color.
+
+**File citations:**
+- Settings POST endpoint: `app.py:1864-1979` (`_handle_set_workspace_color_api`), registered at `app.py:4465` (`POST /api/workspaces/{agent_id}/color`)
+- Create-form parse: `app.py:432-450` (`_color_for_new_workspace`), `app.py:453-464` (`_suggested_create_color`)
+- Settings picker JS: `static/workspace_settings.js:20-225`
+- `mngr label` write: `app.py:1957` — `[mngr_binary, "label", str(parsed_id), "-l", f"color={normalized}"]`
+
+The settings endpoint returns distinct error discriminants: `400 invalid_hex`, `404 not_primary` (not a primary workspace), `409 stale_provider` (provider's last discovery poll errored), `502 host_unreachable` (`mngr label` failed). Color writes apply only to **primary** workspaces (`workspace` + `is_primary` label pair).
+
+### 5.5 How a Color Reaches the UI
+
+The resolved accent is attached to each entry in the SSE `workspaces` payload as `accent` (`#rrggbb`) and `accent_fg` (the contrasting RGB triple). `chrome.js` / `sidebar.js` drop those into CSS variables; `workspace_color.py` is never imported client-side.
+
+**File citations:**
+- SSE payload build: `app.py:2508-2549` (`_build_workspace_list`) — `accent = _resolved_workspace_color(...)`, `accent_fg = pick_workspace_foreground(accent)`
+- Titlebar application: `static/chrome.js:101-176` — sets `--workspace-accent`, `--titlebar-bg`, `--titlebar-fg` on the document root per active workspace
+- Sidebar dot: `static/sidebar.js` + the `.sidebar-dot` token (per-workspace accent circle, colored inline per workspace)
+- Inbox card accent: `app.py:3663-3680` — mirrors the homepage tile's accent off the homepage agent's id
+- CSS variables + tokens: `static/tokens.css` (`--workspace-accent` / `--titlebar-bg` / `--titlebar-fg`, `.color-swatch`, `.color-hex-pill`, `.accent-spine`, `.sidebar-dot`)
+
+### 5.6 Default / Backfill Behavior
+
+Workspaces created before the picker shipped have **no** `color` label. `_resolved_workspace_color` (`app.py:420-430`) returns `DEFAULT_WORKSPACE_COLOR` (`confusion`, `#0b292b`) for them; nothing proactively backfills the label — a pre-picker workspace renders with the default until the user explicitly picks a color.
+
+### 5.7 ColorSwatch Component and DevStyleguide
+
+The picker swatch is a reusable JinjaX primitive, `ColorSwatch` (`templates/ColorSwatch.jinja`): a circular `role="radio"` button owning the markup contract the picker JS selects on (`.color-swatch`, `aria-checked`, `data-color`, `aria-label`). It is used by both the settings picker (`size="md"`, 34px) and the create-form picker (`size="sm"`, 24px). The live component catalog `DevStyleguide` (`templates/pages/DevStyleguide.jinja`, mounted at `/_dev/styleguide`) demos it alongside the other form-control primitives.
+
+**File citations:**
+- Swatch component: `templates/ColorSwatch.jinja`
+- Catalog: `templates/pages/DevStyleguide.jinja`, README entry: `templates/README.md:52`
+
+### 5.8 Terminology Variants
+
+- **color**: The storage-level term — the `color` agent label, the `color` form/JSON field, the `WORKSPACE_PALETTE` keys' values. Used in `workspace_color.py`, the create/settings forms, and the label write.
+- **accent**: The UI-level term — `accent` / `accent_fg` in the SSE payload, `--workspace-accent`, `.accent-spine`, `static/workspace_accent.js`, `accentByAgentId` in `chrome.js`. The same hex, framed as the visible workspace accent.
+- **palette**: The fixed server-side set of 12 pickable colors (`WORKSPACE_PALETTE`); a user may also type any custom hex, which is not a palette entry.
+- **swatch**: The circular radio control rendering one color (`ColorSwatch.jinja`, `.color-swatch`).
+
+**Inconsistency**: The concept is named **color** at the storage/form layer (`color` label, `color` field, `workspace_color.py`) but **accent** at the rendering layer (`accent` SSE field, `--workspace-accent`, `workspace_accent.js`). They refer to the same per-workspace hex; the dual naming parallels the service/application split in Concept 2.
+
+### 5.9 Recommended Canonical Term
+
+- Use **workspace color** for the user-chosen value as stored/configured (matches the `color` label and `workspace_color.py`).
+- Use **accent** for the same value as it paints the chrome (matches the SSE `accent` field and the `--workspace-accent` CSS variable).
+- Reserve **palette** for the fixed server-side set of 12 pickable colors, distinct from a custom hex.
+
+---
+
 ## Cross-Cutting Inconsistencies Summary
 
 ### Inconsistency A: Panel vs Tab vs View vs Window
@@ -391,3 +481,7 @@ The `Minds_concepts.md` lists "browsers" as an existing concept in the "Presenta
 ### Inconsistency E: Two ttyd provisioning paths
 
 Both `libs/mngr_ttyd/plugin.py` (random port, ServiceLogRecord events) and `scripts/run_ttyd.sh` (fixed port 7681, `forward_port.py`) provision ttyd. These are parallel, non-equivalent implementations. In a mngr-provisioned environment, the plugin runs; in an FCT-bootstrapped environment, `run_ttyd.sh` runs. Both are in the same repo scope.
+
+### Inconsistency F: Workspace color vs accent
+
+The per-workspace color is named **color** at the storage/form layer (the `color` agent label, the `color` form/JSON field, `workspace_color.py`) but **accent** at the rendering layer (the `accent` / `accent_fg` SSE fields, `--workspace-accent`, `static/workspace_accent.js`). They are the same `#rrggbb` value. This is a Minds-app concept (`apps/minds/imbue/minds/desktop_client/`), distinct from the FCT-grounded layout/terminal/service concepts above, and the color/accent split mirrors the service/application split in Concept 2.

@@ -34,7 +34,9 @@ Ordering is roughly by blast radius.
   (see §6).
 - "**Claude Code subagent**" for `.claude/agents/`. Rename the mngr_claude sync entry
   intent in comments/docs so the bare token `"agents"` is never read as mngr agents.
-- "**agent type**" for `AgentTypeName` (claude/codex/agy).
+- "**agent type**" for `AgentTypeName` (claude/codex/antigravity/opencode/pi-coding), plus
+  the name-resolution **aliases** (`agy`→antigravity, `pi`→pi-coding) registered via
+  `register_agent_aliases`.
 
 ---
 
@@ -45,15 +47,21 @@ Ordering is roughly by blast radius.
 1. **provider backend** — stateless factory, one per backend type
    (`ProviderBackendInterface`).
 2. **provider instance** — configured endpoint managing hosts (`ProviderInstanceInterface`).
-3. **"AI provider"** — colloquial for the LLM auth/routing layer. **Never a code type.**
+3. **AI provider** (`AIProvider`) — the LLM auth/billing layer (how an agent obtains its
+   Anthropic credentials). **Now a real minds enum** (`apps/minds/.../primitives.py:72`:
+   `IMBUE_CLOUD`/`API_KEY`/`SUBSCRIPTION`), so the bare word `provider` is now genuinely
+   overloaded between compute and LLM auth in code.
 
 **Decision:**
 - "**provider backend**" (factory) and "**provider instance**" (configured endpoint).
   Reserve bare "**provider**" for the instance in user-facing text.
 - Rename `VultrProvider` → `VultrProviderInstance` (it currently reads like an instance but
   subclasses `VpsDockerProvider` and plays both roles). `vps_docker` is a shared base, not
-  a usable provider — document that it registers no backend.
-- Never call the LLM layer an "AI provider"; use "**LLM auth mode**" (§3 of group 2).
+  a usable provider — document that it registers no backend. The same base is now also
+  subclassed by `aws`, `gcp`, and `ovh` instances.
+- The code names the LLM-auth enum `AIProvider`, which collides with compute "provider"; in
+  user-facing / cross-subsystem text prefer "**LLM auth mode**" or "AI connection" so the
+  bare word "provider" keeps meaning compute (§5 of group 2).
 
 ---
 

@@ -21,8 +21,8 @@ The module docstring at `tunnel_token_injection.py:1-16` defines the convention 
 
 Named secret files in the codebase:
 - `runtime/secrets/cloudflare_tunnel.env` — Cloudflare tunnel token (`tunnel_token_injection.py:28`)
-- `runtime/secrets/restic.env` — restic backup credentials (referenced in `tunnel_token_injection.py:14`, `primitives.py:76-85` via `BackupProvider`)
-- `runtime/secrets/telegram.env` — Telegram bot token (referenced in `tunnel_token_injection.py:15`)
+- `runtime/secrets/restic.env` — restic backup credentials (referenced in `tunnel_token_injection.py:12`, `primitives.py:94-114` via `BackupProvider`)
+- `runtime/secrets/telegram.env` — Telegram bot token (referenced in `tunnel_token_injection.py:12`)
 
 A separate, orthogonal meaning of "secret" exists in the **deployment layer**: timestamped Modal Secrets (cloud key-value stores) holding environment data pushed by `minds env deploy`. These are governed by `apps/minds/imbue/minds/envs/secret_lifecycle.py`, which defines `DeployId`, `timestamped_secret_name`, and `gc_old_per_tier_secrets`. The term "Secret" here is Modal's own nomenclature (a hosted KV namespace), not the `runtime/secrets/*.env` convention.
 
@@ -36,12 +36,12 @@ A third meaning: **Vault KV-v2 secrets** read by deploy operators via `apps/mind
 | `onboarding.py:59` | Constant for `PERMISSIONS_PREFERENCES_REMOTE_PATH` mentions `runtime/memory/` not `runtime/secrets/`; onboarding does not use secrets |
 | `envs/secret_lifecycle.py` | Modal Secret naming, GC, timestamped deploy IDs |
 | `envs/vault_reader.py` | Vault KV read/write/delete via `vault` CLI |
-| `primitives.py:66-85` | `BackupProvider` enum references injecting a `runtime/secrets/restic.env` |
+| `primitives.py:94-114` | `BackupProvider` enum references injecting a `runtime/secrets/restic.env` |
 | `mngr_imbue_cloud/session_store.py` | SuperTokens session tokens (access/refresh JWT) stored at `<profile_dir>/providers/imbue_cloud/sessions/<user_id>.json`; not called "secrets" in code |
-| `sharing_handler.py:159` | `tunnel.token.get_secret_value()` — Pydantic `SecretStr` wrapper |
+| `sharing_handler.py:161` | `tunnel.token.get_secret_value()` — Pydantic `SecretStr` wrapper |
 | `api_key_store.py` | In-memory `MINDS_API_KEY`, not persisted |
 | `auth.py:131` | `secrets.token_urlsafe` — Python stdlib for generating signing key |
-| `supertokens_app.py:33` | `api_key: SecretStr` — Pydantic field type for SuperTokens admin API key |
+| `supertokens_app.py:36` | `api_key: SecretStr` — Pydantic field type for SuperTokens admin API key |
 | `cloudflare_tunnels.py:39` | `api_token: SecretStr` — Pydantic field type for CF API token |
 
 ### 1.3 Competing/Multiple Definitions
@@ -66,12 +66,12 @@ Additionally, Pydantic's `SecretStr` type is used throughout to wrap sensitive s
 
 - The word "secret" is overloaded across three entirely different storage systems (filesystem, Modal, Vault). Reading "secrets" in a file name or variable requires context to determine which system is meant.
 - `CLOUDFLARE_TUNNEL_TOKEN` is the env-var name inside `cloudflare_tunnel.env` but the file itself is called "tunnel token" not "tunnel secret" in comments.
-- `restic.env` exports are called "backup credentials" in `primitives.py:76-85` but the file is stored under `runtime/secrets/`.
+- `restic.env` exports are called "backup credentials" in `primitives.py:94-114` but the file is stored under `runtime/secrets/`.
 - The `MINDS_API_KEY` (`api_key_store.py`) is ephemeral/in-memory but is called a "key" not a "secret."
 
 ### 1.6 DOC/CODE Divergences
 
-- `latchkey-permissions.md:125-128` describes the opaque permissions handle at `~/.minds/latchkey/permissions/<uuid>.json`, but the code (`store.py:74`) uses `<latchkey_directory>/mngr_latchkey/permissions/<uuid>.json`. The docs use `~/.minds/latchkey/` which matches the user-visible path only if `LATCHKEY_DIRECTORY=~/.minds/latchkey`; the code uses a `PLUGIN_DATA_SUBDIR_NAME = "mngr_latchkey"` subdirectory inside `LATCHKEY_DIRECTORY` (`store.py:65`), so the canonical internal path is `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json`.
+- `latchkey-permissions.md:121-122` describes the opaque permissions handle at `~/.minds/latchkey/permissions/<uuid>.json`, but the code (`store.py:309-344`, via `opaque_permissions_dir` / `new_opaque_permissions_path`) uses `<latchkey_directory>/mngr_latchkey/permissions/<uuid>.json`. The docs use `~/.minds/latchkey/` which matches the user-visible path only if `LATCHKEY_DIRECTORY=~/.minds/latchkey`; the code uses a `PLUGIN_DATA_SUBDIR_NAME = "mngr_latchkey"` subdirectory inside `LATCHKEY_DIRECTORY` (`store.py:65`), so the canonical internal path is `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json`.
 
 ### 1.7 Recommended Canonical Term + Definition
 
@@ -85,7 +85,7 @@ Use **"runtime secret"** for `runtime/secrets/*.env` files to distinguish them f
 
 A **credential** in Minds means a set of third-party service authentication materials managed by the `latchkey` CLI and stored in `LATCHKEY_DIRECTORY`. These are distinct from secrets: secrets are Minds-managed env files; credentials are latchkey-managed per-service auth state (OAuth tokens, API keys set via `latchkey auth set`, browser-acquired tokens via `latchkey auth browser`).
 
-Canonical definition of credential status: `libs/mngr_latchkey/imbue/mngr_latchkey/core.py:142-153`
+Canonical definition of credential status: `libs/mngr_latchkey/imbue/mngr_latchkey/core.py:145-155`
 ```python
 class CredentialStatus(UpperCaseStrEnum):
     """Latchkey-reported credential state for a service.
@@ -99,11 +99,11 @@ class CredentialStatus(UpperCaseStrEnum):
     UNKNOWN = auto()
 ```
 
-The `LatchkeyServiceInfo` model at `core.py:171-190` models the parsed output of `latchkey services info <service>`, including `credential_status`, `auth_options`, and `set_credentials_example`.
+The `LatchkeyServiceInfo` model at `core.py:174-192` models the parsed output of `latchkey services info <service>`, including `credential_status`, `auth_options`, and `set_credentials_example`.
 
 Two sub-flows for obtaining credentials:
-- **Browser flow**: `latchkey auth browser <service>` — `core.py:167` (`LATCHKEY_AUTH_OPTION_BROWSER`)
-- **Manual set flow**: `latchkey auth set` — `core.py:168` (`LATCHKEY_AUTH_OPTION_SET`)
+- **Browser flow**: `latchkey auth browser <service>` — `core.py:170` (`LATCHKEY_AUTH_OPTION_BROWSER`)
+- **Manual set flow**: `latchkey auth set` — `core.py:171` (`LATCHKEY_AUTH_OPTION_SET`)
 
 ### 2.2 All Usages
 
@@ -111,20 +111,20 @@ Two sub-flows for obtaining credentials:
 |---|---|
 | `latchkey/handlers/predefined.py:334` | `self.latchkey.services_info(service_info.name)` — probe credential status |
 | `latchkey/handlers/predefined.py:367` | `self.latchkey.auth_browser(service_info.name)` — acquire credentials via browser |
-| `latchkey/handlers/predefined.py:130-144` | `_fallback_set_credentials_example`, `_prepend_latchkey_directory` — manual credential setup |
-| `core.py:142-196` | `CredentialStatus`, `LatchkeyServiceInfo`, `LATCHKEY_AUTH_OPTION_BROWSER`, `LATCHKEY_AUTH_OPTION_SET` |
-| `gateway_client.py:195-200` | `AvailablePermission` — permission schemas tied to credentials scope |
+| `latchkey/handlers/predefined.py:129-144` | `_fallback_set_credentials_example`, `_prepend_latchkey_directory` — manual credential setup |
+| `core.py:145-199` | `CredentialStatus`, `LatchkeyServiceInfo`, `LATCHKEY_AUTH_OPTION_BROWSER`, `LATCHKEY_AUTH_OPTION_SET` |
+| `mngr_latchkey/services_catalog.py:84-137` | `_AvailablePermission`, `ServicePermissionInfo` — permission schemas tied to a credentials scope |
 | `latchkey-permissions.md:76-95` | Describes the credential-check-then-grant flow (matches code) |
 
-The term "credential" also appears in FCT (`claude_auth.py`) in a different context: Claude Code's own authentication credentials (`ANTHROPIC_API_KEY`, OAuth tokens from `claude auth login`). These are not latchkey credentials; they are Claude-specific auth materials. `claude_auth.py:1-47` documents both paths (API key and OAuth).
+The term "credential" also appears in FCT (`claude_auth.py`, in the `forever-claude-template` repo at `apps/system_interface/imbue/system_interface/claude_auth.py`, not this monorepo) in a different context: Claude Code's own authentication credentials (`ANTHROPIC_API_KEY`, OAuth tokens from `claude auth login`). These are not latchkey credentials; they are Claude-specific auth materials. The module docstring (`claude_auth.py:1-47`) documents both paths (the OAuth PTY flow and the raw API-key write).
 
 ### 2.3 Competing/Multiple Definitions
 
 - **Latchkey credentials**: third-party service credentials (Slack, GitHub, etc.) managed by latchkey.
-- **Claude credentials**: `ANTHROPIC_API_KEY` or OAuth tokens for Claude itself, written to host env file by `claude_auth.py:192-206`.
+- **Claude credentials**: `ANTHROPIC_API_KEY` (written to the host env file by `write_api_key_to_host_env`, `claude_auth.py:192-206`) or OAuth tokens for Claude itself (acquired via the `claude auth login` PTY flow, `start_oauth_login` / `submit_oauth_code`). (`claude_auth.py` lives in the `forever-claude-template` repo, not this monorepo.)
 - **SuperTokens session tokens**: access/refresh JWTs for the Minds cloud account, stored by `mngr_imbue_cloud/session_store.py`. These are sometimes called "session" not "credentials" but they are authentication materials.
 - **Cloudflare API token**: used for tunnel management in `cloudflare_tunnels.py:39`, called `api_token: SecretStr`.
-- **SuperTokens API key**: used for admin operations in `supertokens_app.py:33`, called `api_key: SecretStr`.
+- **SuperTokens API key**: used for admin operations in `supertokens_app.py:36`, called `api_key: SecretStr`.
 
 ### 2.4 Terminology Variants
 
@@ -133,11 +133,11 @@ The term "credential" also appears in FCT (`claude_auth.py`) in a different cont
 - **api_key** — Anthropic API key (`claude_auth.py`), SuperTokens admin key (`supertokens_app.py`), Cloudflare API token (`cloudflare_tunnels.py`), Minds API key (`api_key_store.py`)
 - **token** — Cloudflare tunnel token (`tunnel_token_injection.py`), SuperTokens access/refresh JWTs (`session_store.py`)
 - **session** — SuperTokens session (`session_store.py`, `supertokens_routes.py`)
-- **signing_key** — cookie signing key (`auth.py:25`, `primitives.py:134`)
+- **signing_key** — cookie signing key (`auth.py:25`, `CookieSigningKey` at `primitives.py:162`)
 
 ### 2.5 Ambiguities/Inconsistencies
 
-- "Credentials" in `latchkey` context means third-party service auth, but "credentials" in `supertokens_routes.py:302` means the email+password pair submitted to sign in. These are entirely different things sharing the same term.
+- "Credentials" in `latchkey` context means third-party service auth, but "credentials" in `supertokens_routes.py` means the email+password pair submitted to sign in — surfaced only as the `WRONG_CREDENTIALS` status string (`supertokens_routes.py:65`) returned by the email/password sign-in handler (`_handle_signin_api`, `supertokens_routes.py:320-332`). These are entirely different things sharing the same term.
 - `api_key` is used for four semantically different things: Anthropic inference key, SuperTokens admin key, Cloudflare REST API token, and the Minds internal API key.
 - The latchkey doc (`latchkey-permissions.md:75-78`) says "credentials are not valid" (matching `CredentialStatus.VALID`), consistent with code.
 
@@ -160,7 +160,7 @@ None found for credentials specifically. The `latchkey-permissions.md` accuratel
 
 A **permission** in Minds is a named detent schema string that an agent requests and a user grants to allow a specific category of access to a third-party service. Permissions are organized into **scopes** (detent scope schemas, e.g. `slack-api`), and each scope can have multiple permission schemas (e.g. `slack-read-all`, `any`).
 
-The permission model is defined in `libs/mngr_latchkey/imbue/mngr_latchkey/store.py:206-236`:
+The permission model is defined in `libs/mngr_latchkey/imbue/mngr_latchkey/store.py:226-256`:
 ```python
 class LatchkeyPermissionsConfig(FrozenModel):
     """In-memory representation of a Latchkey/Detent permissions config file."""
@@ -169,12 +169,12 @@ class LatchkeyPermissionsConfig(FrozenModel):
 ```
 
 Per-host permission files live at:
-`<LATCHKEY_DIRECTORY>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json` (`store.py:244-251`)
+`<LATCHKEY_DIRECTORY>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json` (`permissions_path_for_host`, `store.py:264-271`)
 
 Three special permission files:
-- **Default (deny-all)**: `latchkey_default_permissions.json` (`store.py:254-262`) — empty rules, consulted when no JWT is present
-- **Admin (wildcard)**: `latchkey_admin_permissions.json` (`store.py:265-286`) — `{"any": ["any"]}` rule
-- **Per-agent opaque**: `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json` (`store.py:289-323`) — initially deny-all, symlinked to host canonical path after `mngr create`
+- **Default (deny-all)**: `latchkey_default_permissions.json` (`default_permissions_path`, `store.py:274-282`) — empty rules, consulted when no JWT is present
+- **Admin (wildcard)**: `latchkey_admin_permissions.json` (`admin_permissions_path` / `ensure_admin_permissions_file`, `store.py:285-306`) — `{"any": ["any"]}` rule
+- **Per-agent opaque**: `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json` (`opaque_permissions_dir` / `new_opaque_permissions_path`, `store.py:309-344`) — initially deny-all, symlinked to host canonical path after `mngr create` (`link_opaque_permissions_to_host`, `store.py:347-391`)
 
 The term **"detent"** refers to the upstream open-source access-control framework that Latchkey is built on. Detent defines the schema system (scope schemas, permission schemas, the `any` wildcard) that minds uses to express what access is being granted. Detent is not developed inside this monorepo; minds consumes it through the latchkey CLI and gateway. Detent terminology is: **scope** (e.g. `slack-api`) = the service namespace; **permission** (e.g. `slack-read-all`, `any`) = a specific access grant within that scope.
 
@@ -182,21 +182,21 @@ The term **"detent"** refers to the upstream open-source access-control framewor
 
 | Location | Usage |
 |---|---|
-| `store.py:206-236` | `LatchkeyPermissionsConfig` — permission file model |
-| `store.py:254-286` | Default and admin permissions files |
-| `store.py:289-323` | Opaque per-agent permissions handle |
-| `gateway_client.py:93-157` | `PredefinedRequestPayload`, `PermissionEffect`, `StreamedPermissionRequest` — gateway wire types |
-| `gateway_client.py:195-233` | `AvailablePermission`, `AvailableServiceEntry` — catalog types |
-| `gateway_client.py:575-652` | `get_granted_permissions_for_scopes`, `set_permission_rule` — permission read/write via gateway |
-| `services_catalog.py:56-108` | `ServicePermissionInfo`, `_service_info_from_entry` — dialog-facing catalog |
+| `store.py:226-256` | `LatchkeyPermissionsConfig` — permission file model |
+| `store.py:274-306` | Default and admin permissions files |
+| `store.py:309-344` | Opaque per-agent permissions handle |
+| `gateway_client.py:92-191` | `PredefinedRequestPayload`, `PermissionEffect`, `StreamedPermissionRequest` — gateway wire types |
+| `mngr_latchkey/services_catalog.py:84-137` | `_AvailablePermission`, `ServicePermissionInfo` — catalog types (replaced the former `gateway_client.AvailablePermission`/`AvailableServiceEntry`) |
+| `gateway_client.py:480-557` | `get_granted_permissions_for_scopes`, `set_permission_rule` — permission read/write via gateway |
+| `mngr_latchkey/services_catalog.py:110-167` | `ServicePermissionInfo`, `_service_info_from_entry` — dialog-facing catalog |
 | `permission_requests_consumer.py` | Streaming gateway-side pending requests |
-| `latchkey/handlers/predefined.py:237-744` | `LatchkeyPermissionGrantHandler` — full grant/deny flow |
+| `latchkey/handlers/predefined.py:237-743` | `LatchkeyPermissionGrantHandler` — full grant/deny flow |
 | `latchkey/handlers/file_sharing.py` | `FileSharingGrantHandler` — file-sharing grant/deny flow |
 | `api_key_auth.py` | `MINDS_API_KEY` bearer auth for `/api/v1/...` — a separate, simpler auth layer, not detent-based |
 | `cookie_manager.py` | Session cookie auth — also not detent-based |
 | `latchkey_auto_register.py:28-80` | `LatchkeyAutoRegister` — auto-register newly-discovered agents in host permissions file |
 | `agent_setup.py` (mngr_latchkey) | `register_agent_for_host` — referenced by auto-register |
-| `core.py:106-119` | `_ENV_EXTENSION_PERMISSIONS_ROOT`, `_GATEWAY_EXTENSIONS_SUBDIR` — environment constraining the gateway extension |
+| `core.py:116-122` | `_ENV_EXTENSION_PERMISSIONS_ROOT`, `_GATEWAY_EXTENSIONS_SUBDIR` — environment constraining the gateway extension |
 
 ### 3.3 Competing/Multiple Definitions
 
@@ -208,32 +208,32 @@ Two distinct permission systems coexist:
 
 3. **Session cookie auth** — `minds_session` cookie for the bare-origin desktop UI (`cookie_manager.py`). Also not detent-based.
 
-4. **Latchkey gateway password** — `X-Latchkey-Gateway-Password` header for all gateway requests (`gateway_client.py:54`). A shared secret, not a permission.
+4. **Latchkey gateway password** — `X-Latchkey-Gateway-Password` header for all gateway requests (`gateway_client.py:53`). A shared secret, not a permission.
 
-5. **Latchkey permissions-override JWT** — `X-Latchkey-Gateway-Permissions-Override` header (`gateway_client.py:55`), which directs the gateway to a specific permissions file per agent. This is an access-control mechanism but is called "override" not "permission."
+5. **Latchkey permissions-override JWT** — `X-Latchkey-Gateway-Permissions-Override` header (`gateway_client.py:54`), which directs the gateway to a specific permissions file per agent. This is an access-control mechanism but is called "override" not "permission."
 
 ### 3.4 Terminology Variants
 
 - **permission** — a detent permission schema name string (e.g. `slack-read-all`, `any`)
 - **permissions** — the plural set of permission schemas granted for a scope; also the file `latchkey_permissions.json`
 - **scope** — a detent scope schema name (e.g. `slack-api`); the namespace under which permissions are granted
-- **rule** — one `{scope: [permission, ...]}` mapping in `latchkey_permissions.json` (`store.py:225`)
-- **rule_key** — the scope name used as the key when calling `set_permission_rule` (`gateway_client.py:621`)
-- **permissions_preference** — the onboarding Q3 free-text preference written to `runtime/memory/permissions_preferences.md` (`onboarding.py:99`) — completely different from detent permissions
+- **rule** — one `{scope: [permission, ...]}` mapping in `latchkey_permissions.json` (`store.py:245-248`)
+- **rule_key** — the scope name used as the key when calling `set_permission_rule` (`gateway_client.py:526-543`)
+- **permissions_preference** — the onboarding Q3 free-text preference written to `runtime/memory/permissions_preferences.md` (`onboarding.py:100`; path constant at `onboarding.py:59`) — completely different from detent permissions
 - **permission_request** — a pending agent request for a permission grant (gateway extension endpoint)
 - **permissions-override JWT** — the per-agent JWT controlling which permissions file the gateway reads
 
 ### 3.5 Ambiguities/Inconsistencies
 
-- `permissions_preference` in onboarding (`onboarding.py:99`) has nothing to do with detent permissions — it is a free-text user instruction written into Claude's memory. The name is misleading.
+- `permissions_preference` in onboarding (`onboarding.py:100`) has nothing to do with detent permissions — it is a free-text user instruction written into Claude's memory. The name is misleading.
 - The word "permissions" without qualification can mean: (a) detent permission schemas, (b) the `latchkey_permissions.json` file, (c) the gateway HTTP extension `/permissions/...`, or (d) the onboarding `permissions_preference` field.
-- `scope` in `PredefinedRequestPayload.scope` (`gateway_client.py:96`) is a detent scope schema name. `scope` in `PermissionEffect` rules (`gateway_client.py:143`) has the same meaning. But `scope` in Python stdlib / OAuth has a different meaning; no collision risk internally, but documentation readers need context.
-- The admin permissions file content is `{"any": ["any"]}` — here `any` in the scope position means "match all requests" (a detent wildcard scope); `any` in the permissions position means "match all permission requirements." This double `any` wildcard is noted in `store.py:284` but not explained for readers unfamiliar with detent.
+- `scope` in `PredefinedRequestPayload.scope` (`gateway_client.py:95`) is a detent scope schema name. `scope` in `PermissionEffect` rules (`gateway_client.py:146`) has the same meaning. But `scope` in Python stdlib / OAuth has a different meaning; no collision risk internally, but documentation readers need context.
+- The admin permissions file content is `{"any": ["any"]}` — here `any` in the scope position means "match all requests" (a detent wildcard scope); `any` in the permissions position means "match all permission requirements." This double `any` wildcard is materialized at `store.py:304` (`ensure_admin_permissions_file`) but not explained for readers unfamiliar with detent. (See also `services_catalog.py:62-71`, where `_WILDCARD_SCOPE` and `_ALWAYS_AVAILABLE_PERMISSION` document the two `any` senses.)
 
 ### 3.6 DOC/CODE Divergences
 
-- `latchkey-permissions.md:125` says `~/.minds/latchkey/permissions/<uuid>.json`; code uses `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json` (`store.py:298`). These are equivalent only if `LATCHKEY_DIRECTORY = ~/.minds/latchkey` (the default). The doc omits the `mngr_latchkey/` subdirectory layer.
-- `latchkey-permissions.md:135-138` says "minds replaces the opaque file with a symlink pointing at `~/.minds/agents/<agent_id>/latchkey_permissions.json`" — but the code (`store.py:244-251`) shows the canonical path is `<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json`, not `~/.minds/agents/<agent_id>/...`. DOC says it's keyed by `agent_id`; CODE says it's keyed by `host_id`. This is a significant divergence — multiple agents on the same host share one permissions file.
+- `latchkey-permissions.md:122` says `~/.minds/latchkey/permissions/<uuid>.json`; code uses `<LATCHKEY_DIRECTORY>/mngr_latchkey/permissions/<uuid>.json` (`new_opaque_permissions_path`, `store.py:325-344`). These are equivalent only if `LATCHKEY_DIRECTORY = ~/.minds/latchkey` (the default). The doc omits the `mngr_latchkey/` subdirectory layer.
+- `latchkey-permissions.md:131-133` says "minds replaces the opaque file with a symlink pointing at `~/.minds/agents/<agent_id>/latchkey_permissions.json`" — but the code (`permissions_path_for_host`, `store.py:264-271`; `link_opaque_permissions_to_host`, `store.py:347-391`) shows the canonical path is `<plugin_data_dir>/hosts/<host_id>/latchkey_permissions.json`, not `~/.minds/agents/<agent_id>/...`. DOC says it's keyed by `agent_id`; CODE says it's keyed by `host_id`. This is a significant divergence — multiple agents on the same host share one permissions file.
 
 ### 3.7 Recommended Canonical Term + Definition
 
@@ -275,7 +275,7 @@ The plugin-side session store is `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/s
 | `mngr_imbue_cloud/session_store.py` | SuperTokens session persistence (access/refresh JWTs) |
 | `mngr_imbue_cloud/primitives.py` | `ImbueCloudAccount` (an email address type), `SuperTokensUserId` |
 | `mngr_imbue_cloud/data_types.py` | `PaidListEntry` — connector-side paid-access table |
-| `supertokens_app.py:68-102` | `SuperTokensAppRecord` — per-dev-env SuperTokens app (multi-tenant) |
+| `supertokens_app.py:31-36` | `SuperTokensAppRecord` — per-dev-env SuperTokens app (multi-tenant) |
 | `minds_config.py` (referenced) | `get_default_account_id`, `set_default_account_id` |
 
 ### 4.3 Competing/Multiple Definitions
@@ -283,7 +283,7 @@ The plugin-side session store is `libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/s
 - **Account** in minds context: a signed-in Minds cloud user with a SuperTokens `user_id`, associated workspaces, and a LiteLLM virtual key. Represented by `AccountSession`.
 - **Account** in `mngr_imbue_cloud` plugin context: `ImbueCloudAccount` (just a typed email string, `primitives.py`) — the identifier the plugin uses for multi-account config sections `[providers.imbue_cloud_<slug>]`.
 - **Account** in connector context: a paying customer entry in the `PaidListEntry` table.
-- **Account** in SuperTokens multi-tenancy context: a SuperTokens "app" (what SuperTokens calls a tenant); `supertokens_app.py:68` calls this a `SuperTokensAppRecord` with `app_id`.
+- **Account** in SuperTokens multi-tenancy context: a SuperTokens "app" (what SuperTokens calls a tenant); `supertokens_app.py:31` calls this a `SuperTokensAppRecord` with `app_id`.
 
 ### 4.4 Terminology Variants
 
@@ -346,13 +346,13 @@ Readiness detection: `sharing_handler.py:38-54` — `is_share_ready_from_edge_re
 | `tunnel_token_injection.py:31-73` | Write/clear `cloudflare_tunnel.env` in agent |
 | `envs/providers/cloudflare_tunnels.py` | List/delete tunnels by env metadata during `minds env destroy` |
 | `mngr_imbue_cloud` (ImbueCloudCli) | `create_tunnel`, `add_service`, `set_service_auth` — connector API calls |
-| `primitives.py:140` | `ServiceName` type — named service within an agent |
+| `primitives.py:168` | `ServiceName` type — named service within an agent |
 
 ### 5.3 Competing/Multiple Definitions
 
 - **Sharing** (user-facing): exposing a workspace service to specific external users via Cloudflare tunnel + Cloudflare Access email allowlist.
 - **Global access**: not a defined code term. The concept of "public" vs "restricted" sharing is entirely handled by whether `emails` is empty or non-empty in `enable_sharing_via_cloudflare` (empty → no Access policy applied, which means the tunnel is reachable by anyone who has the URL, since the function does not explicitly block unauthenticated access if no policy is set).
-- **File sharing** (`RequestType.FILE_SHARING_PERMISSION`): a distinct concept — granting an agent access to a local file path on the desktop host via WebDAV, not Cloudflare tunnels. Handled by `latchkey/handlers/file_sharing.py`.
+- **File sharing** (`RequestType.FILE_SHARING_PERMISSION`): a distinct concept — granting an agent access to a local file path on the desktop host via WebDAV, not Cloudflare tunnels. Handled by `latchkey/handlers/file_sharing.py`. The requested path is normalized by `_normalize_share_path` (`file_sharing.py:112`): a leading `~` / `~/` expands against the user's home dir via `_expand_home_prefix` (`file_sharing.py:91`, mirroring the gateway's `expandFileSharingHomePrefix`), and paths with spaces / non-ASCII characters are accepted, before the path is confined to the WebDAV mount roots (home + temp). `~user` notation for another user's home is rejected.
 
 ### 5.4 Terminology Variants
 
@@ -364,13 +364,13 @@ Readiness detection: `sharing_handler.py:38-54` — `is_share_ready_from_edge_re
 
 ### 5.5 Ambiguities/Inconsistencies
 
-- **File sharing** (WebDAV/latchkey) and **workspace sharing** (Cloudflare tunnel) use "sharing" but are entirely different mechanisms and user flows. `RequestType.FILE_SHARING_PERMISSION` (`gateway_client.py:106-131`) deals with WebDAV; the Share modal deals with Cloudflare.
-- `FileSharingAccess` at `gateway_client.py:106` is READ/WRITE access to a local file, not related to global URL sharing.
+- **File sharing** (WebDAV/latchkey) and **workspace sharing** (Cloudflare tunnel) use "sharing" but are entirely different mechanisms and user flows. `FileSharingAccess` / `FileSharingRequestPayload` (`gateway_client.py:105-131`) deal with WebDAV; the Share modal deals with Cloudflare.
+- `FileSharingAccess` at `gateway_client.py:105` is READ/WRITE access to a local file, not related to global URL sharing.
 - The variable `emails` in `enable_sharing_via_cloudflare` is the Access email allowlist. An empty list means no policy is set, which in Cloudflare Access means unrestricted public access — this is not documented in the function signature or docstring, creating a silent behavior change.
 
 ### 5.6 DOC/CODE Divergences
 
-The docs reference a "sharing-request event" flow that agents no longer use. `sharing_handler.py:1-13` notes: "Agents no longer write sharing-request events back into the inbox." This represents a removed feature the doc no longer describes (no divergence found in the audit docs provided).
+The docs reference a "sharing-request event" flow that agents no longer use. `sharing_handler.py:1-15` notes (lines 4-5): "agents no longer write sharing-request events back into the inbox." This represents a removed feature the doc no longer describes (no divergence found in the audit docs provided).
 
 ### 5.7 Recommended Canonical Term + Definition
 
@@ -386,7 +386,7 @@ The docs reference a "sharing-request event" flow that agents no longer use. `sh
 
 **Onboarding** in Minds is a three-question dialog shown to the user while a workspace is being created. Each question maps to a side effect applied asynchronously after workspace creation.
 
-The three questions and their side effects are defined at `apps/minds/imbue/minds/desktop_client/onboarding.py:83-113`:
+The three questions and their side effects are defined at `apps/minds/imbue/minds/desktop_client/onboarding.py:84-115`:
 
 ```python
 class OnboardingAnswers(FrozenModel):
@@ -395,35 +395,35 @@ class OnboardingAnswers(FrozenModel):
     permissions_preference: str                   # Q3: written to workspace memory
 ```
 
-Q1 is the **data preference**: how much the workspace agent may learn about the user. Defined in `primitives.py:89-105`:
+Q1 is the **data preference**: how much the workspace agent may learn about the user. Defined in `primitives.py:117-133`:
 ```python
 class UserDataPreference(UpperCaseStrEnum):
     """How much the workspace agent may learn about the user during onboarding."""
     CONVENIENCE = auto()  # import as much local context as possible
-    PRIVACY = auto()      # gather minimal data, kept on user's machine
-    CONTROL = auto()      # gather nothing (scan skipped)
+    PRIVACY = auto()      # gather minimal data, kept on the user's machine
+    CONTROL = auto()      # gather nothing (the onboarding scan is skipped)
 ```
 
-- `CONVENIENCE` and `PRIVACY`: triggers a local user-context scan (git user.name, OS full name, or login username) written to `~/.minds/user_context/<creation_id>.json` (`onboarding.py:318-326`).
+- `CONVENIENCE` and `PRIVACY`: triggers a local user-context scan (git user.name, OS full name, or login username) written to `~/.minds/user_context/<creation_id>.json` (`_run_user_context_scan`, `onboarding.py:319-327`).
 - `CONTROL`: no scan.
 
-Q3 is the **permissions preference** (free-text): written to `runtime/memory/permissions_preferences.md` via `mngr exec` (`onboarding.py:307-363`, constant at `onboarding.py:59`).
+Q3 is the **permissions preference** (free-text): written to `runtime/memory/permissions_preferences.md` via `mngr exec` (`_apply_permissions_preference` / `_write_permissions_preference`, `onboarding.py:308-364`, constant at `onboarding.py:59`).
 
 ### 6.2 All Usages
 
 | Location | Usage |
 |---|---|
-| `onboarding.py:83-384` | Full `OnboardingApplier` and `OnboardingAnswers` implementation |
-| `primitives.py:89-105` | `UserDataPreference` enum |
-| `onboarding.py:49-59` | Constants: `USER_CONTEXT_DIR_NAME`, `PERMISSIONS_PREFERENCES_REMOTE_PATH` |
-| `onboarding.py:125-128` | `build_user_context_document` — `{name, details}` dict |
-| `onboarding.py:144-158` | `resolve_local_user_name` — git config, GECOS, getpass |
+| `onboarding.py:84-385` | Full `OnboardingApplier` and `OnboardingAnswers` implementation |
+| `primitives.py:117-133` | `UserDataPreference` enum |
+| `onboarding.py:51-59` | Constants: `USER_CONTEXT_DIR_NAME`, `PERMISSIONS_PREFERENCES_REMOTE_PATH` |
+| `onboarding.py:126-129` | `build_user_context_document` — `{name, details}` dict |
+| `onboarding.py:146-159` | `resolve_local_user_name` — git config, GECOS, getpass |
 
 ### 6.3 Competing/Multiple Definitions
 
 - **data_preference** (`UserDataPreference`) is clearly scoped to the onboarding Q1 choice.
 - **permissions_preference** in `OnboardingAnswers.permissions_preference` is onboarding Q3 free text; confusingly named alongside the detent permissions system (see Section 3).
-- The term "onboarding" in `claude_auth.py:252-263` refers to Claude Code's own first-launch onboarding dialogs (`complete_onboarding`), not Minds' workspace-creation onboarding. These are entirely separate flows.
+- The term "onboarding" in `claude_auth.py:245-262` (`_prepare_claude_config_for_restart`, which calls `complete_onboarding` at `claude_auth.py:258`) refers to Claude Code's own first-launch onboarding dialogs, not Minds' workspace-creation onboarding. These are entirely separate flows. (`claude_auth.py` lives in the `forever-claude-template` repo, not this monorepo.)
 
 ### 6.4 Terminology Variants
 
@@ -437,7 +437,7 @@ Q3 is the **permissions preference** (free-text): written to `runtime/memory/per
 
 - The `USER_CONTEXT_PLACEHOLDER_DETAILS` constant (`onboarding.py:54`: `"couldn't find any details"`) is hardcoded as the `details` field in the user context document. The module docstring says "the seed of a feature we will extend later" — the feature is partially implemented.
 - `permissions_preference` (Q3) is stored in Claude's memory at `runtime/memory/permissions_preferences.md` — a markdown file read by Claude as part of its context, not a machine-parseable permissions config. The name conflates "preferences" (a natural language instruction) with the detent "permissions" concept.
-- `PRIVACY` triggers a scan while `CONTROL` does not; but the distinction between `CONVENIENCE` and `PRIVACY` (both scan) is currently only in the enum docstring — the code at `onboarding.py:105-107` only distinguishes `CONTROL` from everything else via `is_scan_requested`. The `CONVENIENCE` vs `PRIVACY` distinction is therefore currently a no-op in the scan path (both produce the same `{name, details}` document).
+- `PRIVACY` triggers a scan while `CONTROL` does not; but the distinction between `CONVENIENCE` and `PRIVACY` (both scan) is currently only in the enum docstring — the code at `onboarding.py:105-108` (`is_scan_requested`) only distinguishes `CONTROL` (`data_preference is not UserDataPreference.CONTROL`) from everything else. The `CONVENIENCE` vs `PRIVACY` distinction is therefore currently a no-op in the scan path (both produce the same `{name, details}` document via `build_user_context_document`).
 
 ### 6.6 DOC/CODE Divergences
 
@@ -478,7 +478,7 @@ These are unrelated but share the word "permissions" in code adjacent to each ot
 These are entirely different mechanisms with entirely different UX, but both use the word "sharing."
 
 ### E. DOC/CODE divergence: per-host permissions path
-`latchkey-permissions.md:135-138` says permissions files are keyed by `agent_id` at `~/.minds/agents/<agent_id>/...`. The code (`store.py:244-251`) keys them by `host_id` at `<LATCHKEY_DIRECTORY>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json`. Multiple agents on the same host share one permissions file — the doc implies each agent has its own.
+`latchkey-permissions.md:131-133` says permissions files are keyed by `agent_id` at `~/.minds/agents/<agent_id>/...`. The code (`permissions_path_for_host`, `store.py:264-271`) keys them by `host_id` at `<LATCHKEY_DIRECTORY>/mngr_latchkey/hosts/<host_id>/latchkey_permissions.json`. Multiple agents on the same host share one permissions file — the doc implies each agent has its own.
 
 ### F. `AccountSession` name misleads readers about what is "session" state vs what is "account" state
 The class holds workspace associations and identity, not authentication tokens. The real sessions (tokens) live in the plugin. This confusion propagates to `MultiAccountSessionStore`, which is an account/workspace registry, not a session token store.

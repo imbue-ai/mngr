@@ -65,9 +65,9 @@ evidence in `groups/`.
   and in which region — affecting cost, speed, and whether you can start/stop it yourself.
 - **Rolls up:**
   - `provider backend` — stateless factory per backend type (local/docker/lima/modal/
-    vultr/ovh/imbue_cloud).
+    vultr/ovh/aws/gcp/imbue_cloud).
   - `provider instance` — the configured endpoint a mind was created with.
-  - `launch mode` (`LaunchMode`: DOCKER/LIMA/CLOUD/IMBUE_CLOUD) — the minds-level user
+  - `launch mode` (`LaunchMode`: DOCKER/LIMA/VULTR/AWS/IMBUE_CLOUD) — the minds-level user
     choice that maps to a provider + templates.
   - `region` — provider-specific datacenter string.
   - `host` — the actual machine the mind runs on.
@@ -77,10 +77,10 @@ evidence in `groups/`.
   - Five+ code terms, no shared user concept: "provider" used for both the factory and the
     configured instance; `VultrProvider` plays both roles; "AI provider" (a different thing,
     see G2) muddies the word further.
-  - The user-facing control exposes raw enum labels (DOCKER/LIMA/CLOUD/IMBUE_CLOUD) a
+  - The user-facing control exposes raw enum labels (DOCKER/LIMA/VULTR/AWS/IMBUE_CLOUD) a
     non-technical user can't parse.
-  - `region` has three incompatible formats across providers (`US-EAST-VA`/`ewr`/`us-east`)
-    and no shared type.
+  - `region` has five incompatible formats across providers
+    (`US-EAST-VA`/`ewr`/`us-east`/`us-east-1`/`us-west1-a` zone) and no shared type.
   - Boundary blur with **A3 (status)** — "where it runs" also determines *whether you can
     start/stop it* (only docker/lima are "shutdown-capable").
 - **To resolve:** name the concept; give the launch-mode options friendly location/plan
@@ -255,9 +255,9 @@ evidence in `groups/`.
 - **Why it's hard:**
   - "crystallize" is internal/evocative jargon; the user-facing verb is undecided
     (learn? save? remember?).
-  - The crystallized/hand-authored split is a provenance detail with no runtime effect, but
-    it gates a validator requirement (`run.py`) that the docs call optional — a hidden
-    constraint (see divergences).
+  - The crystallized/hand-authored split is a provenance detail with no runtime effect:
+    `scripts/run.py` is optional even for crystallized skills (validated only if present),
+    so the split gates nothing structural.
   - Overlaps C1 (a learned thing is a skill) and C3 (learning ≈ a kind of memory).
 - **To resolve:** the user-facing verb/story for learning; whether crystallized-ness is ever
   shown.
@@ -546,10 +546,16 @@ evidence in `groups/`.
 - **Rolls up:** the three `LLM auth mode`s (LiteLLM virtual key / raw `ANTHROPIC_API_KEY` /
   OAuth subscription); imbue cloud account (LiteLLM key, R2).
 - **Why it's hard:**
-  - **Untyped**: the mode is determined by which env vars are present — no type/enum.
-  - "provider" in code always means compute (A2), so "AI provider" is a trap.
+  - **Now typed in minds, still env-driven downstream**: the mode is the `AIProvider` enum
+    (`IMBUE_CLOUD`/`API_KEY`/`SUBSCRIPTION`, `primitives.py:72`), but it reaches the mngr
+    provisioning layer as env vars rather than a typed field.
+  - "provider" used to mean only compute (A2); the code now *also* has an `AIProvider` enum,
+    so the bare word is genuinely overloaded — "AI provider" is no longer just a naming trap
+    but a real, colliding code name.
   - Overlaps D5 (account holds the LiteLLM key) and G1 (model).
-- **To resolve:** name the concept; give the three options friendly names; type the mode.
+- **To resolve:** settle the user-facing name; give the three options friendly names. (The
+  mode is already typed in minds; the open work is threading the enum, not the env vars,
+  through to mngr.)
 
 ---
 
