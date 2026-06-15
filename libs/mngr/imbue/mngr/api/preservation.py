@@ -48,6 +48,19 @@ class PreservedItem(FrozenModel):
     kind: FileType = Field(description="Whether rel_path is a FILE or a DIRECTORY")
 
 
+def get_preserved_agents_root_dir(host_dir: Path) -> Path:
+    """Return the directory under which all agents' preserved files are stored.
+
+    This is the single source of truth for where preserved agent data lives on
+    disk, so code that needs to enumerate preserved agents (rather than address
+    a single one) can do so without duplicating the path structure.
+
+    ``host_dir`` should be the *local* host directory: preserved files always
+    live on the local machine so they survive remote host destruction.
+    """
+    return host_dir / "preserved"
+
+
 def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: AgentId) -> Path:
     """Return the directory under which an agent's preserved files are stored.
 
@@ -59,7 +72,7 @@ def get_preserved_agent_dir(host_dir: Path, agent_name: AgentName, agent_id: Age
     ``host_dir`` should be the *local* host directory: preserved files always
     live on the local machine so they survive remote host destruction.
     """
-    return host_dir / "preserved" / f"{agent_name}--{agent_id}"
+    return get_preserved_agents_root_dir(host_dir) / f"{agent_name}--{agent_id}"
 
 
 def get_local_preserved_agent_dir(mngr_ctx: MngrContext, agent_name: AgentName, agent_id: AgentId) -> Path:

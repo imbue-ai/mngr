@@ -1,1 +1,0 @@
-Fixed the e2e test fixture (`conftest.py`) that wrote an invalid `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`. The duplicate key caused a TOML parse error ("cannot overwrite a value") that broke every e2e tutorial command, including `test_connect_explicit_host`.

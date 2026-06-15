@@ -19,17 +19,20 @@ import docker.context
 import docker.errors
 import docker.models.containers
 import docker.models.images
+import requests.exceptions
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -131,6 +134,11 @@ HOST_VOLUME_MOUNT_PATH: Final[str] = STATE_VOLUME_MOUNT_PATH
 # SSH constants
 CONTAINER_SSH_PORT: Final[int] = 22
 SSH_CONNECT_TIMEOUT: Final[float] = 60
+
+# Substring of Docker's native error when `docker run --runtime <name>` names a
+# runtime the daemon has not registered (e.g. `runsc`/gVisor not installed).
+# Stable across Docker versions: "unknown or invalid runtime name: <name>".
+_UNKNOWN_RUNTIME_ERROR_MARKER: Final[str] = "unknown or invalid runtime name"
 
 
 # Minimum Docker Engine version that supports `--mount ... volume-subpath=...`.
@@ -329,6 +337,17 @@ class DockerProviderInstance(BaseProviderInstance):
         user_id = str(self.mngr_ctx.get_profile_user_id())
         prefix = self.mngr_ctx.config.prefix
         return state_volume_name(prefix, user_id)
+
+    def ensure_state_container_exists(self) -> None:
+        """Create the singleton state container if it does not already exist.
+
+        Used by the backend's ``bootstrap_for_host_creation`` on the
+        ``mngr create`` path so the subsequent read-only ``build_provider_instance``
+        passes its emptiness guard. Idempotent: backed by the cached
+        ``_state_volume`` property, which calls ``ensure_state_container``.
+        """
+        # Accessing the cached property forces ensure_state_container() to run.
+        _ = self._state_volume
 
     def has_state_container(self) -> bool:
         """Whether the singleton state container already exists, without creating it.
@@ -874,10 +893,34 @@ kill -TERM 1
             start_args=start_args,
             volume_mount_args=volume_mount_args,
         )
-        result = self._run_docker_creation_command(cmd)
+        try:
+            result = self._run_docker_creation_command(cmd)
+        except ProcessError as e:
+            # When a non-default runtime is configured but not registered with the
+            # daemon, `docker run --runtime <name>` fails with Docker's native
+            # "unknown or invalid runtime name" error. Re-raise it as a typed,
+            # actionable error so callers (e.g. minds' create UI) surface a clean
+            # message instead of the raw `docker run` command dump.
+            runtime_error = self._runtime_not_registered_error_or_none(e)
+            if runtime_error is not None:
+                raise runtime_error from e
+            raise
 
         container_id = result.stdout.strip()
         return self._docker_client.containers.get(container_id)
+
+    def _runtime_not_registered_error_or_none(self, error: ProcessError) -> DockerRuntimeNotRegisteredError | None:
+        """Map a `docker run` `ProcessError` to a typed runtime error, when applicable.
+
+        Returns a :class:`DockerRuntimeNotRegisteredError` when a non-default
+        `docker_runtime` is configured and the failure output carries Docker's
+        "unknown or invalid runtime name" marker; otherwise ``None`` so the
+        caller re-raises the original `ProcessError` unchanged.
+        """
+        runtime = self.config.docker_runtime
+        if runtime is not None and _UNKNOWN_RUNTIME_ERROR_MARKER in (error.stdout + error.stderr):
+            return DockerRuntimeNotRegisteredError(self.name, runtime)
+        return None
 
     # =========================================================================
     # Container Discovery Helpers
@@ -931,8 +974,11 @@ kill -TERM 1
                 all=True,
                 filters={"label": [f"{LABEL_PROVIDER}={self.name}"]},
             )
-        except docker.errors.DockerException as e:
-            raise MngrError(f"Cannot connect to Docker daemon: {e}") from e
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            # Only a transport failure means the daemon is unreachable. A
+            # docker.errors.APIError (the daemon answered with an error) is a
+            # real fault and must propagate, not be mislabeled as unavailable.
+            raise ProviderUnavailableError(self.name, f"Cannot connect to Docker daemon: {e}") from e
 
         prefix = self.mngr_ctx.config.prefix
         filtered: list[docker.models.containers.Container] = []
@@ -1539,12 +1585,16 @@ kill -TERM 1
         """Discover all Docker container hosts."""
         processed_host_ids: set[HostId] = set()
 
+        # Never swallow a failure into an empty list: GC treats an empty host
+        # list as "every volume is orphaned" and would delete every live host's
+        # data. Raise ProviderUnavailableError on a transport failure so an empty
+        # list always means "genuinely zero hosts". A docker.errors.APIError (the
+        # daemon answered with an error) is a real fault and propagates instead.
         try:
             containers = self._list_containers()
             all_host_records = self._host_store.list_all_host_records()
-        except (MngrError, docker.errors.DockerException) as e:
-            logger.warning("Cannot list Docker hosts (Docker daemon unavailable?): {}", e)
-            return []
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            raise ProviderUnavailableError(self.name, f"Cannot list Docker hosts: {e}") from e
 
         # Map running containers by host_id, and harvest host names from labels.
         # We use this map below instead of h.get_name() so building DiscoveredHosts
