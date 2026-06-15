@@ -6,6 +6,11 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed: The kanpan footer no longer flickers when a background refresh and a user action (e.g. deleting a marked agent) run at the same time. A single writer now picks what to show by priority, so overlapping spinner loops can't overwrite each other on alternating ticks.
+- Fixed: Batch operations in the kanpan TUI (delete, push, markable custom commands) now surface per-agent failure details (including a clear "timed out after Ns" message) at the bottom of the board instead of silently doing nothing. Marks for failed agents are kept so you can retry.
+
 ## [v0.2.13] - 2026-06-13
 
 ### Added

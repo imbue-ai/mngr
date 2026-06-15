@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+### Changed
+
+- Changed: User-facing CLI errors (`MngrError` and its subclasses) now render their `Error:` line in bold red on a color-capable terminal, matching the existing colored `ERROR:` prefix. Suppressed when stderr is not a TTY or `NO_COLOR` is set; exit semantics are unchanged.
+
+### Fixed
+
+- Fixed: `mngr clone <agent> <name> --provider local` no longer fails with "destination path ... already exists and is not an empty directory"; the remote-source to local-target path now performs a mirror-style `git fetch` into the existing bare repo instead of `git clone --mirror`.
+- Fixed: `mngr clone` (and any agent creation) transferring a git repo between two remote hosts no longer fails with "Identity file ... not accessible" / "Host key verification failed"; the transfer now relays through a local bare mirror so source and target SSH credentials are used on the local orchestrator where those files exist.
+- Fixed: `mngr create`'s "branch already checked out" error now suggests `--transfer=none` instead of the removed `--in-place` flag.
+
 ## [v0.2.13] - 2026-06-13
 
 ### Added
