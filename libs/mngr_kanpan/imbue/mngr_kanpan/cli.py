@@ -92,7 +92,7 @@ def kanpan(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="kanpan",
     one_line_description="TUI board showing agents grouped by lifecycle state with PR status",
-    synopsis="mngr kanpan [OPTIONS]",
+    synopsis="mngr kanpan [--include CEL] [--exclude CEL] [--running] [--stopped] [--archived] [--active] [--local] [--remote] [--project PROJECT]",
     description="""Launches a terminal UI that displays all mngr agents organized by their
 lifecycle state (RUNNING, WAITING, STOPPED, DONE, REPLACED, RUNNING_UNKNOWN_AGENT_TYPE, UNKNOWN).
 

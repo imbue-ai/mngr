@@ -634,7 +634,7 @@ def test_render_model_marks_past_reset_as_stale() -> None:
         updated_at=999,
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=900)},
     )
-    model = _build_render_model(snapshot, max_age=300, now=1000)
+    model = _build_render_model(snapshot, stale_after=300, now=1000)
     # Age=1 (<300) so only the past-reset cause should fire.
     assert model.has_past_reset is True
     assert model.is_age_stale is False
@@ -647,7 +647,7 @@ def test_render_model_age_stale() -> None:
         updated_at=500,
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
     )
-    model = _build_render_model(snapshot, max_age=300, now=1000)
+    model = _build_render_model(snapshot, stale_after=300, now=1000)
     # Reset is in the future so only the age cause should fire.
     assert model.is_age_stale is True
     assert model.has_past_reset is False
@@ -660,7 +660,7 @@ def test_render_model_fresh() -> None:
         updated_at=950,
         windows={"five_hour": WindowSnapshot(used_percentage=11.0, resets_at=2000)},
     )
-    model = _build_render_model(snapshot, max_age=300, now=1000)
+    model = _build_render_model(snapshot, stale_after=300, now=1000)
     assert model.is_age_stale is False
     assert model.has_past_reset is False
     assert model.is_stale is False
@@ -677,7 +677,9 @@ def test_flatten_for_template_always_includes_per_mode_cost_keys() -> None:
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
     )
-    flat = _flatten_primary_for_template(_build_render_model(snapshot_without_cost, max_age=300, now=1000), now=1000)
+    flat = _flatten_primary_for_template(
+        _build_render_model(snapshot_without_cost, stale_after=300, now=1000), now=1000
+    )
     assert flat["subscription_cost.total_cost_usd"] == ""
     assert flat["subscription_cost.total_duration_ms"] == ""
     assert flat["api_cost.total_cost_usd"] == ""
@@ -709,7 +711,7 @@ def test_flatten_for_template_populates_api_cost_when_session_is_api_mode() -> N
         ),
         since_seconds=86400,
     )
-    flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=1000), now=1000)
+    flat = _flatten_primary_for_template(_build_render_model(snapshot, stale_after=300, now=1000), now=1000)
     # api_cost reflects the session's reading; subscription_cost stays empty.
     assert flat["api_cost.total_cost_usd"] == "0.42"
     assert flat["api_cost.total_duration_ms"] == "12000"
@@ -753,7 +755,7 @@ def test_flatten_for_template_aggregates_only_within_each_mode() -> None:
         ),
         since_seconds=86400,
     )
-    flat = _flatten_primary_for_template(_build_render_model(snapshot, max_age=300, now=2000), now=2000)
+    flat = _flatten_primary_for_template(_build_render_model(snapshot, stale_after=300, now=2000), now=2000)
     # api_cost sums only api_key sessions; subscription_cost only subscription.
     assert flat["api_cost.total_cost_usd"] == "1.42"
     assert flat["subscription_cost.total_cost_usd"] == "0.1"
@@ -771,7 +773,7 @@ def test_flatten_for_template_emits_only_present_windows() -> None:
         updated_at=900,
         windows={"five_hour": WindowSnapshot(used_percentage=42.0, resets_at=1500)},
     )
-    model = _build_render_model(snapshot, max_age=300, now=1000)
+    model = _build_render_model(snapshot, stale_after=300, now=1000)
     flat = _flatten_primary_for_template(model, now=1000)
     assert flat["source"] == "claude"
     assert flat["five_hour.used_percentage"] == "42.00"
@@ -847,7 +849,7 @@ def test_usage_command_human_format(
             },
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Writer emitted label="5h", so the line uses "5h:" rather than the literal key.
     assert "5h:" in result.output
@@ -906,7 +908,7 @@ def test_usage_command_includes_preserved_by_default_and_excludes_with_flag(
     )
 
     default_result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage, ["--format", "json", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert default_result.exit_code == 0, default_result.output
     default_payload = _parse_json_payload(default_result.output)
@@ -914,7 +916,10 @@ def test_usage_command_includes_preserved_by_default_and_excludes_with_flag(
     assert default_payload["sources"][0]["five_hour"]["used_percentage"] == 42.0
 
     excluded_result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300", "--no-preserved"], obj=plugin_manager, catch_exceptions=False
+        usage,
+        ["--format", "json", "--stale-after", "300", "--no-preserved"],
+        obj=plugin_manager,
+        catch_exceptions=False,
     )
     assert excluded_result.exit_code == 0, excluded_result.output
     # No live agents and preserved excluded -> the no-data hint is logged ahead
@@ -943,7 +948,7 @@ def test_usage_command_json_format(
         },
     )
     result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage, ["--format", "json", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
@@ -992,7 +997,7 @@ def test_usage_command_json_surfaces_elapsed_when_window_seconds_present(
         },
     )
     result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage, ["--format", "json", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
@@ -1032,7 +1037,7 @@ def test_usage_command_format_template(
     )
     result = cli_runner.invoke(
         usage,
-        ["--format", "5h:{five_hour.used_percentage}/7d:{seven_day.used_percentage}", "--max-age", "300"],
+        ["--format", "5h:{five_hour.used_percentage}/7d:{seven_day.used_percentage}", "--stale-after", "300"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1135,7 +1140,7 @@ def test_usage_command_picks_freshest_across_agents(
         },
     )
     result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage, ["--format", "json", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
@@ -1175,7 +1180,7 @@ def test_usage_command_uses_reset_specific_warning_when_window_just_reset(
             },
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Age warning is gone (snapshot was just written).
     assert "snapshot last updated" not in result.output
@@ -1421,7 +1426,7 @@ def test_usage_command_renders_subscription_cost_line_for_subscription_user(
             },
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Subscription cost line with the imputed callout; 2-decimal money format.
     assert "subscription cost (imputed): $0.43" in result.output
@@ -1461,7 +1466,7 @@ def test_usage_command_renders_api_cost_line_for_api_key_user(
             "rate_limits": None,
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     assert "api cost: $1.23" in result.output
     # No subscription line should appear -- the user is on a direct API key.
@@ -1500,7 +1505,7 @@ def test_usage_command_json_default_is_summary_only(
         },
     )
     result = cli_runner.invoke(
-        usage, ["--format", "json", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False
+        usage, ["--format", "json", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output.strip())
@@ -1547,7 +1552,7 @@ def test_usage_command_detail_flag_includes_sessions_in_json(
     )
     result = cli_runner.invoke(
         usage,
-        ["--format", "json", "--max-age", "300", "--detail"],
+        ["--format", "json", "--stale-after", "300", "--detail"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1623,7 +1628,7 @@ def test_usage_command_aggregates_cost_across_agents_in_same_source(
     )
     result = cli_runner.invoke(
         usage,
-        ["--format", "json", "--max-age", "300", "--detail"],
+        ["--format", "json", "--stale-after", "300", "--detail"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1684,7 +1689,7 @@ def test_usage_command_emits_aggregate_api_cost_line_with_multiple_sessions(
             "cost": {"total_cost_usd": 0.30},
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # With multiple api-mode sessions, the api line shows the aggregate with a session count.
     assert "api cost: $1.30 across 2 sessions" in result.output
@@ -1736,7 +1741,7 @@ def test_usage_command_detail_flag_emits_per_session_lines_in_human_output(
             "cost": {"total_cost_usd": 0.30},
         },
     )
-    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--detail", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # api cost line still shows the aggregate.
     assert "api cost: $1.30 across 2 sessions" in result.output, result.output
@@ -1799,7 +1804,7 @@ def test_usage_command_detail_flag_emits_sub_tag_for_subscription_sessions(
             "rate_limits": rate_limits,
         },
     )
-    result = cli_runner.invoke(usage, ["--detail", "--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--detail", "--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Subscription aggregate line appears (imputed callout intact).
     assert "subscription cost (imputed): $1.30 across 2 sessions" in result.output, result.output
@@ -1872,7 +1877,7 @@ def test_usage_command_renders_both_cost_lines_when_both_modes_contribute(
             "cost": {"total_cost_usd": 1.25},
         },
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Both cost lines render.
     assert "subscription cost (imputed): $0.50" in result.output
@@ -1923,7 +1928,7 @@ def test_usage_command_excludes_stale_session_via_since(
     # --since 1h drops the 3h-old session.
     result = cli_runner.invoke(
         usage,
-        ["--format", "json", "--max-age", "300", "--since", "1h"],
+        ["--format", "json", "--stale-after", "300", "--since", "1h"],
         obj=plugin_manager,
         catch_exceptions=False,
     )
@@ -1991,7 +1996,7 @@ def test_usage_command_human_format_multi_source(
         },
         source="opencode",
     )
-    result = cli_runner.invoke(usage, ["--max-age", "300"], obj=plugin_manager, catch_exceptions=False)
+    result = cli_runner.invoke(usage, ["--stale-after", "300"], obj=plugin_manager, catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # Both source headers present
     assert "[claude]" in result.output

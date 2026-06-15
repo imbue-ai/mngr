@@ -6,6 +6,16 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.2.14] - 2026-06-15
+
+### Added
+
+- Added: `imbue.mngr_claude.stream_json`, a shared typed boundary for the Claude partial-message stream-json envelope (defined against the `anthropic` SDK's `RawMessageStreamEvent` union and `anthropic.types.Message`). `mngr ask`'s headless reader now parses partial-message events through it; an event variant newer than the installed `anthropic` package degrades gracefully (skipped, or falls back to a lenient text scan) rather than dropping the response. Adds `anthropic` as a new dependency (unpinned; imported for its typed models only -- mngr still drives the `claude` CLI and makes no API calls).
+
+### Changed
+
+- Changed: `mngr create --adopt-session` now validates the session ID up front (before any host or worktree is created), so an unknown or ambiguous ID fails fast with a clean `Error:` message instead of crashing mid-provisioning with an "Unexpected error" traceback. The "session not found" message no longer enumerates every searched directory.
+
 ## [v0.2.13] - 2026-06-13
 
 ### Added
