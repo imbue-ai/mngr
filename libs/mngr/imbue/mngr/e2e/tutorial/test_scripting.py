@@ -65,8 +65,8 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     """Unhappy path for the same `mngr config set` command: unknown keys are rejected.
 
     `mngr config set` validates the resulting config before writing the file, so
-    an unknown key fails with a non-zero exit and the config file is never
-    created. (Note that the value's *type* is not validated -- e.g.
+    an unknown key fails with a non-zero exit and the config file is left
+    unchanged. (Note that the value's *type* is not validated -- e.g.
     `set headless notabool` is accepted -- because validation goes through
     `model_construct`, which only rejects unknown fields.)
     """
@@ -74,20 +74,25 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
         # or set headless globally
         mngr config set headless true
     """)
-    # Confirm the project config file does not exist before the rejected write.
+    # The e2e fixture pre-seeds the project config file with the pytest opt-in
+    # key, so the file already exists. Capture its contents before the rejected
+    # write so we can prove the write left the file untouched.
     path_result = e2e.run("mngr config path --scope project", comment="locate the project config file")
     expect(path_result).to_succeed()
     project_config_path = Path(path_result.stdout.strip())
-    assert not project_config_path.exists(), f"Expected no project config file yet, found {project_config_path}"
+    contents_before = project_config_path.read_text() if project_config_path.exists() else None
 
     bad_result = e2e.run("mngr config set definitely_not_a_real_setting true", comment="reject an unknown config key")
     expect(bad_result).to_fail()
     expect(bad_result.stderr).to_contain("Unknown configuration fields")
 
-    # The rejected write must not have created or modified the config file.
-    assert not project_config_path.exists(), (
-        f"Rejected write should not have created {project_config_path}, but it exists"
+    # The rejected write must not have modified the config file: its contents are
+    # byte-for-byte identical, and the rejected key never made it to disk.
+    contents_after = project_config_path.read_text() if project_config_path.exists() else None
+    assert contents_after == contents_before, (
+        f"Rejected write must not modify {project_config_path}: {contents_before!r} -> {contents_after!r}"
     )
+    assert contents_after is None or "definitely_not_a_real_setting" not in contents_after
 
 
 @pytest.mark.release

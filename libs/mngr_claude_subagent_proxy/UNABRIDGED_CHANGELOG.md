@@ -4,6 +4,15 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+# Reuse the shared assistant-text extractor
+
+`subagent_wait.extract_assistant_text` now delegates to the shared
+`imbue.mngr_claude.stream_json.assistant_text` typed boundary rather than duplicating its own
+content-block scan. Behavior is unchanged (it still returns the concatenation of the assistant
+message's text blocks, or the empty string), but the envelope-parsing logic now lives in one place.
+
 ## 2026-06-12
 
 Internal: routed `host_dir / "agents"` path constructions through the shared `get_agents_root_dir` / `get_agent_state_dir_path` helpers (now in `imbue.mngr.hosts.common`). No behavior change.

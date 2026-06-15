@@ -4,6 +4,10 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-14
+
+Agent discovery on VPS Docker providers (AWS, OVH, Vultr) now reads agents **live** from each host's container instead of from the persisted `agents/*.json` outer store. The outer store is only written by the host-side mngr at agent-create time, so agents created *inside* a container (for example by an in-container `mngr create`) were never recorded there and were invisible to `mngr message`, `mngr connect`, and any other command that resolves agents through discovery -- even though `mngr list` showed them (it already read live). This caused, among other things, onboarding messages to an in-container chat agent to never be delivered. Discovery now uses the same live read that imbue_cloud already used, and derives each host's running state from that same read (removing a separate per-host inspect round-trip). If only the live read fails (for example a `docker exec` racing a container restart) after a host's record has already been read, that host still appears in the listing as offline rather than disappearing.
+
 ## 2026-06-13
 
 Reworked the outer-side btrfs snapshot helper (`snapshot_helper.sh`) so vps-docker backups capture data on every cycle instead of only the first.
