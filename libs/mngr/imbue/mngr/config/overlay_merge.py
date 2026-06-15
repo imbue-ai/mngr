@@ -105,7 +105,7 @@ def _to_operator_dict(
     inner ``__extend`` / ``__assign`` markers survive and re-combine); every other key
     bare (assign-by-default). ``drop_field_names`` keys are dropped (routing metadata);
     under ``drop_none_values`` a ``None``-valued key is dropped (the "treat ``None`` as
-    unset" reproduction of ``_assign_scalar``).
+    unset" rule, since the model's "unset" sentinel is ``None``).
 
     The same rule set applies at every depth: a sub-model may itself carry a registry /
     settings-patch field, and it is handled identically. (For the current config models a
