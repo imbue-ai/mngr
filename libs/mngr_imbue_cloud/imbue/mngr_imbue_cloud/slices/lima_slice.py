@@ -45,6 +45,25 @@ systemctl enable --now docker 2>/dev/null || true
 """
 
 
+# Installs inotify-tools on the VM so the vps_docker snapshot helper (the
+# outer_trigger btrfs helper provisioned by mngr_vps_docker) can run: its
+# systemd unit execs `inotifywait` to watch for snapshot requests, and without
+# it the unit crash-loops (exit 127) -- servicing requests only by accident of
+# its restart cadence and emitting spurious "already exists" failures. The OVH
+# VPS path gets this from host_setup's base packages; the slice VM (this VM is
+# the helper's "outer") provisions it here, alongside Docker. `jq`, the helper's
+# other dependency, is already installed by the base lima provisioning script.
+# Idempotent: skips the apt run when inotifywait is already present.
+_INOTIFY_TOOLS_INSTALL_SCRIPT: Final[str] = """\
+#!/bin/bash
+set -eux -o pipefail
+if ! command -v inotifywait >/dev/null 2>&1; then
+    apt-get update -qq
+    apt-get install -y -qq inotify-tools
+fi
+"""
+
+
 def _append_root_authorized_keys_script(extra_root_authorized_keys: tuple[str, ...]) -> str:
     """Bash that appends each key to the VM root's authorized_keys (idempotent).
 
@@ -124,11 +143,13 @@ def build_slice_lima_yaml(
         *config["portForwards"],
     ]
     # After the base provisioning (packages, sshd, root key, btrfs disk mount):
-    # make sshd listen on the extra forwardable port, then install Docker so the
-    # shared vps_docker bake can run its container on this VM.
+    # make sshd listen on the extra forwardable port, install Docker so the
+    # shared vps_docker bake can run its container on this VM, and install
+    # inotify-tools so the vps_docker snapshot helper's systemd unit can run.
     config["provision"] = list(config["provision"]) + [
         {"mode": "system", "script": _vm_ssh_extra_port_script(_VM_SSH_GUEST_PORT)},
         {"mode": "system", "script": _DOCKER_INSTALL_SCRIPT},
+        {"mode": "system", "script": _INOTIFY_TOOLS_INSTALL_SCRIPT},
     ]
     # Authorize any extra keys for root (e.g. the pool management key the
     # connector uses at lease/release time), in addition to the bake key already

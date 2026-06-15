@@ -484,9 +484,11 @@ def provision_snapshot_helper_on_outer(
     enabled and active; the ``docker volume create`` is no-op-with-warning
     when the volume already exists.
 
-    Assumes ``inotify-tools`` and ``jq`` are already installed (both the
-    cloud-init and SSH host-setup paths install them via the shared
-    ``host_setup`` base-packages step).
+    Assumes ``inotify-tools`` and ``jq`` are already installed. The cloud-init
+    and SSH host-setup paths install both via the shared ``host_setup``
+    base-packages step; the slice path installs them in its lima VM provisioning
+    (``mngr_imbue_cloud.slices.lima_slice``: ``jq`` via the base lima script,
+    ``inotify-tools`` via its own provision step).
     """
     helper_script = load_resource_text("snapshot_helper.sh")
     helper_service = load_resource_text("snapshot_helper.service")

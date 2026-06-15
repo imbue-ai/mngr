@@ -76,10 +76,18 @@ def test_slice_yaml_authorizes_root_client_key_and_installs_docker() -> None:
 def test_slice_yaml_provision_runs_base_setup_before_docker() -> None:
     config = _build()
     scripts = [step["script"] for step in config["provision"]]
-    # The last provision step is the docker install; the base setup (which mounts
-    # the btrfs disk and installs the host key) must run first.
-    assert "get.docker.com" in scripts[-1]
-    assert any("btrfs" in script.lower() for script in scripts[:-1])
+    # The base setup (which mounts the btrfs disk and installs the host key) must
+    # run before the docker install that the vps_docker bake depends on.
+    docker_index = next(i for i, script in enumerate(scripts) if "get.docker.com" in script)
+    assert any("btrfs" in script.lower() for script in scripts[:docker_index])
+
+
+def test_slice_provision_installs_inotify_tools_for_snapshot_helper() -> None:
+    config = _build()
+    scripts = [step["script"] for step in config["provision"]]
+    # inotify-tools must be installed so the vps_docker snapshot helper's systemd
+    # unit (which execs inotifywait) can run on the slice VM rather than crash-loop.
+    assert any("inotify-tools" in script for script in scripts)
 
 
 _POOL_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTpoolkey mngr-pool"
