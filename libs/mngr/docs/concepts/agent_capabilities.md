@@ -15,6 +15,7 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 | streaming_headless_output | - | - | - | - | - | - | Y | Y | - | - | - |
 | waiting_reason_field | - | Y | - | Y | - | - | - | - | - | Y | - |
 | streaming_snapshot | - | Y | Y | - | - | Y | Y | - | Y | - | - |
+| session_preservation | Y | Y | Y | Y | - | Y | Y | - | Y | Y | Y |
 
 ## Capabilities
 
@@ -24,3 +25,4 @@ absent. See `specs/agent-plugin-parity/capability-mixins.md` for the design.
 - **streaming_headless_output** -- A headless agent that also streams output incrementally. Only for headless agent variants.
 - **waiting_reason_field** -- Surfaces why a WAITING agent is blocked (PERMISSIONS vs END_OF_TURN) in `mngr list`. Wanted if the CLI prompts for tool approval.
 - **streaming_snapshot** -- Publishes a live, in-progress view of the agent's assistant text. Lowest-priority; only needed if a consuming UI wants live streaming.
+- **session_preservation** -- Preserves session/transcript files when the agent is destroyed, so the conversation is not lost. Baseline; every port wants it.
