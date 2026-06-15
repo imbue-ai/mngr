@@ -393,10 +393,10 @@ def _wait_for_cloud_init_marker(
             logger.debug("Transient SSH error during host-bootstrap poll (will retry): {}", e)
             return None
 
-    _value, _poll_count, elapsed = poll_for_value(
+    value, _, elapsed = poll_for_value(
         _is_marker_present, timeout=timeout_seconds, poll_interval=poll_interval_seconds
     )
-    if _value is None:
+    if value is None:
         raise MngrError(
             f"Cloud-init did not complete within {timeout_seconds}s. Docker may not be installed on the VPS."
         )
