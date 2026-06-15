@@ -1,4 +1,4 @@
-{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id #}
+{#def agent_ids, agent_accents, mngr_forward_origin, telegram_enabled, telegram_status_by_agent_id, is_discovering, agent_names, destroying_status_by_agent_id, shutdown_capable_agent_ids, mind_liveness_by_agent_id, agent_providers={} #}
 {#
   Landing page: list of accessible workspaces with per-row health, backup,
   and telegram status. Subscribes to the chrome SSE so the page reloads
@@ -597,6 +597,10 @@
                   :data-mind-name="agent_names.get(agent_id | string, agent_id)"
                   onclick="window.landingRowClick(event, this)">
               <span class="flex-1 font-medium text-zinc-900 pl-1">{{ agent_names.get(agent_id | string, agent_id) }}</span>
+              {% set provider_label = agent_providers.get(agent_id | string, "") %}
+              {% if provider_label %}
+                <span class="landing-provider-badge inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-zinc-100 text-zinc-500">{{ provider_label }}</span>
+              {% endif %}
               <span class="landing-backup-badge hidden inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium"></span>
               <Link href="#" class="landing-backup-download hidden cursor-pointer" extra="text-xs">download</Link>
               <span class="landing-mind-state-badge inline-flex items-center px-2 py-0.5 rounded-md text-sm font-medium" style="display:none"></span>
