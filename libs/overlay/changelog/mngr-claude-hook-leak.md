@@ -40,3 +40,10 @@ predicates `would_assignment_narrow` / `narrowing_paths` that the node engine im
 `extend_plain_value` names the dotted `field_path` when it rejects a contradictory
 bare/`__assign` key at the top level of the extend body, matching the location the
 removed plain-dict resolver surfaced.
+
+Internal (no user-facing behavior change): the low-cohesion `merge.py` grab-bag is split
+by concern. The value-level narrowing predicates (`would_assignment_narrow` /
+`narrowing_paths`) move verbatim to a new `narrowing.py` module, and the leaf-extend
+primitive `extend_aggregate_leaf` moves into `node_merge.py` next to the other extend
+helpers (`apply_extend` / `combine_extend_payloads`). `merge.py` is deleted. Pure
+move/rename: function bodies are unchanged, only their module home and import lines move.

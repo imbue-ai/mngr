@@ -41,7 +41,7 @@ from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import setup_logging
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.overlay.errors import OverlayError
-from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.narrowing import would_assignment_narrow
 from imbue.overlay.node_merge import extend_plain_value
 from imbue.overlay.operators import bare_key
 from imbue.overlay.operators import is_extend_key

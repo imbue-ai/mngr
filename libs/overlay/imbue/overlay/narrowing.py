@@ -1,17 +1,13 @@
-"""The leaf-extend primitive and the shared narrowing predicates.
+"""The value-level narrowing predicates.
 
 Everything here operates purely on plain dicts/lists/sets/scalars plus the ``Static*``
-markers. ``extend_aggregate_leaf`` is the shape-checked leaf branch of the extend algebra
-(list concat / set union / scalar error); ``node_merge.py`` -- the single extend engine --
-imports it. ``would_assignment_narrow`` is the value-level narrowing predicate and
-``narrowing_paths`` its path-collecting counterpart, reporting the specific narrowed leaf
-paths; ``node_merge.py`` imports ``narrowing_paths`` from here to expand its recorded
-assign drops.
+markers. ``narrowing_paths`` reports the dotted paths where assigning ``override`` over
+``base`` would drop entries, and ``would_assignment_narrow`` is its boolean form. They are
+consumed by ``node_merge`` (path expansion) and the mngr ``--setting`` / template guard.
 """
 
 from typing import Any
 
-from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import is_static_marker
 
 
@@ -64,34 +60,4 @@ def narrowing_paths(base_value: Any, override_value: Any, prefix: str) -> list[s
     return sum(
         (narrowing_paths(sub_base, override_value[key], f"{prefix}.{key}") for key, sub_base in base_value.items()),
         [],
-    )
-
-
-def extend_aggregate_leaf(current: Any, extend_payload: Any, field_path: str) -> Any:
-    """Extend a non-dict aggregate leaf (``current``) by ``extend_payload`` and return it.
-
-    The shape-checked leaf branches shared by both ``apply_extend`` engines (this module's
-    plain-dict resolver and ``node_merge.py``'s node algebra): a list/tuple concatenates, a
-    set/frozenset unions, and a scalar target is an error. The caller handles the
-    ``current is None`` and dict/``Patch`` cases before reaching here.
-    """
-    if isinstance(current, (list, tuple)):
-        if not isinstance(extend_payload, (list, tuple)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
-                f"got: {type(extend_payload).__name__}"
-            )
-        merged = list(current) + list(extend_payload)
-        return tuple(merged) if isinstance(current, tuple) else merged
-    if isinstance(current, (set, frozenset)):
-        if not isinstance(extend_payload, (list, tuple, set, frozenset)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (set) requires a JSON array value; "
-                f"got: {type(extend_payload).__name__}"
-            )
-        merged_set = set(current) | set(extend_payload)
-        return frozenset(merged_set) if isinstance(current, frozenset) else merged_set
-    raise OverlayError(
-        f"__extend on field '{field_path}' is not valid: target field is a scalar "
-        f"({type(current).__name__}); use bare assignment instead."
     )

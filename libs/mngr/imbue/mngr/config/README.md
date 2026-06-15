@@ -137,7 +137,7 @@ merge: `merge_models_via_overlay_with_narrowings` returns every narrowing path i
 finds, and the loader (`_collect_narrowing`) attributes each to the layer that set
 the dropped value. There is no separate model-walker.
 
-The overlay's `narrowing_paths` does the detection (in `imbue.overlay.merge`):
+The overlay's `narrowing_paths` does the detection (in `imbue.overlay.narrowing`):
 
 - An override that is a superset, a no-op, or a `Static*` atomic aggregate does **not**
   narrow. A `ScalarTuple` (a string-shaped TOML value coerced to a tuple, e.g. a

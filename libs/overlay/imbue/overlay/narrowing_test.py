@@ -6,8 +6,8 @@ from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import StaticDict
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
-from imbue.overlay.merge import narrowing_paths
-from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.narrowing import narrowing_paths
+from imbue.overlay.narrowing import would_assignment_narrow
 
 # =============================================================================
 # would_assignment_narrow -- value-level narrowing predicate

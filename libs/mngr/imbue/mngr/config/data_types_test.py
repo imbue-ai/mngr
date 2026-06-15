@@ -41,7 +41,7 @@ from imbue.mngr.utils.logging import LoggingConfig
 from imbue.overlay.markers import ScalarTuple
 from imbue.overlay.markers import StaticList
 from imbue.overlay.markers import StaticTuple
-from imbue.overlay.merge import would_assignment_narrow
+from imbue.overlay.narrowing import would_assignment_narrow
 
 
 def _is_settings_patch_rooted(

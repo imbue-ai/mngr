@@ -374,7 +374,7 @@ def _assigned_paths(parsed_layer: MngrConfig) -> list[str]:
     Derived from the layer's sparse dump (``exclude_unset=True``, ``serialize_as_any=True``)
     -- the exact dump the merge lifts to compute narrowings -- so a narrowing path the
     merge surfaces (which may be a field prefix for a whole-aggregate replacement or a
-    deep leaf for a same-keys nested drop; see ``overlay.merge.narrowing_paths``) is
+    deep leaf for a same-keys nested drop; see ``overlay.narrowing.narrowing_paths``) is
     always one of these paths. Recording every node and leaf, rather than only leaves,
     is what lets a prefix-level narrowing path find its owner.
     """

@@ -1,9 +1,9 @@
 """The typed-node merge algebra: lift, combine, finalize, and the public API.
 
-This is the self-contained typed-node engine, and the single extend algebra. ``merge.py``
-holds only the leaf-extend primitive (``extend_aggregate_leaf``) and the value-level
-narrowing predicates (``would_assignment_narrow`` / ``narrowing_paths``); this module
-imports both from there and owns its own ``apply_extend`` / ``combine_extend_payloads``.
+This is the self-contained typed-node engine, and the single extend algebra. It owns the
+leaf-extend primitive (``extend_aggregate_leaf``) alongside its own ``apply_extend`` /
+``combine_extend_payloads``, and imports the value-level narrowing predicate
+(``narrowing_paths``) from ``narrowing.py`` to expand its recorded assign drops.
 ``extend_plain_value`` is the mngr-boundary adapter that lifts a plain resolved value into
 this engine so the suffix-keyed-dict consumers (``key_resolver`` / ``common_opts``) share
 the one extend algebra rather than a parallel plain-dict recursion.
@@ -31,8 +31,7 @@ from typing import Any
 from imbue.overlay.errors import NarrowingError
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import is_static_marker
-from imbue.overlay.merge import extend_aggregate_leaf
-from imbue.overlay.merge import narrowing_paths
+from imbue.overlay.narrowing import narrowing_paths
 from imbue.overlay.nodes import Assign
 from imbue.overlay.nodes import Default
 from imbue.overlay.nodes import Extend
@@ -246,6 +245,35 @@ def combine_extend_payloads(
     raise OverlayError(
         f"Cannot combine __extend values for field '{field_path}': incompatible shapes "
         f"({type(lower_payload).__name__} and {type(higher_payload).__name__})."
+    )
+
+
+def extend_aggregate_leaf(current: Any, extend_payload: Any, field_path: str) -> Any:
+    """Extend a non-dict aggregate leaf (``current``) by ``extend_payload`` and return it.
+
+    The shape-checked leaf branch of the extend algebra: a list/tuple concatenates, a
+    set/frozenset unions, and a scalar target is an error. ``apply_extend`` handles the
+    ``current is None`` and dict/``Patch`` cases before reaching here.
+    """
+    if isinstance(current, (list, tuple)):
+        if not isinstance(extend_payload, (list, tuple)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged = list(current) + list(extend_payload)
+        return tuple(merged) if isinstance(current, tuple) else merged
+    if isinstance(current, (set, frozenset)):
+        if not isinstance(extend_payload, (list, tuple, set, frozenset)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (set) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged_set = set(current) | set(extend_payload)
+        return frozenset(merged_set) if isinstance(current, frozenset) else merged_set
+    raise OverlayError(
+        f"__extend on field '{field_path}' is not valid: target field is a scalar "
+        f"({type(current).__name__}); use bare assignment instead."
     )
 
 

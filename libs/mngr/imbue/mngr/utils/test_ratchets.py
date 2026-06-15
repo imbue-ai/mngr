@@ -17,12 +17,7 @@ pytestmark = pytest.mark.xdist_group(name="ratchets")
 
 
 def test_prevent_todos() -> None:
-    # The 1 violation is in libs/mngr/imbue/mngr/e2e/tutorial/test_git.py inside
-    # an e2e.write_tutorial_block(\"\"\"...\"\"\") triple-quoted string -- it is a
-    # verbatim quote of a "# TODO: ..." line in mega_tutorial.sh that the
-    # tutorial_matcher requires to appear in the test body, not a TODO we
-    # added to the codebase. See PR #1806.
-    rc.check_todos(_DIR, snapshot(1))
+    rc.check_todos(_DIR, snapshot(0))
 
 
 def test_prevent_exec() -> None:
@@ -104,7 +99,7 @@ def test_prevent_getattr() -> None:
     # (HOST_PROVISIONING_FIELD_MAP). Both are data-driven traversals where
     # the attribute name only exists in the map; static field access is not
     # possible.
-    rc.check_getattr(_DIR, snapshot(11))
+    rc.check_getattr(_DIR, snapshot(9))
 
 
 def test_prevent_setattr() -> None:
