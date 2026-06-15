@@ -46,6 +46,7 @@ class _PiReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = True
     asserts_usage = True
+    native_session_preserved_relpaths = ("plugin/pi_coding/sessions",)
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("pi") is None or not os.environ.get("ANTHROPIC_API_KEY"):

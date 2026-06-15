@@ -78,6 +78,7 @@ class _AntigravityReleaseProfile(AgentReleaseProfile):
     observes_running_marker = False
     forces_tool_call = False
     asserts_usage = False
+    native_session_preserved_relpaths = ("plugin/antigravity/home/.gemini/antigravity-cli/conversations",)
 
     def unavailable_reason(self) -> str | None:
         if shutil.which("agy") is None or not (_REAL_GEMINI / "oauth_creds.json").exists():

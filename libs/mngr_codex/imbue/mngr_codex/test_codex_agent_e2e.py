@@ -73,6 +73,7 @@ class _CodexReleaseProfile(AgentReleaseProfile):
     observes_running_marker = True
     forces_tool_call = False
     asserts_usage = False
+    native_session_preserved_relpaths = ("plugin/codex/home/sessions",)
 
     def unavailable_reason(self) -> str | None:
         if _CODEX_BIN is None or _MNGR_BIN is None or not _REAL_AUTH.exists():

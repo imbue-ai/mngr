@@ -5,3 +5,5 @@ OpenCode agents now preserve their transcripts on destroy, matching the claude p
 - Works for both online destroys and offline host destruction (where the agent state is read off the host's persisted volume).
 
 - The opencode release lifecycle test now asserts the transcripts are actually preserved on destroy (previously destroy was bare cleanup), so the feature is covered end-to-end against the real `opencode` binary.
+
+- OpenCode's native resumable session store (the SQLite `opencode.db` plus its `-wal`/`-shm` write-ahead-log sidecars, and `storage/`) is now also preserved on destroy, targeting those specific paths so the session can be resumed/adopted; the sibling `auth.json` (a symlink to shared credentials) and `log/` are deliberately excluded. The WAL sidecars are copied alongside the db so recent (not-yet-checkpointed) turns are not lost.

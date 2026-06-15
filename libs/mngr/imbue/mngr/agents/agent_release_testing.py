@@ -99,6 +99,12 @@ class AgentReleaseProfile(abc.ABC):
     # set, the arc asserts the transcripts actually landed there after destroy. A
     # profile whose agent disables preservation sets this False to skip that check.
     preserves_on_destroy: bool = True
+    # Paths (relative to the agent state dir, mirrored under the preserved dir) of the
+    # agent's *native* resumable session store -- the files `preserve_on_destroy` copies
+    # in addition to the transcripts (e.g. codex's `plugin/codex/home/sessions`). The arc
+    # asserts each exists and is non-empty after destroy. Empty when the agent has no
+    # native store worth preserving. Only checked when ``preserves_on_destroy`` is set.
+    native_session_preserved_relpaths: Sequence[str] = ()
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -209,15 +215,24 @@ def _preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
     return matches[0]
 
 
-def _assert_transcripts_preserved(host_dir: Path, agent_name: str, subdir: str, secret: str) -> None:
-    """Assert destroy preserved the agent's raw + common transcripts to the local preserved/ dir.
+def _assert_transcripts_preserved(
+    host_dir: Path, agent_name: str, subdir: str, secret: str, native_session_relpaths: Sequence[str]
+) -> None:
+    """Assert destroy preserved the agent's transcripts + native session store to preserved/.
 
     The destroy that triggers this logs preservation failures as warnings and does not
     abort, so without this assertion a broken preservation path passes silently. Keying
     on the seeded ``secret`` proves real transcript *content* (not just an empty tree)
     survived to the preserved location. Both the common transcript (canonical, what the
     arc reads from the live state dir) and the raw transcript directory
-    (``build_transcript_preserved_items``'s other half) are checked.
+    (``build_transcript_preserved_items``'s other half) are checked, plus each
+    ``native_session_relpaths`` entry (the agent's own resumable session store).
+
+    FIXME(adopt-session): once `mngr create --adopt-session` is implemented for these
+    agents (only claude has it today), extend this arc to actually resume from the
+    preserved native store -- create a fresh agent adopting the preserved session and
+    assert it recalls the pre-destroy secret -- rather than only asserting the files
+    landed on disk. Until then this proves the bytes are preserved, not that they resume.
     """
     preserved_dir = _preserved_agent_dir(host_dir, agent_name)
     common = preserved_dir / "events" / subdir / "common_transcript" / "events.jsonl"
@@ -232,6 +247,13 @@ def _assert_transcripts_preserved(host_dir: Path, agent_name: str, subdir: str, 
     assert raw_dir.is_dir() and any(raw_dir.iterdir()), (
         f"raw transcript dir not preserved (or empty) at {raw_dir}; preserved tree: {list(preserved_dir.rglob('*'))}"
     )
+    for relpath in native_session_relpaths:
+        native = preserved_dir / relpath
+        non_empty = (native.is_file() and native.stat().st_size > 0) or (native.is_dir() and any(native.iterdir()))
+        assert non_empty, (
+            f"native session store not preserved (or empty) at {native}; "
+            f"preserved tree: {list(preserved_dir.rglob('*'))}"
+        )
 
 
 def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) -> None:
@@ -339,7 +361,9 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
         assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
         destroyed = True
         if profile.preserves_on_destroy:
-            _assert_transcripts_preserved(host_dir, agent_name, subdir, secret)
+            _assert_transcripts_preserved(
+                host_dir, agent_name, subdir, secret, profile.native_session_preserved_relpaths
+            )
     finally:
         try:
             if not destroyed:
