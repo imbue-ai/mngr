@@ -250,7 +250,11 @@ class AzureVpsClient(VpsClientInterface):
     _cached_resource_client: Any = PrivateAttr(default=None)
 
     # =========================================================================
-    # Lazily-built management clients (overridden in tests to inject fakes)
+    # Management clients
+    #
+    # Built lazily and cached on first use. Defined as methods (not inlined) so
+    # the test-only subclass in testing.py can override them to inject fakes --
+    # the same seam as the aws/gcp provider clients.
     # =========================================================================
 
     def _compute(self) -> Any:
@@ -857,18 +861,17 @@ class AzureVpsClient(VpsClientInterface):
         return [instance for instance in instances if wanted in instance["tags"]]
 
     def list_mngr_managed_vms(self) -> list[dict[str, Any]]:
-        """List VMs in the resource group carrying any ``mngr-provider`` tag.
+        """List VMs in the resource group tagged ``managed-by=mngr``.
 
-        Filters by tag-*key* presence (any value), so it spans every mngr
-        provider config bound to this resource group, not just one provider name.
-        Used by ``mngr azure cleanup`` to refuse deleting the shared resource
-        group while any mngr-managed agent still exists.
+        Filters on the single decisive ownership tag every mngr-created VM carries
+        (the same ``managed-by=mngr`` tag ``delete_managed_resource_group`` uses to
+        prove it owns the group), so it spans every mngr provider config bound to
+        this resource group regardless of provider name. Used by ``mngr azure
+        cleanup`` to refuse deleting the shared resource group while any
+        mngr-managed agent still exists.
         """
-        return [
-            instance
-            for instance in self._list_vms_with_ips()
-            if any(tag.startswith("mngr-provider=") for tag in instance["tags"])
-        ]
+        managed_by_tag = f"{AZURE_MANAGED_BY_TAG_KEY}={AZURE_MANAGED_BY_TAG_VALUE}"
+        return [instance for instance in self._list_vms_with_ips() if managed_by_tag in instance["tags"]]
 
     def delete_managed_resource_group(self) -> str | None:
         """Delete the mngr-owned resource group (and everything in it). Returns its name.

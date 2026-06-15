@@ -485,14 +485,16 @@ def test_list_instances_empty_when_rg_missing() -> None:
 
 
 def test_list_mngr_managed_vms_spans_provider_names() -> None:
+    """Returns every managed-by=mngr VM across provider names, excluding untagged VMs."""
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure-west"}),
-        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr"}),
+        SimpleNamespace(name="vm-a", tags={"managed-by": "mngr", "mngr-provider": "azure-west"}),
+        SimpleNamespace(name="vm-b", tags={"managed-by": "mngr", "mngr-provider": "azure-east"}),
+        SimpleNamespace(name="vm-c", tags={"team": "infra"}),
     ]
     client = _make_client(compute=compute)
     managed = client.list_mngr_managed_vms()
-    assert [vm["id"] for vm in managed] == ["vm-a"]
+    assert sorted(vm["id"] for vm in managed) == ["vm-a", "vm-b"]
 
 
 # =========================================================================
