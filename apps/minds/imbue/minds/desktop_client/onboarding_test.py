@@ -54,7 +54,7 @@ def test_expected_duration_per_launch_mode() -> None:
     assert expected_creation_duration_seconds(LaunchMode.DOCKER) == 30.0
     assert expected_creation_duration_seconds(LaunchMode.IMBUE_CLOUD) == 30.0
     assert expected_creation_duration_seconds(LaunchMode.LIMA) == 600.0
-    assert expected_creation_duration_seconds(LaunchMode.CLOUD) == 300.0
+    assert expected_creation_duration_seconds(LaunchMode.VULTR) == 300.0
 
 
 def test_expected_duration_covers_every_launch_mode() -> None:
