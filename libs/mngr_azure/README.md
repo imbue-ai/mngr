@@ -169,9 +169,10 @@ size has no capacity in the region right now; pick another size with
 - **SSH keys** are injected inline at VM create (`os_profile.linux_configuration.ssh`);
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
-- **Image:** Ubuntu 24.04 LTS by default (runs cloud-init with the Azure
-  datasource, so the shared `mngr_vps_docker` bootstrap works unchanged).
-  Configurable via `image_publisher` / `image_offer` / `image_sku` / `image_version`.
+- **Image:** Debian 12 by default (matching the other mngr providers; runs
+  cloud-init with the Azure datasource, so the shared `mngr_vps_docker` bootstrap
+  works unchanged). Configurable via `image_publisher` / `image_offer` /
+  `image_sku` / `image_version`.
 - **Snapshots** are managed-disk snapshots of the VM's OS disk.
 - **Spot** (`--azure-spot`): `priority=Spot`, `eviction_policy=Delete`,
   `max_price=-1` — evicted only on capacity, and deleted (not stopped) on

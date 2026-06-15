@@ -418,7 +418,7 @@ def test_api_client_list_instances_does_not_error(azure_release_client: AzureVps
 
 
 def test_default_image_resolves(azure_release_subscription_id: str) -> None:
-    """The default Ubuntu marketplace image must still resolve via the Compute API.
+    """The default Debian marketplace image must still resolve via the Compute API.
 
     Marketplace SKUs occasionally change names; a periodic release-test run is
     the cheapest way to catch a stale default before it breaks every create.

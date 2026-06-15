@@ -31,6 +31,10 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
+from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
+from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
+from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
+from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsDockerError
@@ -218,10 +222,10 @@ class AzureVpsClient(VpsClientInterface):
     vnet_address_prefix: str = Field(default="10.0.0.0/16", description="vnet CIDR address space")
     subnet_address_prefix: str = Field(default="10.0.0.0/24", description="subnet CIDR address range")
     vm_size: str = Field(default="Standard_B2s", description="Default VM size for instances created via this client")
-    image_publisher: str = Field(default="Canonical", description="Marketplace image publisher")
-    image_offer: str = Field(default="ubuntu-24_04-lts", description="Marketplace image offer")
-    image_sku: str = Field(default="server", description="Marketplace image SKU")
-    image_version: str = Field(default="latest", description="Marketplace image version")
+    image_publisher: str = Field(default=DEFAULT_IMAGE_PUBLISHER, description="Marketplace image publisher")
+    image_offer: str = Field(default=DEFAULT_IMAGE_OFFER, description="Marketplace image offer")
+    image_sku: str = Field(default=DEFAULT_IMAGE_SKU, description="Marketplace image SKU")
+    image_version: str = Field(default=DEFAULT_IMAGE_VERSION, description="Marketplace image version")
     admin_username: str = Field(default="azureuser", description="Admin user the SSH public key is attached to")
     os_disk_size_gb: int = Field(default=30, description="OS managed-disk size in GB")
     os_disk_type: str = Field(default="StandardSSD_LRS", description="OS managed-disk storage account type")
@@ -656,8 +660,8 @@ class AzureVpsClient(VpsClientInterface):
                         ]
                     ),
                 ),
-                # Azure requires custom_data base64-encoded; the Ubuntu cloud-init
-                # Azure datasource decodes it and runs it as user-data on first boot.
+                # Azure requires custom_data base64-encoded; the cloud-init Azure
+                # datasource decodes it and runs it as user-data on first boot.
                 custom_data=base64.b64encode(user_data.encode("utf-8")).decode("ascii"),
             ),
             network_profile=compute_models.NetworkProfile(

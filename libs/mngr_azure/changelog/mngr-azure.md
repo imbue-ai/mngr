@@ -18,7 +18,7 @@
 
 - **SSH keys** are injected inline at VM create (`os_profile.linux_configuration.ssh`); Azure has no per-key resource, so `upload/list/delete_ssh_key` use an in-memory map (like `mngr_gcp`). The shared cloud-init also forwards the key into root's `authorized_keys`, so mngr's root SSH works regardless of the admin user. Cloud-init `custom_data` is base64-encoded as Azure requires.
 
-- **Image**: Ubuntu 24.04 LTS by default (`Canonical:ubuntu-24_04-lts:server`), which runs cloud-init with the Azure datasource so the shared bootstrap works unchanged. Configurable via `image_publisher` / `image_offer` / `image_sku` / `image_version`. **Default VM size** `Standard_B2s` (B-series is the family most likely to have nonzero quota on a fresh pay-as-you-go subscription).
+- **Image**: Debian 12 by default (`Debian:debian-12:12-gen2`), matching the Debian-12 default of the other mngr providers (aws / gcp / ovh / vultr). It runs cloud-init with the Azure datasource so the shared bootstrap works unchanged. Configurable via `image_publisher` / `image_offer` / `image_sku` / `image_version`. **Default VM size** `Standard_B2s` (B-series is the family most likely to have nonzero quota on a fresh pay-as-you-go subscription).
 
 - **Snapshots** are managed-disk snapshots of the VM's OS disk (`create_option=Copy`).
 

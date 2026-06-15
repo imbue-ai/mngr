@@ -19,15 +19,16 @@ from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 AZURE_MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
 AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
-# Default marketplace image: Ubuntu 24.04 LTS (gen2). Ubuntu runs cloud-init
-# with the Azure datasource, so the shared ``mngr_vps_docker`` cloud-init flow
-# (Docker install, SSH host-key injection, mngr bootstrap) works unchanged. The
-# four-part publisher/offer/sku/version URN is configurable for users who want a
-# different distro or a custom image; ``test_release_azure`` validates that the
-# default still resolves.
-DEFAULT_IMAGE_PUBLISHER: Final[str] = "Canonical"
-DEFAULT_IMAGE_OFFER: Final[str] = "ubuntu-24_04-lts"
-DEFAULT_IMAGE_SKU: Final[str] = "server"
+# Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
+# the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
+# cloud-init with the Azure datasource, so the shared ``mngr_vps_docker``
+# cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
+# unchanged. The four-part publisher/offer/sku/version URN is configurable for
+# users who want a different distro or a custom image; ``test_release_azure``
+# validates that the default still resolves.
+DEFAULT_IMAGE_PUBLISHER: Final[str] = "Debian"
+DEFAULT_IMAGE_OFFER: Final[str] = "debian-12"
+DEFAULT_IMAGE_SKU: Final[str] = "12-gen2"
 DEFAULT_IMAGE_VERSION: Final[str] = "latest"
 
 
