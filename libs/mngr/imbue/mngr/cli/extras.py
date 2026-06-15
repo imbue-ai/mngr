@@ -13,9 +13,7 @@ import click
 from loguru import logger
 from pydantic import Field
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.errors import ProcessError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.common_opts import add_common_options
@@ -38,6 +36,7 @@ from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
 from imbue.mngr.utils.deps import CLAUDE
+from imbue.mngr.utils.deps import SUBPROCESS_ERRORS
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
@@ -211,13 +210,6 @@ class ClaudeCodePlugin(FrozenModel):
     )
 
 
-# ConcurrencyGroup wraps a synchronous subprocess failure (or spawn error)
-# from inside its `with` block in a ConcurrencyExceptionGroup before
-# re-raising, so a bare `except ProcessError` would miss it. Mirror the
-# tuple used by imbue.mngr.utils.deps.
-_SUBPROCESS_ERRORS: Final[tuple[type[Exception], ...]] = (OSError, ProcessError, ConcurrencyExceptionGroup)
-
-
 # The Claude Code plugins mngr knows how to install. Each lives in its own
 # GitHub repo, published as a Claude Code plugin marketplace.
 _CLAUDE_CODE_PLUGINS: Final[tuple[ClaudeCodePlugin, ...]] = (
@@ -250,7 +242,7 @@ def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
     try:
         with ConcurrencyGroup(name="extras-claude-check") as cg:
             result = cg.run_process_to_completion(["claude", "plugin", "list", "--json"], is_checked_after=False)
-    except _SUBPROCESS_ERRORS:
+    except SUBPROCESS_ERRORS:
         return True, not_installed
 
     if result.returncode != 0:
@@ -290,7 +282,7 @@ def _install_one_claude_plugin(plugin: ClaudeCodePlugin) -> bool:
                     detail = result.stderr.strip() or result.stdout.strip()
                     logger.warning("Failed to install {}. {}", plugin.name, detail)
                     return False
-    except _SUBPROCESS_ERRORS as e:
+    except SUBPROCESS_ERRORS as e:
         logger.warning("Failed to install {}. {}", plugin.name, str(e))
         return False
 
