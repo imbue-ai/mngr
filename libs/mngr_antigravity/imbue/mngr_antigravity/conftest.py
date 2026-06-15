@@ -13,7 +13,7 @@ def isolated_home(tmp_path: Path) -> Path:
 
     ``$HOME`` is already redirected to ``tmp_path`` for every test by mngr's
     autouse ``setup_test_mngr_env`` fixture (pulled in via the package
-    ``conftest``'s ``pytest_plugins``), so this fixture only adds the
+    ``conftest``'s ``register_plugin_test_fixtures``), so this fixture only adds the
     antigravity-specific piece: the shared oauth token that ``provision`` reads
     and symlinks into each per-agent home. Tests that want a *clean* (no shared
     token) home simply don't request this fixture and use ``tmp_path`` directly.

@@ -4,6 +4,120 @@ Full, unedited changelog entries consolidated nightly from individual files in `
 
 For a concise summary, see [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-06-13
+
+Reworked the outer-side btrfs snapshot helper (`snapshot_helper.sh`) so vps-docker backups capture data on every cycle instead of only the first.
+
+Previously the helper snapshotted into a single fixed path (`snapshots/current`), deleting and recreating it each cycle. Under gVisor (runsc) the container reads that path through the gofer, which caches a handle to the first subvolume it opened -- so after the first delete+recreate every snapshot read came back empty and restic backed up nothing.
+
+The helper now creates each snapshot at a unique, caller-named path (`snapshots/<name>`), fails rather than overwriting on a name collision, and deletes old snapshots by name on request. Cleanup targets are validated to be a single path component (no `/` or `..`) so a malformed request can never escape the snapshots directory or touch the live subvolume. The inner `host_backup` service drives the new naming and garbage-collects old snapshots down to a retained count.
+
+## 2026-06-12
+
+Fixed `builder = "DEPOT"` builds, which were broken for all VPS backends (aws/vultr/ovh).
+The depot CLI installs to `$HOME/.depot/bin/depot`, which is not on the non-interactive
+shell's PATH, but `build_image_on_outer` invoked it by bare name (`depot build ...`),
+failing with `bash: line 1: depot: command not found`. The CLI is now resolved at run
+time: a `depot` already on PATH is preferred (so an existing install is respected),
+otherwise it falls back to the installer's off-PATH default `$HOME/.depot/bin/depot`,
+installing there only when nothing is found. The same resolved path drives both the
+idempotent install check and the `depot build` invocation.
+
+A second bug in the same path also blocked depot: `DEPOT_TOKEN` was forwarded via the
+streaming SSH command's `env`, but env forwarding for compound commands was broken in
+`mngr` core (see the `mngr` changelog) so the token never reached `depot build`
+("missing API token"). Both are now fixed.
+
+## AWS provider support: shared VPS-Docker base refactor
+
+- **Parallel-SSH host-record discovery** lifted from `VultrProvider` into `VpsDockerProvider`. Subclasses now implement two small hooks: `_list_provider_vps_hostnames()` and `_fetch_provider_instances()`. The cache scaffolding for instance listings (`_instances_cache` field, `reset_caches` integration) lives in one place.
+- **New `_validate_provider_args_for_create` hook** on `VpsDockerProvider` (default no-op), called by `_provision_vps` immediately before `create_instance`. AWS uses this for its pytest-time `auto_shutdown_minutes` guard.
+- **`wait_for_instance_active` lifted onto `VpsClientInterface`** as a default method with a `slow_provisioning_warning_threshold_seconds` field for per-provider tuning. AWS / Vultr no longer duplicate the polling loop.
+- **`VpsClientInterface.create_instance` `tags` parameter** widened to `Mapping[str, str]` for read-only-friendly call sites.
+- **`os_id` removed from the shared interface**: `VpsClientInterface.create_instance` no longer carries the Vultr-specific image-selection int. `VpsHostConfig` / `ParsedVpsBuildOptions` / `VpsDockerProviderConfig` all lose the field. The `--vps-os=` / `--vps-image=` / `--vps-ami=` build args produce a dedicated error pointing at the per-provider config field that replaces them (`default_os_id` / `default_image_name` / `default_ami_id`).
+- **Build-args prefix moved per-provider**: `--vps-region=` / `--vps-plan=` are gone. Each provider now uses its native prefix: `--aws-region=` / `--aws-instance-type=`, `--vultr-region=` / `--vultr-plan=`, `--ovh-datacenter=` (alias `--ovh-region=`) / `--ovh-plan=`. The dropped `--vps-*` prefix raises a migration error with the new name. `--git-depth=` stays shared (it's about the local mngr build context). The shared parser is now `parse_vps_build_args` (public) and takes `provider_prefix` + `plan_arg_name`; each provider overrides `_parse_build_args`. `default_plan` is dropped from `VpsDockerProviderConfig` (each provider's config carries its own native field: Vultr/OVH `default_plan`, AWS `default_instance_type`). `vps_boot_timeout` renamed to `instance_boot_timeout` to drop leaked "VPS" terminology now that hyperscalers (AWS, future GCP/Azure) are in scope.
+- **New public `MinimalVpsDockerProvider`** in `mngr_vps_docker.instance`. Pairs with a `vps_client` whose provisioning calls raise (e.g. an `ExternallyManagedVpsClient` stub): provisioning is managed elsewhere and this provider only ever runs the post-provisioning host-setup machinery. Its `_parse_build_args` extracts `--git-depth=N` and forwards everything else to docker; the legacy `--vps-*` prefix is rejected with a migration error. Used by `mngr_imbue_cloud`'s slow path; available for any other caller that needs the same shape.
+- **New composable parser helpers**: the shared `parse_vps_build_args` monolith is rebuilt on top of small composable pieces (`extract_single_value_arg`, `extract_git_depth`, `extract_presence_flag`, `raise_if_vps_migration_arg`, `raise_if_unknown_provider_arg`). `parse_vps_build_args` stays as a convenience for the region+plan+git-depth shape; providers with extra knobs (currently only AWS, which adds `--aws-ami=` and the presence-only `--aws-spot`) compose the lower-level helpers directly. `extract_presence_flag` covers boolean opt-in flags and rejects the value-bearing form (e.g. `--aws-spot=true`) so a likely typo fails fast. `VpsDockerProvider._parse_build_args` is now a real `@abstractmethod` (`ProviderInstanceInterface` already inherits `ABC`); the previous "raises a `must override` `MngrError`" pattern surfaced the contract only at runtime.
+- **New `_create_vps_instance` hook** on `VpsDockerProvider`. The base `_provision_vps` calls it instead of `self.vps_client.create_instance(...)` directly. Default impl mirrors the previous call; AWS overrides to thread `ami_id_override` from `ParsedAwsBuildOptions` through to `AwsVpsClient.create_instance`'s new optional kwarg. Lets providers add per-call knobs without widening the shared `VpsClientInterface`. `_provision_vps` now takes `parsed: ParsedVpsBuildOptions` instead of pre-extracted `region` / `plan` (OVH's override updated accordingly).
+- **New `auto_shutdown_minutes` field** on `VpsDockerProviderConfig`. Cloud-init schedules `shutdown -P +N` when set; on AWS, paired with `InstanceInitiatedShutdownBehavior=terminate`, the instance auto-terminates from the inside.
+- `is_for_host_creation` flag removed; replaced with the default-no-op `bootstrap_for_host_creation` hook on `ProviderBackendInterface`. No behavior change for VPS-Docker subclasses.
+- README updated and an out-of-place "OS image selection is provider-specific" block removed (it tried to document the dropped `--vps-os=` arg).
+- **Cloud-init sshd bump uses a drop-in + reload instead of restart**. `MaxSessions` / `MaxStartups` is now written via cloud-init `write_files` to `/etc/ssh/sshd_config.d/99-mngr.conf` and applied with `systemctl reload ssh` (SIGHUP, no connection drop), instead of an in-place `sshd_config` rewrite + `systemctl restart`. The restart was tearing down in-flight SSH connections and hanging the provisioning poll loop on pyinfra's 10s per-command read timeout, which fired the EC2 lifecycle test failure.
+- **`_wait_for_cloud_init` swallows transient `HostConnectionError` per poll** so the loop survives sshd reload windows; the outer `timeout_seconds` remains the hard wall. The body was extracted to a module-level `_wait_for_cloud_init_marker` helper with injectable clock / sleeper for unit testing.
+- **Cloud-init installs Docker via the Debian `docker.io` package instead of `curl get.docker.com | sh`**. The packaged install runs inline with cloud-init's other apt packages (ca-certificates, curl, rsync) and finishes in ~5-15s on a `t3.small`, vs ~60-120s for the upstream installer script (which fetches the full docker-ce stack and configures Docker's own apt repo).
+- After merging `main` (which raised `ty` to the stricter 0.0.39), the discovery test's `_DummyOuter` stand-in is now `cast` to `OuterHostInterface` at the `yield` site, matching the sibling vps_docker tests. Test-only.
+- **`builder=DEPOT` without `DEPOT_TOKEN` now fails fast, before provisioning.** Previously a DEPOT build whose `DEPOT_TOKEN` was unset failed only at the build step -- after a billable VPS had already been provisioned and cloud-init had run. `create_host` now runs an `ensure_depot_token_available(...)` preflight up front (only when the create will actually build, i.e. non-empty docker build args; a plain image pull needs no token), raising the same actionable error before any instance is created. The build-time check remains as the last line of defense.
+
+- **`auto_shutdown_minutes` renamed to `auto_shutdown_seconds`** on `VpsDockerProviderConfig`, for unit consistency with the rest of the config (everything else is seconds) and to sit alongside the existing seconds-based `default_idle_timeout`. It remains a hard max-lifetime cap (distinct from the activity-based idle timeout). cloud-init rounds the value up to whole minutes for `shutdown -P +N` (the granularity `shutdown` accepts), with a floor of 1 minute for any positive value. **Action required:** any `settings.toml` using `auto_shutdown_minutes` must switch to `auto_shutdown_seconds` and multiply by 60.
+
+- `VpsClientInterface.wait_for_instance_active` now logs at debug level (instead of silently `pass`-ing) when an instance reports ACTIVE but has no IP yet and the poll is retried, so a stuck provision is traceable without spamming the happy path.
+
+Fixed `mngr create` against the VPS Docker backends (aws/vultr/ovh) failing during the
+post-build git seed with `remote rejected ... refusing to update checked out branch` when
+the build context is a primary git checkout (`.git` is a directory) that has linked
+worktrees -- e.g. running `mngr create -t aws` from a main checkout that keeps a worktree
+per branch.
+
+The remote-`docker build` flow now clones *any* local git context into a temp dir before
+upload (previously only a linked worktree, whose `.git` is a gitlink file, or an explicit
+`--git-depth`, triggered the clone). A fresh clone's `.git` is self-contained and carries
+no `.git/worktrees/` admin, so it no longer baked the operator's other branches into the
+image as "checked out" -- which is what made the mirror seed push refuse them. The
+operator's working tree (including uncommitted edits) is still overlaid onto the clone, so
+in-flight changes continue to reach the build.
+
+## 2026-06-11
+
+Test-quality cleanup of the mngr_vps_docker unit tests (no production code changed):
+
+- `instance_test.py`: the two `_emit_docker_build_output` tests now capture log
+  output and assert the BUILD-level line (stripped) is emitted for non-empty
+  input and nothing is emitted for whitespace-only input, instead of only
+  asserting "does not raise". The scattered `_is_retryable_rsync_error` cases
+  were consolidated into a parametrized test covering one representative stderr
+  string for each of the eight retryable connection patterns plus negatives.
+- `_outer_helpers_test.py`: removed the duplicate `_redact_secret_env` /
+  `_is_retryable_rsync_error` tests (now covered once, comprehensively, in
+  `instance_test.py`) and their unused imports.
+- `_snapshot_helper_test.py`: the snapshot_helper.service load test now asserts
+  the resource is non-empty and contains expected systemd directives rather than
+  discarding the result.
+- `cloud_init_test.py`: replaced the loose bag-of-substrings generation checks
+  with a single full `inline_snapshot` of the rendered user_data, so the
+  load-bearing YAML indentation and key placement (the embedded SSH private key
+  in particular) are pinned exactly, plus a companion test that parses the
+  output as YAML and asserts the private key lands at the correct nesting.
+- `host_store_test.py`: `test_list_persisted_agent_data_reads_all_agents_in_one_round_trip`
+  now asserts the read call count does not grow with agent count (2 vs 5) rather
+  than pinning a bare literal, and documents that the call-count assertion
+  deliberately guards the network round-trip budget. Removed two tautological
+  constructor round-trip tests.
+- `config_test.py` / `primitives_test.py`: removed tautological constructor
+  round-trip tests; the remaining default/wire-value contract tests carry a
+  comment marking them deliberate change-detectors.
+- `test_ratchets.py`: tightened the `init_methods_in_non_exception_classes`
+  ratchet from 1 to 0 (the recorded count was stale; actual is 0), and bumped
+  `yaml_usage` to 3 for the cloud-init YAML-parse test above (the ratchet
+  prevents introducing new YAML config, not parsing the cloud-init YAML format
+  we are forced to emit).
+
+## 2026-06-10
+
+Raised the stale coverage floor from 40% to 45% to match the coverage CI already measures (~48%).
+
+## 2026-06-09
+
+Offline hosts produced by this provider are now readable: the offline-host
+construction path (used by both `get_host` for stopped hosts and
+`to_offline_host`) returns an `OfflineHostWithVolume` (which implements the new
+`HostFileReadInterface`) via the shared `make_readable_offline_host` helper.
+This makes a stopped host's files readable through the same interface as an
+online host -- used by Claude session preservation when a host is destroyed
+while offline (the destroy path obtains the host via `get_host`), and available
+to other readers of offline host data. The host's volume is resolved lazily on
+first read, so this adds no per-host probe to host discovery. When no volume is
+available, reads behave as "nothing there".
+
 ## 2026-06-08
 
 Consolidated host-level provisioning into a single source of truth. A new

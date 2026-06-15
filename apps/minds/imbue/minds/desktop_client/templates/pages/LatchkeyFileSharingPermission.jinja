@@ -1,4 +1,4 @@
-{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", mngr_forward_origin #}
+{#def agent_id, request_id, ws_name, rationale, file_path, access, access_human_label, display_name, allowed_roots_json="[]", home_dir="", mngr_forward_origin #}
 {#
   Latchkey file-sharing permission request fragment. Rendered inside the
   inbox modal's right pane. Provides a single hidden checked
@@ -54,6 +54,7 @@
                name="file_path"
                :value="file_path"
                :data-allowed-roots="allowed_roots_json"
+               :data-home-dir="home_dir"
                extra="font-mono text-sm"
                oninput="window.updateApproveState && window.updateApproveState()" />
     {# Shown by the inbox shell only when the field holds a non-empty path

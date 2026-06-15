@@ -95,10 +95,9 @@ def test_discovered_agent_create_time_returns_none_when_missing() -> None:
 
 
 def test_discovered_agent_create_time_returns_datetime_from_string() -> None:
-    """create_time should parse ISO format string from certified_data."""
+    """create_time should parse the full ISO format string from certified_data."""
     ref = _make_discovered_agent({"create_time": "2024-01-15T12:00:00+00:00"})
-    assert ref.create_time is not None
-    assert ref.create_time.year == 2024
+    assert ref.create_time == datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_discovered_agent_create_time_returns_datetime_directly() -> None:
