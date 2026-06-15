@@ -63,8 +63,11 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
+from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -1695,10 +1698,19 @@ class ImbueCloudProvider(BaseProviderInstance):
            ``cleanup_released_hosts.py`` later for VPS-destroy.
         3. Drop local per-host state (ssh keys, known_hosts, cached records).
 
-        Each step is best-effort with respect to the others: a failed wipe
-        still proceeds to release (because a stuck VPS would otherwise leak
-        a paid lease indefinitely), and a failed release still proceeds to
-        local cleanup. Operators see warnings for each partial failure.
+        Best-effort across steps: a failed wipe still proceeds to release
+        (because a stuck VPS would otherwise leak a paid lease indefinitely),
+        and the data wipe is non-gating because the VPS is destroyed wholesale
+        by ``cleanup_released_hosts.py`` after release regardless. A failed
+        release, however, means the paid lease is leaked -- it is recorded as a
+        ``HOST_RESOURCE_REMAINS`` failure and local cleanup is intentionally
+        skipped (removing local SSH keys for a host that was never released
+        would make mngr unable to reach the still-running VPS). Operators see
+        warnings for each partial failure.
+
+        Best-effort: real cleanup failures (resources left behind) are raised
+        as a ``CleanupFailedGroup``; returns normally on full success or benign
+        "already gone" outcomes. See specs/cleanup-error-aggregation.md.
 
         Use ``mngr stop`` (-> ``stop_host``) instead when you intend to
         resume the workspace later on the same VPS -- that path preserves
@@ -1715,14 +1727,29 @@ class ImbueCloudProvider(BaseProviderInstance):
         of the same flow -- it's a no-op for an already-released lease
         and a recovery path if a previous destroy crashed mid-wipe.
         """
-        self._wipe_and_release_pool_host(host)
+        # delete_host returns None per the interface; cleanup failures are surfaced through
+        # destroy_host, not here. GC calls delete_host after the grace period as a recovery
+        # re-run, so a residual leftover-resource failure must not abort the GC sweep -- the
+        # shared flow's CleanupFailedGroup is logged and swallowed.
+        try:
+            self._wipe_and_release_pool_host(host)
+        except CleanupFailedGroup as group:
+            logger.warning("Cleanup left resources behind while deleting host {}: {}", host.id, group)
 
     def _wipe_and_release_pool_host(self, host: HostInterface | HostId) -> None:
         """Shared implementation for ``destroy_host`` and ``delete_host``.
 
         See ``destroy_host`` for the contract. Split out so both entry
         points run identically; both are now terminal for imbue_cloud.
+
+        Raises a ``CleanupFailedGroup`` carrying the real cleanup failures
+        (resources left behind); returns normally otherwise. The wipe step is
+        non-gating (warn-only): the leased VPS is destroyed wholesale by
+        ``cleanup_released_hosts.py`` after the release, so residual data on it
+        is not a leaked resource from mngr's accounting. A failed release leaks
+        the paid lease and is recorded as ``HOST_RESOURCE_REMAINS``.
         """
+        failures: list[CleanupFailure] = []
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
         host_db_id: str | None = None
@@ -1737,6 +1764,8 @@ class ImbueCloudProvider(BaseProviderInstance):
                 host_id,
             )
             self._cleanup_local_host_state(host_id)
+            if failures:
+                raise CleanupFailedGroup.from_failures(failures)
             return
 
         if leased is not None:
@@ -1775,12 +1804,29 @@ class ImbueCloudProvider(BaseProviderInstance):
             token = self._get_access_token(account)
             # release_host raises ImbueCloudConnectorError on failure (transport
             # error or non-2xx, e.g. the synchronous release returning 5xx when
-            # the OVH cancel failed). Let it propagate so the failure is visible
-            # and local state is NOT cleaned up below -- cleaning up here would
-            # make mngr "forget" a host that was never actually released (the
-            # old silent-orphan bug).
-            self.client.release_host(token, host_db_id)
+            # the OVH cancel failed); the idempotent ``already_released`` case is
+            # a 2xx and returns normally, so any exception here means the paid
+            # lease is actually leaked. Record it as HOST_RESOURCE_REMAINS and
+            # return WITHOUT running local cleanup -- cleaning up here would make
+            # mngr "forget" a host that was never actually released (the old
+            # silent-orphan bug) and drop the local SSH keys needed to reach the
+            # still-running VPS.
+            try:
+                self.client.release_host(token, host_db_id)
+            except ImbueCloudConnectorError as exc:
+                logger.warning("Failed to release leased VPS for host {}: {}", host_id, exc)
+                failures.append(
+                    CleanupFailure(
+                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                        message=f"failed to release leased VPS for host {host_id}: {exc}",
+                        host_id=host_id,
+                    )
+                )
+                raise CleanupFailedGroup.from_failures(failures) from exc
         self._cleanup_local_host_state(host_id)
+        if failures:
+            raise CleanupFailedGroup.from_failures(failures)
+        return
 
     def _resolve_host_db_id(
         self,

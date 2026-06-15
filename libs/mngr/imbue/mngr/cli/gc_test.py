@@ -20,6 +20,8 @@ from imbue.mngr.cli.gc import _emit_jsonl_summary
 from imbue.mngr.cli.gc import _format_destroyed_message
 from imbue.mngr.cli.gc import gc
 from imbue.mngr.interfaces.data_types import BuildCacheInfo
+from imbue.mngr.interfaces.data_types import CleanupFailure
+from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import LogFileInfo
 from imbue.mngr.interfaces.data_types import SizeBytes
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -284,9 +286,12 @@ def test_emit_jsonl_summary_handles_none_snapshot_size(capsys: pytest.CaptureFix
 
 
 def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> None:
-    """_emit_jsonl_summary should include errors in output."""
+    """_emit_jsonl_summary should include structured failures and formatted errors in output."""
     result = GcResult()
-    result.errors = ["Error 1", "Error 2"]
+    result.failures = [
+        CleanupFailure(category=CleanupFailureCategory.HOST_RESOURCE_REMAINS, message="Error 1"),
+        CleanupFailure(category=CleanupFailureCategory.OTHER, message="Error 2"),
+    ]
 
     _emit_jsonl_summary(result, dry_run=False)
 
@@ -294,7 +299,9 @@ def test_emit_jsonl_summary_with_errors(capsys: pytest.CaptureFixture[str]) -> N
     output = json.loads(captured.out.strip())
 
     assert output["errors_count"] == 2
-    assert output["errors"] == ["Error 1", "Error 2"]
+    assert output["errors"] == ["[HOST_RESOURCE_REMAINS] Error 1", "[OTHER] Error 2"]
+    assert [f["category"] for f in output["failures"]] == ["HOST_RESOURCE_REMAINS", "OTHER"]
+    assert [f["message"] for f in output["failures"]] == ["Error 1", "Error 2"]
 
 
 # =============================================================================
@@ -491,7 +498,10 @@ def test_emit_human_summary_shows_machine_records_deleted(capsys: pytest.Capture
 def test_emit_human_summary_errors_displayed(capsys: pytest.CaptureFixture[str]) -> None:
     """_emit_human_summary should display errors."""
     result = GcResult()
-    result.errors = ["Error A", "Error B"]
+    result.failures = [
+        CleanupFailure(category=CleanupFailureCategory.LOCAL_STATE_REMAINS, message="Error A"),
+        CleanupFailure(category=CleanupFailureCategory.OTHER, message="Error B"),
+    ]
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()
     assert "Errors:" in captured.out
@@ -508,7 +518,7 @@ def test_emit_human_summary_with_all_resource_types(capsys: pytest.CaptureFixtur
     result.volumes_destroyed = [_create_volume_info()]
     result.logs_destroyed = [_create_log_file_info()]
     result.build_cache_destroyed = [_create_build_cache_info()]
-    result.errors = ["An error occurred"]
+    result.failures = [CleanupFailure(category=CleanupFailureCategory.OTHER, message="An error occurred")]
 
     _emit_human_summary(result, dry_run=False)
     captured = capsys.readouterr()

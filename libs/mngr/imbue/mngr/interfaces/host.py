@@ -619,7 +619,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def destroy_agent(self, agent: AgentInterface) -> None:
-        """Remove an agent and all its associated state from this host."""
+        """Remove an agent and all its associated state from this host.
+
+        Best-effort and aggregate-and-continue: attempts every teardown step and collects
+        every real failure. Returns normally on full success or benign "already gone"
+        outcomes; raises ``CleanupFailedGroup`` if any real resources were left behind.
+        See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
@@ -629,7 +635,13 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
 
     @abstractmethod
     def stop_agents(self, agent_ids: Sequence[AgentId], timeout_seconds: float = 5.0) -> None:
-        """Stop the specified agents gracefully within the given timeout."""
+        """Stop the specified agents gracefully within the given timeout.
+
+        Best-effort and aggregate-and-continue: attempts every step for every agent and
+        collects every real failure. Returns normally on full success or benign "already
+        gone" outcomes; raises ``CleanupFailedGroup`` if any real resources were left
+        behind. See specs/cleanup-error-aggregation.md.
+        """
         ...
 
     @abstractmethod
