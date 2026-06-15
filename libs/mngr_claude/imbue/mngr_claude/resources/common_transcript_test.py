@@ -11,13 +11,16 @@ so tests are fast and deterministic.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 
 # -- Helpers --
@@ -122,10 +125,20 @@ class ScriptRunner:
         log_path.write_text(stub_mngr_log_sh)
         log_path.chmod(0o755)
 
+        # Write the real shared common-transcript lib: the converter sources it
+        # for the convert lock, mirroring Host._ensure_shared_shell_libs.
+        lib_path = self.agent_state_dir / "commands" / "mngr_common_transcript_lib.sh"
+        lib_path.write_text(
+            importlib.resources.files(mngr_resources).joinpath("mngr_common_transcript_lib.sh").read_text()
+        )
+        lib_path.chmod(0o755)
+
         # Standard paths
         self.script_path = Path(__file__).parent / "common_transcript.sh"
         self.input_file = self.agent_state_dir / "logs" / "claude_transcript" / "events.jsonl"
         self.output_file = self.agent_state_dir / "events" / "claude" / "common_transcript" / "events.jsonl"
+        # The mkdir-based mutex the converter takes around its read-modify-write.
+        self.lock_dir = self.agent_state_dir / ".common_transcript_convert.lock"
 
     def write_input(self, lines: list[str]) -> None:
         """Write lines to the input transcript file."""
@@ -148,11 +161,14 @@ class ScriptRunner:
                 events.append(json.loads(line))
         return events
 
-    def run_single_pass(self, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    def run_single_pass(
+        self, timeout: float = 10.0, extra_env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Run the script with --single-pass."""
         env = {
             **os.environ,
             "MNGR_AGENT_STATE_DIR": str(self.agent_state_dir),
+            **(extra_env or {}),
         }
         return subprocess.run(
             ["bash", str(self.script_path), "--single-pass"],
@@ -812,3 +828,70 @@ def test_incremental_conversion(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     assert len(events) == 2
     assert events[0]["content"] == "First"
     assert events[1]["content"] == "Second"
+
+
+def test_held_lock_skips_pass(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A pass that cannot take the convert lock (held by a concurrent pass)
+    skips its conversion rather than racing into duplicate output. Simulated by
+    pre-creating the (fresh) lock dir and giving the pass a short lock timeout."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_assistant_event(uuid4().hex, "2026-01-01T00:00:01Z", text="hi")])
+
+    # Hold the lock with a fresh mtime so the stale-break (>1min) does not fire.
+    runner.lock_dir.mkdir(parents=True)
+
+    result = runner.run_single_pass(extra_env={"MNGR_CONVERT_LOCK_TIMEOUT": "1"})
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    # Lock was held the whole time, so nothing was converted.
+    assert runner.get_output_events() == []
+
+    # Release the lock; the next pass converts normally.
+    runner.lock_dir.rmdir()
+    result = runner.run_single_pass()
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert len(runner.get_output_events()) == 1
+
+
+def test_stale_lock_is_broken(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """A convert lock older than a minute is treated as stale (left by a crashed
+    pass) and broken, so the converter never wedges permanently."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input([_make_assistant_event(uuid4().hex, "2026-01-01T00:00:01Z", text="hi")])
+
+    runner.lock_dir.mkdir(parents=True)
+    # Age the lock past the 1-minute stale threshold.
+    stale = time.time() - 120
+    os.utime(runner.lock_dir, (stale, stale))
+
+    result = runner.run_single_pass(extra_env={"MNGR_CONVERT_LOCK_TIMEOUT": "1"})
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    # The stale lock was broken, so conversion proceeded.
+    assert len(runner.get_output_events()) == 1
+
+
+def test_concurrent_passes_do_not_duplicate(tmp_path: Path, stub_mngr_log_sh: str) -> None:
+    """Two passes racing over the same input must not both append the same
+    events: the lock serializes them so the second sees the first's output in
+    its dedup set. Without the lock this produces duplicate event_ids."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
+    runner.write_input(
+        [_make_assistant_event(uuid4().hex, f"2026-01-01T00:00:{i:02d}Z", text=f"m{i}") for i in range(20)]
+    )
+
+    env = {**os.environ, "MNGR_AGENT_STATE_DIR": str(runner.agent_state_dir)}
+    procs = [
+        subprocess.Popen(
+            ["bash", str(runner.script_path), "--single-pass"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=30) == 0
+
+    events = runner.get_output_events()
+    event_ids = [e["event_id"] for e in events]
+    assert len(event_ids) == len(set(event_ids)), "convert lock failed to prevent duplicate events"
+    assert len(events) == 20
