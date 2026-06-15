@@ -94,6 +94,11 @@ class AgentReleaseProfile(abc.ABC):
     observes_running_marker: bool = True
     forces_tool_call: bool = False
     asserts_usage: bool = False
+    # Whether destroy preserves this agent's transcripts to the local preserved/ dir
+    # (the preserve-on-destroy feature, default-on for every current agent type). When
+    # set, the arc asserts the transcripts actually landed there after destroy. A
+    # profile whose agent disables preservation sets this False to skip that check.
+    preserves_on_destroy: bool = True
 
     @abc.abstractmethod
     def unavailable_reason(self) -> str | None:
@@ -185,6 +190,50 @@ def _assert_records_conform(records: list[dict[str, Any]]) -> None:
         assert error is None, f"emitted record does not match the canonical schema ({error}): {record}"
 
 
+def _preserved_agent_dir(host_dir: Path, agent_name: str) -> Path:
+    """Return the unique ``preserved/<agent_name>--<id>/`` dir, asserting it exists.
+
+    Mirrors the on-disk layout the preservation module writes (see
+    ``imbue.mngr.api.preservation.get_preserved_agent_dir``); the id is unknown to the
+    test, so it globs by the ``<name>--`` prefix and requires exactly one match.
+    """
+    preserved_root = host_dir / "preserved"
+    matches = (
+        [path for path in preserved_root.iterdir() if path.is_dir() and path.name.startswith(f"{agent_name}--")]
+        if preserved_root.exists()
+        else []
+    )
+    assert len(matches) == 1, (
+        f"expected exactly one preserved dir for {agent_name} under {preserved_root}, found {matches}"
+    )
+    return matches[0]
+
+
+def _assert_transcripts_preserved(host_dir: Path, agent_name: str, subdir: str, secret: str) -> None:
+    """Assert destroy preserved the agent's raw + common transcripts to the local preserved/ dir.
+
+    The destroy that triggers this logs preservation failures as warnings and does not
+    abort, so without this assertion a broken preservation path passes silently. Keying
+    on the seeded ``secret`` proves real transcript *content* (not just an empty tree)
+    survived to the preserved location. Both the common transcript (canonical, what the
+    arc reads from the live state dir) and the raw transcript directory
+    (``build_transcript_preserved_items``'s other half) are checked.
+    """
+    preserved_dir = _preserved_agent_dir(host_dir, agent_name)
+    common = preserved_dir / "events" / subdir / "common_transcript" / "events.jsonl"
+    assert common.exists(), (
+        f"common transcript not preserved at {common}; preserved tree: {list(preserved_dir.rglob('*'))}"
+    )
+    common_text = common.read_text()
+    assert secret in common_text, (
+        f"preserved common transcript missing the seeded secret {secret!r}: {common_text[:2000]}"
+    )
+    raw_dir = preserved_dir / "logs" / f"{subdir}_transcript"
+    assert raw_dir.is_dir() and any(raw_dir.iterdir()), (
+        f"raw transcript dir not preserved (or empty) at {raw_dir}; preserved tree: {list(preserved_dir.rglob('*'))}"
+    )
+
+
 def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) -> None:
     """Drive the full create -> lifecycle -> transcript -> resume -> destroy arc for ``profile``.
 
@@ -201,6 +250,7 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
     subdir = profile.common_transcript_subdir
     agent_name = f"{profile.agent_type.replace('-', '')}-e2e-{get_short_random_string()}"
     secret = f"SECRET-{get_short_random_string()}"
+    destroyed = False
 
     try:
         # 1. Create (no inline message), then assert the agent is idle: marker absent.
@@ -279,9 +329,21 @@ def run_agent_release_lifecycle(profile: AgentReleaseProfile, tmp_path: Path) ->
             "pre-restart turn was lost from the common transcript after stop/start"
         )
         _assert_records_conform(post)
+
+        # 8. Destroy must preserve the agent's transcripts to the local preserved/ dir before the
+        #    state dir is deleted (the preserve-on-destroy feature). Done here in the try -- not as
+        #    bare cleanup in the finally -- so the preservation assertion runs only on the success
+        #    path and a swallowed preservation failure can no longer pass silently. The finally
+        #    still force-destroys for the failure path (guarded by ``destroyed``).
+        destroy = profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+        assert destroy.returncode == 0, f"destroy failed:\n{destroy.stdout}\n{destroy.stderr}"
+        destroyed = True
+        if profile.preserves_on_destroy:
+            _assert_transcripts_preserved(host_dir, agent_name, subdir, secret)
     finally:
         try:
-            profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
+            if not destroyed:
+                profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_LIFECYCLE_TIMEOUT_SECONDS)
         finally:
             if ctx.teardown is not None:
                 ctx.teardown()

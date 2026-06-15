@@ -127,6 +127,9 @@ class _CodexReleaseProfile(AgentReleaseProfile):
 # The agent runs in tmux; the autouse setup_test_mngr_env fixture gives the test its own
 # isolated tmux server (the resource guard requires this marker for any tmux use).
 @pytest.mark.tmux
+# The arc's destroy step preserves transcripts to the local preserved/ dir, which rsyncs
+# the transcript directories off the (local) host (the resource guard requires this marker).
+@pytest.mark.rsync
 @pytest.mark.timeout(900)
 def test_codex_agent_full_lifecycle(tmp_path: Path) -> None:
     run_agent_release_lifecycle(_CodexReleaseProfile(), tmp_path)
