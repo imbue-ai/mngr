@@ -13,9 +13,9 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
@@ -71,16 +71,40 @@ class MngrMessageSender(MutableModel):
         default_factory=get_default_mngr_caller,
         description="Forkserver-backed in-app ``mngr`` CLI caller.",
     )
+    concurrency_group: ConcurrencyGroup | None = Field(
+        default=None,
+        description=(
+            "App concurrency group. When set, :meth:`send` dispatches the message on a tracked "
+            "background thread instead of blocking the caller; when None it runs synchronously."
+        ),
+    )
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def _run_message(self, argv: list[str]) -> MngrCallResult:
-        """Run a ``mngr`` ``argv`` through the caller."""
-        return self.caller.call(argv, timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
-
     def send(self, agent_id: AgentId, text: str) -> None:
-        is_delivered = self.try_send(str(agent_id), text)
-        if not is_delivered:
+        """Fire-and-forget nudge: dispatch the message without blocking the caller.
+
+        The permission Approve/Deny handlers call this *after* the response
+        event is already persisted, so delivery is best-effort and its latency
+        (a ~2s SSH round-trip to the agent's host) must not delay the HTTP
+        response. When a :attr:`concurrency_group` is set, the send runs on a
+        tracked background thread; otherwise (e.g. in tests) it runs
+        synchronously. Either way it never raises -- failures are logged.
+        """
+        if self.concurrency_group is None:
+            self._send_and_log(agent_id, text)
+            return
+        self.concurrency_group.start_new_thread(
+            self._send_and_log,
+            args=(agent_id, text),
+            name="mngr-message-send",
+            is_checked=False,
+            on_failure=lambda exc: logger.warning("mngr message send to agent {} failed: {}", agent_id, exc),
+        )
+
+    def _send_and_log(self, agent_id: AgentId, text: str) -> None:
+        """Deliver the message and log a warning if it did not land."""
+        if not self.try_send(str(agent_id), text):
             logger.warning("mngr message to agent {} was not delivered", agent_id)
 
     def try_send(self, target: str, text: str) -> bool:
@@ -96,7 +120,7 @@ class MngrMessageSender(MutableModel):
         # positional argument as an agent identifier (``nargs=-1``), so passing
         # the text as a positional would be parsed as a second agent and the
         # actual message content would be read from stdin (silently empty here).
-        result = self._run_message(["message", "-m", text, "--", target])
+        result = self.caller.call(["message", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
         if result.returncode != 0:
             logger.warning(
                 "mngr message to target {} exited {}: {}",
@@ -116,7 +140,9 @@ class MngrMessageSender(MutableModel):
         when no agent matches the target, so a caller that retries until the
         agent exists must inspect the output, not the exit code.
         """
-        result = self._run_message(["message", "--format", "jsonl", "-m", text, "--", target])
+        result = self.caller.call(
+            ["message", "--format", "jsonl", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS
+        )
         is_delivered = stdout_reports_message_delivered(result.stdout)
         if not is_delivered:
             logger.debug(

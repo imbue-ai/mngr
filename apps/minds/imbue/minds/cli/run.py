@@ -255,7 +255,7 @@ def run(
     # one-time import cost on a background thread, off the request path.
     mngr_caller = get_default_mngr_caller()
     mngr_caller.prewarm()
-    mngr_message_sender = MngrMessageSender(caller=mngr_caller)
+    mngr_message_sender = MngrMessageSender(caller=mngr_caller, concurrency_group=root_concurrency_group)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,
