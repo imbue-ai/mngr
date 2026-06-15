@@ -37,3 +37,6 @@ also removed: `node_merge.py` is now the single extend algebra, with a thin
 the suffix-keyed-dict consumers (mngr's `key_resolver` / `common_opts`). The `merge.py`
 module is now just the leaf-extend primitive `extend_aggregate_leaf` and the narrowing
 predicates `would_assignment_narrow` / `narrowing_paths` that the node engine imports.
+`extend_plain_value` names the dotted `field_path` when it rejects a contradictory
+bare/`__assign` key at the top level of the extend body, matching the location the
+removed plain-dict resolver surfaced.

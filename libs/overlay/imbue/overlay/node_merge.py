@@ -43,6 +43,7 @@ from imbue.overlay.operators import ASSIGN_SUFFIX
 from imbue.overlay.operators import EXTEND_SUFFIX
 from imbue.overlay.operators import assign_bare_key
 from imbue.overlay.operators import bare_key
+from imbue.overlay.operators import check_no_conflicting_assign
 from imbue.overlay.operators import is_assign_key
 from imbue.overlay.operators import is_extend_key
 
@@ -348,9 +349,18 @@ def extend_plain_value(current: Any, extend: Any, field_path: str) -> Any:
     ``extend`` lifts as a patch (so nested ``key__extend`` recurses and a nested bare
     key assigns); leaf values pass straight through to ``apply_extend``. ``current is
     None`` makes the extend act as assign. ``OverlayError``s propagate (callers wrap).
+
+    A conflicting bare/``__assign`` key at the top level of a dict ``extend`` is rejected
+    with the dotted ``field_path`` in the message (``check_no_conflicting_assign`` before
+    lifting), matching the location the plain-dict resolver used to surface; ``lift``'s own
+    engine-level check still covers any conflict nested deeper, without a location.
     """
     cur = lift_concrete(current) if isinstance(current, Mapping) else current
-    ext = lift(extend) if isinstance(extend, Mapping) else extend
+    if isinstance(extend, Mapping):
+        check_no_conflicting_assign(extend, field_path)
+        ext: Any = lift(extend)
+    else:
+        ext = extend
     return finalize_payload(apply_extend(cur, ext, field_path))
 
 

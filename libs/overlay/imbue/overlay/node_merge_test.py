@@ -619,3 +619,11 @@ def test_extend_plain_value_against_none_resolves_nested_markers() -> None:
 def test_extend_plain_value_rejects_extend_on_scalar() -> None:
     with pytest.raises(OverlayError, match="target field is a scalar"):
         extend_plain_value("base", "oops", "f")
+
+
+def test_extend_plain_value_conflicting_assign_names_the_field_path() -> None:
+    # A bare key and its __assign form for the same field at the top level of the extend
+    # body are contradictory; the error names the dotted field_path so the offending key
+    # is locatable (the location the plain-dict resolver used to surface).
+    with pytest.raises(OverlayError, match=r"Conflicting assignment at 'create_templates.modal.env'"):
+        extend_plain_value({}, {"x": 1, "x__assign": 2}, "create_templates.modal.env")
