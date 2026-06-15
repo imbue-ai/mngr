@@ -1393,10 +1393,11 @@ class VpsDockerProvider(BaseProviderInstance):
                 start_container(outer, host_record.config.container_name)
             # sshd is launched via `docker exec`, not the container's entrypoint, so a
             # `docker start` brings the container back WITHOUT sshd (the idle watcher's
-            # container stop, a manual `mngr stop`, or a VPS reboot all land here). Re-exec
-            # it before waiting, or `_wait_for_container_sshd` would block until timeout and
-            # the agent would be unrecoverable via `mngr start`/`conn`. `docker start` is a
-            # no-op on an already-running container, so this also repairs the
+            # container stop, a manual `mngr stop`, a VPS reboot, or an AWS instance
+            # stop/start all land here). Re-exec it before waiting, or
+            # `_wait_for_container_sshd` would block until timeout and the agent would be
+            # unrecoverable via `mngr start`/`conn`. `docker start` is a no-op on an
+            # already-running container, so this also repairs the
             # container-up-but-sshd-down state.
             with log_span("Restarting sshd in container"):
                 start_container_sshd(outer, host_record.config.container_name)
@@ -1646,14 +1647,13 @@ class VpsDockerProvider(BaseProviderInstance):
             # Cache the host record for later use by get_host_and_agent_details
             self._host_record_cache[host_id] = record
 
-            # Running status came from the same live listing read. A VPS that
-            # was reachable during discovery has an entry here even when its
-            # container is stopped (the live listing reports CONTAINER_STATE for
-            # a stopped container via docker cp). A VPS that was unreachable has
-            # no entry, so it falls through to the offline-state derivation rather
-            # than crashing the listing -- one bad VPS must not drop the other
-            # VPSes' hosts. The presence of an entry is thus the "outer VPS was
-            # reachable" signal the cleanly-stopped distinction below needs.
+            # Running status came from the same live listing read. An entry in
+            # is_running_by_host_id exists only when that read succeeded, which
+            # requires the VPS to have been reachable -- so its presence doubles
+            # as the reachability signal. A VPS that was unreachable during
+            # discovery has no entry here, so it falls through to the
+            # offline-state derivation rather than crashing the listing -- one
+            # bad VPS must not drop the other VPSes' hosts.
             is_running = discovery.is_running_by_host_id.get(host_id, False)
             is_outer_reachable = host_id in discovery.is_running_by_host_id
 
@@ -1661,9 +1661,9 @@ class VpsDockerProvider(BaseProviderInstance):
             is_failed = record.certified_host_data.failure_reason is not None
             # A reachable VPS whose container is simply stopped (idle-watcher shutdown,
             # a manual `mngr stop`, or a VPS reboot) is cleanly STOPPED and restartable
-            # via `mngr start` -- NOT crashed. The live listing only produced a running-state
-            # entry because the VPS was up, so this is never a host crash. Keep such
-            # hosts visible to `mngr conn`/`start` (which pass include_destroyed=False)
+            # via `mngr start` -- NOT crashed. The live listing read only succeeded
+            # because the VPS is up, so this is never a host crash. Keep such hosts
+            # visible to `mngr conn`/`start` (which pass include_destroyed=False)
             # instead of hiding them as if destroyed. An *unreachable* VPS with no
             # recorded stop_reason still derives to CRASHED below -- there the host
             # itself is down, which is the genuine failure case.

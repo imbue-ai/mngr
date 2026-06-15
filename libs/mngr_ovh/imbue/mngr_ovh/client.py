@@ -1,8 +1,6 @@
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
-from datetime import datetime
-from datetime import timezone
 from typing import Any
 from typing import Final
 
@@ -31,10 +29,7 @@ from imbue.mngr_vps_docker.errors import VpsApiError
 from imbue.mngr_vps_docker.errors import VpsProvisioningError
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
 from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
-from imbue.mngr_vps_docker.primitives import VpsSnapshotId
 from imbue.mngr_vps_docker.vps_client import VpsClientInterface
-from imbue.mngr_vps_docker.vps_client import VpsSnapshotInfo
-from imbue.mngr_vps_docker.vps_client import VpsSshKeyInfo
 
 _DEFAULT_VPS_TASK_POLL_INTERVAL: Final[float] = 5.0
 
@@ -552,71 +547,6 @@ class OvhVpsClient(VpsClientInterface):
         return ids
 
     # =========================================================================
-    # Snapshot operations (VPS-level)
-    # =========================================================================
-
-    def create_snapshot(self, instance_id: VpsInstanceId, description: str) -> VpsSnapshotId:
-        """Create a VPS-level snapshot. OVH supports at most one snapshot per VPS.
-
-        Returns a ``VpsSnapshotId`` equal to the owning ``serviceName``. OVH's
-        single-snapshot-per-VPS model means the snapshot is identified solely
-        by which VPS owns it (``DELETE /vps/{s}/snapshot`` operates on the
-        only slot), so encoding the serviceName here keeps ``create_snapshot``
-        / ``list_snapshots`` / ``delete_snapshot`` round-trippable.
-        """
-        existing = self._safe_get_snapshot(instance_id)
-        if existing is not None:
-            raise MngrError(
-                f"OVH VPS {instance_id} already has a snapshot ({existing.get('id', '?')}); "
-                "delete it first -- OVH supports at most one snapshot per VPS."
-            )
-        result = self._call("POST", f"/vps/{instance_id}/createSnapshot", description=description)
-        task_id = int((result or {}).get("id", 0))
-        if not task_id:
-            raise VpsApiError(0, f"OVH createSnapshot on {instance_id} returned no task id")
-        self.wait_for_task(str(instance_id), task_id, timeout_seconds=900.0)
-        snap = self._safe_get_snapshot(instance_id)
-        if snap is None:
-            raise MngrError(f"OVH createSnapshot completed but no snapshot returned for {instance_id}")
-        return VpsSnapshotId(str(instance_id))
-
-    def delete_snapshot(self, snapshot_id: VpsSnapshotId) -> None:
-        """Delete the snapshot whose id (== owning ``serviceName`` for OVH) is given.
-
-        OVH's ``DELETE /vps/{s}/snapshot`` deletes the VPS's single snapshot
-        slot; the snapshot is identified solely by which VPS owns it. We
-        encode the owning serviceName into the ``VpsSnapshotId`` returned
-        from ``create_snapshot``.
-        """
-        self._call("DELETE", f"/vps/{snapshot_id}/snapshot")
-        logger.info("Deleted OVH snapshot for VPS {}", snapshot_id)
-
-    def list_snapshots(self) -> list[VpsSnapshotInfo]:
-        """Return all snapshots across every VPS this account owns.
-
-        OVH has no global snapshot index, so this iterates ``/vps`` and
-        queries each VPS's single snapshot slot.
-        """
-        snapshots: list[VpsSnapshotInfo] = []
-        for service_name in self.list_instances():
-            snap = self._safe_get_snapshot(VpsInstanceId(service_name))
-            if snap is None:
-                continue
-            snapshots.append(_snapshot_info_from_payload(service_name, snap))
-        return snapshots
-
-    def _safe_get_snapshot(self, instance_id: VpsInstanceId) -> dict[str, Any] | None:
-        try:
-            payload = self._call("GET", f"/vps/{instance_id}/snapshot")
-        except VpsApiError as e:
-            if e.status_code == 404:
-                return None
-            raise
-        if not payload:
-            return None
-        return dict(payload)
-
-    # =========================================================================
     # SSH key shim
     # =========================================================================
 
@@ -632,9 +562,6 @@ class OvhVpsClient(VpsClientInterface):
 
     def delete_ssh_key(self, key_id: str) -> None:
         self._ssh_key_cache.pop(key_id, None)
-
-    def list_ssh_keys(self) -> list[VpsSshKeyInfo]:
-        return [VpsSshKeyInfo(id=key, name=key) for key in self._ssh_key_cache]
 
 
 def _ovh_api_error_status_code(error: APIError) -> int:
@@ -656,19 +583,6 @@ def _ovh_api_error_status_code(error: APIError) -> int:
     if isinstance(error, ResourceConflictError):
         return 409
     return 0
-
-
-def _snapshot_info_from_payload(service_name: str, payload: dict[str, Any]) -> VpsSnapshotInfo:
-    created_raw = payload.get("creationDate", "")
-    try:
-        created_at = datetime.fromisoformat(str(created_raw))
-    except ValueError:
-        created_at = datetime.now(timezone.utc)
-    return VpsSnapshotInfo(
-        id=VpsSnapshotId(service_name),
-        description=str(payload.get("description", "")),
-        created_at=created_at,
-    )
 
 
 def build_ovh_client(config: OvhProviderConfig) -> "OvhVpsClient":
