@@ -348,13 +348,8 @@ class AntigravityAgentConfig(AgentTypeConfig):
     )
     preserve_on_destroy: bool = Field(
         default=True,
-        description="Preserve this agent's transcripts locally before its state directory is "
-        "deleted on destroy. When enabled, the raw and common transcripts, the conversation-id "
-        "history, and agy's native resumable conversation store (so the agent can be resumed or "
-        "adopted) are copied to <local_host_dir>/preserved/<agent-name>--<agent-id>/, mirroring the "
-        "agent's state-directory layout. For remote agents, files are pulled to the local machine "
-        "so they survive host destruction. Note: a macOS-created conversation store is not portable "
-        "to another machine (it is keychain-encrypted). Set to False to discard this data on destroy.",
+        description="When destroying this agent, first copy its transcripts and resumable session "
+        "store to <local_host_dir>/preserved/ so they survive. Set to False to discard them.",
     )
 
 
