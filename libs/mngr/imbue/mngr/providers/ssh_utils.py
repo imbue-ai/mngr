@@ -57,8 +57,10 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
     private_key_pem, public_key_openssh = generate_ssh_keypair()
 
-    atomic_write(private_key_path, private_key_pem, mode=0o600)
-    atomic_write(public_key_path, public_key_openssh, mode=0o644)
+    atomic_write(private_key_path, private_key_pem)
+    private_key_path.chmod(0o600)
+    atomic_write(public_key_path, public_key_openssh)
+    public_key_path.chmod(0o644)
 
     return private_key_path, public_key_path
 

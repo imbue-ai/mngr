@@ -63,26 +63,6 @@ def test_atomic_write_new_file_gets_default_permissions(tmp_path: Path) -> None:
     assert actual_mode == 0o600
 
 
-def test_atomic_write_explicit_mode_on_new_file(tmp_path: Path) -> None:
-    target = tmp_path / "new_file.txt"
-
-    atomic_write(target, "content", mode=0o644)
-
-    actual_mode = stat.S_IMODE(target.stat().st_mode)
-    assert actual_mode == 0o644
-
-
-def test_atomic_write_explicit_mode_overrides_existing_permissions(tmp_path: Path) -> None:
-    target = tmp_path / "output.txt"
-    target.write_text("original")
-    os.chmod(target, 0o644)
-
-    atomic_write(target, "updated", mode=0o600)
-
-    actual_mode = stat.S_IMODE(target.stat().st_mode)
-    assert actual_mode == 0o600
-
-
 @pytest.mark.skipif(os.geteuid() == 0, reason="Root bypasses permission checks")
 def test_atomic_write_raises_on_unwritable_directory(tmp_path: Path) -> None:
     locked_dir = tmp_path / "locked"

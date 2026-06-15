@@ -30,7 +30,7 @@ def read_json_dict(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def atomic_write(path: Path, content: str, mode: int | None = None) -> None:
+def atomic_write(path: Path, content: str) -> None:
     """Write content to a file atomically using a temp file and rename.
 
     Writes to a temporary file in the same directory, flushes to disk with
@@ -40,9 +40,8 @@ def atomic_write(path: Path, content: str, mode: int | None = None) -> None:
     If the target path is a symlink, the write goes through to the symlink's
     target so the link is preserved.
 
-    If ``mode`` is given, the new file is created with exactly those permission
-    bits. Otherwise, an existing target's permissions are preserved on the new
-    file, and a new file keeps the temp file's default permissions (0600).
+    If the target file already exists, its permissions are preserved on the
+    new file. Otherwise the file is created with default permissions (0600).
 
     The caller is responsible for catching OSError if the write fails.
     """
@@ -73,9 +72,7 @@ def atomic_write(path: Path, content: str, mode: int | None = None) -> None:
         tmp_path = Path(tmp_file.name)
 
     try:
-        if mode is not None:
-            os.chmod(tmp_path, mode)
-        elif existing_mode is not None:
+        if existing_mode is not None:
             os.chmod(tmp_path, stat.S_IMODE(existing_mode))
         os.replace(tmp_path, resolved)
     except OSError:
