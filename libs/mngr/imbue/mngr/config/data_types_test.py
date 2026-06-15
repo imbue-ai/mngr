@@ -17,6 +17,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.config.data_types import RetryConfig
+from imbue.mngr.config.data_types import ScalarTuple
 from imbue.mngr.config.data_types import StringDerivedTuple
 from imbue.mngr.config.data_types import WorkDirExtraPathMode
 from imbue.mngr.config.data_types import detect_settings_narrowing
@@ -1252,6 +1253,50 @@ def test_would_assignment_narrow_exempts_string_derived_tuple() -> None:
     base: tuple[str, ...] = ("--debug",)
     assert would_assignment_narrow(base, StringDerivedTuple(("--verbose",))) is False
     assert would_assignment_narrow(base, ("--verbose",)) is True
+
+
+def test_string_derived_tuple_is_a_scalar_tuple() -> None:
+    """``StringDerivedTuple`` specializes ``ScalarTuple`` so the single
+    ``isinstance(_, ScalarTuple)`` check in both narrowing guards covers it and
+    every other replace-by-default field (e.g. ``allowed_ssh_cidrs``) at once.
+    """
+    assert isinstance(StringDerivedTuple(("--verbose",)), ScalarTuple)
+
+
+def test_would_assignment_narrow_exempts_scalar_tuple() -> None:
+    """A bare ``ScalarTuple`` override (not string-derived) is exempt from
+    narrowing too: it marks a field whose value is a coherent scalar that a
+    higher-precedence layer replaces wholesale (the ``allowed_ssh_cidrs`` case),
+    rather than a list to be merged additively. A plain tuple with the same
+    tokens still narrows, proving the marker is the discriminator.
+    """
+    base: tuple[str, ...] = ("0.0.0.0/0",)
+    assert would_assignment_narrow(base, ScalarTuple(("203.0.113.4/32",))) is False
+    assert would_assignment_narrow(base, ("203.0.113.4/32",)) is True
+
+
+def test_detect_settings_narrowing_exempts_scalar_tuple_override(mngr_test_prefix: str) -> None:
+    """The leaf-level ``ScalarTuple`` exemption holds through the full
+    ``detect_settings_narrowing`` walk: a ``ScalarTuple`` override over a
+    non-empty tuple base reports no narrowing, while a plain-tuple override of
+    the same shape still does.
+    """
+    base = MngrConfig(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig(cli_args=("--debug",))},
+    )
+    exempt_override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={
+            AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=ScalarTuple(("--verbose",)))
+        },
+    )
+    assert detect_settings_narrowing(base, exempt_override) == []
+    plain_override = MngrConfig.model_construct(
+        prefix=mngr_test_prefix,
+        agent_types={AgentTypeName("my_claude"): AgentTypeConfig.model_construct(cli_args=("--verbose",))},
+    )
+    assert detect_settings_narrowing(base, plain_override) == ["agent_types.my_claude.cli_args"]
 
 
 def test_detect_settings_narrowing_flags_provider_subclass_list_replacement(mngr_test_prefix: str) -> None:

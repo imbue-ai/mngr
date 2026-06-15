@@ -5,6 +5,7 @@ import shlex
 from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
+from typing import Annotated
 from typing import Any
 from typing import Final
 from typing import Self
@@ -12,6 +13,7 @@ from typing import TypeVar
 from uuid import uuid4
 
 import pluggy
+from pydantic import AfterValidator
 from pydantic import BaseModel
 from pydantic import Field
 from pydantic import GetCoreSchemaHandler
@@ -55,21 +57,60 @@ _DEFAULT_MIN_ONLINE_HOST_AGE_SECONDS: Final[float] = 60.0 * 10.0
 PluginConfigT = TypeVar("PluginConfigT", bound="PluginConfig")
 
 
-class StringDerivedTuple(tuple):
-    """Marker tuple subclass for a tuple value that was originally provided as a
-    string in user settings.
+class ScalarTuple(tuple):
+    """Marker tuple subclass for a tuple-typed field whose value is semantically a
+    single scalar: replacing it from a higher-precedence settings layer is scalar
+    replacement, not aggregate narrowing.
+
+    The settings-narrowing guard (``_check_narrowing`` / ``would_assignment_narrow``)
+    normally flags a higher-precedence layer that drops entries from a non-empty
+    list/tuple set by a lower layer. For some fields that additive intent never
+    applies -- the value is a coherent whole a higher layer means to *replace*.
+    Marking such a field's parsed value ``ScalarTuple`` exempts it from that check.
+
+    Two cases produce the marker: a tuple field written as a single string in TOML
+    (``StringDerivedTuple``, a subclass), and a field declared with ``ScalarStrTuple``
+    that is always replace-by-default regardless of how it is written (e.g. an AWS
+    provider's ``allowed_ssh_cidrs`` -- combining CIDRs across config layers is never
+    the intent).
+
+    The marker is applied by ``model_validate`` (via the ``ScalarStrTuple``
+    after-validator) or by the loader's string-splitting path. It survives
+    ``model_construct`` (which bypasses validation) but is intentionally not
+    preserved through ``model_dump`` / merges. That is enough because narrowing
+    detection always compares a freshly-parsed layer (which retains the marker)
+    against the already-merged base.
+    """
+
+
+class StringDerivedTuple(ScalarTuple):
+    """Marker for a tuple value originally provided as a single string in user
+    settings.
 
     Some tuple-typed fields (most notably ``cli_args``) accept either a list/tuple
     or a single string in TOML. When the user writes a string, the natural unit is
     the whole string -- so a higher-precedence layer that replaces one string with
-    another is scalar replacement, not aggregate narrowing. ``_check_narrowing``
-    uses this marker to short-circuit the per-entry narrowing check for those cases.
-
-    The marker survives ``model_construct`` (which bypasses validation) but is
-    intentionally not preserved through ``model_dump`` / merges. That is enough
-    because narrowing detection always compares a freshly-parsed layer (which
-    retains the marker on string-derived fields) against the already-merged base.
+    another is scalar replacement, not aggregate narrowing. A specialization of
+    ``ScalarTuple`` (it inherits the narrowing exemption); this subclass exists so
+    the loader can mark *only* the string-shaped writes of fields that otherwise
+    merge additively.
     """
+
+
+def _coerce_to_scalar_tuple(value: tuple[str, ...]) -> ScalarTuple:
+    """After-validator for ``ScalarStrTuple``: wrap the validated string tuple in
+    ``ScalarTuple`` so the settings-narrowing guard treats the field as
+    replace-by-default."""
+    return ScalarTuple(value)
+
+
+# A ``tuple[str, ...]`` config field that is semantically a single scalar value: a
+# higher-precedence settings layer that sets it replaces the whole value rather than
+# narrowing it. Use for fields where combining entries across config layers is never
+# the intent (e.g. an AWS provider's ``allowed_ssh_cidrs``). The narrowing exemption
+# only takes effect under ``model_validate`` (which runs the after-validator);
+# ``_parse_providers`` validates provider blocks, so provider-config fields qualify.
+ScalarStrTuple = Annotated[tuple[str, ...], AfterValidator(_coerce_to_scalar_tuple)]
 
 
 @pure
@@ -141,16 +182,17 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     counts as narrowing. Same exemptions: no-ops (override equals base) and
     supersets (every base entry survives, e.g. the materialised result of an
     ``__extend`` operation) return ``False``. Against a list/tuple base, a
-    ``StringDerivedTuple`` override is also exempt -- it represents a scalar
-    string replacement of the whole value, not aggregate narrowing. Scalars
-    and empty/non-aggregate bases never narrow.
+    ``ScalarTuple`` override is also exempt -- it represents scalar replacement
+    of the whole value (a string-shaped TOML value, or a field declared
+    replace-by-default like ``allowed_ssh_cidrs``), not aggregate narrowing.
+    Scalars and empty/non-aggregate bases never narrow.
     """
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return False
     if isinstance(base_value, (list, tuple)):
-        # Mirror the StringDerivedTuple exemption in ``_check_narrowing`` so the
+        # Mirror the ScalarTuple exemption in ``_check_narrowing`` so the
         # template-application guard agrees with the settings-layer guard.
-        if isinstance(override_value, StringDerivedTuple):
+        if isinstance(override_value, ScalarTuple):
             return False
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return False
@@ -183,12 +225,12 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
     a missing list/set element, a missing dict key, or an explicit empty
     aggregate over a non-empty base. No-ops (override equals base) and
     supersets (every base entry survives, e.g. an ``__extend`` result) pass
-    without flagging. Against a list/tuple base, a ``StringDerivedTuple``
-    override is also exempt: a string-shaped TOML value (e.g.
-    ``cli_args = "..."``) is a coherent single value, so a higher-precedence
-    layer that replaces one string with another expresses scalar replacement
-    rather than aggregate narrowing. Value mutations at a shared dict key
-    recurse instead of flagging at the parent.
+    without flagging. Against a list/tuple base, a ``ScalarTuple`` override is
+    also exempt: a string-shaped TOML value (e.g. ``cli_args = "..."``) or a
+    field declared replace-by-default (e.g. ``allowed_ssh_cidrs``) is a coherent
+    single value, so a higher-precedence layer that replaces it expresses scalar
+    replacement rather than aggregate narrowing. Value mutations at a shared dict
+    key recurse instead of flagging at the parent.
 
     Layers that didn't write the field (override value is ``None``, since
     ``parse_config`` defaults missing fields to ``None``) are skipped by
@@ -262,10 +304,10 @@ def _check_narrowing(
     Against a non-empty list/tuple base, three forms of override pass without
     warning: no-ops (override equals base), supersets (every base entry
     survives, e.g. ``__extend`` results or additive assigns that happen to
-    include every prior value), and ``StringDerivedTuple`` overrides (a
-    string-shaped TOML value such as ``cli_args = "..."`` is a coherent
-    single value, so replacing it is scalar replacement rather than
-    aggregate narrowing).
+    include every prior value), and ``ScalarTuple`` overrides (a string-shaped
+    TOML value such as ``cli_args = "..."``, or a replace-by-default field such
+    as ``allowed_ssh_cidrs``, is a coherent single value, so replacing it is
+    scalar replacement rather than aggregate narrowing).
     """
     if isinstance(base_value, BaseModel) and isinstance(override_value, BaseModel):
         _walk_for_narrowing(base_value, override_value, path, violations)
@@ -273,10 +315,11 @@ def _check_narrowing(
     if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
         return
     if isinstance(base_value, (list, tuple)):
-        # Scalar replacement intent: when the override was originally a string
-        # (e.g. ``cli_args = "..."`` in TOML), the user is replacing the whole
-        # value as a coherent unit, not narrowing a list.
-        if isinstance(override_value, StringDerivedTuple):
+        # Scalar replacement intent: the override is either a string-derived value
+        # (e.g. ``cli_args = "..."`` in TOML) or a replace-by-default field (e.g.
+        # ``allowed_ssh_cidrs``); either way the whole value is replaced as a
+        # coherent unit, not narrowed as a list.
+        if isinstance(override_value, ScalarTuple):
             return
         if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
             return

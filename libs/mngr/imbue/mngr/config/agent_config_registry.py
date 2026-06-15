@@ -4,8 +4,10 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.config.agent_alias_registry import normalize_agent_type_name
 from imbue.mngr.config.agent_class_registry import get_agent_class
 from imbue.mngr.config.agent_class_registry import is_agent_class_registered
+from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.errors import MngrError
@@ -63,15 +65,19 @@ def reset_agent_config_registry() -> None:
 
 
 def is_known_agent_type(agent_type: str, config: MngrConfig) -> bool:
-    """Whether an agent type is known anywhere: a registered class, a registered
-    config, or a user-defined [agent_types.X] block in the loaded config.
+    """Whether an agent type is known anywhere: a registered alias, a registered
+    class, a registered config, or a user-defined [agent_types.X] block.
 
     This is the canonical predicate for "is this a real agent type name?" --
-    callers should prefer this over checking individual registries.
+    callers should prefer this over checking individual registries. An alias
+    is resolved to its canonical type before the registries are consulted.
     """
-    name = AgentTypeName(agent_type)
+    canonical_type = normalize_agent_type_name(agent_type)
+    name = AgentTypeName(canonical_type)
     return (
-        name in config.agent_types or is_agent_class_registered(agent_type) or is_agent_config_registered(agent_type)
+        name in config.agent_types
+        or is_agent_class_registered(canonical_type)
+        or is_agent_config_registered(canonical_type)
     )
 
 
@@ -127,9 +133,12 @@ def _check_agent_type_not_disabled(
 ) -> None:
     """Raise MngrError if the agent type or any ancestor in its parent chain is disabled.
 
-    At each level, uses the explicit ``plugin`` field if set, otherwise
-    falls back to ``parent_type`` (if set) or the type name -- mirroring
-    how ``_parse_providers`` resolves the plugin for a provider block.
+    At each level, the plugin name to compare against ``disabled_plugins`` is
+    resolved by this precedence: the explicit ``plugin`` field if set,
+    otherwise the type's recorded owning plugin (the authoritative source --
+    it knows the real registering plugin even when the type name differs from
+    the entry-point name, e.g. ``pi-coding`` registered by the ``pi_coding``
+    entry point), otherwise the type name itself.
 
     Walks the chain: agent_type -> parent_type -> parent's parent_type -> ...
     until we hit a type with no parent_type or one that is not defined in
@@ -149,11 +158,14 @@ def _check_agent_type_not_disabled(
                     f"mngr plugin enable {current_cfg.plugin}"
                 )
             return
-        if checked in config.disabled_plugins:
+        # Prefer the owning plugin recorded for this type; fall back to the
+        # type name when nothing was recorded (e.g. config-only custom types).
+        plugin_name = get_agent_type_owner(checked) or checked
+        if plugin_name in config.disabled_plugins:
             raise MngrError(
                 f"Agent type '{agent_type}' cannot be used because plugin "
-                f"'{checked}' is disabled. Enable the plugin with: "
-                f"mngr plugin enable {checked}"
+                f"'{plugin_name}' is disabled. Enable the plugin with: "
+                f"mngr plugin enable {plugin_name}"
             )
         if current_cfg is not None and current_cfg.parent_type is not None:
             checked = str(current_cfg.parent_type)
@@ -177,17 +189,25 @@ def resolve_agent_type(
     For plugin-registered or direct command types, returns the registered
     class and config directly.
 
+    A name that is a registered alias is resolved to its canonical type first.
+    If a custom ``[agent_types.X]`` block shares a name with an alias, the alias
+    is dropped at config-load time so the custom type wins -- by the time this
+    runs the name is no longer an alias and resolves to the custom type. A custom
+    type's ``parent_type`` is normalized to canonical at config-load time too.
+
     Raises UnknownAgentTypeError if the agent type name is not known via any
     registry or user config (or, in the parent-type branch, if the parent
     type itself is not known). Raises MngrError if the agent type (or its
     parent type) belongs to a disabled plugin.
     """
-    _check_agent_type_not_disabled(agent_type, config)
+    canonical_type = AgentTypeName(normalize_agent_type_name(agent_type))
 
-    if not is_known_agent_type(str(agent_type), config):
-        raise UnknownAgentTypeError(str(agent_type))
+    _check_agent_type_not_disabled(canonical_type, config)
 
-    custom_config = config.agent_types.get(agent_type)
+    if not is_known_agent_type(str(canonical_type), config):
+        raise UnknownAgentTypeError(str(canonical_type))
+
+    custom_config = config.agent_types.get(canonical_type)
 
     if custom_config is not None and custom_config.parent_type is not None:
         parent_type = custom_config.parent_type
@@ -211,8 +231,8 @@ def resolve_agent_type(
             agent_config=merged_config,
         )
 
-    agent_class = get_agent_class(str(agent_type))
-    config_class = get_agent_config_class(str(agent_type))
+    agent_class = get_agent_class(str(canonical_type))
+    config_class = get_agent_config_class(str(canonical_type))
 
     if custom_config is not None:
         agent_config = custom_config

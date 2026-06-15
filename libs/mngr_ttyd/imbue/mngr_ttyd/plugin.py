@@ -5,6 +5,7 @@ from loguru import logger
 
 from imbue.mngr import hookimpl
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import install_packaged_script_on_host
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -137,7 +138,7 @@ def on_after_provisioning(
     """
     _ensure_ttyd_installed(host)
 
-    agent_dir = host.host_dir / "agents" / str(agent.id)
+    agent_dir = get_agent_state_dir_path(host.host_dir, agent.id)
     ttyd_dir = agent_dir / "commands" / "ttyd"
 
     host.execute_idempotent_command(f"mkdir -p {shlex.quote(str(ttyd_dir))}", timeout_seconds=10.0)
