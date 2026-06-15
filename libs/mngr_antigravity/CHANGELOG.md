@@ -6,6 +6,17 @@ For the full, unedited changelog entries, see [UNABRIDGED_CHANGELOG.md](UNABRIDG
 
 ## [Unreleased]
 
+## [v0.1.4] - 2026-06-13
+
+### Added
+
+- Added: `agy` alias for the `antigravity` agent type (`mngr create my-agent agy` is equivalent to `mngr create my-agent antigravity`).
+
+### Changed
+
+- Changed: Agent lifecycle replaced the fragile `PreInvocation` / `Stop` marker hooks with a single mngr-owned `statusline.sh` driven by agy's `statusLine`. It maintains the RUNNING/WAITING `active` marker (busy iff `agent_state` is not idle/initializing/authenticating), records the root conversation for resume, and fires the tmux signal confirming submission. A user-provided `statusLine` is composed (mngr runs it with the same payload and emits only its output); a non-runnable command is dropped with a warning.
+- Changed: `mngr message` to an antigravity agent now returns only after the agent has started processing the submission (gated on the statusLine signal); the agent reports RUNNING for the whole turn including while subagents run.
+
 ## [v0.1.3] - 2026-06-08
 
 ### Fixed

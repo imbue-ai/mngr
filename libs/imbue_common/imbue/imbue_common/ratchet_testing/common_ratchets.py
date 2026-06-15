@@ -136,7 +136,7 @@ PREVENT_BASE_EXCEPTION_CATCH = RegexRatchetRule(
 PREVENT_BUILTIN_EXCEPTION_RAISES = RegexRatchetRule(
     rule_name="direct raising of built-in exceptions",
     rule_description="Never raise built-in exceptions directly. Create custom exception types that inherit from both the package base exception and the built-in",
-    pattern_string=r"raise\s+(ValueError|KeyError|TypeError|AttributeError|IndexError|RuntimeError|OSError|IOError|KeyboardInterrupt)\(\b",
+    pattern_string=r"raise\s+(ValueError|KeyError|TypeError|AttributeError|IndexError|RuntimeError|OSError|IOError|KeyboardInterrupt)\(",
 )
 
 

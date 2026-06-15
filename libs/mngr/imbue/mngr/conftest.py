@@ -41,6 +41,7 @@ from imbue.mngr.utils.deps import CORE_DEPS
 from imbue.mngr.utils.env_utils import looks_like_mngr_test_container_name
 from imbue.mngr.utils.plugin_testing import register_plugin_test_fixtures
 from imbue.mngr.utils.plugin_testing import register_test_placeholder_agent_type
+from imbue.mngr.utils.testing import capture_log_warnings
 from imbue.mngr.utils.testing import cleanup_tmux_session
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import worker_docker_state_prefixes
@@ -177,19 +178,11 @@ def active_concurrency_group() -> Generator[ConcurrencyGroup, None, None]:
 def log_warnings() -> Generator[list[str], None, None]:
     """Capture loguru warning messages for assertion in tests.
 
-    Tolerates handler removal during the test (e.g. setup_logging() calls
-    logger.remove() which clears all handlers, so the handler we added may
-    no longer exist by the time teardown runs).
+    Delegates to capture_log_warnings() in testing.py (the single source of
+    truth shared with plugin_testing.py's identically-named fixture).
     """
-    messages: list[str] = []
-    handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING", format="{message}")
-    try:
+    with capture_log_warnings() as messages:
         yield messages
-    finally:
-        try:
-            logger.remove(handler_id)
-        except ValueError:
-            pass
 
 
 # =============================================================================

@@ -30,6 +30,8 @@ from imbue.mngr.plugins.hookspecs import OnBeforeCreateArgs
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.registry import resolve_backend_and_config
 from imbue.mngr.utils.env_utils import parse_env_file
 from imbue.mngr.utils.git_utils import delete_git_branch
 from imbue.mngr.utils.git_utils import find_source_repo_of_worktree
@@ -210,15 +212,15 @@ def create(
     is_new_host = isinstance(target_host, NewHostOptions)
     # Resolve the provider that owns a newly-created host so we can tear it down
     # if the rest of the create fails (None when adopting an existing host).
-    # Pass is_for_host_creation=True so backends with one-time bootstrap (Modal's
-    # per-user environment) don't raise ProviderEmptyError here: this is the
-    # create path, and resolve_target_host below constructs the same (cached)
-    # instance with is_for_host_creation=True to actually create the host.
-    new_host_provider: ProviderInstanceInterface | None = (
-        get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
-        if isinstance(target_host, NewHostOptions)
-        else None
-    )
+    # Bootstrap first so backends with one-time bootstrap (Modal's per-user
+    # environment) don't raise ProviderEmptyError here: this is the create path.
+    # ``resolve_target_host`` below bootstraps + builds the same (cached) instance
+    # to actually create the host; bootstrap is idempotent, so doing it here too
+    # is cheap.
+    new_host_provider: ProviderInstanceInterface | None = None
+    if isinstance(target_host, NewHostOptions):
+        bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
+        new_host_provider = get_provider_instance(target_host.provider, mngr_ctx)
     with log_span("Resolving target host"):
         host = resolve_target_host(target_host, mngr_ctx)
 
@@ -487,17 +489,34 @@ def _create_new_host(
     return new_host
 
 
+def bootstrap_backend_for_host_creation(
+    provider_name: ProviderInstanceName,
+    mngr_ctx: MngrContext,
+) -> None:
+    """Resolve the backend + config for ``provider_name`` and call ``bootstrap_for_host_creation``.
+
+    Shares its resolution logic with ``get_provider_instance`` via
+    ``resolve_backend_and_config``. Most backends override
+    ``bootstrap_for_host_creation`` to a no-op so the call is cheap.
+    """
+    backend, provider_config = resolve_backend_and_config(provider_name, mngr_ctx)
+    backend.bootstrap_for_host_creation(name=provider_name, config=provider_config, mngr_ctx=mngr_ctx)
+
+
 def resolve_target_host(
     target_host: OnlineHostInterface | NewHostOptions,
     mngr_ctx: MngrContext,
 ) -> OnlineHostInterface:
     """Resolve which host to use for the agent."""
     if target_host is not None and isinstance(target_host, NewHostOptions):
-        # Create a new host using the specified provider. Pass is_for_host_creation=True
-        # so that backends with one-time bootstrap (Modal's per-user environment) are
-        # allowed to create those resources here -- the create path is the only caller
-        # authorized to do so.
-        provider = get_provider_instance(target_host.provider, mngr_ctx, is_for_host_creation=True)
+        # Bootstrap any one-time backend resources (e.g. Modal's per-user
+        # environment) before building the provider instance. The create-host
+        # path is the only call site authorized to do this -- read-only paths
+        # like ``mngr list`` build the provider directly via
+        # ``get_provider_instance`` and skip the provider on ProviderEmptyError
+        # instead of bootstrapping silently behind the user's back.
+        bootstrap_backend_for_host_creation(target_host.provider, mngr_ctx)
+        provider = get_provider_instance(target_host.provider, mngr_ctx)
         is_auto_named = target_host.name is None
         host_name = target_host.name
         if host_name is None:

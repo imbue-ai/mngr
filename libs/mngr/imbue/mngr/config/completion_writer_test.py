@@ -1,18 +1,22 @@
 """Tests for completion_writer module."""
 
 from pathlib import Path
+from typing import Any
 
 import click
 import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
+from imbue.mngr.config.agent_config_registry import register_agent_config
 from imbue.mngr.config.completion_cache import COMPLETION_CACHE_FILENAME
 from imbue.mngr.config.completion_cache import get_completion_cache_dir
 from imbue.mngr.config.completion_cache import read_completion_cache
 from imbue.mngr.config.completion_writer import _EXCLUDED_CONFIG_KEY_PREFIXES
 from imbue.mngr.config.completion_writer import _POSITIONAL_COMPLETION_SPEC
+from imbue.mngr.config.completion_writer import _agent_type_schema_completions
 from imbue.mngr.config.completion_writer import _extract_config_value_choices
 from imbue.mngr.config.completion_writer import _is_excluded_config_key
+from imbue.mngr.config.completion_writer import _value_choices_for_annotation
 from imbue.mngr.config.completion_writer import flatten_dict_keys
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import AgentTypeConfig
@@ -649,3 +653,57 @@ def test_excluded_config_keys_not_in_dynamic_completions(
         assert matching_choice_keys == [], (
             f"excluded prefix {prefix!r} found in config_value_choices: {matching_choice_keys}"
         )
+
+
+# =============================================================================
+# Agent-type schema completion
+# =============================================================================
+
+
+def test_value_choices_for_annotation() -> None:
+    """The shared annotation->choices helper classifies bool, enum, source, and unconstrained types."""
+    assert _value_choices_for_annotation(bool, {}) == ["true", "false"]
+    # Optional is unwrapped to the inner type.
+    assert _value_choices_for_annotation(bool | None, {}) == ["true", "false"]
+    # Free-form / scalar types have no constrained value set.
+    assert _value_choices_for_annotation(str, {}) is None
+    assert _value_choices_for_annotation(dict[str, Any], {}) is None
+    # AgentTypeName resolves to the dynamic agent-type names (or None when none are available).
+    assert _value_choices_for_annotation(AgentTypeName, {"agent_type_names": ["a", "b"]}) == ["a", "b"]
+    assert _value_choices_for_annotation(AgentTypeName, {}) is None
+
+
+class _FancyAgentConfig(AgentTypeConfig):
+    """A fake agent config subclass with a bool and a free-form dict field, for tests."""
+
+    headless: bool = False
+    config_overrides: dict[str, Any] = {}
+
+
+def test_agent_type_schema_completions_for_registered_subclass() -> None:
+    """A registered type's keys/choices come from its config class schema, incl. unset container fields.
+
+    The autouse registry-reset fixture cleans up the registration after the test.
+    """
+    register_agent_config("fancy", _FancyAgentConfig)
+    keys, choices = _agent_type_schema_completions(["fancy"], MngrConfig(), {"agent_type_names": ["fancy", "claude"]})
+
+    # Base field, subclass bool, and the free-form dict (surfaced as a leaf even though it is unset).
+    assert "agent_types.fancy.command" in keys
+    assert "agent_types.fancy.headless" in keys
+    assert "agent_types.fancy.config_overrides" in keys
+
+    # Constrained fields get value choices; the free-form dict does not.
+    assert choices["agent_types.fancy.headless"] == ["true", "false"]
+    assert choices["agent_types.fancy.parent_type"] == ["fancy", "claude"]
+    assert "agent_types.fancy.config_overrides" not in choices
+
+
+def test_agent_type_schema_completions_falls_back_to_base_config() -> None:
+    """An agent type with no registered config class still gets the base AgentTypeConfig fields."""
+    keys, choices = _agent_type_schema_completions(["plain"], MngrConfig(), {"agent_type_names": ["plain"]})
+
+    assert "agent_types.plain.command" in keys
+    assert "agent_types.plain.cli_args" in keys
+    assert "agent_types.plain.parent_type" in keys
+    assert choices["agent_types.plain.parent_type"] == ["plain"]

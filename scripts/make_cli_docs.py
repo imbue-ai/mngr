@@ -55,6 +55,7 @@ PRIMARY_COMMANDS = {
 }
 SECONDARY_COMMANDS = {
     "ask",
+    "aws",
     "capture",
     "chat",
     "cleanup",

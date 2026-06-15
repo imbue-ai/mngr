@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from imbue.mngr.primitives import TmuxWindowSize
@@ -75,9 +77,23 @@ def test_pass_through_claude_flags() -> None:
     assert partition.positional_prompt == "hello"
 
 
+def test_pass_through_claude_value_flag_equals_form() -> None:
+    # The inline ``--flag=value`` form takes a different branch than the
+    # space-separated form: the single token is forwarded verbatim and the
+    # following token must NOT be consumed as the flag's value, so the prompt
+    # placed after it is still recognized as the positional prompt.
+    partition = partition_args(("--model=opus", "hello"))
+    assert partition.pass_through_agent_args == ("--model=opus",)
+    assert partition.positional_prompt == "hello"
+
+
 @pytest.mark.parametrize("flag", sorted(REJECTED_FLAGS.keys()))
 def test_rejected_flags_raise(flag: str) -> None:
-    with pytest.raises(UnsupportedClaudeFlagError):
+    # Assert the raised message is the per-flag reason from REJECTED_FLAGS, not
+    # just that *some* UnsupportedClaudeFlagError was raised -- otherwise a bug
+    # that paired a flag with the wrong reason (e.g. --resume raising the
+    # --continue message) would go uncaught.
+    with pytest.raises(UnsupportedClaudeFlagError, match=re.escape(REJECTED_FLAGS[flag])):
         partition_args((flag,))
 
 

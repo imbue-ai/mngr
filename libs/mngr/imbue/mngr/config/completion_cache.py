@@ -45,7 +45,13 @@ class CompletionCacheData(NamedTuple):
     commands: list[str] = []
     aliases: dict[str, str] = {}
     subcommand_by_command: dict[str, list[str]] = {}
+    # Every option name (both ``--long`` and ``-short`` forms). The ``--long``
+    # entries are the candidates for ``--`` completion; the whole set lets the
+    # positional-argument counter recognise an option so it consumes its value.
     options_by_command: dict[str, list[str]] = {}
+    # The subset of options that take no value (flags and ``count`` options like
+    # ``-v``/``--verbose``), both forms, so the counter consumes only the option
+    # word itself rather than also consuming the following word.
     flag_options_by_command: dict[str, list[str]] = {}
     option_choices: dict[str, list[str]] = {}
     git_branch_options: list[str] = []
@@ -63,6 +69,10 @@ class CompletionCacheData(NamedTuple):
     positional_nargs_by_command: dict[str, int | None] = {}
     positional_completions: dict[str, list[list[str]]] = {}
     config_value_choices: dict[str, list[str]] = {}
+    # Option names (e.g. "-S", "--setting") whose value is a ``KEY=VALUE`` config
+    # override. The completer completes their KEY against config_keys and their
+    # VALUE against config_value_choices (the same data behind `mngr config set`).
+    setting_option_names: list[str] = []
     # Candidates for the `mngr help` positional arg: every top-level command name
     # plus every registered help topic key.
     help_targets: list[str] = []
