@@ -990,8 +990,10 @@ def _resolve_destroying_for_landing(
                 marker[str(agent_id)] = "running"
             else:
                 delete_destroying(agent_id, paths)
-            continue
-        marker[str(agent_id)] = "running" if record.status == DestroyingStatus.RUNNING else "failed"
+        elif record.status == DestroyingStatus.RUNNING:
+            marker[str(agent_id)] = "running"
+        else:
+            marker[str(agent_id)] = "failed"
     return marker
 
 
