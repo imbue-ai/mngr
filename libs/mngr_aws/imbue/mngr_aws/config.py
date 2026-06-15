@@ -153,6 +153,18 @@ class AwsProviderConfig(VpsDockerProviderConfig):
         default=None,
         description="Optional IAM instance profile name attached to launched instances.",
     )
+    terminate_on_shutdown: bool = Field(
+        default=False,
+        description=(
+            "Sets EC2 InstanceInitiatedShutdownBehavior. False (default) -> 'stop': an OS "
+            "shutdown -- whether the idle watcher powering the host off, or the "
+            "auto_shutdown_seconds time cap -- STOPS the instance, so it is resumable via "
+            "`mngr start` with its EBS volume intact (the Modal-like idle-pause; an abandoned "
+            "stopped instance costs only EBS until reaped by `mngr destroy` or GC). True -> "
+            "'terminate': an OS shutdown TERMINATES the instance (ephemeral, self-cleaning -- "
+            "used by the release tests so a leaked instance auto-destroys at the time cap)."
+        ),
+    )
 
     def get_session(self) -> boto3.Session:
         """Build a boto3 Session that resolves credentials via boto3's default chain.
