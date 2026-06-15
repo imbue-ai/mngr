@@ -1090,7 +1090,9 @@ def _render_format_template(template: str, agent: AgentDetails) -> str:
 CommandHelpMetadata(
     key="list",
     one_line_description="List all agents managed by mngr",
-    synopsis="mngr [list|ls] [OPTIONS]",
+    synopsis="mngr [list|ls] [--stdin] [--schema] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] "
+    "[--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] "
+    "[--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]",
     description="""Displays agents with their status, host information, and other metadata.
 Supports filtering, sorting, and multiple output formats.""",
     aliases=("ls",),
