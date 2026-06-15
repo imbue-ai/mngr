@@ -1056,6 +1056,27 @@ def order(
     )
 
 
+def _fetch_server_or_raise(dsn: str, server_id: str) -> BareMetalServer:
+    """Read one server row with a short-lived connection (never held across a long OVH/SSH wait)."""
+    conn = psycopg2.connect(dsn)
+    try:
+        server = fetch_server_by_id(conn, BareMetalServerDbId(server_id))
+    finally:
+        conn.close()
+    if server is None:
+        raise BareMetalProvisioningError(f"no bare_metal_servers row with id {server_id}")
+    return server
+
+
+def _update_server_fields(dsn: str, server_id: str, **fields: Any) -> None:
+    """Update a server row with a short-lived connection (Neon drops connections idle across a long wait)."""
+    conn = psycopg2.connect(dsn)
+    try:
+        update_server(conn, BareMetalServerDbId(server_id), **fields)
+    finally:
+        conn.close()
+
+
 @server.command(name="await-delivery")
 @click.option("--server-id", required=True, help="bare_metal_servers row id (from `order`).")
 @click.option("--database-url", default=None)
@@ -1064,32 +1085,28 @@ def await_delivery(server_id: str, database_url: str | None) -> None:
 
     Resumable: a no-op if the server is already delivered. Delivery can take a while (often ~1h).
     """
-    conn = psycopg2.connect(resolve_pool_database_url(database_url))
-    try:
-        server = fetch_server_by_id(conn, BareMetalServerDbId(server_id))
-        if server is None:
-            raise BareMetalProvisioningError(f"no bare_metal_servers row with id {server_id}")
-        if str(server.status) in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING, SERVER_STATUS_READY):
-            write_human_line(f"Already delivered: {server.ovh_service_name} ({server.public_address}).")
-            return
-        if not server.ovh_order_id:
-            raise BareMetalProvisioningError(f"server {server_id} has no ovh_order_id to wait on")
-        client = build_ovh_client(_require_ovh_config())
-        service_name = wait_for_order_service_name(client, order_id=int(server.ovh_order_id))
-        address = wait_for_dedicated_server_address(client, service_name=service_name)
-        update_server(
-            conn,
-            server.id,
-            ovh_service_name=service_name,
-            public_address=address,
-            status=SERVER_STATUS_DELIVERED,
-        )
-        write_human_line(
-            f"Server {server_id} delivered: {service_name} ({address}). "
-            f"Next: `admin server setup --server-id {server_id}`."
-        )
-    finally:
-        conn.close()
+    dsn = resolve_pool_database_url(database_url)
+    server = _fetch_server_or_raise(dsn, server_id)
+    if str(server.status) in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING, SERVER_STATUS_READY):
+        write_human_line(f"Already delivered: {server.ovh_service_name} ({server.public_address}).")
+        return
+    if not server.ovh_order_id:
+        raise BareMetalProvisioningError(f"server {server_id} has no ovh_order_id to wait on")
+    # Resolve serviceName + IP without holding the DB connection (delivery polling can run for ~1h).
+    client = build_ovh_client(_require_ovh_config())
+    service_name = wait_for_order_service_name(client, order_id=int(server.ovh_order_id))
+    address = wait_for_dedicated_server_address(client, service_name=service_name)
+    _update_server_fields(
+        dsn,
+        server_id,
+        ovh_service_name=service_name,
+        public_address=address,
+        status=SERVER_STATUS_DELIVERED,
+    )
+    write_human_line(
+        f"Server {server_id} delivered: {service_name} ({address}). "
+        f"Next: `admin server setup --server-id {server_id}`."
+    )
 
 
 @server.command(name="setup")
@@ -1125,50 +1142,47 @@ def setup(
 
     Resumable via status: reinstall runs only from 'delivered'; re-running from 'installing' resumes at prep.
     """
-    conn = psycopg2.connect(resolve_pool_database_url(database_url))
-    try:
-        server = fetch_server_by_id(conn, BareMetalServerDbId(server_id))
-        if server is None:
-            raise BareMetalProvisioningError(f"no bare_metal_servers row with id {server_id}")
-        if str(server.status) == SERVER_STATUS_READY:
-            write_human_line(f"Server {server_id} is already ready ({server.ovh_service_name}).")
-            return
-        if str(server.status) not in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING):
-            raise BareMetalProvisioningError(
-                f"server {server_id} is {server.status}; run `await-delivery` until it is 'delivered' first"
-            )
-        if not server.ovh_service_name or not server.public_address:
-            raise BareMetalProvisioningError(f"server {server_id} has no serviceName/address; re-run await-delivery")
-
-        client = build_ovh_client(_require_ovh_config())
-        with _pool_private_key_path() as private_key_path:
-            pool_public_key = _derive_public_key(private_key_path)
-            # Reinstall only from 'delivered'; if we're already 'installing' we assume the reinstall completed
-            # (or will be re-driven by a fresh run from delivered) and resume at SSH-wait + prep.
-            if str(server.status) == SERVER_STATUS_DELIVERED:
-                task_id = start_os_reinstall(
-                    client,
-                    service_name=server.ovh_service_name,
-                    ssh_public_key=pool_public_key,
-                    os_template=os_template,
-                )
-                update_server(conn, server.id, status=SERVER_STATUS_INSTALLING)
-                wait_for_os_reinstall(client, service_name=server.ovh_service_name, task_id=task_id)
-
-            _wait_for_ssh_ready(server.public_address, ssh_user, private_key_path, ssh_ready_timeout)
-            script = build_box_prep_script(
-                pool_public_key=pool_public_key,
-                lima_service_user=lima_service_user,
-                lima_version=lima_version,
-                slice_base_image_url=slice_base_image_url,
-            )
-            logger.info("Prepping delivered box {} ({})", server_id, server.public_address)
-            _run_root_script_over_ssh(server.public_address, ssh_user, private_key_path, script)
-
-        update_server(conn, server.id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
-        write_human_line(
-            f"Server {server_id} is READY: {server.ovh_service_name} ({server.public_address}), "
-            f"{server.slot_count} slots. Bake a slice with `admin pool create --backend slice`."
+    dsn = resolve_pool_database_url(database_url)
+    server = _fetch_server_or_raise(dsn, server_id)
+    if str(server.status) == SERVER_STATUS_READY:
+        write_human_line(f"Server {server_id} is already ready ({server.ovh_service_name}).")
+        return
+    if str(server.status) not in (SERVER_STATUS_DELIVERED, SERVER_STATUS_INSTALLING):
+        raise BareMetalProvisioningError(
+            f"server {server_id} is {server.status}; run `await-delivery` until it is 'delivered' first"
         )
-    finally:
-        conn.close()
+    service_name = server.ovh_service_name
+    address = server.public_address
+    if not service_name or not address:
+        raise BareMetalProvisioningError(f"server {server_id} has no serviceName/address; re-run await-delivery")
+
+    client = build_ovh_client(_require_ovh_config())
+    with _pool_private_key_path() as private_key_path:
+        pool_public_key = _derive_public_key(private_key_path)
+        # Reinstall only from 'delivered'; re-running from 'installing' assumes the reinstall completed and
+        # resumes at SSH-wait + prep. No DB connection is held across the (long) reinstall/prep waits.
+        if str(server.status) == SERVER_STATUS_DELIVERED:
+            task_id = start_os_reinstall(
+                client,
+                service_name=service_name,
+                ssh_public_key=pool_public_key,
+                os_template=os_template,
+            )
+            _update_server_fields(dsn, server_id, status=SERVER_STATUS_INSTALLING)
+            wait_for_os_reinstall(client, service_name=service_name, task_id=task_id)
+
+        _wait_for_ssh_ready(address, ssh_user, private_key_path, ssh_ready_timeout)
+        script = build_box_prep_script(
+            pool_public_key=pool_public_key,
+            lima_service_user=lima_service_user,
+            lima_version=lima_version,
+            slice_base_image_url=slice_base_image_url,
+        )
+        logger.info("Prepping delivered box {} ({})", server_id, address)
+        _run_root_script_over_ssh(address, ssh_user, private_key_path, script)
+
+    _update_server_fields(dsn, server_id, lima_service_user=lima_service_user, status=SERVER_STATUS_READY)
+    write_human_line(
+        f"Server {server_id} is READY: {service_name} ({address}), "
+        f"{server.slot_count} slots. Bake a slice with `admin pool create --backend slice`."
+    )
