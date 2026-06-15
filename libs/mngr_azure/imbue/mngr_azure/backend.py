@@ -326,15 +326,25 @@ class AzureProvider(VpsDockerProvider):
         )
 
     def _list_provider_vps_hostnames(self) -> list[str]:
-        """Return public IPs of Azure VMs tagged with this provider's name.
+        """Return public IPs of *running* Azure VMs tagged with this provider's name.
 
         Credentials are guaranteed resolvable here: ``build_provider_instance``
         raises ``ProviderUnavailableError`` when ``config.get_subscription_id()``
         fails, so any AzureProvider that reaches this point has a subscription.
+
+        Deallocated/stopped VMs are skipped: Azure allocates the public IP
+        ``Static``, so a deallocated VM keeps its IP (unlike a stopped GCE/EC2
+        instance, which loses its ephemeral IP). Feeding that IP to the SSH-based
+        discovery sweep would make every ``mngr list`` block on an SSH timeout per
+        paused host. Those hosts are surfaced from tags instead (see
+        ``discover_hosts_and_agents``), so dropping them here is purely an
+        optimization with no loss of visibility.
         """
         instances = self._list_instances_cached()
         vps_ips: list[str] = []
         for instance in instances:
+            if instance.get("state") in _HOST_DOWN_STATES:
+                continue
             main_ip = instance.get("main_ip", "")
             if main_ip:
                 vps_ips.append(main_ip)
@@ -507,6 +517,12 @@ class AzureProvider(VpsDockerProvider):
         sentinel_on_outer = self._idle_sentinel_path_on_outer(host_id)
         with log_span("Installing Azure idle self-deallocate watcher"):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
+                # The self-deallocate script calls the IMDS + ARM API with curl;
+                # ensure it's present (idempotent -- a no-op when already installed)
+                # so idle self-deallocate doesn't silently degrade to a poweroff.
+                outer.execute_idempotent_command(
+                    "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl)"
+                )
                 outer.write_text_file(
                     Path(_DEALLOCATE_SCRIPT_PATH), _build_self_deallocate_script(str(sentinel_on_outer))
                 )
