@@ -75,7 +75,8 @@ def detect_settings_narrowing(base: Any, override: Any) -> list[str]:
     (settings-patch drops included). This test-side helper reruns that merge with the same
     kwargs the loader uses, then drops the ``SettingsPatchField``-rooted paths (which the
     walker exempted), so the existing assertions exercise the surviving production path
-    unchanged. The old-vs-new equivalence is independently guarded in ``overlay_merge_test``.
+    unchanged. There is no separate reference implementation to compare against -- the
+    walker was removed, and this helper drives the live production detector directly.
     """
     override_patch_field_names = get_settings_patch_field_names(type(override))
     if isinstance(base, MngrConfig):
