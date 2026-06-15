@@ -24,7 +24,16 @@ dependencies = [
     "click-option-group>=0.5.6",
     "concurrency-group==0.1.20",
     "coolname>=3.0.0",
-    "cryptography>=42.0",
+    # Upper-cap pins cryptography <47 because 47.0.0+ ships an aarch64 Rust
+    # OpenSSL wheel whose code uses a CPU instruction that lima-VZ on Apple
+    # Silicon M5 does not expose to the guest -- importing the wheel
+    # SIGILLs (exit 132). 46.x is the last release that imports cleanly in
+    # that environment; M4 Max + native Linux are unaffected either way.
+    # Empirically bisected on the launch-to-msg CI runner (Apple M5):
+    # 46.0.3 import OK; 47.0.0 / 48.0.0 Illegal instruction. Do not drop this
+    # cap without re-verifying launch-to-msg on the M5 runner (it was reverted
+    # once in 68f3f6b7a and silently regressed the agent into recovery).
+    "cryptography>=42.0,<47",
     # pinning docker because the guard registration module
     # (register_guards_docker.py) monkeypatches its internal methods for test
     # resource guards; new versions may move or rename them.
