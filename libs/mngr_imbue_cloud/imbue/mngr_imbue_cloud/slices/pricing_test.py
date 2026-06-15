@@ -268,11 +268,13 @@ def test_compute_slice_pricing_rows_sorts_by_price_per_slice_and_computes_sizing
     rows = compute_slice_pricing_rows(
         _slice_catalog(), _slice_availabilities(), {"vin", "hil"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
     )
-    # Two RAM configs (32GB -> 4 slots, 64GB -> 8 slots), cheapest-per-slice first.
-    assert [row.server_ram_gb for row in rows] == [64, 32]
+    # 64GB is vin-only; 32GB is in both regions -> 3 rows (one per server x RAM x region), cheapest first.
+    assert {(row.server_ram_gb, row.region) for row in rows} == {(64, "vin"), (32, "vin"), (32, "hil")}
 
     cheapest = rows[0]
     assert cheapest.plan_code == "24rise02-v1-us"
+    assert cheapest.server_ram_gb == 64
+    assert cheapest.region == "vin"
     assert cheapest.slot_count == 8
     # floor(16 threads * 2.0 overcommit / 8 slots) = 4 vCPUs; (512 usable - 20 reserve) // 8 = 61 GiB.
     assert cheapest.cpus_per_slice == 4
@@ -285,15 +287,27 @@ def test_compute_slice_pricing_rows_sorts_by_price_per_slice_and_computes_sizing
     assert cheapest.storage_options == ()
 
 
+def test_compute_slice_pricing_rows_splits_rows_per_region_with_distinct_delivery() -> None:
+    rows = compute_slice_pricing_rows(
+        _slice_catalog(), _slice_availabilities(), {"vin", "hil"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
+    )
+    by_region = {row.region: row for row in rows if row.server_ram_gb == 32}
+    # 32GB/2x512nvme is 72H in vin but 1H-low in hil, so the per-region rows carry different delivery times.
+    assert by_region["vin"].delivery_hours == 72 and by_region["vin"].stock_level == ""
+    assert by_region["hil"].delivery_hours == 1 and by_region["hil"].stock_level == "low"
+
+
 def test_compute_slice_pricing_rows_lists_storage_upgrades_as_per_slice_deltas() -> None:
     rows = compute_slice_pricing_rows(
         _slice_catalog(), _slice_availabilities(), {"vin", "hil"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
     )
-    thirty_two_gb_row = next(row for row in rows if row.server_ram_gb == 32)
-    assert thirty_two_gb_row.base_storage_label == "softraid-2x512nvme"
-    assert len(thirty_two_gb_row.storage_options) == 1
-    upgrade = thirty_two_gb_row.storage_options[0]
+    # The 2x1920nvme upgrade is only available in vin for the 32GB config.
+    thirty_two_gb_vin = next(row for row in rows if row.server_ram_gb == 32 and row.region == "vin")
+    assert thirty_two_gb_vin.base_storage_label == "softraid-2x512nvme"
+    assert len(thirty_two_gb_vin.storage_options) == 1
+    upgrade = thirty_two_gb_vin.storage_options[0]
     assert upgrade.label == "softraid-2x1920nvme"
+    assert upgrade.storage_plan_code == "softraid-2x1920nvme-24rise02-v1-us"
     assert upgrade.usable_disk_gb == 1920
     # 1408 extra usable GB over the 512GB base, spread across 4 slots = 352 GB/slice; $36/mo / 1408 GB.
     assert upgrade.extra_disk_gb_per_slice == (1920 - 512) // 4
@@ -306,8 +320,60 @@ def test_compute_slice_pricing_rows_filters_by_region() -> None:
         _slice_catalog(), _slice_availabilities(), {"hil"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
     )
     # Only the 32GB/2x512nvme combo is available in hil; the 64GB combo (vin-only) is excluded.
-    assert [row.server_ram_gb for row in rows] == [32]
-    assert rows[0].available_regions == ("hil",)
+    assert [(row.server_ram_gb, row.region) for row in rows] == [(32, "hil")]
+
+
+def test_compute_slice_pricing_rows_matches_addons_whose_suffix_differs_from_plan_code() -> None:
+    # SYS RAM/storage add-ons carry a '-24sys-us' family suffix, not the '-24sys012-v1-us' planCode;
+    # the builder must still match them (regression guard for the bug where only RISE plans appeared).
+    catalog = {
+        "products": [
+            {
+                "name": "24sys",
+                "description": "Intel Xeon-E 2136",
+                "blobs": {"technical": {"server": {"cpu": {"cores": 6, "threads": 12}}}},
+            }
+        ],
+        "plans": [
+            {
+                "planCode": "24sys012-v1-us",
+                "invoiceName": "SYS-1",
+                "product": "24sys",
+                "pricings": [_install(0), _renew(30 * _USD, 0, 1)],
+                "addonFamilies": [
+                    {"name": "memory", "addons": ["ram-32g-ecc-2666-24sys-us"]},
+                    {"name": "storage", "addons": ["softraid-2x512nvme-24sys-us"]},
+                ],
+            }
+        ],
+        "addons": [
+            {
+                "planCode": "ram-32g-ecc-2666-24sys-us",
+                "invoiceName": "32GB",
+                "pricings": [_install(0), _renew(0, 0, 1)],
+            },
+            {
+                "planCode": "softraid-2x512nvme-24sys-us",
+                "invoiceName": "2x512",
+                "pricings": [_install(0), _renew(0, 0, 1)],
+            },
+        ],
+    }
+    availabilities = [
+        {
+            "planCode": "24sys012-v1-us",
+            "memory": "ram-32g-ecc-2666",
+            "storage": "softraid-2x512nvme",
+            "datacenters": [{"datacenter": "vin", "availability": "1H-high"}],
+        }
+    ]
+    rows = compute_slice_pricing_rows(
+        catalog, availabilities, {"vin"}, memory_per_slice_gb=8, cpu_overcommit_ratio=2.0
+    )
+    assert len(rows) == 1
+    assert rows[0].plan_code == "24sys012-v1-us"
+    assert rows[0].server_ram_gb == 32
+    assert rows[0].recurring_monthly_usd == Decimal(30)
 
 
 def test_compute_slice_pricing_rows_skips_when_slice_larger_than_server_ram() -> None:

@@ -33,6 +33,7 @@ from tabulate import tabulate
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ObservableThread
+from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.bake.pool_bake import BAKED_SERVICES_AGENT_NAME
@@ -793,7 +794,7 @@ def _format_slice_pricing_table(rows: list[SlicePricingRow]) -> str:
         "$/SLICE/MO",
         "PLAN_CODE",
         "MODEL",
-        "REGIONS",
+        "REGION",
         "DELIVERY",
         "STOCK",
         "RAM_GB",
@@ -810,7 +811,7 @@ def _format_slice_pricing_table(rows: list[SlicePricingRow]) -> str:
             f"{row.price_per_slice_usd:.2f}",
             row.plan_code,
             row.server_model,
-            ",".join(row.available_regions),
+            row.region,
             _format_delivery(row.delivery_hours),
             row.stock_level or "-",
             row.server_ram_gb,
@@ -880,13 +881,10 @@ def pricing(regions: tuple[str, ...], memory_per_slice_gb: int, cpu_overcommit: 
 
     region_label = ",".join(sorted(allowed_regions))
     if not rows:
-        logger.info("No orderable plans found in region(s) {} at {}GB/slice.", region_label, memory_per_slice_gb)
+        write_human_line(f"No orderable plans found in region(s) {region_label} at {memory_per_slice_gb}GB/slice.")
         return
-    logger.info(
-        "\nOVH bare-metal slice pricing -- {}GB/slice, {}x CPU overcommit, region(s) {} (catalog '{}')\n{}",
-        memory_per_slice_gb,
-        cpu_overcommit,
-        region_label,
-        catalog_name,
-        _format_slice_pricing_table(rows),
+    header = (
+        f"OVH bare-metal slice pricing -- {memory_per_slice_gb}GB/slice, "
+        f"{cpu_overcommit}x CPU overcommit, region(s) {region_label} (catalog '{catalog_name}')"
     )
+    write_human_line(f"{header}\n{_format_slice_pricing_table(rows)}")

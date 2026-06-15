@@ -185,32 +185,6 @@ def parse_availability_delivery(status: str) -> tuple[int, str]:
     return delivery_hours, stock_level
 
 
-# Stock levels ranked best-first, so a tie on delivery time prefers the better-stocked region.
-_STOCK_RANK_BY_LEVEL: Final[Mapping[str, int]] = {"high": 2, "low": 1, "": 0}
-
-
-@pure
-def _summarize_fastest_delivery(region_to_status: Mapping[str, str]) -> tuple[int, str]:
-    """Across a config's per-region availability, return the (delivery_hours, stock_level) of the soonest.
-
-    Ties on delivery time prefer the better-stocked region (high > low > unspecified).
-    """
-    fastest_hours = 0
-    fastest_stock = ""
-    for status in region_to_status.values():
-        delivery_hours, stock_level = parse_availability_delivery(status)
-        if delivery_hours <= 0:
-            continue
-        is_sooner = fastest_hours == 0 or delivery_hours < fastest_hours
-        is_better_stocked_tie = delivery_hours == fastest_hours and _STOCK_RANK_BY_LEVEL.get(
-            stock_level, 0
-        ) > _STOCK_RANK_BY_LEVEL.get(fastest_stock, 0)
-        if is_sooner or is_better_stocked_tie:
-            fastest_hours = delivery_hours
-            fastest_stock = stock_level
-    return fastest_hours, fastest_stock
-
-
 @pure
 def _server_cpu_specs(products_by_name: Mapping[str, Any], plan: Mapping[str, Any]) -> tuple[int, int, str] | None:
     """Return (cpu_cores, cpu_threads, server_model) for a plan's product, or None if specs are absent."""
@@ -236,19 +210,27 @@ def _addon_family_codes(plan: Mapping[str, Any], family_name: str) -> tuple[str,
 
 
 @pure
-def _strip_plan_suffix(addon_code: str, plan_code: str) -> str:
-    """Strip the trailing '-<planCode>' that catalog add-on codes carry, yielding the short availability code."""
-    suffix = f"-{plan_code}"
-    return addon_code[: -len(suffix)] if addon_code.endswith(suffix) else addon_code
+def _match_short_to_addon_code(short_code: str, addon_codes: Sequence[str]) -> str | None:
+    """Find the catalog add-on whose planCode is the availability short code plus a family suffix.
+
+    OVH availability lists add-ons by a short code (e.g. 'ram-64g-ecc-3200', 'softraid-2x512nvme'),
+    while the catalog's add-on planCodes append a per-product-family suffix that does NOT always equal
+    the planCode (e.g. SYS RAM is 'ram-...-24sys-us' though the plan is '24sys012-v1-us'). So we match
+    by prefix rather than reconstructing the code from the planCode.
+    """
+    for addon_code in addon_codes:
+        if addon_code == short_code or addon_code.startswith(short_code + "-"):
+            return addon_code
+    return None
 
 
 @pure
 def _build_availability_index(
     availabilities: Sequence[Mapping[str, Any]],
     allowed_regions: AbstractSet[str],
-) -> dict[tuple[str, str], dict[str, dict[str, str]]]:
-    """Index orderable combos as (planCode, memory_short) -> {storage_short -> {region -> availability status}}."""
-    index: dict[tuple[str, str], dict[str, dict[str, str]]] = {}
+) -> dict[str, dict[str, dict[str, dict[str, str]]]]:
+    """Index orderable combos as planCode -> memory_short -> storage_short -> {region -> availability status}."""
+    index: dict[str, dict[str, dict[str, dict[str, str]]]] = {}
     for entry in availabilities:
         plan_code = entry.get("planCode")
         memory = entry.get("memory")
@@ -263,9 +245,110 @@ def _build_availability_index(
         }
         if not region_to_status:
             continue
-        storage_by_region = index.setdefault((str(plan_code), str(memory)), {})
-        storage_by_region.setdefault(str(storage), {}).update(region_to_status)
+        storage_by_short = index.setdefault(str(plan_code), {}).setdefault(str(memory), {})
+        storage_by_short.setdefault(str(storage), {}).update(region_to_status)
     return index
+
+
+@pure
+def _build_region_row(
+    catalog: Mapping[str, Any],
+    plan_code: str,
+    server_model: str,
+    cpu_cores: int,
+    cpu_threads: int,
+    region: str,
+    memory_code: str,
+    storage_addon_codes: Sequence[str],
+    storages_by_short: Mapping[str, Mapping[str, str]],
+    server_ram_gb: int,
+    memory_per_slice_gb: int,
+    slot_count: int,
+    cpus_per_slice: int,
+) -> SlicePricingRow | None:
+    """Price one (server, RAM config, region) row, or None if nothing is orderable/sliceable in that region."""
+    # Price each storage option available in this region; the cheapest is the row's base.
+    priced_storages: list[tuple[Decimal, Decimal, str, str, int, str, str]] = []
+    for storage_short, region_to_status in storages_by_short.items():
+        status = region_to_status.get(region)
+        if status is None:
+            continue
+        storage_code = _match_short_to_addon_code(storage_short, storage_addon_codes)
+        if storage_code is None:
+            continue
+        try:
+            pricing = compute_order_pricing(catalog, plan_code, [memory_code, storage_code])
+            usable_gb = compute_storage_usable_gb(storage_short)
+        except OvhCatalogPricingError:
+            continue
+        priced_storages.append(
+            (
+                pricing.recurring_monthly,
+                pricing.one_time_setup,
+                storage_short,
+                storage_code,
+                usable_gb,
+                describe_storage_raid_level(storage_short),
+                status,
+            )
+        )
+    if not priced_storages:
+        return None
+    priced_storages.sort(key=lambda priced: (priced[0], priced[4]))
+    base_monthly, base_setup, base_storage_label, _base_code, base_usable_gb, _base_raid, base_status = (
+        priced_storages[0]
+    )
+
+    try:
+        disk_gb_per_slice = compute_slice_disk_budget_gib(base_usable_gb, slot_count)
+        # A slice needs a fixed boot disk plus a positive data disk; skip configs too disk-starved to host one
+        # (e.g. RAM-dense boxes whose per-slice disk falls below the boot disk at this slice size).
+        compute_slice_disk_gib(base_usable_gb, slot_count)
+    except BareMetalConfigError:
+        return None
+    delivery_hours, stock_level = parse_availability_delivery(base_status)
+    amortized_monthly = base_monthly + base_setup / _SETUP_AMORTIZATION_MONTHS
+    price_per_slice = (amortized_monthly / Decimal(slot_count)).quantize(Decimal("0.01"))
+
+    # The other in-region storage options that add usable capacity, as per-slice disk upgrades.
+    storage_options: list[SliceStorageOption] = []
+    for monthly, _setup, storage_label, storage_code, usable_gb, raid_level, _status in priced_storages:
+        extra_usable_gb = usable_gb - base_usable_gb
+        if extra_usable_gb <= 0:
+            continue
+        storage_options.append(
+            SliceStorageOption(
+                storage_plan_code=storage_code,
+                label=storage_label,
+                raid_level=raid_level,
+                usable_disk_gb=usable_gb,
+                extra_disk_gb_per_slice=extra_usable_gb // slot_count,
+                extra_monthly_usd=monthly - base_monthly,
+                dollars_per_extra_gb=((monthly - base_monthly) / Decimal(extra_usable_gb)).quantize(Decimal("0.0001")),
+            )
+        )
+    storage_options.sort(key=lambda option: option.usable_disk_gb)
+
+    return SlicePricingRow(
+        plan_code=plan_code,
+        server_model=server_model,
+        region=region,
+        delivery_hours=delivery_hours,
+        stock_level=stock_level,
+        server_ram_gb=server_ram_gb,
+        cpu_cores=cpu_cores,
+        cpu_threads=cpu_threads,
+        memory_per_slice_gb=memory_per_slice_gb,
+        slot_count=slot_count,
+        cpus_per_slice=cpus_per_slice,
+        disk_gb_per_slice=disk_gb_per_slice,
+        base_storage_label=base_storage_label,
+        recurring_monthly_usd=base_monthly,
+        one_time_setup_usd=base_setup,
+        amortized_monthly_usd=amortized_monthly,
+        price_per_slice_usd=price_per_slice,
+        storage_options=tuple(storage_options),
+    )
 
 
 @pure
@@ -276,12 +359,13 @@ def compute_slice_pricing_rows(
     memory_per_slice_gb: int,
     cpu_overcommit_ratio: float,
 ) -> list[SlicePricingRow]:
-    """Build the per-slice pricing rows (one per server x in-region RAM config), sorted cheapest-per-slice first.
+    """Build per-slice pricing rows, one per (server x RAM config x region), sorted cheapest-per-slice first.
 
-    Each row prices the cheapest in-region storage as its base (used for the disk/slice and price/slice
-    columns) and lists the other in-region storage configs as per-slice disk upgrades. Price per slice is the
-    month-to-month cost plus the setup fee amortized over a year, divided by the server's slot count.
-    Combos that cannot be priced month-to-month or cannot be sliced at the requested size are skipped.
+    Rows are split per region because delivery time and stock differ by datacenter. Each row prices the
+    cheapest storage available in that region as its base (the disk/slice and price/slice columns) and lists
+    the other in-region storage configs as per-slice disk upgrades. Price per slice is the month-to-month
+    cost plus the setup fee amortized over a year, divided by the slot count. Combos that cannot be priced
+    month-to-month, or whose per-slice disk budget is non-positive, are skipped.
     """
     products_by_name = {str(product["name"]): product for product in catalog.get("products", [])}
     availability_index = _build_availability_index(availabilities, allowed_regions)
@@ -289,107 +373,47 @@ def compute_slice_pricing_rows(
     rows: list[SlicePricingRow] = []
     for plan in catalog.get("plans", []):
         plan_code = str(plan["planCode"])
+        availability_by_memory = availability_index.get(plan_code)
+        if not availability_by_memory:
+            continue
         specs = _server_cpu_specs(products_by_name, plan)
         if specs is None:
             continue
         cpu_cores, cpu_threads, server_model = specs
+        memory_addon_codes = _addon_family_codes(plan, "memory")
+        storage_addon_codes = _addon_family_codes(plan, "storage")
 
-        for memory_code in _addon_family_codes(plan, "memory"):
-            memory_short = _strip_plan_suffix(memory_code, plan_code)
-            available_storage_regions = availability_index.get((plan_code, memory_short))
-            if not available_storage_regions:
+        for memory_short, storages_by_short in availability_by_memory.items():
+            memory_code = _match_short_to_addon_code(memory_short, memory_addon_codes)
+            if memory_code is None:
                 continue
             try:
-                server_ram_gb = parse_memory_gb(memory_code)
+                server_ram_gb = parse_memory_gb(memory_short)
             except OvhCatalogPricingError:
                 continue
             slot_count = compute_slot_count(server_ram_gb, memory_per_slice_gb)
             if slot_count <= 0:
                 continue
-
-            # Price every in-region storage option for this (plan, memory); the cheapest is the row's base.
-            priced_storages: list[tuple[Decimal, Decimal, str, int, str, dict[str, str]]] = []
-            for storage_short, region_to_status in available_storage_regions.items():
-                storage_code = f"{storage_short}-{plan_code}"
-                try:
-                    pricing = compute_order_pricing(catalog, plan_code, [memory_code, storage_code])
-                    usable_gb = compute_storage_usable_gb(storage_short)
-                except OvhCatalogPricingError:
-                    continue
-                raid_level = describe_storage_raid_level(storage_short)
-                priced_storages.append(
-                    (
-                        pricing.recurring_monthly,
-                        pricing.one_time_setup,
-                        storage_short,
-                        usable_gb,
-                        raid_level,
-                        region_to_status,
-                    )
-                )
-            if not priced_storages:
-                continue
-            priced_storages.sort(key=lambda priced: (priced[0], priced[3]))
-            base_monthly, base_setup, base_storage_label, base_usable_gb, _base_raid, base_region_status = (
-                priced_storages[0]
-            )
-
-            try:
-                disk_gb_per_slice = compute_slice_disk_budget_gib(base_usable_gb, slot_count)
-                # Validate the budget can actually host a slice (boot disk + a positive data disk); skip if not.
-                compute_slice_disk_gib(base_usable_gb, slot_count)
-            except BareMetalConfigError:
-                continue
             cpus_per_slice = compute_slice_vcpus(cpu_threads, slot_count, cpu_overcommit_ratio)
-            delivery_hours, stock_level = _summarize_fastest_delivery(base_region_status)
 
-            amortized_monthly = base_monthly + base_setup / _SETUP_AMORTIZATION_MONTHS
-            price_per_slice = (amortized_monthly / Decimal(slot_count)).quantize(Decimal("0.01"))
-
-            # The non-base storage options that add usable capacity, as per-slice disk upgrades.
-            storage_options: list[SliceStorageOption] = []
-            for monthly, _setup, storage_label, usable_gb, raid_level, _region_status in priced_storages:
-                extra_usable_gb = usable_gb - base_usable_gb
-                if extra_usable_gb <= 0:
-                    continue
-                storage_options.append(
-                    SliceStorageOption(
-                        storage_plan_code=f"{storage_label}-{plan_code}",
-                        label=storage_label,
-                        raid_level=raid_level,
-                        usable_disk_gb=usable_gb,
-                        extra_disk_gb_per_slice=extra_usable_gb // slot_count,
-                        extra_monthly_usd=monthly - base_monthly,
-                        dollars_per_extra_gb=((monthly - base_monthly) / Decimal(extra_usable_gb)).quantize(
-                            Decimal("0.0001")
-                        ),
-                    )
-                )
-            storage_options.sort(key=lambda option: option.usable_disk_gb)
-
-            available_regions = set().union(*(region_status for *_rest, region_status in priced_storages))
-            rows.append(
-                SlicePricingRow(
+            for region in sorted(allowed_regions):
+                row = _build_region_row(
+                    catalog=catalog,
                     plan_code=plan_code,
                     server_model=server_model,
-                    available_regions=tuple(sorted(available_regions)),
-                    delivery_hours=delivery_hours,
-                    stock_level=stock_level,
-                    server_ram_gb=server_ram_gb,
                     cpu_cores=cpu_cores,
                     cpu_threads=cpu_threads,
+                    region=region,
+                    memory_code=memory_code,
+                    storage_addon_codes=storage_addon_codes,
+                    storages_by_short=storages_by_short,
+                    server_ram_gb=server_ram_gb,
                     memory_per_slice_gb=memory_per_slice_gb,
                     slot_count=slot_count,
                     cpus_per_slice=cpus_per_slice,
-                    disk_gb_per_slice=disk_gb_per_slice,
-                    base_storage_label=base_storage_label,
-                    recurring_monthly_usd=base_monthly,
-                    one_time_setup_usd=base_setup,
-                    amortized_monthly_usd=amortized_monthly,
-                    price_per_slice_usd=price_per_slice,
-                    storage_options=tuple(storage_options),
                 )
-            )
+                if row is not None:
+                    rows.append(row)
 
     rows.sort(key=lambda row: row.price_per_slice_usd)
     return rows

@@ -402,7 +402,7 @@ class SlicePricingRow(FrozenModel):
 
     plan_code: str = Field(description="OVH planCode of the bare-metal server")
     server_model: str = Field(description="CPU / server description (e.g. 'Intel Xeon-E 2388G')")
-    available_regions: tuple[str, ...] = Field(description="US datacenter codes where this config is orderable")
+    region: str = Field(description="OVH datacenter code this row is priced for (e.g. 'vin', 'hil')")
     delivery_hours: int = Field(
         description="Fastest advertised delivery time in hours for the base config (from OVH availability; lower = sooner)"
     )
