@@ -1,8 +1,8 @@
-import math
 import shlex
 
 from imbue.mngr_vps_docker.host_setup import HostSetupStep
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps_docker.host_setup import build_auto_shutdown_command
 from imbue.mngr_vps_docker.host_setup import build_host_setup_steps
 
 
@@ -44,13 +44,7 @@ def generate_gce_startup_script(
 
     shutdown_block = ""
     if auto_shutdown_seconds is not None:
-        # ``shutdown -P`` only accepts whole minutes. Round up so we never halt
-        # before the deadline, and floor at 1 so any positive sub-minute value
-        # still schedules a shutdown.
-        shutdown_minutes = max(1, math.ceil(auto_shutdown_seconds / 60))
-        shutdown_block = (
-            f"shutdown -P +{shutdown_minutes} 'mngr_vps_docker auto-shutdown after {shutdown_minutes} minutes'\n"
-        )
+        shutdown_block = build_auto_shutdown_command(auto_shutdown_seconds) + "\n"
 
     return f"""#!/bin/bash
 set -e

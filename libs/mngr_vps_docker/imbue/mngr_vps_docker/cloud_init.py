@@ -1,8 +1,8 @@
-import math
 import shlex
 
 from imbue.mngr_vps_docker.host_setup import HostSetupStep
 from imbue.mngr_vps_docker.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps_docker.host_setup import build_auto_shutdown_command
 from imbue.mngr_vps_docker.host_setup import build_host_setup_steps
 
 
@@ -62,13 +62,7 @@ def generate_cloud_init_user_data(
     """
     shutdown_block = ""
     if auto_shutdown_seconds is not None:
-        # ``shutdown -P +N`` only accepts whole minutes. Round up so we never
-        # halt before the requested deadline, and floor at 1 minute so any
-        # positive sub-minute value still schedules a shutdown.
-        shutdown_minutes = max(1, math.ceil(auto_shutdown_seconds / 60))
-        shutdown_block = (
-            f"  - shutdown -P +{shutdown_minutes} 'mngr_vps_docker auto-shutdown after {shutdown_minutes} minutes'\n"
-        )
+        shutdown_block = "  - " + build_auto_shutdown_command(auto_shutdown_seconds) + "\n"
     root_key_block = ""
     if authorized_user_public_key is not None:
         # Append directly to root's authorized_keys (the /root/.ssh dir is made

@@ -1,4 +1,5 @@
 import base64
+import math
 from typing import Final
 
 from pydantic import Field
@@ -45,6 +46,18 @@ _HOST_SETUP_COMMAND_TIMEOUT_SECONDS: Final[float] = 600.0
 # Single source of truth shared by every writer and the poller so the path can
 # never drift between them.
 MNGR_READY_MARKER_PATH: Final[str] = "/var/run/mngr-ready"
+
+
+def build_auto_shutdown_command(auto_shutdown_seconds: int) -> str:
+    """Return the in-guest ``shutdown -P +N`` command for an auto-shutdown deadline.
+
+    ``shutdown -P`` only accepts whole minutes. Round up so we never halt before the
+    deadline, and floor at 1 so any positive sub-minute value still schedules a shutdown.
+    Shared by both first-boot renderers (cloud-init ``runcmd`` and the GCE startup-script)
+    so the rounding policy and command text stay identical.
+    """
+    shutdown_minutes = max(1, math.ceil(auto_shutdown_seconds / 60))
+    return f"shutdown -P +{shutdown_minutes} 'mngr_vps_docker auto-shutdown after {shutdown_minutes} minutes'"
 
 
 class HostSetupStep(FrozenModel):
