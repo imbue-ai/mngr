@@ -12,6 +12,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
@@ -20,6 +21,7 @@ DEFAULT_DESKTOP_CLIENT_HOST: Final[str] = "127.0.0.1"
 
 DEFAULT_DESKTOP_CLIENT_PORT: Final[int] = 8420
 
+# `uv run --active` puts the venv bin on PATH, so bare `mngr` resolves.
 MNGR_BINARY: Final[str] = "mngr"
 
 
@@ -174,7 +176,7 @@ class DeployLifecycleConfig(FrozenModel):
         coupling explicit here.
         """
         if self.writes_local_state and not self.creates_resources:
-            raise ValueError(
+            raise DeployLifecycleConfigError(
                 "deploy.toml [lifecycle] writes_local_state=true requires creates_resources=true. "
                 "The combination 'creates_resources=false + writes_local_state=true' is rejected "
                 "because deploy_env writes the local client.toml / secrets.toml from the records "

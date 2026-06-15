@@ -1,5 +1,5 @@
 import base64
-import time
+from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
@@ -35,6 +35,10 @@ class VultrVpsClient(VpsClientInterface):
     """Vultr API v2 client using raw HTTP calls."""
 
     api_key: SecretStr = Field(frozen=True, description="Vultr API key")
+    os_id: int = Field(
+        frozen=True,
+        description="Vultr OS image ID used by create_instance (e.g., 2136 = Debian 12 x64)",
+    )
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -98,26 +102,21 @@ class VultrVpsClient(VpsClientInterface):
         label: str,
         region: str,
         plan: str,
-        os_id: int | str,
         user_data: str,
         ssh_key_ids: Sequence[str],
-        tags: Sequence[str],
+        tags: Mapping[str, str],
     ) -> VpsInstanceId:
-        # Vultr expects an integer os_id; reject anything else explicitly so the
-        # mistake surfaces at the boundary instead of as a confusing API error.
-        if not isinstance(os_id, int):
-            raise VpsProvisioningError(f"Vultr os_id must be an int, got {type(os_id).__name__}: {os_id!r}")
         # Vultr requires user_data to be base64-encoded
         user_data_b64 = base64.b64encode(user_data.encode()).decode()
 
         data: dict[str, Any] = {
             "region": region,
             "plan": plan,
-            "os_id": os_id,
+            "os_id": self.os_id,
             "label": label,
             "user_data": user_data_b64,
             "sshkey_id": list(ssh_key_ids),
-            "tags": list(tags),
+            "tags": [f"{k}={v}" for k, v in tags.items()],
             "backups": "disabled",
             "hostname": label,
         }
@@ -158,27 +157,6 @@ class VultrVpsClient(VpsClientInterface):
         if main_ip == "0.0.0.0":
             raise VpsProvisioningError(f"Instance {instance_id} does not have an IP yet")
         return main_ip
-
-    def wait_for_instance_active(
-        self,
-        instance_id: VpsInstanceId,
-        timeout_seconds: float = 300.0,
-    ) -> str:
-        start = time.monotonic()
-        while time.monotonic() - start < timeout_seconds:
-            status = self.get_instance_status(instance_id)
-            if status == VpsInstanceStatus.ACTIVE:
-                try:
-                    ip = self.get_instance_ip(instance_id)
-                    elapsed = time.monotonic() - start
-                    if elapsed > 60.0:
-                        logger.warning("VPS provisioning took {:.1f}s (threshold: 60s)", elapsed)
-                    return ip
-                except VpsProvisioningError:
-                    pass
-            time.sleep(5.0)
-
-        raise VpsProvisioningError(f"Vultr instance {instance_id} did not become active within {timeout_seconds}s")
 
     def get_instance_info(self, instance_id: VpsInstanceId) -> dict[str, Any]:
         """Get full instance info from the API."""

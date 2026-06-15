@@ -83,11 +83,6 @@ def test_stream_consumer_emits_full_new_message_sharing_prefix_across_turns() ->
     assert stdout.getvalue() == ""
 
 
-def test_build_pass_env_vars_is_populated() -> None:
-    options = build_pass_env_vars()
-    assert len(options.env_vars) > 0
-
-
 def test_build_pass_env_vars_drops_kitty_terminal_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     # KITTY_* terminal-emulator vars (notably KITTY_SHELL_INTEGRATION) wedge a headless tmux
     # agent's login-shell startup, so they must not be forwarded into the sourced env file.
@@ -134,6 +129,19 @@ def test_monotonic_ms_since_returns_non_negative_int() -> None:
     elapsed = monotonic_ms_since(start)
     assert isinstance(elapsed, int)
     assert elapsed >= 0
+
+
+def test_monotonic_ms_since_scales_to_milliseconds() -> None:
+    """Guard the ``* 1000`` scaling without any wall-clock-timing assumption. The internal
+    ``time.monotonic()`` read happens between ``lower_ms`` and ``upper_ms``; because monotonic is
+    non-decreasing, the result is mathematically bracketed by them regardless of how long the call
+    takes, so this is deterministic, not merely improbable-to-flake. A dropped ``* 1000`` would
+    return seconds (~1) instead of milliseconds (~1000), falling below the lower bound."""
+    start = time.monotonic() - 1.0
+    lower_ms = (time.monotonic() - start) * 1000
+    result = monotonic_ms_since(start)
+    upper_ms = (time.monotonic() - start) * 1000
+    assert int(lower_ms) <= result <= upper_ms
 
 
 def test_transcript_read_failure_warner_warns_once() -> None:
@@ -390,6 +398,8 @@ def test_ticker_picks_up_terminal_event_appended_during_polling(local_host: Host
     timer = threading.Timer(0.25, _append)
     timer.start()
     try:
+        # The 0.25s append delay vs the 2.0s deadline is a deliberate 8x margin:
+        # it is the flakiness guard for this wall-clock-dependent test.
         deadline = time.monotonic() + 2.0
         result: AgentLifecycleState | None = None
         while result is None and time.monotonic() < deadline:

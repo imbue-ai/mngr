@@ -32,8 +32,8 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.host import get_agent_state_dir_path
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
@@ -90,6 +90,7 @@ from imbue.mngr_claude.plugin import _read_macos_keychain_credential
 from imbue.mngr_claude.plugin import _rewrite_installed_plugins_paths
 from imbue.mngr_claude.plugin import _rewrite_known_marketplaces_paths
 from imbue.mngr_claude.plugin import _should_preserve_sessions
+from imbue.mngr_claude.plugin import _sync_user_resources
 from imbue.mngr_claude.plugin import _write_generated_files
 from imbue.mngr_claude.plugin import agent_field_generators
 from imbue.mngr_claude.plugin import approve_api_key_for_claude
@@ -3476,12 +3477,14 @@ def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext
     assert on_before_create(args=args, mngr_ctx=temp_mngr_ctx) is None
 
 
-def test_on_before_create_passes_with_adopt_session(temp_mngr_ctx: MngrContext) -> None:
-    """on_before_create should pass when --adopt-session is used with a claude agent."""
+def test_on_before_create_passes_with_adopt_session(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should pass when --adopt-session names a resolvable session with a claude agent."""
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=AgentTypeName("claude"),
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3504,7 +3507,7 @@ def test_on_before_create_rejects_non_claude_agent_type(temp_mngr_ctx: MngrConte
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
-def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext) -> None:
+def test_on_before_create_passes_with_claude_subtype(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
     """on_before_create should accept a config-defined subtype whose parent_type
     chain reaches claude (e.g. a ``write-plus`` template), not just the literal
     ``claude`` type name. This is the centralized "is a claude agent" check via
@@ -3520,10 +3523,12 @@ def test_on_before_create_passes_with_claude_subtype(temp_mngr_ctx: MngrContext)
     mngr_ctx = temp_mngr_ctx.model_copy_update(
         to_update(temp_mngr_ctx.field_ref().config, config_with_subtype),
     )
+    session_file = tmp_path / "abc123.jsonl"
+    session_file.write_text('{"type":"message"}\n')
     args = OnBeforeCreateArgs(
         agent_options=CreateAgentOptions(
             agent_type=subtype,
-            plugin_data={"adopt_session": ("some-id",)},
+            plugin_data={"adopt_session": (str(session_file),)},
         ),
         target_host=NewHostOptions(provider=ProviderInstanceName("local")),
         create_work_dir=True,
@@ -3552,6 +3557,29 @@ def test_on_before_create_rejects_adopt_session_with_clone_source(
     )
     with pytest.raises(UserInputError, match="incompatible with cloning via --from"):
         on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
+
+
+def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrContext) -> None:
+    """on_before_create should raise UserInputError when an --adopt-session ID does not resolve.
+
+    Validating here -- before any host or worktree is created, and outside the provisioning
+    ConcurrencyGroup -- means a bad session ID surfaces as a clean, fail-fast user error
+    rather than being wrapped in a ConcurrencyExceptionGroup and reported mid-provisioning
+    as an "Unexpected error".
+    """
+    args = OnBeforeCreateArgs(
+        agent_options=CreateAgentOptions(
+            agent_type=AgentTypeName("claude"),
+            plugin_data={"adopt_session": ("nonexistent-session",)},
+        ),
+        target_host=NewHostOptions(provider=ProviderInstanceName("local")),
+        create_work_dir=True,
+    )
+    # Pin config-dir resolution to the isolated test HOME (~/.claude) so the search is
+    # deterministic even when CLAUDE_CONFIG_DIR is set (e.g. inside an mngr agent).
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        with pytest.raises(UserInputError, match="Session nonexistent-session not found"):
+            on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
 # =============================================================================
@@ -3708,6 +3736,92 @@ def test_on_after_provisioning_adopts_session_from_jsonl_path(
     expected_project_name = encode_claude_project_dir_name(agent.work_dir)
     dest_project_dir = agent.get_claude_config_dir() / "projects" / expected_project_name
     assert (dest_project_dir / "abc123-def456.jsonl").exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_preserved_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against a destroyed agent's preserved session files."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Mirror the on-disk layout that preserve_sessions_on_destroy produces:
+    # <local_host_dir>/preserved/<name>--<id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    preserved_project_dir = (
+        local_host_dir
+        / "preserved"
+        / "old-agent--00000000-0000-0000-0000-000000000001"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    preserved_project_dir.mkdir(parents=True)
+    target_session_id = "preserved-session-id"
+    (preserved_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
+
+
+@pytest.mark.rsync
+def test_on_after_provisioning_adopts_session_from_live_mngr_agent(
+    local_provider: LocalProviderInstance, tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A session ID is resolvable against another live local mngr agent's per-agent config dir."""
+    agent, host = make_claude_agent(local_provider, tmp_path, temp_mngr_ctx)
+
+    # Another live agent's session lives under its per-agent state dir:
+    # <local_host_dir>/agents/<other-id>/plugin/claude/anthropic/projects/<encoded>/<sid>.jsonl
+    local_host_dir = Path(temp_mngr_ctx.config.default_host_dir).expanduser()
+    other_agent_project_dir = (
+        local_host_dir
+        / "agents"
+        / "11111111-1111-1111-1111-111111111111"
+        / "plugin"
+        / "claude"
+        / "anthropic"
+        / "projects"
+        / "encoded-source-project"
+    )
+    other_agent_project_dir.mkdir(parents=True)
+    target_session_id = "live-mngr-session-id"
+    (other_agent_project_dir / f"{target_session_id}.jsonl").write_text('{"type":"message"}\n')
+
+    agent_state_dir = agent._get_agent_dir()
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+
+    options = CreateAgentOptions(
+        agent_type=AgentTypeName("claude"),
+        plugin_data={"adopt_session": (target_session_id,)},
+    )
+
+    with patch.dict("os.environ", {"CLAUDE_CONFIG_DIR": ""}):
+        agent.on_after_provisioning(host=host, options=options, mngr_ctx=temp_mngr_ctx)
+
+    assert (agent_state_dir / "claude_session_id").read_text() == target_session_id
+    expected_project_name = encode_claude_project_dir_name(agent.work_dir)
+    dest_session_file = (
+        agent.get_claude_config_dir() / "projects" / expected_project_name / f"{target_session_id}.jsonl"
+    )
+    assert dest_session_file.exists()
 
 
 # =============================================================================
@@ -4771,6 +4885,48 @@ def test_write_generated_files_breaks_symlink_before_writing(tmp_path: Path, tem
     assert symlink.read_text() == rewritten_content
     # The original source file must NOT be modified
     assert json.loads(source_file.read_text()) == {"original": True}
+
+
+def test_sync_user_resources_is_idempotent_without_self_referential_symlinks(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """Re-running _sync_user_resources must not create self-referential symlink loops in the shared source.
+
+    Regression test: plain `ln -sf` (no -n) dereferences an existing dest symlink-to-directory on
+    the second run and nests a new link inside the shared source (e.g. ~/.claude/agents/agents ->
+    ~/.claude/agents, or ~/.claude/skills/<skill>/<skill>). `ln -sfn` replaces the dest symlink
+    instead. Covers both the dir-level branch (agents/commands) and the child-level branch
+    (skills/plugins).
+    """
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    home_claude = tmp_path / "home_claude"
+    # dir-level branch source (agents)
+    (home_claude / "agents").mkdir(parents=True)
+    (home_claude / "agents" / "my-agent.md").write_text("agent")
+    # child-level branch source (skills)
+    (home_claude / "skills" / "user-skill").mkdir(parents=True)
+    (home_claude / "skills" / "user-skill" / "SKILL.md").write_text("skill")
+
+    config_dir = tmp_path / "agent_config"
+    config_dir.mkdir()
+
+    with patch(f"{_CLAUDE_AGENT_MODULE}.get_user_claude_config_dir", return_value=home_claude):
+        _sync_user_resources(host, config_dir, symlink=True)
+        _sync_user_resources(host, config_dir, symlink=True)
+
+    # No self-referential loop nested inside the shared source dirs.
+    assert not (home_claude / "agents" / "agents").exists()
+    assert not (home_claude / "skills" / "skills").exists()
+    assert not (home_claude / "skills" / "user-skill" / "user-skill").exists()
+
+    # dir-level: config_dir/agents is a symlink to the shared source dir.
+    assert (config_dir / "agents").is_symlink()
+    assert (config_dir / "agents").resolve() == (home_claude / "agents").resolve()
+
+    # child-level: config_dir/skills/user-skill is a symlink to the shared source skill.
+    assert (config_dir / "skills" / "user-skill").is_symlink()
+    assert (config_dir / "skills" / "user-skill").resolve() == (home_claude / "skills" / "user-skill").resolve()
 
 
 # =============================================================================
