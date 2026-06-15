@@ -7,6 +7,7 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import PluginConfig
 
 # Discovery convention shared by the reader (``api``) and the destroy-time
@@ -283,6 +284,54 @@ def _sum_optional(values: list[int | None] | list[float | None]) -> int | float 
     """
     present = [v for v in values if v is not None]
     return sum(present) if present else None
+
+
+@overload
+def add_optional(left: int | None, right: int | None) -> int | None: ...
+
+
+@overload
+def add_optional(left: float | None, right: float | None) -> float | None: ...
+
+
+@pure
+def add_optional(left: int | float | None, right: int | float | None) -> int | float | None:
+    """Add two optional numbers, treating None as 'missing' (None + None stays None).
+
+    A present value on either side wins (a None on the other side counts as
+    zero), matching ``_sum_optional``'s 'how much have I spent' stance where a
+    single missing sub-field doesn't black-hole the whole sum.
+    """
+    if left is None and right is None:
+        return None
+    return (left or 0) + (right or 0)
+
+
+@overload
+def sub_optional(current: int | None, baseline: int | None) -> int | None: ...
+
+
+@overload
+def sub_optional(current: float | None, baseline: float | None) -> float | None: ...
+
+
+@pure
+def sub_optional(current: int | float | None, baseline: int | float | None) -> int | float | None:
+    """Single-field clamped subtraction for cost-delta computation.
+
+    Treats a missing baseline as zero so the first reading in a series just
+    gets its own value. A missing current field stays None (no delta to
+    report). Negative deltas are clamped to zero defensively -- they shouldn't
+    occur within a cumulative series but if a writer ever emits an out-of-order
+    pair we'd rather show 0 than a misleading negative spend.
+
+    Distinct from ``add_optional`` because subtraction clamps at zero and treats
+    a None ``current`` as 'no delta', not as a zero operand.
+    """
+    if current is None:
+        return None
+    delta = current - (baseline if baseline is not None else 0)
+    return delta if delta >= 0 else type(current)(0)
 
 
 def _aggregate_cost(records: tuple[SessionCostRecord, ...]) -> CostSnapshot:

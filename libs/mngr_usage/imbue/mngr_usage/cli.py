@@ -980,6 +980,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
         result = wait_for_usage(
             poll_fn=lambda: gather_usage_snapshots(
                 mngr_ctx,
+                now=int(time.time()),
                 include_filters=include_filters,
                 exclude_filters=exclude_filters,
                 provider_names=provider_names,
@@ -989,6 +990,7 @@ def wait(ctx: click.Context, **kwargs: Any) -> None:
             until_filters=until_programs,
             timeout_seconds=timeout_seconds,
             interval_seconds=interval_seconds,
+            now_fn=lambda: int(time.time()),
         )
     except KeyboardInterrupt:
         logger.debug("Received keyboard interrupt")
