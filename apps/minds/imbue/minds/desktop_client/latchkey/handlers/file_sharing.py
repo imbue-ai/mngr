@@ -152,17 +152,11 @@ def _access_human_label(access: str) -> str:
 
 
 def _format_granted_message(file_path: str, access: str) -> str:
-    return (
-        f"Your {_access_human_label(access)} file-sharing permission request for "
-        f"'{file_path}' was granted."
-    )
+    return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was granted."
 
 
 def _format_denied_message(file_path: str, access: str) -> str:
-    return (
-        f"Your {_access_human_label(access)} file-sharing permission request for "
-        f"'{file_path}' was denied."
-    )
+    return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was denied."
 
 
 def _json_error(message: str, status_code: int) -> Response:
