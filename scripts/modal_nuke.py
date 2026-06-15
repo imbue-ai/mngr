@@ -119,8 +119,12 @@ def _list_resources(resource_type: str, environment: str) -> list[dict[str, str]
 
 
 def _stop_app(app_id: str, environment: str) -> tuple[bool, str]:
-    """Stop a Modal app. Returns (success, stderr)."""
-    result = _run_modal(["app", "stop", app_id], environment)
+    """Stop a Modal app. Returns (success, stderr).
+
+    --yes: newer Modal CLIs prompt to confirm `app stop` and abort with "no
+    interactive terminal detected" when run non-interactively.
+    """
+    result = _run_modal(["app", "stop", app_id, "--yes"], environment)
     return result.returncode == 0, result.stderr.strip()
 
 

@@ -25,6 +25,7 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CreateTemplate
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import InvalidKeyPathError
 
 # Operator suffix on a leaf key indicating "extend the current value".
 # Lowercase form used in TOML, ``--setting`` paths, and ``mngr config`` keys.
@@ -77,7 +78,7 @@ def set_at_path(data: dict[str, Any], key_path: Sequence[str], value: Any) -> No
     raw-dict shape.
     """
     if not key_path:
-        raise ValueError("key_path must contain at least one segment")
+        raise InvalidKeyPathError("key_path must contain at least one segment")
     current = data
     for segment in key_path[:-1]:
         existing = current.get(segment)

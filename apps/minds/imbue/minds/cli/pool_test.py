@@ -22,6 +22,7 @@ from imbue.minds.cli.pool import build_list_admin_args
 from imbue.minds.cli.pool import derive_public_key_from_private
 from imbue.minds.cli.pool import merge_ovh_env_into_subprocess_env
 from imbue.minds.cli.pool import pool
+from imbue.minds.cli.pool import resolve_host_pool_dsn
 from imbue.minds.cli.pool import resolved_management_public_key_path
 from imbue.minds.utils.secret_redaction import redact_secret_flag_values
 
@@ -311,6 +312,22 @@ def test_resolved_management_public_key_path_explicit_override_yields_path_uncha
     with resolved_management_public_key_path("dev-x", explicit_path=str(pub_path)) as yielded:
         assert yielded == str(pub_path)
         assert Path(yielded).is_file()
+
+
+def test_resolve_host_pool_dsn_returns_explicit_when_given() -> None:
+    """An explicit --database-url wins and never touches Vault (even on staging)."""
+    # If this consulted Vault for the staging tier it would shell out / fail in
+    # the test env; returning the explicit value proves the precedence short-circuit.
+    assert resolve_host_pool_dsn("staging", "postgres://explicit") == "postgres://explicit"
+
+
+def test_resolve_host_pool_dsn_returns_none_for_dev_tier() -> None:
+    """Per-env tiers return None (no Vault read) so the admin CLI auto-resolves the DSN."""
+    assert resolve_host_pool_dsn("dev-josh-1", None) is None
+
+
+def test_resolve_host_pool_dsn_returns_none_for_ci_tier() -> None:
+    assert resolve_host_pool_dsn("ci-abc123", None) is None
 
 
 def test_merge_ovh_env_with_empty_ovh_returns_shell_copy() -> None:

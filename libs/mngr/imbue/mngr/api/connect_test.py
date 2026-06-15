@@ -65,16 +65,20 @@ def test_build_ssh_activity_wrapper_script_attaches_to_tmux_session() -> None:
     assert "tmux attach -t =mngr-my-agent" in script
 
 
-def test_build_ssh_activity_wrapper_script_guards_resize_on_manual_window_size() -> None:
-    # The post-attach resize must be skipped for a pinned ("manual") window so the
-    # configured dimensions survive an interactive attach. The check is done on the
-    # remote host at attach time via tmux show-options (-wv, a window option).
+def test_build_ssh_activity_wrapper_script_guards_sigwinch_on_manual_window_size() -> None:
+    # The post-attach SIGWINCH nudge must be skipped for a pinned ("manual")
+    # window: it never resizes on attach, so there is nothing to redraw. The check
+    # is done on the remote host at attach time via tmux show-options (-wv, a
+    # window option).
     script = _build_ssh_activity_wrapper_script("mngr-my-agent", Path("/home/user/.mngr"))
 
     assert "show-options -t =mngr-my-agent:0 -wv window-size" in script
     assert "!= manual" in script
-    # The resize itself is still present (run only when not manual).
-    assert "resize-window" in script
+    # The SIGWINCH nudge is present (run only when not manual). We must NOT use
+    # tmux resize-window, which would flip window-size to manual and pin the
+    # window, breaking live resize tracking under the default window-size=latest.
+    assert "kill -WINCH" in script
+    assert "resize-window" not in script
 
 
 def test_build_ssh_activity_wrapper_script_kills_activity_tracker_on_exit() -> None:

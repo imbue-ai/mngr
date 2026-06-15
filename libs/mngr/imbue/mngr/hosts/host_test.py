@@ -1134,8 +1134,17 @@ def _create_host_with_fake_connector(
         (SSHException("SSH session not active"), True),
         (ChannelException(2, "open failed"), True),
         (EOFError(), True),
+        (TimeoutError("Timed out reading output"), True),
     ],
-    ids=["socket-closed", "other-os-error", "non-os-error", "ssh-exception", "channel-exception", "eof-error"],
+    ids=[
+        "socket-closed",
+        "other-os-error",
+        "non-os-error",
+        "ssh-exception",
+        "channel-exception",
+        "eof-error",
+        "timeout-error",
+    ],
 )
 def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> None:
     assert _is_transient_ssh_error(exception) is expected
@@ -1465,6 +1474,125 @@ def test_put_file_propagates_non_socket_closed_os_error(
     host = _create_host_with_custom_sftp(local_provider, _PermissionDeniedSFTP)
 
     with pytest.raises(OSError, match="Permission denied"):
+        host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+
+def test_get_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko read timeout) should disconnect before retrying.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the inner
+    retry handler must branch on it BEFORE the generic OSError branch --
+    otherwise the file-not-found / socket-closed string-matches would run
+    against the timeout exception, miss, and re-raise without disconnect,
+    leaving the retry to reuse the same dead SSH channel.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def getfo(self, remote_path: str, fl: IO[bytes]) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out reading output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._get_file("/remote/file.txt", io.BytesIO())
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_put_file_timeout_error_disconnects_before_retry(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """TimeoutError (pyinfra/paramiko write timeout) should disconnect before retrying.
+
+    Parallel to ``test_get_file_timeout_error_disconnects_before_retry``;
+    see that docstring for the ordering rationale.
+    """
+    call_count = 0
+
+    class _FailOnceThenSucceedSFTP(_BaseFakeSFTP):
+        def putfo(self, fl: IO[bytes], remote_path: str) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise TimeoutError("Timed out writing output")
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, _FailOnceThenSucceedSFTP)
+    result = host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
+
+    assert result is True
+    assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_get_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Without an explicit TimeoutError branch in ``_get_file``'s outer
+    handler, the post-retry timeout would fall into the generic OSError
+    branch and re-raise as raw ``OSError`` (since "Socket is closed"
+    won't match a timeout message), leaking the underlying class to
+    callers.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _get_file_with_transient_retry(
+            self,
+            remote_filename: str,
+            filename_or_io: str | IO[bytes],
+            remote_temp_filename: str | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while reading file"):
+        host._get_file("/remote/file.txt", io.BytesIO())
+
+
+def test_put_file_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    Parallel to ``test_get_file_wraps_timeout_error_in_host_connection_error``.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _put_file_with_transient_retry(
+            self,
+            filename_or_io: str | IO[str] | IO[bytes],
+            remote_filename: str,
+            remote_temp_filename: str | None = None,
+        ) -> bool:
+            raise TimeoutError("Timed out writing output")
+
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out while writing file"):
         host._put_file(io.BytesIO(b"content"), "/remote/file.txt")
 
 
@@ -1822,6 +1950,40 @@ def test_run_shell_command_wraps_ssh_exception_in_host_connection_error(
     )
 
     with pytest.raises(HostConnectionError, match="Could not execute command"):
+        host._run_shell_command(StringCommand("echo hello"))
+
+
+def test_run_shell_command_wraps_timeout_error_in_host_connection_error(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """After all retries are exhausted, TimeoutError must be wrapped in HostConnectionError.
+
+    ``TimeoutError`` is an ``OSError`` subclass on Python 3, so the outer
+    handler's ordering matters: the TimeoutError branch must precede the
+    narrow "Socket is closed" OSError check, otherwise post-retry timeouts
+    leak to callers as raw ``OSError`` rather than the structured
+    ``HostConnectionError`` wrapper.
+    """
+
+    class _HostWithImmediateTimeout(Host):
+        def _run_shell_command_with_transient_retry(
+            self,
+            command: StringCommand,
+            pyinfra_kwargs: dict[str, Any],
+        ) -> tuple[bool, CommandOutput]:
+            raise TimeoutError("Timed out reading output")
+
+    fake = _FakePyinfraHost()
+    connector = PyinfraConnector(cast(PyinfraHost, fake))
+    host = _HostWithImmediateTimeout(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=connector,
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="timed out reading output"):
         host._run_shell_command(StringCommand("echo hello"))
 
 
