@@ -10,6 +10,7 @@ from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from typing import cast
 
 import pytest
 from pydantic import TypeAdapter
@@ -51,6 +52,7 @@ from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_EXECUTE
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_PUSH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_REFRESH
 from imbue.mngr_kanpan.tui import _BUILTIN_COMMAND_KEY_UNMARK
+from imbue.mngr_kanpan.tui import _BatchItemResult
 from imbue.mngr_kanpan.tui import _BatchWorkItem
 from imbue.mngr_kanpan.tui import _ColumnDef
 from imbue.mngr_kanpan.tui import _FieldCellMarkupFn
@@ -68,6 +70,7 @@ from imbue.mngr_kanpan.tui import _build_mark_palette
 from imbue.mngr_kanpan.tui import _carry_forward_fields
 from imbue.mngr_kanpan.tui import _clear_focus
 from imbue.mngr_kanpan.tui import _compute_board_column_widths
+from imbue.mngr_kanpan.tui import _compute_footer_display
 from imbue.mngr_kanpan.tui import _dispatch_command
 from imbue.mngr_kanpan.tui import _execute_marks
 from imbue.mngr_kanpan.tui import _execute_next_in_batch
@@ -83,10 +86,11 @@ from imbue.mngr_kanpan.tui import _is_field_stale
 from imbue.mngr_kanpan.tui import _is_focus_on_first_selectable
 from imbue.mngr_kanpan.tui import _load_user_commands
 from imbue.mngr_kanpan.tui import _on_batch_item_poll
+from imbue.mngr_kanpan.tui import _on_transient_expire
 from imbue.mngr_kanpan.tui import _prune_orphaned_marks
 from imbue.mngr_kanpan.tui import _refresh_display
+from imbue.mngr_kanpan.tui import _render_footer
 from imbue.mngr_kanpan.tui import _resolve_section_order
-from imbue.mngr_kanpan.tui import _restore_footer
 from imbue.mngr_kanpan.tui import _run_shell_command
 from imbue.mngr_kanpan.tui import _show_transient_message
 from imbue.mngr_kanpan.tui import _submit_batch_item
@@ -96,6 +100,7 @@ from imbue.mngr_kanpan.tui import _unmark_focused
 from imbue.mngr_kanpan.tui import _update_mark_count_footer
 from imbue.mngr_kanpan.tui import _update_row_mark
 from imbue.mngr_kanpan.tui import _update_snapshot_mute
+from imbue.mngr_kanpan.tui import resolve_board_layout
 
 # =============================================================================
 # Helpers
@@ -264,6 +269,25 @@ def test_build_board_widgets_errors_displayed() -> None:
     assert found_error
 
 
+def test_build_board_widgets_execute_errors_displayed() -> None:
+    snapshot = make_board_snapshot(entries=())
+    walker, _ = _build_board_widgets(
+        snapshot, _BUILTIN_COLUMN_DEFS, execute_errors=("delete foo: timed out after 60s",)
+    )
+    texts = [str(w.text) if hasattr(w, "text") else "" for w in walker]
+    assert any("delete foo: timed out after 60s" in t for t in texts)
+
+
+def test_build_board_widgets_execute_and_fetch_errors_share_one_block() -> None:
+    snapshot = make_board_snapshot(entries=(), errors=("fetch boom",))
+    walker, _ = _build_board_widgets(snapshot, _BUILTIN_COLUMN_DEFS, execute_errors=("delete bar: failed",))
+    texts = [str(w.text) if hasattr(w, "text") else "" for w in walker]
+    # A single "Errors:" header covers both fetch and execution errors.
+    assert sum(1 for t in texts if t.strip() == "Errors:") == 1
+    assert any("fetch boom" in t for t in texts)
+    assert any("delete bar: failed" in t for t in texts)
+
+
 def test_build_board_widgets_groups_by_section() -> None:
     e1 = _make_entry(name="a", section=BoardSection.STILL_COOKING)
     e2 = _make_entry(name="b", section=BoardSection.PR_MERGED)
@@ -372,11 +396,93 @@ def test_show_transient_message() -> None:
     assert state.footer_left_text.text == "  Test message"
 
 
-def test_restore_footer() -> None:
+def test_transient_message_expires_to_steady() -> None:
     state = _make_state()
+    state.loop = _make_mock_loop()
     state.steady_footer_text = "  Steady"
-    _restore_footer(state)
+    _show_transient_message(state, "  Test message")
+    assert state.footer_left_text.text == "  Test message"
+    _on_transient_expire(state.loop, state)
+    assert state.transient_message is None
     assert state.footer_left_text.text == "  Steady"
+
+
+class _RecordingLoop:
+    """Mock loop that hands out real alarm handles and records cancellations.
+
+    Lets us exercise the transient-message debounce, where a second message must
+    cancel the first message's pending expiry alarm so it cannot clear the new one.
+    """
+
+    def __init__(self) -> None:
+        self.next_handle = 0
+        self.removed: list[int] = []
+
+    def set_alarm_in(self, _seconds: float, _callback: Any, _data: Any = None) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        return handle
+
+    def remove_alarm(self, handle: int) -> None:
+        self.removed.append(handle)
+
+
+def test_show_transient_message_cancels_previous_alarm() -> None:
+    state = _make_state()
+    loop = _RecordingLoop()
+    state.loop = cast(Any, loop)
+    _show_transient_message(state, "  First")
+    first_handle = state.transient_alarm
+    _show_transient_message(state, "  Second")
+    # The first message's expiry alarm was cancelled so it cannot clear the second.
+    assert loop.removed == [first_handle]
+    assert state.transient_alarm != first_handle
+    assert state.footer_left_text.text == "  Second"
+
+
+def test_footer_priority_action_wins_over_refresh() -> None:
+    # Regression: a refresh and a user action (e.g. delete) overlapping must not
+    # flicker. The single-owner footer shows the action label, not "Refreshing".
+    state = _make_state()
+    # A stand-in object for an in-flight refresh future.
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  [1/1] delete agent-a"
+    text, attr = _compute_footer_display(state)
+    assert text.startswith("  [1/1] delete agent-a")
+    assert "Refreshing" not in text
+    assert attr == "footer"
+
+
+def test_footer_priority_refresh_when_no_action() -> None:
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    text, _ = _compute_footer_display(state)
+    assert text.startswith("  Refreshing")
+
+
+def test_footer_transient_overrides_action_and_refresh() -> None:
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  [1/1] delete agent-a"
+    state.transient_message = "  Done"
+    text, attr = _compute_footer_display(state)
+    assert text == "  Done"
+    assert attr == "notification"
+
+
+def test_render_footer_is_single_writer_no_flicker() -> None:
+    # Both the refresh poll context and the action context render through the same
+    # function; the displayed text stays the action label across repeated renders.
+    state = _make_state()
+    state.refresh_future = cast(Any, object())
+    state.action_label = "  Running deploy on agent-a"
+    _render_footer(state)
+    first = state.footer_left_text.text
+    state.spinner_index += 1
+    _render_footer(state)
+    second = state.footer_left_text.text
+    assert first.startswith("  Running deploy on agent-a")
+    assert second.startswith("  Running deploy on agent-a")
 
 
 def test_update_snapshot_mute() -> None:
@@ -528,6 +634,28 @@ def test_build_data_source_column_defs_deduplicates() -> None:
     defs = _build_data_source_column_defs([_MockDataSource(), _MockDataSource()])
     names = [d.name for d in defs]
     assert names.count("mock_field") == 1
+
+
+def test_resolve_board_layout_default_order() -> None:
+    columns, section_order = resolve_board_layout([_MockDataSource()], KanpanPluginConfig())
+    keys = [key for key, _header in columns]
+    # Builtins come first, then the data source's columns appended (default order).
+    assert keys[:2] == ["name", "state"]
+    assert "mock_field" in keys
+    # Headers are stripped of the TUI's display padding.
+    assert ("name", "NAME") in columns
+    assert ("mock_field", "MOCK") in columns
+    assert section_order == BOARD_SECTION_ORDER
+
+
+def test_resolve_board_layout_respects_configured_order() -> None:
+    config = KanpanPluginConfig(
+        column_order=["state", "name", "mock_field"],
+        section_order=[BoardSection.MUTED, BoardSection.PR_MERGED],
+    )
+    columns, section_order = resolve_board_layout([_MockDataSource()], config)
+    assert [key for key, _header in columns] == ["state", "name", "mock_field"]
+    assert section_order == (BoardSection.MUTED, BoardSection.PR_MERGED)
 
 
 # =============================================================================
@@ -1363,17 +1491,29 @@ def test_toggle_mark_push_no_work_dir_shows_message() -> None:
 def test_finish_batch_execution_all_ok() -> None:
     state = _make_state()
     state.executing = True
-    _finish_batch_execution(state, ["op1: ok", "op2: ok"])
+    _finish_batch_execution(
+        state,
+        [_BatchItemResult(label="op1", is_success=True), _BatchItemResult(label="op2", is_success=True)],
+    )
     assert state.executing is False
     assert "2" in state.footer_left_text.text
+    assert state.execute_errors == ()
 
 
 def test_finish_batch_execution_with_failures() -> None:
     state = _make_state()
     state.executing = True
-    _finish_batch_execution(state, ["op1: ok", "op2: failed (err)"])
+    _finish_batch_execution(
+        state,
+        [
+            _BatchItemResult(label="op1", is_success=True),
+            _BatchItemResult(label="op2", is_success=False, detail="boom"),
+        ],
+    )
     assert state.executing is False
-    assert "failed" in state.footer_left_text.text or "1 failed" in state.footer_left_text.text
+    assert "1 failed" in state.footer_left_text.text
+    # The failure detail is persisted for rendering at the bottom of the board.
+    assert state.execute_errors == ("op2: boom",)
 
 
 def test_finish_batch_execution_empty_results() -> None:
@@ -1381,6 +1521,7 @@ def test_finish_batch_execution_empty_results() -> None:
     state.executing = True
     _finish_batch_execution(state, [])
     assert state.executing is False
+    assert state.execute_errors == ()
 
 
 # =============================================================================
@@ -1427,9 +1568,36 @@ def test_on_batch_item_poll_future_done_failure() -> None:
     proc = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="something bad")
     future = _make_done_future(proc)
     mock_loop = _make_mock_loop()
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
-    assert any("failed" in r for r in results)
+    assert len(results) == 1
+    assert results[0].is_success is False
+    # The captured stderr is preserved as the failure detail.
+    assert results[0].detail == "something bad"
+
+
+def test_on_batch_item_poll_timeout_reports_clear_detail() -> None:
+    state = _make_state()
+    state.executing = True
+    item = _BatchWorkItem(
+        name=AgentName("agent-a"),
+        key="c",
+        cmd=CustomCommand(name="custom"),
+        entry=None,
+    )
+
+    def _raise_timeout() -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=["mngr", "destroy"], timeout=60)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future: Future[subprocess.CompletedProcess[str]] = pool.submit(_raise_timeout)
+        future.exception()
+        mock_loop = _make_mock_loop()
+        results: list[_BatchItemResult] = []
+        _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
+    assert len(results) == 1
+    assert results[0].is_success is False
+    assert results[0].detail == "timed out after 60s"
 
 
 def test_on_batch_item_poll_future_done_batch_names() -> None:
@@ -1446,7 +1614,7 @@ def test_on_batch_item_poll_future_done_batch_names() -> None:
     proc = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
     future = _make_done_future(proc)
     mock_loop = _make_mock_loop()
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _on_batch_item_poll(mock_loop, (state, future, [item], results, 0, item))
     assert AgentName("a") not in state.marks
     assert AgentName("b") not in state.marks
@@ -1567,9 +1735,9 @@ def test_execute_next_in_batch_skipped_item() -> None:
         cmd=CustomCommand(name="noop"),
         entry=None,
     )
-    results: list[str] = []
+    results: list[_BatchItemResult] = []
     _execute_next_in_batch(state, [item], results, 0)
-    assert any("skipped" in r for r in results)
+    assert any("skipped" in r.detail for r in results)
     state.executor.shutdown(wait=False)
 
 

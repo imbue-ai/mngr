@@ -321,32 +321,25 @@ Only needed if you want the staging desktop client to use IMBUE_CLOUD
 launch mode. DOCKER mode (`--template main --template docker`) works
 without any pool hosts.
 
-```bash
-export DATABASE_URL=$(vault kv get -mount=secrets -field=DATABASE_URL minds/staging/neon)
-export ANTHROPIC_API_KEY=$(vault kv get -mount=secrets -field=ANTHROPIC_API_KEY minds/staging/litellm)
-export OVH_APPLICATION_KEY=$(vault kv get -mount=secrets -field=OVH_APPLICATION_KEY minds/staging/ovh)
-export OVH_APPLICATION_SECRET=$(vault kv get -mount=secrets -field=OVH_APPLICATION_SECRET minds/staging/ovh)
-export OVH_CONSUMER_KEY=$(vault kv get -mount=secrets -field=OVH_CONSUMER_KEY minds/staging/ovh)
+With staging activated, bake via the canonical justfile recipe:
 
-uv run mngr imbue_cloud admin pool create \
-    --count 1 \
-    --region US-WEST-OR \
-    --tag minds_env=staging \
-    --attributes '{"repo_branch_or_tag": "main"}' \
-    --workspace-dir ~/project/forever-claude-template \
-    --management-public-key-file .minds/staging/pool_management_key/id_ed25519.pub \
-    --database-url "$DATABASE_URL"
+```bash
+just bake-pool-host '{"repo_branch_or_tag": "v0.3.0"}' US-WEST-OR
 ```
+
+`just bake-pool-host <attributes-json> <region> [workspace_dir] [count] [extra flags]`
+wraps `minds pool create`, which derives the management SSH key and the OVH
+AK/AS/CK from the tier's Vault entries, auto-tags the VPS `minds_env=staging`
+(so `minds env destroy` can tear it down), and -- for staging/production --
+reads the host_pool DSN from `secrets/minds/staging/neon`. You do NOT export
+any of those by hand. See [host-pool-setup.md](./host-pool-setup.md) step 5
+for the full breakdown.
 
 `--region` is required by OVH (use any OVH datacenter code that's valid
 for the VPS plan; `US-WEST-OR` and `US-EAST-VA` are the routine picks).
-`--tag minds_env=staging` is what `minds env destroy` greps for when
-enumerating OVH hosts to tear down on a staging wipe, so omitting it
-would leak the VPS on destroy.
-
-The bake also needs OVH credentials on the operator's machine -- either
-already configured under `mngr`'s OVH provider, or as env vars exported
-from the tier's Vault entry as shown above.
+The baked version comes from the `workspace_dir` checkout (default
+`~/project/forever-claude-template`), NOT from `--attributes` -- check that
+workspace out at the tag/branch you want baked first (e.g. `v0.3.0`).
 
 Common first-bake failure: ``OVH API POST /order/cart/.../checkout
 returned error: You do not have preferred payment method``. The OVH
@@ -355,8 +348,7 @@ can go through. Set one in the OVH manager UI (Billing -> Payment
 methods -> add -> mark as default) and re-run. The bake script cleans
 up the half-provisioned VPS on this failure, so it's safe to retry.
 
-- [ ] `mngr imbue_cloud admin pool list --database-url "$DATABASE_URL"`
-  shows the row.
+- [ ] `just list-pool-hosts` shows the row.
 
 ---
 

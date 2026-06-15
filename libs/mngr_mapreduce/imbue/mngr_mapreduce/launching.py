@@ -9,6 +9,7 @@ from loguru import logger
 
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.model_update import to_update
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.api.create import create as api_create
 from imbue.mngr.api.create import resolve_target_host
 from imbue.mngr.api.data_types import CreateAgentResult
@@ -398,13 +399,13 @@ def launch_all_mappers(
 
     launch_config = config
     if config.snapshot is None:
-        # Pass is_for_host_creation=True so a backend with one-time bootstrap
-        # (Modal's per-user environment) creates that resource here. The
-        # snapshotter and every test agent that follows is a host creation,
-        # so this is the moment to allow bootstrap; without it, snapshotting
-        # against a fresh Modal account aborts with ProviderEmptyError before
-        # any host is created.
-        provider = get_provider_instance(config.provider_name, mngr_ctx, is_for_host_creation=True)
+        # Bootstrap any one-time backend resources (Modal's per-user environment)
+        # before building the provider instance. The snapshotter and every test
+        # agent that follows is a host creation, so this is the moment to allow
+        # bootstrap; without it, snapshotting against a fresh Modal account
+        # aborts with ProviderEmptyError before any host is created.
+        bootstrap_backend_for_host_creation(config.provider_name, mngr_ctx)
+        provider = get_provider_instance(config.provider_name, mngr_ctx)
         if provider.supports_snapshots:
             try:
                 snapshot_name = _create_snapshot_host(recipe.name, config, mngr_ctx, run_name)

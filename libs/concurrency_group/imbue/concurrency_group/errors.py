@@ -82,3 +82,9 @@ class EnvironmentStoppedError(ConcurrencyGroupError):
     """Raised when the environment is stopped."""
 
     ...
+
+
+class SingleExceptionExpectedError(ConcurrencyGroupError, ValueError):
+    """Raised when an exception group does not contain exactly one exception."""
+
+    ...
