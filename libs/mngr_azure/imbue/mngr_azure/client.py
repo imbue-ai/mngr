@@ -1,7 +1,6 @@
 import base64
 import os
 import re
-import time
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -29,6 +28,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_KEY
 from imbue.mngr_azure.config import AZURE_MANAGED_BY_TAG_VALUE
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
@@ -311,19 +311,22 @@ class AzureVpsClient(VpsClientInterface):
                 self._resource().providers.register(namespace)
             self._wait_for_provider_registered(namespace)
 
+    def _is_provider_registered(self, namespace: str) -> bool:
+        with self._translate_azure_errors():
+            provider = self._resource().providers.get(namespace)
+        return bool(provider.registration_state == "Registered")
+
     def _wait_for_provider_registered(self, namespace: str) -> None:
-        start = time.monotonic()
-        while time.monotonic() - start < _PROVIDER_REGISTRATION_TIMEOUT_SECONDS:
-            with self._translate_azure_errors():
-                provider = self._resource().providers.get(namespace)
-            if provider.registration_state == "Registered":
-                return
-            time.sleep(_PROVIDER_REGISTRATION_POLL_SECONDS)
-        raise MngrError(
-            f"Azure resource provider {namespace!r} did not reach 'Registered' within "
-            f"{_PROVIDER_REGISTRATION_TIMEOUT_SECONDS:.0f}s. Register it manually with "
-            f"`az provider register --namespace {namespace}` and retry `mngr azure prepare`."
-        )
+        if not poll_until(
+            lambda: self._is_provider_registered(namespace),
+            timeout=_PROVIDER_REGISTRATION_TIMEOUT_SECONDS,
+            poll_interval=_PROVIDER_REGISTRATION_POLL_SECONDS,
+        ):
+            raise MngrError(
+                f"Azure resource provider {namespace!r} did not reach 'Registered' within "
+                f"{_PROVIDER_REGISTRATION_TIMEOUT_SECONDS:.0f}s. Register it manually with "
+                f"`az provider register --namespace {namespace}` and retry `mngr azure prepare`."
+            )
 
     def ensure_network(self) -> AzureNetworkPrepareResult:
         """Create the mngr resource group + vnet/subnet/NSG if absent. Returns a prepare result.
