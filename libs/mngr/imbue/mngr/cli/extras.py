@@ -3,7 +3,6 @@
 import json
 import os
 import platform
-import shutil
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +37,7 @@ from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.pre_readers import find_profile_dir_lightweight
 from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.plugin_catalog import PLUGIN_CATALOG
+from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
@@ -243,7 +243,7 @@ def _claude_plugin_status() -> tuple[bool, dict[str, bool]]:
     as not installed.
     """
     not_installed = {plugin.name: False for plugin in _CLAUDE_CODE_PLUGINS}
-    claude_available = shutil.which("claude") is not None
+    claude_available = CLAUDE.is_available()
     if not claude_available:
         return False, not_installed
 
