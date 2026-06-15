@@ -1,1 +1,1 @@
-Clarified CLAUDE.md flaky-test guidance: if a test fails because of a timeout, do not mark it `@pytest.mark.flaky`; bump the timeout instead.
+Expanded CLAUDE.md flaky-test guidance: first investigate why a test is flaky and make it more robust if possible; if it is correct but fundamentally needs more time, bump that test's timeout (but avoid unreasonably long timeouts -- prefer leaving it marked flaky for infrastructure-level flukes).
