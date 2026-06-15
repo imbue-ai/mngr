@@ -13,6 +13,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_azure.errors import AzureSubscriptionError
 from imbue.mngr_azure.state_bucket import BlobStateBucket
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
 from imbue.mngr_vps_docker.config import VpsDockerProviderConfig
 
 # Storage-account names are globally unique, 3-24 chars, lowercase alphanumeric
@@ -215,6 +216,17 @@ class AzureProviderConfig(VpsDockerProviderConfig):
             "dropped in favor of the bucket; without it, mngr falls back to the legacy tag mirror."
         ),
     )
+    is_host_dir_synced_to_bucket: bool = Field(
+        default=True,
+        description=(
+            "Whether the VM syncs its host_dir to the Blob state bucket so it is readable while the VM "
+            "is deallocated (a Lima-style offline host_dir; mirrors Lima's is_host_data_volume_exposed). "
+            "On by default. When on (and a bucket exists), the create path attaches the prepare-provisioned "
+            "user-assigned managed identity, an on-box daemon periodically `az storage blob sync`s host_dir "
+            "to hosts/<host_id>/host_dir/, and get_volume_for_host serves offline reads from the bucket. Set "
+            "False to disable the host_dir sync entirely (offline host metadata still works via the bucket)."
+        ),
+    )
 
     def get_credential(self) -> Any:
         """Return a ``DefaultAzureCredential`` for the management clients.
@@ -284,6 +296,22 @@ class AzureProviderConfig(VpsDockerProviderConfig):
         ``mngr azure prepare`` created them), not on whether a name can be built.
         """
         return BlobStateBucket(
+            credential=self.get_credential(),
+            subscription_id=subscription_id,
+            resource_group=self.resource_group,
+            region=self.default_region,
+            account_name=self.resolve_state_storage_account_name(subscription_id),
+        )
+
+    def build_host_identity(self, subscription_id: str) -> BlobStateHostIdentity:
+        """Build the bucket-write ``BlobStateHostIdentity`` from this config + the resolved subscription.
+
+        The identity name is derived from the state-account name, so it shares the
+        account's per-(subscription, resource-group) scope. The account name is
+        always derivable, so (like ``build_state_bucket``) this never returns None;
+        the provider gates on whether the identity actually *exists*.
+        """
+        return BlobStateHostIdentity(
             credential=self.get_credential(),
             subscription_id=subscription_id,
             resource_group=self.resource_group,

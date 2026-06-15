@@ -513,6 +513,7 @@ class AzureVpsClient(VpsClientInterface):
         ssh_key_ids: Sequence[str],
         tags: Mapping[str, str],
         spot: bool = False,
+        user_assigned_identity_id: str | None = None,
     ) -> VpsInstanceId:
         """Provision an Azure VM (public IP + NIC + VM) in the client's region.
 
@@ -528,6 +529,12 @@ class AzureVpsClient(VpsClientInterface):
         reclaim semantics). ``spot`` is Azure-specific: it widens this method's
         signature beyond the shared ``VpsClientInterface.create_instance``
         contract, so providers reach it via ``self.azure_client.create_instance``.
+
+        When ``user_assigned_identity_id`` is supplied (the bucket-write managed
+        identity provisioned by ``mngr azure prepare``), it is attached to the VM
+        alongside the system-assigned identity, so the on-box host_dir sync daemon
+        can write Blob storage via MSI. Attaching it requires the create
+        credentials to hold the identity's ``.../assign/action``.
         """
         if region != self.region:
             raise VpsApiError(
@@ -556,7 +563,9 @@ class AzureVpsClient(VpsClientInterface):
             vm_tags[AZURE_PYTEST_LAUNCHED_TAG] = "true"
 
         nic_id = self._create_public_ip_and_nic(vm_name, subnet_id, vm_tags)
-        vm_model = self._build_vm_model(vm_name, plan, user_data, public_key, nic_id, vm_tags, spot)
+        vm_model = self._build_vm_model(
+            vm_name, plan, user_data, public_key, nic_id, vm_tags, spot, user_assigned_identity_id
+        )
 
         # The public IP + NIC are created before the VM. If VM creation fails
         # (e.g. SkuNotAvailable / quota), this method raises before returning an
@@ -653,6 +662,7 @@ class AzureVpsClient(VpsClientInterface):
         nic_id: str,
         vm_tags: Mapping[str, str],
         spot: bool,
+        user_assigned_identity_id: str | None = None,
     ) -> Any:
         # azure-mgmt-compute 38.x "flattens" the per-VM sub-profiles into
         # ``properties`` at runtime, but its typed __init__ overload only exposes
@@ -706,15 +716,26 @@ class AzureVpsClient(VpsClientInterface):
             properties.priority = "Spot"
             properties.eviction_policy = "Delete"
             properties.billing_profile = compute_models.BillingProfile(max_price=-1.0)
+        # System-assigned managed identity: the in-VM idle watcher uses its IMDS
+        # token to deallocate this VM itself (see AzureProvider's idle watcher). A
+        # per-VM role assignment (assign_self_deallocate_role) grants it the
+        # least-privilege deallocate action scoped to just this VM. When the
+        # bucket-write user-assigned identity is supplied, attach it too (type
+        # "SystemAssigned, UserAssigned") so the on-box host_dir sync daemon can
+        # write Blob storage via MSI -- its Storage Blob Data Contributor role is
+        # scoped to just the state account.
+        if user_assigned_identity_id is not None:
+            identity = compute_models.VirtualMachineIdentity(
+                type="SystemAssigned, UserAssigned",
+                user_assigned_identities={user_assigned_identity_id: compute_models.UserAssignedIdentitiesValue()},
+            )
+        else:
+            identity = compute_models.VirtualMachineIdentity(type="SystemAssigned")
         return compute_models.VirtualMachine(
             location=self.region,
             tags=dict(vm_tags),
             properties=properties,
-            # System-assigned managed identity: the in-VM idle watcher uses its IMDS
-            # token to deallocate this VM itself (see AzureProvider's idle watcher).
-            # A per-VM role assignment (assign_self_deallocate_role) grants it the
-            # least-privilege deallocate action scoped to just this VM.
-            identity=compute_models.VirtualMachineIdentity(type="SystemAssigned"),
+            identity=identity,
         )
 
     def _public_ip_name(self, vm_name: str) -> str:

@@ -48,6 +48,8 @@ from imbue.mngr_azure.client import HOST_NAME_TAG_KEY
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.state_bucket import BlobStateBucket
 from imbue.mngr_azure.state_bucket import BlobStateBucketError
+from imbue.mngr_azure.state_bucket import BlobStateHostIdentity
+from imbue.mngr_azure.state_bucket import host_dir_blob_prefix_for
 from imbue.mngr_vps_docker.container_setup import HOST_DIR_SUBPATH
 from imbue.mngr_vps_docker.container_setup import host_volume_name_for
 from imbue.mngr_vps_docker.host_store import VpsDockerHostRecord
@@ -90,6 +92,106 @@ IDLE_WATCHER_UNIT_NAME: Final[str] = "mngr-azure-idle-watcher"
 IDLE_SENTINEL_FILENAME: Final[str] = "stop-instance-requested"
 # Where the host-side deallocate script is installed on the outer VM.
 _DEALLOCATE_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-azure-deallocate.sh"
+
+# Host-side host_dir sync daemon (Component 3 of specs/provider-state-bucket).
+# When ``is_host_dir_synced_to_bucket`` is on and a state bucket exists, the
+# create path attaches the prepare-provisioned user-assigned managed identity,
+# then installs (over SSH on the outer) a systemd oneshot ``.service`` + ``.timer``
+# pair: every ``HOST_DIR_SYNC_INTERVAL_SECONDS`` the oneshot runs ``azcopy sync``
+# of ``<host_dir_on_outer>`` to the blob container's ``hosts/<id>/host_dir/``
+# prefix, authenticating azcopy as the VM's user-assigned identity via MSI (no
+# long-lived keys on the box). The same oneshot is triggered once on graceful
+# stop (``stop_host``) so the offline copy is current. Offline reads are served
+# from the bucket by the operator's credentials via ``get_volume_for_host``.
+# Mirrors the AWS ``aws s3 sync`` daemon.
+HOST_DIR_SYNC_UNIT_NAME: Final[str] = "mngr-azure-host-dir-sync"
+HOST_DIR_SYNC_INTERVAL_SECONDS: Final[int] = 60
+# host_dir can contain large transient build artifacts; exclude the obvious ones
+# so a periodic full-tree sync stays cheap. The same conservative set as AWS,
+# expressed as azcopy ``--exclude-pattern`` globs (semicolon-separated).
+_HOST_DIR_SYNC_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = ("*.tmp", "__pycache__", "node_modules")
+
+
+def _build_host_dir_sync_command(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
+    """Build the ``azcopy sync ... --delete-destination`` command the oneshot service runs.
+
+    Syncs the per-host ``host_dir`` tree to the ``hosts/<id>/host_dir/`` blob
+    prefix, with ``--delete-destination=true`` so a removed file is removed offline
+    too (the ``--delete`` analog), and a few excludes for large transient caches.
+    azcopy authenticates as the VM's *user-assigned* managed identity via MSI (its
+    client id pins which identity to use, since the VM also has a system-assigned
+    one). ``AZCOPY_AUTO_LOGIN_TYPE``/``AZCOPY_MSI_CLIENT_ID`` are set in the
+    service unit's environment.
+    """
+    excludes = ";".join(_HOST_DIR_SYNC_EXCLUDE_PATTERNS)
+    del identity_client_id  # threaded via the unit Environment, not the command line
+    return (
+        f'azcopy sync "{host_dir_on_outer}" "{blob_prefix_url}" '
+        f'--recursive --delete-destination=true --exclude-pattern "{excludes}"'
+    )
+
+
+def _build_host_dir_sync_service_unit(host_dir_on_outer: str, blob_prefix_url: str, identity_client_id: str) -> str:
+    """Build the oneshot systemd ``.service`` that pushes host_dir to the bucket once.
+
+    Triggered periodically by the paired ``.timer`` and once on graceful stop.
+    ``Type=oneshot`` so a stop-time ``systemctl start`` blocks until the sync
+    completes (the offline copy is current before the VM deallocates). The MSI
+    login env pins azcopy to the bucket-write user-assigned identity.
+    """
+    command = _build_host_dir_sync_command(host_dir_on_outer, blob_prefix_url, identity_client_id)
+    return (
+        "[Unit]\n"
+        "Description=Sync this host's host_dir to the mngr Azure Blob state bucket for offline reads\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "Environment=AZCOPY_AUTO_LOGIN_TYPE=MSI\n"
+        f"Environment=AZCOPY_MSI_CLIENT_ID={identity_client_id}\n"
+        f"ExecStart=/bin/sh -c '{command}'\n"
+    )
+
+
+def _build_host_dir_sync_timer_unit(interval_seconds: int) -> str:
+    """Build the systemd ``.timer`` that fires the host_dir sync every ``interval_seconds``.
+
+    ``OnBootSec`` gives the host a moment to finish bootstrapping before the first
+    sync; ``OnUnitActiveSec`` then repeats at the interval. Mirrors the AWS timer.
+    """
+    return (
+        "[Unit]\n"
+        "Description=Periodically sync this host's host_dir to the mngr Azure Blob state bucket\n"
+        "[Timer]\n"
+        f"OnBootSec={interval_seconds}\n"
+        f"OnUnitActiveSec={interval_seconds}\n"
+        f"Unit={HOST_DIR_SYNC_UNIT_NAME}.service\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+def _build_azcopy_install_command() -> str:
+    """Build the best-effort azcopy install command (no-op when already present).
+
+    Installs the azcopy v10 binary from Microsoft's static download into
+    ``/usr/local/bin`` only when ``azcopy`` is not already on PATH, so a re-run or
+    a baked image is a no-op. Uses curl + tar (both present on the Debian image
+    after the base cloud-init). Mirrors the AWS awscli best-effort install.
+    """
+    return (
+        "command -v azcopy >/dev/null 2>&1 || ("
+        "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl) && "
+        "tmp=$(mktemp -d) && "
+        'curl -fsSL "https://aka.ms/downloadazcopy-v10-linux" -o "$tmp/azcopy.tgz" && '
+        'tar -xzf "$tmp/azcopy.tgz" -C "$tmp" && '
+        'install -m 0755 "$tmp"/azcopy_linux_*/azcopy /usr/local/bin/azcopy && '
+        'rm -rf "$tmp")'
+    )
+
+
+def _build_host_dir_blob_url(account_name: str, container_name: str, host_id: HostId) -> str:
+    """Return the ``https://<account>.blob.core.windows.net/<container>/hosts/<id>/host_dir`` sync target."""
+    prefix = host_dir_blob_prefix_for(host_id).rstrip("/")
+    return f"https://{account_name}.blob.core.windows.net/{container_name}/{prefix}"
 
 
 def _build_sentinel_shutdown_script(sentinel_in_container: str) -> str:
@@ -258,6 +360,19 @@ class AzureProvider(VpsDockerProvider):
             )
             return None
         return bucket
+
+    def _host_identity(self) -> BlobStateHostIdentity | None:
+        """Return the bucket-write managed-identity helper (uncached), or None when unresolvable.
+
+        Built fresh each call (cheap; used only at create / rare diagnostics),
+        scoped to the same state-account name as ``_state_bucket``. Mirrors
+        ``AwsProvider._host_identity``.
+        """
+        try:
+            subscription_id = self.azure_config.get_subscription_id()
+        except ValueError:
+            return None
+        return self.azure_config.build_host_identity(subscription_id)
 
     def _fetch_provider_instances(self) -> list[dict[str, Any]]:
         """List Azure VMs tagged with this provider's name."""
