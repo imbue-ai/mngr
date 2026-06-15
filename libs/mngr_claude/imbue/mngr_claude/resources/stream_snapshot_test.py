@@ -335,3 +335,50 @@ def test_read_last_complete_assistant_id(tmp_path: Path) -> None:
 
 def test_read_last_complete_assistant_id_missing_file(tmp_path: Path) -> None:
     assert stream_snapshot._read_last_complete_assistant_id(tmp_path / "nope.jsonl") == ""
+
+
+def test_run_one_poll_idle_from_idle_does_no_work(tmp_path: Path) -> None:
+    # An idle agent that was already idle on the previous poll: no transcript
+    # read, no capture, no buffer write. The buffer file is never touched.
+    state = stream_snapshot.StreamBufferState()
+    buffer_path = tmp_path / "stream_buffer"
+    # active_path is absent, so the agent reads as idle.
+    active_path = tmp_path / "active"
+    # transcript_path is absent too, and must never be read on an idle poll.
+    transcript_path = tmp_path / "events.jsonl"
+
+    is_active = stream_snapshot._run_one_poll(
+        "dummy-session", state, active_path, transcript_path, buffer_path, was_active=False
+    )
+
+    assert is_active is False
+    assert not buffer_path.exists()
+
+
+def test_run_one_poll_active_to_idle_clears_buffer_once(tmp_path: Path) -> None:
+    # The active->idle transition empties the in-progress body and pins the id
+    # line to the last complete assistant message.
+    state = stream_snapshot.StreamBufferState()
+    block = stream_snapshot.extract_latest_assistant_block(_read_fixture("stream_markdown_demo_full.txt"))
+    assert block is not None
+    state.ingest_block(stream_snapshot.convert_block_to_markdown(block), has_marker=True)
+    # There is in-progress text in the accumulator for the transition to clear.
+    assert state.body_lines
+
+    buffer_path = tmp_path / "stream_buffer"
+    # active_path is absent, so the agent reads as idle.
+    active_path = tmp_path / "active"
+    transcript_path = tmp_path / "events.jsonl"
+    transcript_path.write_text(
+        '{"type": "assistant", "uuid": "a1"}\n{"type": "assistant", "uuid": "a2"}\n',
+        encoding="utf-8",
+    )
+
+    is_active = stream_snapshot._run_one_poll(
+        "dummy-session", state, active_path, transcript_path, buffer_path, was_active=True
+    )
+
+    assert is_active is False
+    # Body cleared (accumulator reset), id line pinned to the final message.
+    assert buffer_path.read_text(encoding="utf-8") == "a2"
+    assert state.body_lines == []

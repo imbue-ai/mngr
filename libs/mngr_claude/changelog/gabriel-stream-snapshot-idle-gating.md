@@ -1,0 +1,3 @@
+The Claude response-streaming watcher (`stream_snapshot.py`, enabled by `streaming_snapshot_interval_seconds > 0`) now does no work at all while the agent is idle: no transcript read, no tmux pane capture, and no buffer write.
+
+Previously the expensive pane capture was already skipped when the agent was idle, but the watcher still re-read the transcript and rewrote the stream buffer on every poll. It now performs a single clearing write on the active-to-idle transition (emptying the in-progress body and pinning the id line to the last complete message, so a stale preview cannot linger) and stays completely silent until the agent next becomes active.
