@@ -11,6 +11,7 @@ from inline_snapshot import snapshot
 from imbue.mngr.api.events import EventRecord
 from imbue.mngr.api.events import EventSourceInfo
 from imbue.mngr.api.events import EventsTarget
+from imbue.mngr.api.events import FOLLOW_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.events import _AllEventsStreamState
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
 from imbue.mngr.api.events import _build_event_sources_from_listing
@@ -23,7 +24,7 @@ from imbue.mngr.api.events import _pygtail_offset_file_path
 from imbue.mngr.api.events import _record_from_event_data
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
 from imbue.mngr.api.events import _start_tail_thread
-from imbue.mngr.api.events import _tail_source_thread_local
+from imbue.mngr.api.events import _tail_source_thread
 from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import filter_sources_by_name
 from imbue.mngr.api.events import parse_event_line
@@ -1141,11 +1142,11 @@ def test_resolve_events_target_populates_provider_and_host_id(
 
 
 @pytest.mark.timeout(30)
-def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
-    """Verify the pygtail-based tail thread detects new content appended to events.jsonl."""
-    events_dir = tmp_path / "events" / "src"
-    events_dir.mkdir(parents=True)
-    events_file = events_dir / "events.jsonl"
+def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path, local_provider) -> None:
+    """The persistent tail thread detects new content appended to a local events.jsonl (pygtail path)."""
+    events_dir = tmp_path / "events"
+    (events_dir / "src").mkdir(parents=True)
+    events_file = events_dir / "src" / "events.jsonl"
     # Start with an empty file
     events_file.write_text("")
 
@@ -1153,10 +1154,13 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
     offset_dir.mkdir()
     event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
+    online_event = threading.Event()
+    online_event.set()
+    target_holder = [_make_local_host_target(local_provider, events_dir)]
 
     thread = threading.Thread(
-        target=_tail_source_thread_local,
-        args=(events_file, "src", event_queue, [], [], stop_event, offset_dir),
+        target=_tail_source_thread,
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
         daemon=True,
     )
     thread.start()
@@ -1185,6 +1189,7 @@ def test_tail_source_thread_local_picks_up_new_events(tmp_path: Path) -> None:
         assert result.event_id == "t1"
     finally:
         stop_event.set()
+        online_event.set()
         thread.join(timeout=5.0)
 
 
@@ -1216,14 +1221,17 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
     offset_dir.mkdir()
     event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
+    online_event = threading.Event()
+    online_event.set()
 
     thread = _start_tail_thread(
-        target=host_target,
+        target_holder=[host_target],
         source_path="src",
         event_queue=event_queue,
         cel_include_filters=[],
         cel_exclude_filters=[],
         stop_event=stop_event,
+        online_event=online_event,
         offset_dir_path=offset_dir,
         initial_byte_offset=len(events_file.read_bytes()),
     )
@@ -1252,6 +1260,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
         assert result.event_id == "new1"
     finally:
         stop_event.set()
+        online_event.set()
         thread.join(timeout=5.0)
 
 
@@ -1341,23 +1350,17 @@ def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
 # =============================================================================
 
 
-def test_handle_online_offline_transition_restarts_threads(
-    tmp_path: Path,
-    temp_mngr_ctx: MngrContext,
+def test_handle_online_offline_transition_comes_online_sets_gate(
     local_provider,
 ) -> None:
-    """Verify _handle_online_offline_transition stops old threads and starts new ones."""
-    per_host_dir = local_provider.host_dir
-    agent_id = _create_agent_data_json(per_host_dir, "test-handle-transition-38291", "sleep 38291")
-    agent_events_subpath = Path("agents") / str(agent_id) / "events"
+    """Coming online swaps in the online target and opens the I/O gate.
 
-    # Create events directory
-    agent_events_dir = per_host_dir / "agents" / str(agent_id) / "events" / "src"
-    agent_events_dir.mkdir(parents=True)
-    (agent_events_dir / "events.jsonl").write_text("")
-
-    # Create a target that appears offline (no readable host yet) but carries
-    # the provider/host_id/events_subpath needed for refresh to resolve one.
+    No threads are created or torn down here -- the persistent tail threads pick
+    up the swapped target and resume reading once ``online_event`` is set.
+    """
+    agent_events_subpath = Path("agents") / "does-not-matter" / "events"
+    # A target that is currently offline (no readable host) but carries the
+    # provider/host_id/events_subpath that lets refresh resolve the online host.
     target = EventsTarget(
         display_name="test",
         provider=local_provider,
@@ -1365,82 +1368,49 @@ def test_handle_online_offline_transition_restarts_threads(
         events_subpath=agent_events_subpath,
     )
 
-    state = _AllEventsStreamState(
-        is_online=False,
-        known_source_paths={"src"},
-    )
+    state = _AllEventsStreamState(is_online=False)
     target_holder = [target]
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
-    tail_threads: list[threading.Thread] = []
+    # Starts clear (offline).
+    online_event = threading.Event()
 
-    offset_dir = tmp_path / "offsets"
-    offset_dir.mkdir()
+    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
 
-    _handle_online_offline_transition(
-        target_holder=target_holder,
-        state=state,
-        event_queue=event_queue,
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        stop_event=stop_event,
-        tail_threads=tail_threads,
-        offset_dir_path=offset_dir,
-    )
-
-    # Local host is always online, so transition should have occurred
+    # The local host resolves as online, so the transition should fire.
     assert state.is_online is True
     assert isinstance(target_holder[0].host, OnlineHostInterface)
-    # New tail threads should have been started for known sources
-    assert len(tail_threads) >= 1
-
-    # Clean up
-    stop_event.set()
-    for thread in tail_threads:
-        thread.join(timeout=5.0)
+    # The gate is opened so the persistent tail threads resume reading.
+    assert online_event.is_set()
 
 
 def test_handle_online_offline_transition_no_change_when_same_state() -> None:
-    """Verify _handle_online_offline_transition is a no-op when state hasn't changed."""
+    """A no-op when the online/offline state hasn't changed; the gate is left untouched."""
     target = EventsTarget(display_name="test")
 
-    # No provider info means refresh returns the same target
+    # No provider info means refresh returns the same target (still offline).
     state = _AllEventsStreamState(is_online=False)
     target_holder = [target]
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
-    tail_threads: list[threading.Thread] = []
+    # Clear, matching the offline state.
+    online_event = threading.Event()
 
-    _handle_online_offline_transition(
-        target_holder=target_holder,
-        state=state,
-        event_queue=event_queue,
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        stop_event=stop_event,
-        tail_threads=tail_threads,
-        offset_dir_path=None,
-    )
+    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
 
-    # No transition should have occurred (no provider to refresh)
+    # No transition should have occurred (no provider to refresh).
     assert state.is_online is False
     assert target_holder[0] is target
-    assert len(tail_threads) == 0
+    assert not online_event.is_set()
 
 
-def test_handle_online_offline_transition_stops_tailing_when_going_offline(
-    tmp_path: Path,
+def test_handle_online_offline_transition_clears_gate_when_going_offline(
     temp_mngr_ctx: MngrContext,
     local_provider,
 ) -> None:
-    """Going offline tears down tailing and does NOT restart it.
+    """Going offline clears the I/O gate so the persistent tail threads stop reading.
 
     A stopped agent's persisted event files cannot change until its host
     returns, so the follow loop must stop re-reading them every poll -- the
     repeated volume reads (one ``docker exec`` each) are the high-CPU load this
-    fix targets. The handler should leave ``tail_threads`` empty and leave the
-    consume loop's ``stop_event`` clear so the periodic online check can later
-    resume tailing.
+    fix targets. The handler clears ``online_event`` (parking the tail threads
+    with zero I/O) while leaving them alive for a later resume.
     """
     host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
     # The volume-backed host is a reader but explicitly not online.
@@ -1452,32 +1422,141 @@ def test_handle_online_offline_transition_stops_tailing_when_going_offline(
     # is a no-op and the target stays the offline host built above.
     target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
 
-    state = _AllEventsStreamState(is_online=True, known_source_paths={"src"})
+    state = _AllEventsStreamState(is_online=True)
     target_holder = [target]
+    online_event = threading.Event()
+    # Currently online.
+    online_event.set()
+
+    _handle_online_offline_transition(target_holder=target_holder, state=state, online_event=online_event)
+
+    # Transitioned online -> offline: the gate is cleared so tailing pauses.
+    assert state.is_online is False
+    assert not online_event.is_set()
+
+
+# =============================================================================
+# Persistent tail thread gating / target-follow tests
+# =============================================================================
+
+
+@pytest.mark.timeout(30)
+def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
+    tmp_path: Path,
+    temp_mngr_ctx: MngrContext,
+    local_provider,
+) -> None:
+    """The persistent tail thread reads nothing while ``online_event`` is clear, then
+    picks up events once it is set -- the core "no docker exec while offline" guarantee.
+
+    Uses a volume-backed offline host (the whole-file polling path) so any read would
+    go through ``read_event_content``; with the gate closed the thread must not read at
+    all, so the pre-existing ``e1`` stays out of the queue until the gate opens.
+    """
+    host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
+    assert not isinstance(host, OnlineHostInterface)
+    events_dir = host.host_dir / "events"
+    (events_dir / "src").mkdir(parents=True, exist_ok=True)
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
+    )
+
+    target = EventsTarget(host=host, events_path=events_dir, display_name="offline host 'local'")
+    offset_dir = tmp_path / "offsets"
+    offset_dir.mkdir()
     event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
     stop_event = threading.Event()
-    tail_threads: list[threading.Thread] = []
+    # Clear: gate closed (offline).
+    online_event = threading.Event()
+    target_holder = [target]
+
+    thread = threading.Thread(
+        target=_tail_source_thread,
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        # Give the thread well over a poll interval to (not) act while gated off.
+        threading.Event().wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS * 2)
+        assert event_queue.empty()
+
+        # Open the gate: the thread now reads the offline volume and delivers e1.
+        online_event.set()
+        result, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert result is not None
+        assert result.event_id == "e1"
+    finally:
+        stop_event.set()
+        online_event.set()
+        thread.join(timeout=5.0)
+
+
+@pytest.mark.timeout(30)
+def test_tail_source_thread_follows_target_swap_without_recreation(
+    tmp_path: Path,
+    local_provider,
+) -> None:
+    """Swapping ``target_holder[0]`` to a new path makes the same thread re-read the new
+    source from the start -- the thread follows the target without being recreated.
+
+    (The downstream consume-loop dedup, covered elsewhere, suppresses the repeated ids
+    on a real resume; here we assert the thread picks up the swapped path's content.)
+    """
+    dir_a = tmp_path / "a"
+    (dir_a / "src").mkdir(parents=True)
+    (dir_a / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"a1","source":"src"}\n'
+    )
+
+    dir_b = tmp_path / "b"
+    (dir_b / "src").mkdir(parents=True)
+    (dir_b / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"b1","source":"src"}\n'
+    )
 
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
+    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    stop_event = threading.Event()
+    online_event = threading.Event()
+    online_event.set()
+    target_holder = [_make_local_host_target(local_provider, dir_a)]
 
-    _handle_online_offline_transition(
-        target_holder=target_holder,
-        state=state,
-        event_queue=event_queue,
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        stop_event=stop_event,
-        tail_threads=tail_threads,
-        offset_dir_path=offset_dir,
+    thread = threading.Thread(
+        target=_tail_source_thread,
+        args=("src", target_holder, event_queue, [], [], stop_event, online_event, offset_dir, 0),
+        daemon=True,
     )
+    thread.start()
+    try:
+        # The thread first reads source A.
+        first, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert first is not None
+        assert first.event_id == "a1"
 
-    # Transitioned online -> offline: tailing is torn down and not restarted.
-    assert state.is_online is False
-    assert tail_threads == []
-    # The consume loop must keep running (stop_event left clear) so a later
-    # online check can resume tailing.
-    assert not stop_event.is_set()
+        # Swap to a different path (B); the same thread must follow it.
+        target_holder[0] = _make_local_host_target(local_provider, dir_b)
+
+        second, _, _ = poll_for_value(
+            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
+            timeout=15.0,
+            poll_interval=0.5,
+        )
+        assert second is not None
+        assert second.event_id == "b1"
+    finally:
+        stop_event.set()
+        online_event.set()
+        thread.join(timeout=5.0)
 
 
 # =============================================================================

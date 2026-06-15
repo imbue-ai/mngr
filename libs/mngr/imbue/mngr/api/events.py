@@ -557,7 +557,7 @@ def _read_events_from_file(
     drop it. ``read_event_content`` reads byte-exact via ``HostFileReadInterface.read_file``,
     so a file's true trailing-newline state is preserved either way. Partial-write
     robustness during *streaming* is handled separately by the follow-tail loop in
-    _tail_source_thread_remote, which has its own partial-line guard.
+    _read_remote_source_once, which has its own partial-line guard.
     """
     try:
         content = read_event_content(target, relative_file_path)
@@ -648,26 +648,33 @@ def _collect_historical_events(
 
 
 def _start_tail_threads_for_sources(
-    target: EventsTarget,
+    target_holder: list[EventsTarget],
     sources: Sequence[EventSourceInfo],
     initial_byte_offsets: dict[str, int],
     event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
+    online_event: threading.Event,
     offset_dir_path: Path,
 ) -> list[threading.Thread]:
-    """Start per-source tail threads for all current events.jsonl files."""
+    """Start one persistent tail thread per current events.jsonl file.
+
+    The threads are started unconditionally (even while offline): each gates its
+    own I/O on ``online_event`` and does nothing while the target is offline, so
+    a stopped agent costs no reads without any thread teardown/restart churn.
+    """
     threads: list[threading.Thread] = []
     for source in sources:
         if source.is_current_file_present:
             thread = _start_tail_thread(
-                target=target,
+                target_holder=target_holder,
                 source_path=source.source_path,
                 event_queue=event_queue,
                 cel_include_filters=cel_include_filters,
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
+                online_event=online_event,
                 offset_dir_path=offset_dir_path,
                 initial_byte_offset=initial_byte_offsets.get(source.source_path, 0),
             )
@@ -714,6 +721,16 @@ def stream_all_events(
         last_source_scan_time=time.monotonic(),
     )
     stop_event = threading.Event()
+    # Gates per-source tail I/O: set while online, cleared while offline. The
+    # tail threads stay alive across transitions and simply park (no reads)
+    # while it is clear, so a stopped agent costs nothing without thread churn.
+    online_event = threading.Event()
+    if state.is_online:
+        online_event.set()
+    # Shared, swappable handle to the current target. The consume loop swaps
+    # target_holder[0] on an online/offline transition; the tail threads read
+    # it each poll, so they follow the new target without being recreated.
+    target_holder: list[EventsTarget] = [target]
     event_queue: queue.Queue[EventRecord] = queue.Queue()
     tail_threads: list[threading.Thread] = []
     offset_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -724,24 +741,23 @@ def stream_all_events(
             target, state, cel_include_filters, cel_exclude_filters, source_filters
         )
 
-        # Start tail threads for follow mode. While the target is offline (we
-        # are reading a stopped agent's persisted files, which nothing can write
-        # to until the host comes back), tailing would just re-read unchanging
-        # files every poll, so we skip it and let the periodic online check in
-        # _consume_event_queue start tailing once the host comes online.
+        # Start one persistent tail thread per source for follow mode. They are
+        # started even while offline -- each gates its own I/O on online_event,
+        # so an offline target drives no reads, and coming back online just sets
+        # the gate (no teardown/restart).
         if is_follow:
             offset_dir = tempfile.TemporaryDirectory(prefix="mngr-events-offsets-")
-            if state.is_online:
-                tail_threads = _start_tail_threads_for_sources(
-                    target,
-                    sources,
-                    initial_byte_offsets,
-                    event_queue,
-                    cel_include_filters,
-                    cel_exclude_filters,
-                    stop_event,
-                    Path(offset_dir.name),
-                )
+            tail_threads = _start_tail_threads_for_sources(
+                target_holder,
+                sources,
+                initial_byte_offsets,
+                event_queue,
+                cel_include_filters,
+                cel_exclude_filters,
+                stop_event,
+                online_event,
+                Path(offset_dir.name),
+            )
 
         # Rotation guard: re-scan for newly rotated files that appeared during startup
         with log_span("Checking for newly rotated files"):
@@ -759,13 +775,14 @@ def stream_all_events(
 
         # Follow mode: consume events from queue
         _consume_event_queue(
-            target_holder=[target],
+            target_holder=target_holder,
             state=state,
             event_queue=event_queue,
             on_event=on_event,
             cel_include_filters=cel_include_filters,
             cel_exclude_filters=cel_exclude_filters,
             stop_event=stop_event,
+            online_event=online_event,
             tail_threads=tail_threads,
             offset_dir_path=Path(offset_dir.name) if offset_dir is not None else None,
             source_filters=source_filters,
@@ -773,6 +790,9 @@ def stream_all_events(
 
     finally:
         stop_event.set()
+        # Wake any thread parked on the offline gate so it observes the stop and
+        # exits promptly rather than after a full poll interval.
+        online_event.set()
         for thread in tail_threads:
             thread.join(timeout=5.0)
         if offset_dir is not None:
@@ -818,54 +838,62 @@ def _check_for_new_archived_events(
     return new_events
 
 
+def _resolve_read_plan(target: EventsTarget, source_path: str) -> tuple[bool, Path] | None:
+    """Return ``(is_local, events_file_path)`` for reading ``source_path`` from ``target`` now.
+
+    ``is_local`` selects the read mechanism: pygtail incremental tailing of a
+    local online host's file, versus whole-file polling (an SSH-remote online
+    host, or a volume-backed offline host). ``events_file_path`` is the absolute
+    path to the source's ``events.jsonl`` and also serves as the switch-detection
+    key -- a change in either the mechanism or the path means the tail thread
+    must re-initialize its reader. Returns ``None`` when the target exposes no
+    readable events path.
+    """
+    if target.events_path is None:
+        return None
+    is_local = isinstance(target.host, OnlineHostInterface) and target.host.is_local
+    return is_local, target.events_path / source_path / _EVENTS_JSONL_FILENAME
+
+
 def _start_tail_thread(
-    target: EventsTarget,
+    target_holder: list[EventsTarget],
     source_path: str,
     event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
+    online_event: threading.Event,
     offset_dir_path: Path,
     initial_byte_offset: int,
 ) -> threading.Thread:
-    """Start a daemon thread that tails a single events.jsonl and pushes events to the queue."""
-    is_local = isinstance(target.host, OnlineHostInterface) and target.host.is_local
-    if is_local and target.events_path is not None:
-        # Use pygtail for local filesystem tailing
-        events_file_path = target.events_path / source_path / _EVENTS_JSONL_FILENAME
+    """Start a persistent daemon thread that tails one source into the queue.
 
-        # Pre-write the pygtail offset file so it starts from exactly where
-        # the historical read left off, avoiding a gap between Phase 1 and Phase 2
-        _write_pygtail_offset_file(events_file_path, source_path, offset_dir_path, initial_byte_offset)
-
-        thread = threading.Thread(
-            target=_tail_source_thread_local,
-            args=(
-                events_file_path,
-                source_path,
-                event_queue,
-                cel_include_filters,
-                cel_exclude_filters,
-                stop_event,
-                offset_dir_path,
-            ),
-            daemon=True,
-        )
-    else:
-        # Use polling for remote hosts
-        thread = threading.Thread(
-            target=_tail_source_thread_remote,
-            args=(
-                target,
-                source_path,
-                event_queue,
-                cel_include_filters,
-                cel_exclude_filters,
-                stop_event,
-                initial_byte_offset,
-            ),
-            daemon=True,
-        )
+    The thread lives for the whole follow session: it reads the current target
+    from ``target_holder`` each poll and gates its I/O on ``online_event``, so a
+    target going offline/online needs only a flag flip, never a thread restart.
+    """
+    plan = _resolve_read_plan(target_holder[0], source_path)
+    if plan is not None and plan[0]:
+        # Local initial plan: pre-write the pygtail offset so the first read
+        # resumes exactly where the historical read left off (no gap, no
+        # needless re-read). On a later mechanism/path switch the thread itself
+        # resets to the start and relies on dedup.
+        _write_pygtail_offset_file(plan[1], source_path, offset_dir_path, initial_byte_offset)
+    thread = threading.Thread(
+        target=_tail_source_thread,
+        args=(
+            source_path,
+            target_holder,
+            event_queue,
+            cel_include_filters,
+            cel_exclude_filters,
+            stop_event,
+            online_event,
+            offset_dir_path,
+            initial_byte_offset,
+        ),
+        daemon=True,
+    )
     thread.start()
     return thread
 
@@ -895,108 +923,173 @@ def _write_pygtail_offset_file(
         logger.trace("Failed to pre-write pygtail offset file for '{}': {}", source_path, e)
 
 
-def _tail_source_thread_local(
+def _read_local_source_once(
     events_file_path: Path,
     source_path: str,
+    offset_dir_path: Path,
+    warner: MalformedJsonLineWarner,
     event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
-    offset_dir_path: Path,
 ) -> None:
-    """Thread function that tails a local events.jsonl via pygtail."""
+    """Read any new lines from a local events.jsonl via pygtail and enqueue them.
+
+    Pygtail reads from the offset file on construction, so each call picks up
+    where the previous one left off (the offset file is pre-written before the
+    first call, and reset on a mechanism/path switch).
+    """
     offset_file = _pygtail_offset_file_path(source_path, offset_dir_path)
-    warner = MalformedJsonLineWarner(source_description=f"event file '{events_file_path}'")
-
-    while not stop_event.is_set():
-        try:
-            # Create a new Pygtail instance each iteration. Pygtail reads from
-            # offset_file on construction, so subsequent iterations pick up where
-            # the previous one left off. The offset file is pre-written by
-            # _write_pygtail_offset_file before the thread starts.
-            tail = Pygtail(
-                str(events_file_path),
-                offset_file=offset_file,
-                save_on_end=True,
-                read_from_end=False,
-                full_lines=True,
-                copytruncate=True,
-                # Rotated files are named events.jsonl.<timestamp>. Pygtail's
-                # built-in patterns only check for .1 and dateext with '-', so
-                # we add a custom glob so it can find the rotated file and read
-                # any events written between our last read and the rotation.
-                log_patterns=["%s.[0-9]*"],
-            )
-            for line in tail:
-                if stop_event.is_set():
-                    break
-                parsed = warner.parse(line)
-                if parsed is None:
-                    continue
-                data, stripped = parsed
-                record = _record_from_event_data(data, stripped, source_path)
-                if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
-                    continue
-                event_queue.put(record)
-        except (OSError, IOError) as e:
-            logger.trace("Pygtail error for source '{}': {}", source_path, e)
-
-        # Wait before checking for more lines
-        stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
+    tail = Pygtail(
+        str(events_file_path),
+        offset_file=offset_file,
+        save_on_end=True,
+        read_from_end=False,
+        full_lines=True,
+        copytruncate=True,
+        # Rotated files are named events.jsonl.<timestamp>. Pygtail's built-in
+        # patterns only check for .1 and dateext with '-', so we add a custom
+        # glob so it can find the rotated file and read any events written
+        # between our last read and the rotation.
+        log_patterns=["%s.[0-9]*"],
+    )
+    for line in tail:
+        if stop_event.is_set():
+            break
+        parsed = warner.parse(line)
+        if parsed is None:
+            continue
+        data, stripped = parsed
+        record = _record_from_event_data(data, stripped, source_path)
+        if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+            continue
+        event_queue.put(record)
 
 
-def _tail_source_thread_remote(
+def _read_remote_source_once(
     target: EventsTarget,
     source_path: str,
+    byte_offset: int,
+    warner: MalformedJsonLineWarner,
+    event_queue: queue.Queue[EventRecord],
+    cel_include_filters: Sequence[Any],
+    cel_exclude_filters: Sequence[Any],
+) -> int:
+    """Poll a source by whole-file read, enqueue new lines, and return the new byte offset.
+
+    Used for any non-local target (SSH-remote online host, or a volume-backed
+    offline host). May raise ``MngrError``/``OSError`` from the read; the caller
+    handles that and retries on the next poll without advancing the offset.
+    """
+    relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
+    content = read_event_content(target, relative_file_path)
+
+    content_bytes = content.encode("utf-8")
+    current_length = len(content_bytes)
+
+    if current_length < byte_offset:
+        # File was rotated -- re-read from beginning, dedup via event_ids.
+        # Drop any malformed line still buffered in the warner: it came from
+        # the now-rotated file's tail, so treating it as mid-file corruption
+        # in the new file would be misleading.
+        logger.debug("Remote event file for source '{}' was rotated", source_path)
+        byte_offset = 0
+        warner.reset()
+
+    if current_length > byte_offset:
+        new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")
+        # Only consume up to the last newline; any trailing partial line is
+        # left in the file for the next poll so a mid-flush write doesn't
+        # cause the line to be split and silently lost.
+        lines, bytes_consumed = split_complete_lines(new_content)
+        for line in lines:
+            parsed = warner.parse(line)
+            if parsed is None:
+                continue
+            data, stripped = parsed
+            record = _record_from_event_data(data, stripped, source_path)
+            if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+                continue
+            event_queue.put(record)
+        byte_offset += bytes_consumed
+
+    return byte_offset
+
+
+def _tail_source_thread(
+    source_path: str,
+    target_holder: list[EventsTarget],
     event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
+    online_event: threading.Event,
+    offset_dir_path: Path,
     initial_byte_offset: int,
 ) -> None:
-    """Thread function that polls a remote source for new events."""
+    """Persistent per-source tail thread for the whole follow session.
+
+    Does no I/O while offline (``online_event`` clear): a stopped agent's files
+    cannot change, so polling them would just burn reads (one ``docker exec``
+    each for the Docker provider). On each online poll it reads from the current
+    target (``target_holder[0]``), which the consume loop swaps on a transition.
+    When the target's read mechanism or path changes, the thread re-initializes
+    its reader and re-reads from the start; ``emitted_event_ids`` dedup in the
+    consume loop suppresses anything already emitted, so the re-read never
+    double-emits.
+    """
+    warner = MalformedJsonLineWarner(source_description=f"event source '{source_path}'")
     byte_offset = initial_byte_offset
-    relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
-    warner = MalformedJsonLineWarner(
-        source_description=f"remote event file '{relative_file_path}' on {target.display_name}"
-    )
+    # Seed the switch-detection key from the target the thread was created
+    # against, so the first online poll on the initial target uses the
+    # pre-written offset rather than treating it as a switch (which would reset).
+    last_plan = _resolve_read_plan(target_holder[0], source_path)
 
     while not stop_event.is_set():
-        try:
-            content = read_event_content(target, relative_file_path)
-        except (MngrError, OSError) as e:
-            logger.trace("Failed to read remote source '{}' during follow: {}", source_path, e)
+        # Pause all I/O while offline; wake periodically to re-check shutdown.
+        if not online_event.is_set():
+            online_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
+            continue
+
+        plan = _resolve_read_plan(target_holder[0], source_path)
+        if plan is None:
             stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
             continue
 
-        content_bytes = content.encode("utf-8")
-        current_length = len(content_bytes)
-
-        if current_length < byte_offset:
-            # File was rotated -- re-read from beginning, dedup via event_ids.
-            # Drop any malformed line still buffered in the warner: it came from
-            # the now-rotated file's tail, so treating it as mid-file corruption
-            # in the new file would be misleading.
-            logger.debug("Remote event file for source '{}' was rotated", source_path)
+        is_local, events_file_path = plan
+        if plan != last_plan:
+            # Mechanism/path changed (an online/offline transition). Re-read
+            # from the start; dedup backstops against re-emitting old events.
             byte_offset = 0
             warner.reset()
+            if is_local:
+                _write_pygtail_offset_file(events_file_path, source_path, offset_dir_path, 0)
+            last_plan = plan
 
-        if current_length > byte_offset:
-            new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")
-            # Only consume up to the last newline; any trailing partial line is
-            # left in the file for the next poll so a mid-flush write doesn't
-            # cause the line to be split and silently lost.
-            lines, bytes_consumed = split_complete_lines(new_content)
-            for line in lines:
-                parsed = warner.parse(line)
-                if parsed is None:
-                    continue
-                data, stripped = parsed
-                record = _record_from_event_data(data, stripped, source_path)
-                if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
-                    continue
-                event_queue.put(record)
-            byte_offset += bytes_consumed
+        try:
+            if is_local:
+                _read_local_source_once(
+                    events_file_path,
+                    source_path,
+                    offset_dir_path,
+                    warner,
+                    event_queue,
+                    cel_include_filters,
+                    cel_exclude_filters,
+                    stop_event,
+                )
+            else:
+                byte_offset = _read_remote_source_once(
+                    target_holder[0],
+                    source_path,
+                    byte_offset,
+                    warner,
+                    event_queue,
+                    cel_include_filters,
+                    cel_exclude_filters,
+                )
+        except (MngrError, OSError, IOError) as e:
+            logger.trace("Tail read error for source '{}': {}", source_path, e)
 
         stop_event.wait(timeout=FOLLOW_POLL_INTERVAL_SECONDS)
 
@@ -1012,6 +1105,7 @@ def _consume_event_queue(
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
+    online_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
     source_filters: Sequence[str] = (),
@@ -1031,16 +1125,17 @@ def _consume_event_queue(
             # directory only appears when the agent writes a new kind of event,
             # which requires a running (online) host, so while the target is
             # offline we skip the scan and its per-directory listing cost. When
-            # the host returns, _handle_online_offline_transition resumes
-            # tailing and the next scan picks up any genuinely new sources.
+            # the host returns, _handle_online_offline_transition flips the gate
+            # back on and the next scan picks up any genuinely new sources.
             if state.is_online and now - state.last_source_scan_time > SOURCE_SCAN_INTERVAL_SECONDS:
                 _rescan_and_start_new_tail_threads(
-                    target=target_holder[0],
+                    target_holder=target_holder,
                     state=state,
                     event_queue=event_queue,
                     cel_include_filters=cel_include_filters,
                     cel_exclude_filters=cel_exclude_filters,
                     stop_event=stop_event,
+                    online_event=online_event,
                     tail_threads=tail_threads,
                     offset_dir_path=offset_dir_path,
                     source_filters=source_filters,
@@ -1052,12 +1147,7 @@ def _consume_event_queue(
                 _handle_online_offline_transition(
                     target_holder=target_holder,
                     state=state,
-                    event_queue=event_queue,
-                    cel_include_filters=cel_include_filters,
-                    cel_exclude_filters=cel_exclude_filters,
-                    stop_event=stop_event,
-                    tail_threads=tail_threads,
-                    offset_dir_path=offset_dir_path,
+                    online_event=online_event,
                 )
                 last_online_check_time = now
 
@@ -1071,17 +1161,19 @@ def _consume_event_queue(
 
 
 def _rescan_and_start_new_tail_threads(
-    target: EventsTarget,
+    target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
     event_queue: queue.Queue[EventRecord],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
+    online_event: threading.Event,
     tail_threads: list[threading.Thread],
     offset_dir_path: Path | None,
     source_filters: Sequence[str] = (),
 ) -> None:
     """Re-scan for new event source directories and start tail threads for them."""
+    target = target_holder[0]
     try:
         current_sources = filter_sources_by_name(discover_event_sources(target), source_filters)
     except (MngrError, OSError) as e:
@@ -1103,15 +1195,16 @@ def _rescan_and_start_new_tail_threads(
             if event.event_id not in state.emitted_event_ids:
                 event_queue.put(event)
 
-        # Start a tail thread for the new source
+        # Start a persistent tail thread for the new source
         if source.is_current_file_present and offset_dir_path is not None:
             thread = _start_tail_thread(
-                target=target,
+                target_holder=target_holder,
                 source_path=source.source_path,
                 event_queue=event_queue,
                 cel_include_filters=cel_include_filters,
                 cel_exclude_filters=cel_exclude_filters,
                 stop_event=stop_event,
+                online_event=online_event,
                 offset_dir_path=offset_dir_path,
                 initial_byte_offset=byte_offsets.get(source.source_path, 0),
             )
@@ -1149,20 +1242,17 @@ def refresh_events_target(
 def _handle_online_offline_transition(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord],
-    cel_include_filters: Sequence[Any],
-    cel_exclude_filters: Sequence[Any],
-    stop_event: threading.Event,
-    tail_threads: list[threading.Thread],
-    offset_dir_path: Path | None,
+    online_event: threading.Event,
 ) -> None:
-    """Check for online/offline transitions and restart tail threads if needed.
+    """Detect an online/offline transition and update shared state accordingly.
 
-    On any transition the existing tail threads are stopped. New tail threads
-    are started only when the host has come *online*: while it is offline its
-    persisted files cannot change, so we stop tailing and wait for it to return
-    rather than re-reading unchanging files every poll. Event deduplication via
-    emitted_event_ids ensures no events are emitted twice when tailing resumes.
+    On a net change this swaps ``target_holder[0]`` to the refreshed target and
+    sets/clears ``online_event``. The persistent tail threads read both on their
+    next poll: they follow the new target and either resume reading (online) or
+    park doing no I/O (offline). No threads are created or torn down here -- that
+    churn, and its teardown races, is gone. Event deduplication via
+    ``emitted_event_ids`` ensures no events are emitted twice when tailing
+    resumes (a thread re-reads its source from the start after the switch).
     """
     target = target_holder[0]
     try:
@@ -1185,30 +1275,7 @@ def _handle_online_offline_transition(
     state.is_online = is_now_online
     target_holder[0] = new_target
 
-    # Stop existing tail threads so they can be restarted with the new target
-    stop_event.set()
-    for thread in tail_threads:
-        thread.join(timeout=5.0)
-    tail_threads.clear()
-
-    # Reset the stop event for the new threads
-    stop_event.clear()
-
-    # Restart tail threads only when the host is now online. When it went
-    # offline its persisted files are immutable until it returns, so we leave
-    # tailing stopped (the threads were already torn down above) and wait for
-    # the next online transition to resume -- avoiding a poll-every-second
-    # re-read of unchanging files for a stopped agent.
-    if is_now_online and offset_dir_path is not None:
-        for source_path in state.known_source_paths:
-            thread = _start_tail_thread(
-                target=new_target,
-                source_path=source_path,
-                event_queue=event_queue,
-                cel_include_filters=cel_include_filters,
-                cel_exclude_filters=cel_exclude_filters,
-                stop_event=stop_event,
-                offset_dir_path=offset_dir_path,
-                initial_byte_offset=0,
-            )
-            tail_threads.append(thread)
+    if is_now_online:
+        online_event.set()
+    else:
+        online_event.clear()
