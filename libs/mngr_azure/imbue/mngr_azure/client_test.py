@@ -624,36 +624,30 @@ def test_remove_tags_empty_is_noop() -> None:
 # =========================================================================
 
 
-def test_list_instances_populates_state_from_power_state_and_expands_instance_view() -> None:
-    """A deallocated VM surfaces state="deallocated"; the list requests expand=instanceView.
+def test_list_instances_does_not_request_instance_view_expand() -> None:
+    """The VM list must NOT pass expand=instanceView (Azure 400s it on a resource-group list).
 
-    Power state comes only from the instance-view status (``PowerState/<state>``),
-    which the VM list populates only when expanded with ``instanceView`` -- so this
-    asserts both the requested expand and the parsed state.
+    Regression guard: ``expand=instanceView`` is only valid with a VM Scale Set
+    filter, so requesting it on the resource-group VM list breaks every Azure
+    operation (create/list/stop/start). The list therefore carries no power state
+    (``state`` is always empty); live power state is fetched per-VM via
+    ``get_instance_status``.
     """
     compute = FakeComputeClient()
     compute.virtual_machines.list_result = [
         SimpleNamespace(
             name="vm-a",
             tags={"mngr-provider": "azure"},
+            # Even if an instance view is present on the object, the list must not
+            # surface it as state (and must not have requested the expand).
             instance_view=SimpleNamespace(statuses=[SimpleNamespace(code="PowerState/deallocated")]),
         )
     ]
     client = _make_client(compute=compute)
     instances = client.list_instances()
-    assert compute.virtual_machines.last_list_expand == "instanceView"
+    assert compute.virtual_machines.last_list_expand is None
     assert len(instances) == 1
-    assert instances[0]["state"] == "deallocated"
-
-
-def test_list_instances_state_empty_when_instance_view_absent() -> None:
-    """Without an instance view (expand not honored / no statuses) the state is empty."""
-    compute = FakeComputeClient()
-    compute.virtual_machines.list_result = [
-        SimpleNamespace(name="vm-a", tags={"mngr-provider": "azure"}, instance_view=None)
-    ]
-    client = _make_client(compute=compute)
-    assert client.list_instances()[0]["state"] == ""
+    assert instances[0]["state"] == ""
 
 
 # =========================================================================

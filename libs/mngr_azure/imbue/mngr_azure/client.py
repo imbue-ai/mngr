@@ -1044,45 +1044,34 @@ class AzureVpsClient(VpsClientInterface):
         return public_ip.ip_address
 
     def _normalize_vm(self, vm: Any, ip_by_name: Mapping[str, str]) -> dict[str, Any]:
+        # ``state`` is left empty: Azure's resource-group VM list cannot return
+        # power state (``expand=instanceView`` is rejected unless a VM Scale Set
+        # filter is applied), so callers that need the live power state of a
+        # specific VM fetch it on demand via ``get_instance_status`` (a per-VM
+        # ``instance_view`` call). See ``AzureProvider.discover_hosts_and_agents``.
         tags = dict(vm.tags or {})
         return {
             "id": vm.name,
             "main_ip": ip_by_name.get(self._public_ip_name(vm.name), ""),
-            "state": self._power_state_from_vm(vm),
+            "state": "",
             "tags": [f"{key}={value}" for key, value in tags.items()],
         }
 
-    def _power_state_from_vm(self, vm: Any) -> str:
-        """Return the VM's power-state suffix (e.g. ``running`` / ``deallocated``), ``''`` if absent.
-
-        Reads the ``PowerState/<state>`` instance-view status, which the VM list
-        populates only when expanded with ``expand="instanceView"`` (see
-        ``_list_vms_with_ips``). Offline discovery uses this to spot deallocated /
-        stopped VMs that the SSH-based sweep can't reach.
-        """
-        instance_view = vm.instance_view
-        if instance_view is None:
-            return ""
-        for status in instance_view.statuses or ():
-            code = status.code or ""
-            if code.startswith("PowerState/"):
-                return code[len("PowerState/") :]
-        return ""
-
     def _list_vms_with_ips(self) -> list[dict[str, Any]]:
-        """List all VMs in the resource group, normalized with their public IPs and power state.
+        """List all VMs in the resource group, normalized with their public IPs.
 
         Resolves each VM's public IP from a single ``public_ip_addresses.list``
-        call (Azure's VM list does not include IPs), and requests
-        ``expand="instanceView"`` so each VM carries its power state (needed to
-        surface deallocated VMs in offline discovery) without a per-VM
-        ``instance_view`` call. Returns ``[]`` when the resource group does not
+        call (Azure's VM list does not include IPs). Power state is NOT requested
+        here: Azure rejects ``expand=instanceView`` on a resource-group VM list
+        (it is only valid with a VM Scale Set filter), so the normalized ``state``
+        is empty and live power state is fetched per-VM on demand via
+        ``get_instance_status``. Returns ``[]`` when the resource group does not
         exist yet (pre-prepare), so discovery does not error on an unconfigured
         subscription.
         """
         try:
             with self._translate_azure_errors():
-                vms = list(self._compute().virtual_machines.list(self.resource_group, expand="instanceView"))
+                vms = list(self._compute().virtual_machines.list(self.resource_group))
                 public_ips = list(self._network().public_ip_addresses.list(self.resource_group))
         except VpsApiError as e:
             if e.status_code == 404:

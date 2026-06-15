@@ -56,6 +56,7 @@ from imbue.mngr_vps_docker.instance import extract_single_value_arg
 from imbue.mngr_vps_docker.instance import raise_if_unknown_provider_arg
 from imbue.mngr_vps_docker.instance import raise_if_vps_migration_arg
 from imbue.mngr_vps_docker.primitives import VpsInstanceId
+from imbue.mngr_vps_docker.primitives import VpsInstanceStatus
 
 AZURE_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("azure")
 
@@ -69,11 +70,6 @@ _AGENT_TAG_FIELDS: Final[tuple[str, ...]] = ("name", "type", "labels")
 # Azure tag values are capped at 256 chars; a field whose value overflows is
 # dropped, not failed (realistically only ``labels``).
 _MAX_TAG_VALUE_LEN: Final[int] = 256
-# Power-state suffixes (from the instance view) in which the guest OS is down (so
-# the SSH-based sweep can't reach the VM) but the VM still exists and its agents
-# must be reconstructed from tags. Includes both ``stopped`` (powered off, still
-# billing) and ``deallocated`` (compute billing halted) plus their transitions.
-_HOST_DOWN_STATES: Final[frozenset[str]] = frozenset({"stopping", "stopped", "deallocating", "deallocated"})
 # ``mngr-host-name`` tag holds ``mngr-<host_name>``; strip the prefix on read.
 _HOST_NAME_PREFIX: Final[str] = "mngr-"
 
@@ -621,14 +617,20 @@ class AzureProvider(VpsDockerProvider):
         """Add DEALLOCATED VMs (which the SSH-based base discovery misses) from tags.
 
         A deallocated VM keeps its static public IP but its OS is down, so the base
-        sweep can't SSH in; here we reconstruct those hosts and their agents from
-        VM tags. Mirrors ``AwsProvider.discover_hosts_and_agents``.
+        SSH sweep can't reach it; here we reconstruct those hosts and their agents
+        from VM tags. Mirrors ``AwsProvider.discover_hosts_and_agents``.
+
+        Azure's VM list cannot carry power state (``expand=instanceView`` is
+        rejected on a resource-group list), so -- unlike AWS, which gets EC2 state
+        for free in the list -- we confirm a candidate is actually halted with a
+        per-VM ``get_instance_status`` call. That call is made only for mngr VMs the
+        SSH sweep did NOT surface (i.e. unreachable ones), so a healthy ``mngr
+        list`` makes zero extra calls, and a running-but-transiently-unreachable VM
+        is not misreported as STOPPED.
         """
         result = super().discover_hosts_and_agents(cg, include_destroyed=include_destroyed)
         online_host_ids = {ref.host_id for ref in result}
         for instance in self._list_instances_cached():
-            if instance.get("state") not in _HOST_DOWN_STATES:
-                continue
             try:
                 host_ref = self._discovered_host_from_tags(instance)
             except ValueError as e:
@@ -638,6 +640,12 @@ class AzureProvider(VpsDockerProvider):
                 )
                 continue
             if host_ref is None or host_ref.host_id in online_host_ids:
+                continue
+            # Only reconstruct genuinely-down VMs: a not-online mngr VM that is
+            # still ``running`` (e.g. SSH transiently failed, mid-boot, firewall)
+            # must not be surfaced as STOPPED. HALTED covers stopped/deallocated
+            # and their in-flight transitions.
+            if self.azure_client.get_instance_status(VpsInstanceId(instance["id"])) != VpsInstanceStatus.HALTED:
                 continue
             agent_refs: list[DiscoveredAgent] = []
             for agent_data in self._persisted_agent_dicts_from_instance(instance):

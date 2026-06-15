@@ -140,7 +140,8 @@ class FakeVirtualMachinesOperations:
         self.list_result: list[Any] = []
         self.list_error: Exception | None = None
         # Records the ``expand`` value the production code passes to ``list`` so a
-        # test can assert ``instanceView`` is requested (needed for power state).
+        # test can assert it is NOT ``instanceView`` (Azure 400s that on a
+        # resource-group list; power state is fetched per-VM via instance_view).
         self.last_list_expand: str | None = None
 
     def begin_create_or_update(self, resource_group: str, vm_name: str, parameters: Any) -> FakePoller:

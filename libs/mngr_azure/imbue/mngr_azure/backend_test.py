@@ -235,24 +235,39 @@ def _build_stubbed_provider(
     return provider, compute, resource
 
 
-def _vm(name: str, state: str, *, tags: dict[str, str] | None = None) -> SimpleNamespace:
+def _vm(name: str, *, tags: dict[str, str] | None = None) -> SimpleNamespace:
     """A VM SimpleNamespace as the fake compute client's ``list`` returns it.
 
-    ``state`` becomes the instance-view power state (``PowerState/<state>``); the
-    provider normalizes it to the dict's ``state``. Tags become the normalized
-    ``"key=value"`` list. The provider's instance lookups go through
-    ``list_instances(provider_tag="azure-test")``, which filters on the
+    The resource-group list carries no power state (``expand=instanceView`` is
+    rejected on it), so the normalized dict's ``state`` is always empty. Tags
+    become the normalized ``"key=value"`` list. The provider's instance lookups go
+    through ``list_instances(provider_tag="azure-test")``, which filters on the
     ``mngr-provider`` tag, so it is injected by default (every mngr VM carries it)
     unless a test sets its own.
     """
     full_tags = {"mngr-provider": "azure-test", **(tags or {})}
-    instance_view = SimpleNamespace(statuses=[SimpleNamespace(code=f"PowerState/{state}")]) if state else None
-    return SimpleNamespace(name=name, tags=full_tags, instance_view=instance_view)
+    return SimpleNamespace(name=name, tags=full_tags, instance_view=None)
 
 
 def _seed_compute(compute: FakeComputeClient, vms: list[SimpleNamespace]) -> None:
     """Seed the fake compute VM list for the normalize path."""
     compute.virtual_machines.list_result = vms
+
+
+def _set_power_state(compute: FakeComputeClient, power_suffix: str) -> None:
+    """Set the shared instance-view result so ``get_instance_status`` maps to one power state.
+
+    ``get_instance_status`` reads the fake's single ``instance_view_result`` (the
+    same for every VM); the real client maps the ``PowerState/<suffix>`` status to a
+    ``VpsInstanceStatus`` (e.g. ``deallocated``/``stopping`` -> HALTED, ``running``
+    -> ACTIVE).
+    """
+    compute.virtual_machines.instance_view_result = SimpleNamespace(
+        statuses=[
+            SimpleNamespace(code="ProvisioningState/succeeded"),
+            SimpleNamespace(code=f"PowerState/{power_suffix}"),
+        ]
+    )
 
 
 def _seed_stopped_host_record(provider: AzureProvider, host_id: HostId) -> None:
@@ -281,8 +296,8 @@ def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContex
     _seed_compute(
         compute,
         [
-            _vm("vm-match", "deallocated", tags={"mngr-host-id": str(host_id), "mngr-provider": "azure-test"}),
-            _vm("vm-other", "running", tags={"mngr-host-id": str(HostId.generate()), "mngr-provider": "azure-test"}),
+            _vm("vm-match", tags={"mngr-host-id": str(host_id), "mngr-provider": "azure-test"}),
+            _vm("vm-other", tags={"mngr-host-id": str(HostId.generate()), "mngr-provider": "azure-test"}),
         ],
     )
     found = provider._find_instance_for_host(host_id)
@@ -293,7 +308,7 @@ def test_find_instance_for_host_matches_by_host_id_tag(temp_mngr_ctx: MngrContex
 def test_find_instance_for_host_returns_none_when_no_tag_match(temp_mngr_ctx: MngrContext) -> None:
     """A host with no matching VM tag resolves to None (after a single cache-refresh retry)."""
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
-    _seed_compute(compute, [_vm("vm-other", "running", tags={"mngr-host-id": str(HostId.generate())})])
+    _seed_compute(compute, [_vm("vm-other", tags={"mngr-host-id": str(HostId.generate())})])
     assert provider._find_instance_for_host(HostId.generate()) is None
 
 
@@ -309,8 +324,8 @@ def test_find_instance_for_host_refuses_duplicate_host_id_tag(temp_mngr_ctx: Mng
     _seed_compute(
         compute,
         [
-            _vm("vm-real", "deallocated", tags={"mngr-host-id": str(host_id)}),
-            _vm("vm-evil", "running", tags={"mngr-host-id": str(host_id)}),
+            _vm("vm-real", tags={"mngr-host-id": str(host_id)}),
+            _vm("vm-evil", tags={"mngr-host-id": str(host_id)}),
         ],
     )
     with pytest.raises(MngrError, match="ambiguous"):
@@ -329,7 +344,7 @@ def test_persist_agent_data_mirrors_fields_into_vm_tags(temp_mngr_ctx: MngrConte
     host_id = HostId.generate()
     agent_id = AgentId.generate()
     _seed_stopped_host_record(provider, host_id)
-    _seed_compute(compute, [_vm("vm-1", "deallocated", tags={"mngr-host-id": str(host_id)})])
+    _seed_compute(compute, [_vm("vm-1", tags={"mngr-host-id": str(host_id)})])
     provider.persist_agent_data(
         host_id,
         {"id": str(agent_id), "name": "a1", "type": "command", "labels": {"env": "prod"}},
@@ -353,7 +368,6 @@ def test_list_persisted_agent_data_for_host_reads_tags(temp_mngr_ctx: MngrContex
         [
             _vm(
                 "vm-1",
-                "deallocated",
                 tags={
                     "mngr-host-id": str(host_id),
                     f"{AGENT_TAG_PREFIX}{agent_id}-name": "a1",
@@ -381,7 +395,6 @@ def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr
         [
             _vm(
                 "vm-1",
-                "deallocated",
                 tags={
                     "mngr-host-id": str(host_id),
                     "mngr-provider": "azure-test",
@@ -392,6 +405,7 @@ def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr
             )
         ],
     )
+    _set_power_state(compute, "deallocated")
     with ConcurrencyGroup(name="test") as cg:
         result = provider.discover_hosts_and_agents(cg)
     hosts = list(result.keys())
@@ -406,7 +420,7 @@ def test_discover_hosts_and_agents_surfaces_deallocated_host_from_tags(temp_mngr
 
 
 def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp_mngr_ctx: MngrContext) -> None:
-    """A still-stopping VM (OS down, _HOST_DOWN_STATES) is reconstructed so it doesn't vanish mid-stop."""
+    """A still-stopping VM (OS down, status HALTED) is reconstructed so it doesn't vanish mid-stop."""
     provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
     host_id = HostId.generate()
     agent_id = AgentId.generate()
@@ -415,7 +429,6 @@ def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp
         [
             _vm(
                 "vm-1",
-                "stopping",
                 tags={
                     "mngr-host-id": str(host_id),
                     "mngr-provider": "azure-test",
@@ -425,6 +438,7 @@ def test_discover_hosts_and_agents_surfaces_stopping_host_during_transition(temp
             )
         ],
     )
+    _set_power_state(compute, "stopping")
     with ConcurrencyGroup(name="test") as cg:
         result = provider.discover_hosts_and_agents(cg)
     hosts = {host.host_id: host for host in result}
@@ -440,19 +454,47 @@ def test_discover_hosts_and_agents_skips_vm_with_absent_host_id_tag(temp_mngr_ct
     _seed_compute(
         compute,
         [
-            _vm("vm-bad", "deallocated", tags={"mngr-provider": "azure-test"}),
+            _vm("vm-bad", tags={"mngr-provider": "azure-test"}),
             _vm(
                 "vm-good",
-                "deallocated",
                 tags={"mngr-host-id": str(good_host_id), "mngr-provider": "azure-test", "mngr-host-name": "mngr-good"},
             ),
         ],
     )
+    _set_power_state(compute, "deallocated")
     with ConcurrencyGroup(name="test") as cg:
         result = provider.discover_hosts_and_agents(cg)
     host_ids = {host.host_id for host in result}
     assert good_host_id in host_ids
     assert len(host_ids) == 1
+
+
+def test_discover_hosts_and_agents_skips_running_but_unreachable_vm(temp_mngr_ctx: MngrContext) -> None:
+    """A not-online mngr VM that is still ``running`` is NOT reconstructed as STOPPED.
+
+    The SSH base sweep didn't surface it (no reachable host record), but its
+    per-candidate ``get_instance_status`` reports ACTIVE (not HALTED), so the
+    transiently-unreachable VM is left out rather than misreported as stopped.
+    """
+    provider, compute, _resource = _build_stubbed_provider(temp_mngr_ctx)
+    host_id = HostId.generate()
+    _seed_compute(
+        compute,
+        [
+            _vm(
+                "vm-1",
+                tags={
+                    "mngr-host-id": str(host_id),
+                    "mngr-provider": "azure-test",
+                    "mngr-host-name": "mngr-myhost",
+                },
+            )
+        ],
+    )
+    _set_power_state(compute, "running")
+    with ConcurrencyGroup(name="test") as cg:
+        result = provider.discover_hosts_and_agents(cg)
+    assert host_id not in {host.host_id for host in result}
 
 
 def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: MngrContext) -> None:
@@ -468,7 +510,6 @@ def test_to_offline_host_reconstructs_stopped_host_from_tags(temp_mngr_ctx: Mngr
         [
             _vm(
                 "vm-1",
-                "deallocated",
                 tags={
                     "mngr-host-id": str(host_id),
                     "mngr-host-name": "mngr-myhost",
@@ -497,7 +538,6 @@ def test_to_offline_host_falls_back_to_now_on_malformed_created_at(
         [
             _vm(
                 "vm-1",
-                "deallocated",
                 tags={"mngr-host-id": str(host_id), "mngr-host-name": "mngr-myhost", "mngr-created-at": "not-a-stamp"},
             )
         ],
