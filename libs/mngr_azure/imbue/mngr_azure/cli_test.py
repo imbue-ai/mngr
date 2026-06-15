@@ -9,22 +9,69 @@ from click.testing import CliRunner
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr_azure.backend import AZURE_BACKEND_NAME
+from imbue.mngr_azure.cli import _ensure_state_bucket_best_effort
 from imbue.mngr_azure.cli import _output_cleanup_result
 from imbue.mngr_azure.cli import _output_prepare_result
 from imbue.mngr_azure.cli import _perform_cleanup
+from imbue.mngr_azure.cli import _perform_state_bucket_cleanup
 from imbue.mngr_azure.cli import _resolve_provider_config
 from imbue.mngr_azure.cli import azure_cli_group
 from imbue.mngr_azure.client import AzureNetworkPrepareResult
 from imbue.mngr_azure.config import AzureProviderConfig
 from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.testing import FakeBlobStorageBackend
 from imbue.mngr_azure.testing import FakeComputeClient
 from imbue.mngr_azure.testing import FakeNetworkClient
 from imbue.mngr_azure.testing import FakeResourceClient
 from imbue.mngr_azure.testing import _StubbedAzureVpsClient
+from imbue.mngr_azure.testing import _StubbedBlobStateBucket
+
+
+def _stubbed_bucket(backend: FakeBlobStorageBackend) -> _StubbedBlobStateBucket:
+    return _StubbedBlobStateBucket(
+        credential=None,
+        subscription_id="sub-123",
+        resource_group="mngr",
+        region="westus",
+        account_name="mngrststateacct1234",
+        fake_backend=backend,
+    )
+
+
+def test_ensure_state_bucket_best_effort_creates_account() -> None:
+    bucket = _stubbed_bucket(FakeBlobStorageBackend())
+    account_name, was_created = _ensure_state_bucket_best_effort(bucket)
+    assert account_name == "mngrststateacct1234"
+    assert was_created is True
+
+
+def test_perform_state_bucket_cleanup_deletes_when_empty() -> None:
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    assert _perform_state_bucket_cleanup(bucket) == "mngrststateacct1234"
+    assert backend.deleted_account is True
+
+
+def test_perform_state_bucket_cleanup_noop_when_account_absent() -> None:
+    bucket = _stubbed_bucket(FakeBlobStorageBackend())
+    assert _perform_state_bucket_cleanup(bucket) is None
+
+
+def test_perform_state_bucket_cleanup_refuses_with_host_state() -> None:
+    backend = FakeBlobStorageBackend()
+    bucket = _stubbed_bucket(backend)
+    bucket.ensure_bucket()
+    bucket.write_host_record(HostId.generate(), "{}")
+    with pytest.raises(AzureProviderError, match="still holds host state"):
+        _perform_state_bucket_cleanup(bucket)
+    # Refusal deletes nothing.
+    assert backend.deleted_account is False
 
 
 def _operator_client(

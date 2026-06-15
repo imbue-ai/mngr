@@ -524,7 +524,7 @@ class FakeStorageAccountsOperations:
         self._backend.account_exists = True
         return FakePoller(result_value=SimpleNamespace(name=account_name))
 
-    def begin_delete(self, resource_group_name: str, account_name: str) -> None:
+    def delete(self, resource_group_name: str, account_name: str) -> None:
         del resource_group_name, account_name
         self._backend.account_exists = False
         self._backend.container_exists = False

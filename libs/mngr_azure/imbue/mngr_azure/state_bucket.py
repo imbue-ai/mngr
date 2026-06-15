@@ -234,8 +234,10 @@ class BlobStateBucket(MutableModel):
         """Delete the storage account (cascading the container + blobs). Idempotent."""
         if not self.account_exists():
             return
+        # Storage-account delete is synchronous in the SDK (no LRO poller), so the
+        # call returns once the account is gone; a failure surfaces here directly.
         with _translate_blob_errors(self.account_name):
-            self._storage_mgmt().storage_accounts.begin_delete(self.resource_group, self.account_name)
+            self._storage_mgmt().storage_accounts.delete(self.resource_group, self.account_name)
         logger.info("Deleted Azure storage account {} in resource group {}", self.account_name, self.resource_group)
 
     def _put_blob(self, key: str, body: str) -> None:
