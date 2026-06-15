@@ -25,7 +25,7 @@ selection runs through :func:`list_vps_resources_for_provider`, which
 filters to VPSes whose ``mngr-provider`` tag matches the running
 provider instance's name. So a VPS that was ordered by mngr but whose
 provisioning aborted *before* the post-delivery tag attach (e.g. an OVH
-order that didn't deliver before ``vps_boot_timeout`` elapsed) is
+order that didn't deliver before ``instance_boot_timeout`` elapsed) is
 **invisible** to the recycle path and would leak indefinitely on its
 own.
 

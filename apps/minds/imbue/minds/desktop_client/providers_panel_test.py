@@ -32,6 +32,8 @@ from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
+from imbue.minds.desktop_client.workspace_color import pick_workspace_foreground
 from imbue.minds.testing import stub_mngr_host_dir
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -355,14 +357,15 @@ def test_build_providers_state_payload_dedups_healthy_provider_also_in_disabled_
 # -- _build_workspace_list stale marking --
 
 
-def _make_workspace_agent(provider_name: str) -> DiscoveredAgent:
+def _make_workspace_agent(provider_name: str, extra_labels: dict[str, str] | None = None) -> DiscoveredAgent:
     """A primary workspace agent (carries the workspace + is_primary labels)."""
+    labels = {"workspace": "my-workspace", "is_primary": "true", **(extra_labels or {})}
     return DiscoveredAgent(
         host_id=HostId("host-" + "0" * 31 + "1"),
         agent_id=AgentId("agent-" + "0" * 31 + "1"),
         agent_name=AgentName("ws-agent"),
         provider_name=ProviderInstanceName(provider_name),
-        certified_data={"labels": {"workspace": "my-workspace", "is_primary": "true"}},
+        certified_data={"labels": labels},
     )
 
 
@@ -407,3 +410,51 @@ def test_build_workspace_list_does_not_mark_stale_for_unrelated_provider_error()
     workspaces = _build_workspace_list(resolver)
     assert len(workspaces) == 1
     assert "is_stale" not in workspaces[0]
+
+
+# -- _build_workspace_list color + accent_fg emission --
+#
+# These assert the SSE workspaces payload carries the stored color and
+# the WCAG-derived foreground triple. Pre-migration workspaces (no
+# ``color`` label) fall back to ``DEFAULT_WORKSPACE_COLOR`` so the
+# rollout doesn't visually break existing workspaces.
+
+
+def test_build_workspace_list_emits_stored_color_when_label_present() -> None:
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#0b292b"})
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert len(workspaces) == 1
+    assert workspaces[0]["accent"] == "#0b292b"
+    # Confusion is dark -> white foreground.
+    assert workspaces[0]["accent_fg"] == "255 255 255"
+
+
+def test_build_workspace_list_emits_black_foreground_for_light_palette_entries() -> None:
+    # #fcefd4 is the "clarity" palette entry, used here because it's
+    # near the upper end of the lightness range -- exercises the
+    # > 0.179 luminance branch of pick_workspace_foreground.
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("docker", extra_labels={"color": "#fcefd4"})
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == "#fcefd4"
+    assert workspaces[0]["accent_fg"] == "0 0 0"
+
+
+def test_build_workspace_list_falls_back_to_default_color_when_label_missing() -> None:
+    """Workspaces without a ``color`` label (created before the picker
+    shipped, or backfilled but not yet written through ``mngr label``)
+    render as ``DEFAULT_WORKSPACE_COLOR`` -- the same value new
+    workspaces get pre-selected in the picker. ``accent_fg`` matches
+    via the same WCAG luminance computation."""
+    resolver = MngrCliBackendResolver()
+    agent = _make_workspace_agent("imbue_cloud_acct")
+    resolver.update_agents(ParsedAgentsResult(agent_ids=(agent.agent_id,), discovered_agents=(agent,)))
+
+    workspaces = _build_workspace_list(resolver)
+    assert workspaces[0]["accent"] == DEFAULT_WORKSPACE_COLOR
+    assert workspaces[0]["accent_fg"] == pick_workspace_foreground(DEFAULT_WORKSPACE_COLOR)

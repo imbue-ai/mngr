@@ -1,0 +1,36 @@
+{#
+  Shared bottom of the floating sidebar menu: the "New workspace" CTA, a
+  horizontal divider, and the "Manage account(s)" / "Log in" entry. Rendered
+  inside Chrome.jinja (browser-mode inline sidebar) and Sidebar.jinja (the
+  sidebar page loaded into the shared modal WebContentsView in Electron) so
+  the markup, classes, and SVG path data live in one place. The two button
+  ids (#sidebar-new-workspace and #sidebar-account) are wired up in
+  chrome.js and sidebar.js respectively; the #sidebar-account-label span is
+  updated by both scripts when the auth status changes.
+
+  These three elements are direct flex children of #sidebar-menu (JinjaX
+  inlines the component), so the panel's ``gap-0.5`` (2px) supplies the
+  spacing between every entry -- including the 2px above and below the
+  bare divider line, which therefore needs no padding of its own.
+#}
+<button id="sidebar-new-workspace"
+        type="button"
+        class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white/70 hover:text-white hover:bg-white/10 bg-transparent border-0 text-left">
+  <svg class="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <line x1="8" y1="3.33" x2="8" y2="12.67"/>
+    <line x1="3.33" y1="8" x2="12.67" y2="8"/>
+  </svg>
+  <span>New workspace</span>
+</button>
+<div class="h-px bg-white/10"></div>
+<button id="sidebar-account"
+        type="button"
+        class="sidebar-action group flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer text-[13px] text-white hover:bg-white/10 bg-transparent border-0 text-left"
+        title="">
+  <svg class="w-4 h-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="8" cy="6" r="2.33"/>
+    <path d="M3.33 13.33a4.67 4.67 0 0 1 9.33 0"/>
+    <circle cx="8" cy="8" r="6.67"/>
+  </svg>
+  <span id="sidebar-account-label">Log in</span>
+</button>

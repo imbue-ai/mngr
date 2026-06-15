@@ -3,8 +3,8 @@
 We avoid actually invoking ``mngr destroy`` -- the bash command the spawn
 helper builds is exercised by replacing the binary at the call boundary
 with a tiny shell script that writes to stdout/stderr and exits 0 or 1.
-That gives us deterministic coverage of the pid + log capture + status
-table without any live mngr state.
+That gives us deterministic coverage of the pid + log + host_id capture and
+the status table without any live mngr state.
 """
 
 import os
@@ -23,9 +23,11 @@ from imbue.minds.desktop_client.destroying import _is_pid_alive
 from imbue.minds.desktop_client.destroying import delete_destroying
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
+from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import start_destroy
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 
 def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bool:
@@ -47,9 +49,8 @@ def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bo
 def _make_fake_mngr(tmp_path: Path, exit_code: int, stdout: str = "", stderr: str = "") -> Path:
     """Write a tiny bash script that pretends to be ``mngr`` and exits with ``exit_code``.
 
-    ``mngr destroy <id> -f`` and ``mngr list ... | mngr destroy -f -`` both
-    end up running this binary, which is enough for the destroy helper's
-    contract (any non-zero exit leaves the agent in the resolver).
+    The destroy command (``mngr list ... | mngr destroy -f -``) ends up running
+    this binary, which is enough for the destroy helper's contract.
 
     stdout/stderr are passed through ``printf '%b'`` so that ``\\n`` in the
     Python string is interpreted as a real newline by bash (rather than a
@@ -113,16 +114,18 @@ def _kill_process_group(pid: int) -> None:
         pass
 
 
-def test_build_destroy_command_with_host_id_does_fanout() -> None:
-    agent_id = AgentId.generate()
-    command = _build_destroy_command(agent_id, host_id="host-abc123")
+def test_build_destroy_command_fans_out_over_the_whole_host() -> None:
+    host_id = HostId.generate()
+    command = _build_destroy_command(host_id)
     assert command[0] == "bash"
     assert command[1] == "-c"
     shell_command = command[2]
-    # Pipe-fanout shape: `mngr list ... --ids | mngr destroy -f -`. Assert the
-    # ordered pipeline so a garbled command (e.g. destroy before list, or a
-    # missing pipe) can't pass.
-    assert 'host.id == "host-abc123"' in shell_command
+    # Pipe-fanout shape: `mngr list ... --ids | mngr destroy -f -` over every
+    # agent on the host. Assert the ordered pipeline so a garbled command (e.g.
+    # destroy before list, or a missing pipe) can't pass. There is deliberately
+    # no single-agent path, so destroying a minds workspace tears down the whole
+    # host (workspace agent + system-services).
+    assert f'host.id == "{host_id}"' in shell_command
     assert " | " in shell_command
     list_index = shell_command.index("list")
     destroy_index = shell_command.index("destroy -f -")
@@ -130,26 +133,25 @@ def test_build_destroy_command_with_host_id_does_fanout() -> None:
     assert list_index < pipe_index < destroy_index
 
 
-def test_build_destroy_command_without_host_id_falls_back_to_single() -> None:
-    agent_id = AgentId.generate()
-    command = _build_destroy_command(agent_id, host_id=None)
-    assert command[0] == "bash"
-    # Single-agent destroy: no pipe, just `mngr destroy <id> -f`.
-    assert "destroy -f -" not in command[2]
-    assert f"destroy {agent_id} -f" in command[2]
-
-
-def test_start_destroy_writes_pid_file_and_log(tmp_path: Path) -> None:
+def test_start_destroy_writes_pid_log_and_host_id(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="destroyed agent\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    host_id = HostId.generate()
+    fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="destroyed host\n")
+    record = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(fake), mngr_binary="mngr")
 
     pid_file = tmp_path / "destroying" / str(agent_id) / "pid"
     log_file = tmp_path / "destroying" / str(agent_id) / "output.log"
     assert pid_file.read_text().strip() == str(record.pid)
+    # The host id is recorded so a later status read can confirm the *host* is gone.
+    assert read_host_id(agent_id, paths) == host_id
     assert _wait_for_pid_exit(record.pid)
-    assert log_file.read_text() == "destroyed agent\n"
+    assert log_file.read_text() == "destroyed host\n"
+
+
+def test_read_host_id_returns_none_when_absent(tmp_path: Path) -> None:
+    paths = WorkspacePaths(data_dir=tmp_path)
+    assert read_host_id(AgentId.generate(), paths) is None
 
 
 def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
@@ -157,9 +159,11 @@ def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
     agent_id = AgentId.generate()
     # Block until the test kills it so the RUNNING assertion never races a quick exit.
     sleeper = _make_blocking_mngr(tmp_path)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(sleeper), mngr_binary="mngr"
+    )
     try:
-        seen = read_destroying(agent_id, paths, agent_in_resolver=True)
+        seen = read_destroying(agent_id, paths, is_host_still_active=True)
         assert seen is not None
         assert seen.status == DestroyingStatus.RUNNING
         assert seen.pid_alive is True
@@ -168,41 +172,52 @@ def test_read_destroying_status_running_when_pid_alive(tmp_path: Path) -> None:
         _wait_for_pid_exit(record.pid)
 
 
-def test_read_destroying_status_done_when_pid_dead_and_agent_gone(tmp_path: Path) -> None:
+def test_read_destroying_status_done_when_pid_dead_and_host_gone(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
     assert _wait_for_pid_exit(record.pid)
-    seen = read_destroying(agent_id, paths, agent_in_resolver=False)
+    seen = read_destroying(agent_id, paths, is_host_still_active=False)
     assert seen is not None
     assert seen.status == DestroyingStatus.DONE
     assert seen.pid_alive is False
 
 
-def test_read_destroying_status_failed_when_pid_dead_but_agent_still_present(tmp_path: Path) -> None:
+def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_path: Path) -> None:
+    """The exact silent-orphan bug: the wrapper exited but the host is still up.
+
+    Models a destroy that tore down only the workspace agent (or otherwise
+    failed) while the host kept running -- it must read as FAILED, not DONE, so
+    the workspace stays visible instead of leaking a still-running host.
+    """
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=1, stderr="boom\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
     assert _wait_for_pid_exit(record.pid)
-    seen = read_destroying(agent_id, paths, agent_in_resolver=True)
+    seen = read_destroying(agent_id, paths, is_host_still_active=True)
     assert seen is not None
     assert seen.status == DestroyingStatus.FAILED
 
 
 def test_read_destroying_returns_none_when_no_directory(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
-    assert read_destroying(AgentId.generate(), paths, agent_in_resolver=False) is None
+    assert read_destroying(AgentId.generate(), paths, is_host_still_active=False) is None
 
 
 def test_start_destroy_is_idempotent_while_running(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
+    host_id = HostId.generate()
     sleeper = _make_blocking_mngr(tmp_path)
-    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+    first = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
     try:
-        second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(sleeper))
+        second = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
         assert second.pid == first.pid
         assert second.status == DestroyingStatus.RUNNING
     finally:
@@ -215,14 +230,18 @@ def test_list_destroying_walks_dir_and_picks_up_each_agent(tmp_path: Path) -> No
     agent_a = AgentId.generate()
     agent_b = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record_a = start_destroy(agent_a, paths, host_id=None, env=_path_with_fake_mngr(fake))
-    record_b = start_destroy(agent_b, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record_a = start_destroy(
+        agent_a, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
+    record_b = start_destroy(
+        agent_b, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
     assert _wait_for_pid_exit(record_a.pid)
     assert _wait_for_pid_exit(record_b.pid)
-    listing = list_destroying(paths, frozenset({agent_a}))
+    # agent_a's host is reported still active → FAILED; agent_b's host is gone → DONE.
+    listing = list_destroying(paths, lambda aid: aid == agent_a)
     assert agent_a in listing
     assert agent_b in listing
-    # agent_a is "still in resolver" → FAILED, agent_b is gone → DONE.
     assert listing[agent_a].status == DestroyingStatus.FAILED
     assert listing[agent_b].status == DestroyingStatus.DONE
 
@@ -231,7 +250,9 @@ def test_delete_destroying_is_idempotent(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0)
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
     assert _wait_for_pid_exit(record.pid)
     assert delete_destroying(agent_id, paths) is True
     assert delete_destroying(agent_id, paths) is False
@@ -242,7 +263,9 @@ def test_read_log_chunk_returns_tail_from_offset(tmp_path: Path) -> None:
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     fake = _make_fake_mngr(tmp_path, exit_code=0, stdout="hello world\n")
-    record = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(fake))
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
     assert _wait_for_pid_exit(record.pid)
     content, next_offset = read_log_chunk(agent_id, paths, offset=0)
     assert content == b"hello world\n"
@@ -263,14 +286,15 @@ def test_idempotent_after_failure_overwrites_log(tmp_path: Path) -> None:
     """A Retry overwrites the previous run's log so the user sees the new attempt fresh."""
     paths = WorkspacePaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
+    host_id = HostId.generate()
     failing = _make_fake_mngr(tmp_path, exit_code=1, stderr="first run boom\n")
-    first = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(failing))
+    first = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(failing), mngr_binary="mngr")
     assert _wait_for_pid_exit(first.pid)
     log_path = tmp_path / "destroying" / str(agent_id) / "output.log"
     assert b"first run boom" in log_path.read_bytes()
 
     succeeding = _make_fake_mngr(tmp_path, exit_code=0, stdout="second run ok\n")
-    second = start_destroy(agent_id, paths, host_id=None, env=_path_with_fake_mngr(succeeding))
+    second = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(succeeding), mngr_binary="mngr")
     assert _wait_for_pid_exit(second.pid)
     after = log_path.read_bytes()
     assert b"first run boom" not in after

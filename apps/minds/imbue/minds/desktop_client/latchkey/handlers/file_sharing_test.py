@@ -86,6 +86,7 @@ def _make_file_sharing_handler(
     tmp_path: Path,
     gateway_handler: _HttpxHandler,
     share_roots: tuple[Path, ...] = _DEFAULT_TEST_SHARE_ROOTS,
+    home_dir: Path = Path("/home/example"),
 ) -> tuple[FileSharingGrantHandler, _RecordingMessageSender]:
     sender = _RecordingMessageSender(sent_messages=[])
     return (
@@ -94,6 +95,7 @@ def _make_file_sharing_handler(
             gateway_client=_build_gateway_client(gateway_handler),
             mngr_message_sender=sender,
             share_roots=share_roots,
+            home_dir=home_dir,
         ),
         sender,
     )
@@ -469,6 +471,90 @@ def test_grant_accepts_edited_path_within_share_roots(tmp_path: Path) -> None:
     response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": edited})
     assert response.status_code == 200
     assert response.json()["outcome"] == "GRANTED"
+
+
+def test_grant_with_tilde_edited_path_expands_to_home(tmp_path: Path) -> None:
+    """A ``~/...`` edited path expands to the home directory before reaching the gateway."""
+    captured: dict[str, object] = {}
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        captured["content"] = request.content
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path, _gateway_handler, share_roots=(tmp_path,), home_dir=tmp_path
+    )
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path=str(tmp_path / "requested.txt"),
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~/Documents/Shared"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["outcome"] == "GRANTED"
+    expanded = str(tmp_path / "Documents" / "Shared")
+    # The gateway received the expanded absolute path, not the ``~`` form.
+    sent_body = captured["content"]
+    assert isinstance(sent_body, bytes)
+    assert json.loads(sent_body) == {"path": expanded}
+    # The granted message and persisted response event name the expanded path.
+    assert expanded in body["message"]
+    response_events = load_response_events(tmp_path)
+    assert len(response_events) == 1
+    assert response_events[0].scope == expanded
+
+
+def test_grant_rejects_tilde_user_edited_path(tmp_path: Path) -> None:
+    """``~user`` (another user's home) is rejected with a 400 before the gateway is called."""
+    gateway_called = False
+
+    def _gateway_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        del request
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    handler, _sender = _make_file_sharing_handler(tmp_path, _gateway_handler)
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/example/data.txt",
+        access="READ",
+        rationale="need data",
+    )
+    inbox = RequestInbox().add_request(event)
+    client = _build_authenticated_client(tmp_path, handler, inbox)
+
+    response = client.post(f"/requests/{event.event_id}/grant", data={"file_path": "~otheruser/secret.txt"})
+    assert response.status_code == 400
+    assert "~user" in response.json()["error"]
+    assert gateway_called is False
+
+
+def test_render_request_detail_fragment_embeds_home_dir(tmp_path: Path) -> None:
+    """The dialog embeds the home directory so the inbox shell can expand ``~`` client-side."""
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path, lambda r: httpx.Response(200), home_dir=Path("/home/glenn")
+    )
+    event = create_latchkey_file_sharing_permission_request_event(
+        agent_id=str(AgentId()),
+        path="/home/glenn/notes.txt",
+        access="READ",
+        rationale="r",
+    )
+    body = str(
+        handler.render_request_detail_fragment(
+            req_event=event,
+            backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+            mngr_forward_origin="",
+        )
+    )
+    attrs = _parse_input_attrs(body, element_id="file-sharing-path-input")
+    assert attrs["data-home-dir"] == "/home/glenn"
 
 
 def test_render_request_detail_fragment_embeds_allowed_roots(tmp_path: Path) -> None:

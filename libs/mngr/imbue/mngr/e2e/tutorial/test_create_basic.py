@@ -183,38 +183,32 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# This test runs three sequential mngr operations (config set, create, list),
-# each of which performs full provider discovery, so it needs more than the
-# default 10s.
+# Agent creation (provisioning, rsync, ttyd install attempt) plus the follow-up
+# `mngr list` can exceed the default 10s per-test timeout, so allow extra
+# headroom.
 #
-# No @pytest.mark.modal here: this test only creates a local codex agent
-# (configured to `sleep 99999`) and runs `mngr list`. `mngr list` reaches Modal
-# solely through the in-process gRPC SDK inside the spawned `mngr` subprocess,
-# which the resource guard cannot track (the SDK monkeypatch lives in the pytest
-# process, and the `modal` CLI binary -- the only cross-process-tracked path --
-# is never invoked for local agents). With the mark, the guard's NEVER_INVOKED
-# check fails the test; without it there is no tracked Modal usage, so no BLOCKED
-# violation.
+# No @pytest.mark.modal here: the codex agent is created locally (and not even
+# launched -- see --no-auto-start below), and `mngr list` reaches Modal solely
+# through the in-process gRPC SDK inside the spawned `mngr` subprocess, which the
+# resource guard cannot track (the SDK monkeypatch lives in the pytest process,
+# and the `modal` CLI binary -- the only cross-process-tracked path -- is never
+# invoked for local agents). With the mark, the guard's NEVER_INVOKED check fails
+# the test; without it there is no tracked Modal usage, so no BLOCKED violation.
 @pytest.mark.timeout(120)
 def test_create_codex_agent(e2e: E2eSession) -> None:
     e2e.write_tutorial_block("""
     # you can also specify a different agent (ex: codex)
     mngr create my-task codex
     """)
-    # Configure the codex agent type to use 'sleep 99999' since codex is not installed.
-    # Write to the local scope (settings.local.toml), which the e2e fixture already
-    # opts into the pytest run via is_allowed_in_pytest = true. Writing to the default
-    # project scope would create a fresh settings.toml without that flag, and the
-    # subsequent mngr create would refuse to load it under the pytest guard.
-    expect(
-        e2e.run(
-            "mngr config set agent_types.codex.command 'sleep 99999' --scope local",
-            comment="Configure codex command for test environment",
-        )
-    ).to_succeed()
-
+    # codex is a real agent-type plugin (imbue-mngr-codex), not a command-driven
+    # stub, so it cannot be faked with a `command` override. This Modal host
+    # has no codex binary or auth, so the agent is created *without launching it*
+    # (--no-auto-start), auto-approving the workspace-trust prompt (-y). That keeps
+    # the tutorial command (`mngr create my-task codex`) honest while verifying the
+    # positional `codex` resolves to the codex agent type. The real codex run is
+    # covered by the plugin's own release test (libs/mngr_codex/.../test_codex_agent_e2e.py).
     result = e2e.run(
-        "mngr create my-task codex --no-ensure-clean",
+        "mngr create my-task codex -y --no-auto-start --no-ensure-clean",
         comment="you can also specify a different agent (ex: codex)",
     )
     expect(result).to_succeed()
@@ -225,13 +219,9 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
     agents = parsed["agents"]
     matching = [a for a in agents if a["name"] == "my-task"]
     assert len(matching) == 1
-    assert matching[0]["type"] == "codex"
-    assert matching[0]["state"] in ("RUNNING", "WAITING")
-    # The agent must actually run the configured codex command, confirming the
-    # `codex` agent type was resolved (not silently falling back to a default).
-    assert matching[0]["command"] == "sleep 99999", (
-        f"Expected codex agent to run the configured command, got: {matching[0]['command']}"
-    )
+    # The positional `codex` must resolve to the codex agent type (not silently
+    # fall back to a default), confirming the type is registered and creatable.
+    assert matching[0]["type"] == "codex", f"expected codex type, got: {matching[0]}"
 
 
 @pytest.mark.rsync

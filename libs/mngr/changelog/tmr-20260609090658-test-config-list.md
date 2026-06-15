@@ -1,1 +1,0 @@
-Fixed the e2e test fixture that seeded a malformed `settings.local.toml` with a duplicate `type = "claude"` key under `[commands.create]`. TOML disallows duplicate keys, so any `mngr config set --scope local` (which re-parses and re-saves the file via tomlkit) failed with "Cannot overwrite a value". This unblocks the config tutorial e2e tests (e.g. `test_config_list`).

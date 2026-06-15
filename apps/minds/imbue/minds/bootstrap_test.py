@@ -20,6 +20,7 @@ from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.bootstrap import root_name_for_env_name
 from imbue.minds.bootstrap import set_imbue_cloud_provider_for_account
 from imbue.minds.bootstrap import set_provider_is_enabled
+from imbue.minds.primitives import CONFIGURED_AWS_REGIONS
 from imbue.minds.testing import stub_mngr_host_dir
 
 
@@ -388,6 +389,93 @@ def test_ensure_mngr_settings_writes_default_imbue_cloud_disabled(
     parsed = tomllib.loads(settings_path.read_text())
     assert parsed["providers"]["imbue_cloud"] == {"backend": "imbue_cloud", "is_enabled": False}
     assert parsed["plugins"]["recursive"]["enabled"] is False
+
+
+def test_ensure_mngr_settings_writes_default_aws_disabled_without_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The region-less default ``[providers.aws]`` instance must be suppressed even with no AWS creds.
+
+    Otherwise ``get_all_provider_instances`` auto-creates it and its discovery
+    fails every ``mngr list`` cycle ("credentials not configured"), logging a
+    spurious warning. This is the no-credentials case, where no per-region
+    ``aws-<region>`` blocks are written, so the default would be the only AWS
+    provider present.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
+    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_keeps_default_aws_disabled_alongside_region_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default ``[providers.aws]`` stays suppressed even when per-region blocks are written."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert parsed["providers"]["aws"] == {"backend": "aws", "is_enabled": False}
+    assert [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_writes_aws_blocks_when_credentials_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One ``[providers.aws-<region>]`` block is written per configured region when AWS creds exist."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    providers = parsed["providers"]
+    for region in CONFIGURED_AWS_REGIONS:
+        block = providers[f"aws-{region}"]
+        assert block == {
+            "backend": "aws",
+            "default_region": region,
+            "default_instance_type": "t3.large",
+            "install_gvisor_runtime": True,
+            "docker_runtime": "runsc",
+        }
+
+
+def test_ensure_mngr_settings_omits_aws_blocks_when_no_credentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No AWS provider blocks are written when no AWS credentials are configured.
+
+    Writing dead blocks would make ``mngr list`` fan out to AWS providers that
+    can't authenticate, logging a provider-unavailable error per region.
+    """
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert not [name for name in parsed["providers"] if name.startswith("aws-")]
+
+
+def test_ensure_mngr_settings_removes_stale_aws_blocks_when_credentials_removed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Stale ``aws-<region>`` blocks are pruned once AWS credentials are no longer present."""
+    settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed = tomllib.loads(settings_path.read_text())
+    assert [name for name in parsed["providers"] if name.startswith("aws-")]
+
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    _ensure_mngr_settings("minds-dev-tname")
+    parsed_after = tomllib.loads(settings_path.read_text())
+    assert not [name for name in parsed_after["providers"] if name.startswith("aws-")]
 
 
 def test_set_imbue_cloud_provider_for_account_also_writes_default_disabled_block(

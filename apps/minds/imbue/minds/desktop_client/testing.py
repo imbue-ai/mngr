@@ -6,6 +6,7 @@ from pathlib import Path
 
 from imbue.minds.desktop_client.agent_creator import AgentCreationStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.primitives import CreationId
 
 
@@ -34,7 +35,7 @@ def restic_backup_a_file(repository: str, password: str, source: Path) -> None:
     env = dict(os.environ)
     env.update({"RESTIC_REPOSITORY": repository, "RESTIC_PASSWORD": password})
     result = subprocess.run(
-        ["restic", "backup", str(source)],
+        [_get_restic_binary(), "backup", str(source)],
         capture_output=True,
         text=True,
         check=False,

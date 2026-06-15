@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from loguru import logger as loguru_logger
 
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
@@ -17,6 +18,7 @@ from imbue.minds.desktop_client.backend_resolver import parse_service_log_record
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_service_log
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
@@ -304,15 +306,145 @@ def test_get_system_services_agent_id_returns_none_when_not_discovered() -> None
     assert resolver.get_system_services_agent_id(AgentId.generate()) is None
 
 
-def _workspace_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
+def _workspace_agent(
+    host_id: HostId,
+    agent_id: AgentId,
+    extra_labels: Mapping[str, str] = {},
+) -> DiscoveredAgent:
     """A primary-workspace DiscoveredAgent (carries the labels the workspace listing filters on)."""
+    labels = {"workspace": "true", "is_primary": "true", **extra_labels}
     return DiscoveredAgent(
         host_id=host_id,
         agent_id=agent_id,
         agent_name=AgentName(str(agent_id)),
         provider_name=ProviderInstanceName("docker"),
-        certified_data={"labels": {"workspace": "true", "is_primary": "true"}},
+        certified_data={"labels": labels},
     )
+
+
+# -- get_workspace_color tests ----------------------------------------
+#
+# The color label is the storage substrate the workspace color picker
+# writes to and the SSE workspaces payload reads from. Tests cover all
+# four states the resolver may see on a label read:
+#   1. label missing -> None (caller backfills)
+#   2. label set, well-formed -> normalized lowercase hex
+#   3. label set, lenient form -> normalized to canonical lowercase
+#   4. label set, malformed -> DEFAULT_WORKSPACE_COLOR plus a single
+#      once-per-agent warning log
+
+
+def _resolver_with_workspace_agent(extra_labels: Mapping[str, str] = {}) -> tuple[MngrCliBackendResolver, AgentId]:
+    """A resolver holding a single primary-workspace agent, returned with its id."""
+    resolver = MngrCliBackendResolver()
+    agent = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(HostId.generate(), agent, extra_labels=extra_labels),),
+        )
+    )
+    return resolver, agent
+
+
+def test_get_workspace_color_returns_none_when_label_missing() -> None:
+    """Pre-migration / freshly-created workspaces have no color label."""
+    resolver, agent = _resolver_with_workspace_agent()
+    assert resolver.get_workspace_color(agent) is None
+
+
+def test_get_workspace_color_returns_normalized_hex_when_label_set() -> None:
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "#0b292b"})
+    assert resolver.get_workspace_color(agent) == "#0b292b"
+
+
+@pytest.mark.parametrize(
+    ("stored_label", "expected_hex"),
+    [
+        ("#FFFFFF", "#ffffff"),
+        ("ffffff", "#ffffff"),
+        ("#fff", "#ffffff"),
+        ("FFF", "#ffffff"),
+        ("  #0b292b  ", "#0b292b"),
+    ],
+)
+def test_get_workspace_color_normalizes_lenient_label_values(stored_label: str, expected_hex: str) -> None:
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": stored_label})
+    assert resolver.get_workspace_color(agent) == expected_hex
+
+
+def test_get_workspace_color_recovers_to_default_when_label_malformed() -> None:
+    """Mngr does not validate label values; a hand-edited / future-version
+    label might be junk. The resolver returns the default workspace color
+    rather than crashing the SSE generator."""
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "not-a-hex"})
+    assert resolver.get_workspace_color(agent) == DEFAULT_WORKSPACE_COLOR
+
+
+def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
+    resolver = MngrCliBackendResolver()
+    assert resolver.get_workspace_color(AgentId.generate()) is None
+
+
+def test_set_workspace_color_locally_updates_the_cached_label() -> None:
+    """Optimistic write: after a successful CLI mngr label write, the
+    resolver's cached snapshot is updated in place so the next SSE
+    workspaces emit reflects the new color -- without waiting for the
+    ~10s discovery tick to re-emit through ``mngr observe``."""
+    resolver, agent = _resolver_with_workspace_agent()
+    assert resolver.get_workspace_color(agent) is None
+
+    assert resolver.set_workspace_color_locally(agent, "#0b292b") is True
+    assert resolver.get_workspace_color(agent) == "#0b292b"
+
+
+def test_set_workspace_color_locally_clears_the_malformed_log_marker() -> None:
+    """After a successful write, the previously-logged-as-malformed marker
+    is cleared so a future round-trip with a *different* bad value will
+    log again. (The fix path -- repick from settings -- should leave the
+    log in a useful state for any next failure.)"""
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "junk"})
+    # First read triggers the warning + marks the agent as logged.
+    resolver.get_workspace_color(agent)
+    assert str(agent) in resolver._logged_malformed_color_agents
+
+    resolver.set_workspace_color_locally(agent, "#ffffff")
+    assert str(agent) not in resolver._logged_malformed_color_agents
+
+
+def test_set_workspace_color_locally_returns_false_for_unknown_agent() -> None:
+    resolver = MngrCliBackendResolver()
+    assert resolver.set_workspace_color_locally(AgentId.generate(), "#0b292b") is False
+
+
+def test_set_workspace_color_locally_fires_on_change_callbacks() -> None:
+    """SSE subscribers register an on-change callback to wake on resolver
+    mutations; the optimistic color write must fire it so the chrome
+    repaints within one SSE tick of the settings save."""
+    resolver, agent = _resolver_with_workspace_agent()
+
+    callback_calls: list[int] = []
+    resolver.add_on_change_callback(lambda: callback_calls.append(1))
+    resolver.set_workspace_color_locally(agent, "#0b292b")
+    assert callback_calls == [1]
+
+
+def test_get_workspace_color_logs_each_malformed_agent_only_once() -> None:
+    """Reads happen on every SSE tick; a malformed label must not spam
+    the log. Subsequent reads for the same agent stay silent. Uses a
+    loguru sink instead of caplog because loguru does not propagate
+    to the standard logging module that caplog hooks."""
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "junk"})
+    log_records: list[str] = []
+    sink_id = loguru_logger.add(lambda msg: log_records.append(str(msg)), level="WARNING")
+    try:
+        resolver.get_workspace_color(agent)
+        resolver.get_workspace_color(agent)
+        resolver.get_workspace_color(agent)
+    finally:
+        loguru_logger.remove(sink_id)
+    matching = [r for r in log_records if "malformed color" in r.lower()]
+    assert len(matching) == 1, matching
 
 
 def test_list_active_workspace_ids_excludes_agents_on_destroyed_hosts() -> None:

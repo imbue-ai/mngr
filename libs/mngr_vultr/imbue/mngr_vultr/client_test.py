@@ -17,7 +17,7 @@ from imbue.mngr_vultr.client import VultrVpsClient
 
 @pytest.fixture()
 def client() -> VultrVpsClient:
-    return VultrVpsClient(api_key=SecretStr("test-api-key"))
+    return VultrVpsClient(api_key=SecretStr("test-api-key"), os_id=2136)
 
 
 def _mock_response(
@@ -86,10 +86,9 @@ class TestVultrVpsClientInstances:
                 label="test",
                 region="ewr",
                 plan="vc2-1c-1gb",
-                os_id=2136,
                 user_data="test data",
                 ssh_key_ids=["key1"],
-                tags=["tag1"],
+                tags={"tag1": "v1"},
             )
             assert instance_id == VpsInstanceId("inst-abc123")
 
@@ -101,10 +100,9 @@ class TestVultrVpsClientInstances:
                     label="test",
                     region="ewr",
                     plan="vc2-1c-1gb",
-                    os_id=2136,
                     user_data="test",
                     ssh_key_ids=[],
-                    tags=[],
+                    tags={},
                 )
 
     def test_get_instance_status_active_running(self, client: VultrVpsClient) -> None:
