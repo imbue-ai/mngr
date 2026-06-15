@@ -654,14 +654,16 @@ mngr imbue_cloud admin pool create [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--count` | integer | Number of pool hosts to create | None |
-| `--region` | text | OVH datacenter code for the new pool VPSes (e.g. ``US-EAST-VA``, ``US-WEST-OR``). Validated by OVH at order time; failure surfaces as a 'datacenter not allowed for this plan' error. | None |
-| `--tag` | text | Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
-| `--attributes` | text | Lease-attributes JSON for the new pool rows (e.g. '{"version":"v1.2.3","cpus":2,"memory_gb":4}') | None |
-| `--workspace-dir` | path | Path to the template repo checkout | None |
-| `--management-public-key-file` | path | Path to the management SSH public key | None |
+| `--backend` | choice (`ovh_vps` &#x7C; `slice`) | Which machine backs each pool host. ``ovh_vps`` orders an OVH classic VPS on demand; ``slice`` carves a lima VM on one of our registered bare-metal boxes (run `admin server register` + `prep` first). Both bake the same FCT pool host and insert the same kind of leasable row -- only the machine-provisioning step differs. | `ovh_vps` |
+| `--region` | text | Lease/region code stamped on every new row (e.g. ``US-EAST-VA``, ``US-WEST-OR``) -- this is what the connector's region-filtered lease matches. For ``ovh_vps`` it is also the OVH datacenter the VPS is ordered in. For ``slice`` it is the lease-region label only (NOT the box's raw datacenter code). | None |
+| `--tag` | text | [ovh_vps only] Repeatable ``KEY=VALUE`` tag attached to every freshly-provisioned VPS via the OVH IAM v2 tag system. Forwarded to the inner ``mngr create`` as ``MNGR_VPS_EXTRA_TAGS=k1=v1,k2=v2``. Example: ``--tag minds_env=alice --tag pool-owner=bob``. | None |
+| `--attributes` | text | Lease-attributes JSON for the new pool rows (e.g. '{"repo_branch_or_tag":"main"}'). For ``slice`` the per-box size (``memory_gb`` / ``cpus``) is computed and stamped on top of these. | None |
+| `--workspace-dir` | path | Path to the template (FCT) repo checkout to bake from. Required for ``ovh_vps``; for ``slice`` it defaults to $HOME/project/forever-claude-template. | None |
+| `--management-public-key-file` | path | [ovh_vps only] Path to the management SSH public key installed on the VPS + container. Slices authorize the pool key from POOL_SSH_PRIVATE_KEY at carve time, so they do not use this. | None |
 | `--database-url` | text | Neon PostgreSQL direct connection string for the pool DB. Defaults to MINDS_HOST_POOL_DSN env var, or the activated minds env's secrets.toml NEON_HOST_POOL_DSN field (so `minds env activate <dev-env>` is enough). Pass this explicitly when operating outside an activated env. | None |
 | `--mngr-source` | path | Path to the mngr monorepo root. If provided, rsyncs into the template's vendor/mngr/ before creating hosts. | None |
-| `--no-recycle` | boolean | Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
+| `--no-recycle` | boolean | [ovh_vps only] Force a fresh OVH VPS order instead of reclaiming a cancelled VPS. By default the OVH provider recycles a cancelled (still-billable) VPS when one is available; pass this to test the fresh-provision path. Sets MNGR__PROVIDERS__OVH__ENABLE_RECYCLE_CANCELLED=false on the inner `mngr create`. | `True` |
+| `--dry-run` | boolean | [slice only] Report placement + per-slice sizing; do not bake. | `False` |
 
 ## mngr imbue_cloud admin pool list
 
@@ -822,3 +824,93 @@ mngr imbue_cloud admin paid email list [OPTIONS]
 | `--paid-only` | boolean | Only show currently-active (is_paid) emails. | `False` |
 | `--api-key` | text | Paid-list admin API key. Defaults to $MINDS_PAID_ADMIN_KEY. | None |
 | `--connector-url` | text | Connector base URL. Defaults to $MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL. | None |
+
+## mngr imbue_cloud admin server
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud admin server prep
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server prep [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-address` | text | SSH-reachable address of the freshly-installed box. | None |
+| `--ssh-user` | text | Bootstrap SSH user (the OS image's default cloud user). | `debian` |
+| `--lima-service-user` | text | Dedicated non-root user to create for the lima VMs. | `limahost` |
+| `--lima-version` | text | Lima release to install on the box. | `2.1.2` |
+| `--slice-base-image-url` | text | Guest OS image to stage on the box once (slices boot from this via file://, never the mirror). | `https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2` |
+
+## mngr imbue_cloud admin server list
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--database-url` | text | Pool DSN (else resolved from env/activated minds env). | None |
+
+## mngr imbue_cloud admin server register
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server register [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--ovh-service-name` | text | OVH dedicated serviceName of the delivered box. | None |
+| `--plan-code` | text | Catalog planCode the box was ordered as. | None |
+| `--region` | text | OVH datacenter code (e.g. vin). | None |
+| `--public-address` | text | SSH-reachable public address of the box. | None |
+| `--ram-gb` | integer | Total RAM in GB. | None |
+| `--cpu-cores` | integer | Physical CPU cores. | None |
+| `--cpu-threads` | integer | CPU threads. | None |
+| `--disk-gb` | integer | Usable disk in GB for slice data (split across slices). | None |
+| `--memory-per-slice-gb` | integer | RAM (GB) each slice on this box advertises; sets slot count + per-slice sizing. | None |
+| `--cpu-overcommit` | float | CPU overcommit factor for sizing each slice's vCPUs. | `2.0` |
+| `--raid-level` | text | RAID level configured at install (e.g. RAID1). | None |
+| `--lima-service-user` | text | Non-root OS user that owns the box's lima VMs. | `limahost` |
+| `--ovh-order-id` | text | OVH order id, if known. | None |
+| `--status` | text | Initial lifecycle status. | `ready` |
+| `--database-url` | text |  | None |
+
+## mngr imbue_cloud admin server set-status
+
+**Usage:**
+
+```text
+mngr imbue_cloud admin server set-status [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--server-id` | text | bare_metal_servers row id. | None |
+| `--status` | text | New lifecycle status. | None |
+| `--database-url` | text |  | None |

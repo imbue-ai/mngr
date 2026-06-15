@@ -161,6 +161,19 @@ def test_no_import_layer_violations() -> None:
     check_no_import_lint_errors(_REPO_ROOT)
 
 
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
+def test_no_import_layer_violations_mngr_imbue_cloud() -> None:
+    """Ensure mngr_imbue_cloud production code has zero import layer violations.
+
+    Enforces the ``mngr_imbue_cloud layers contract`` (the sub-package layering:
+    plugin > cli > bake > providers > hosts > slices > connector > config >
+    data_types > errors > primitives). See ``test_no_import_layer_violations``
+    for the flaky/timeout rationale.
+    """
+    check_no_import_lint_errors(_REPO_ROOT, contract_name="mngr_imbue_cloud layers contract")
+
+
 @pytest.mark.timeout(60)
 def test_no_type_errors() -> None:
     """Ensure the whole workspace has zero type errors (ty).
