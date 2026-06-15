@@ -1,7 +1,6 @@
 import fcntl
 import os
 import socket
-import tempfile
 import time
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from pyinfra.api.inventory import Inventory
 from pyinfra.connectors.sshuserclient.client import get_host_keys
 
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.file_utils import atomic_write
 
 
 def generate_ssh_keypair() -> tuple[str, str]:
@@ -39,38 +39,14 @@ def generate_ssh_keypair() -> tuple[str, str]:
     return private_key_pem, public_key_openssh
 
 
-def _atomic_write_text(path: Path, content: str, mode: int) -> None:
-    """Write ``content`` to ``path`` atomically with the given permission bits.
-
-    The content is written to a temp file in the same directory (so the final
-    ``os.replace`` is a same-filesystem rename and therefore atomic), then
-    renamed into place. A concurrent reader sees either the old file or the
-    fully-written new one -- never a truncated / zero-byte intermediate. This
-    matters because the public-key file is probed by pyinfra/paramiko on every
-    SSH connection (as a possible certificate), and a half-written ``.pub``
-    raises ``ValueError: Not enough fields for public blob``.
-    """
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp_path.chmod(mode)
-        os.replace(tmp_path, path)
-    finally:
-        # On success ``os.replace`` already consumed the temp file, so this is a
-        # no-op; on any failure (including KeyboardInterrupt) it removes the
-        # leftover temp file. Cleanup on every exit path without catching.
-        tmp_path.unlink(missing_ok=True)
-
-
 def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Path]:
     """Generate and save an SSH keypair to the specified directory.
 
-    Both files are written atomically (see ``_atomic_write_text``) so a
-    concurrent reader never observes a truncated key or public-key file.
+    Both files are written atomically (temp file + ``os.replace``) so a
+    concurrent reader never observes a truncated key or public-key file. This
+    matters because the public-key file is probed by pyinfra/paramiko on every
+    SSH connection (as a possible certificate), and a half-written ``.pub``
+    raises ``ValueError: Not enough fields for public blob``.
 
     Returns a tuple of (private_key_path, public_key_path).
     """
@@ -81,8 +57,8 @@ def save_ssh_keypair(key_dir: Path, key_name: str = "ssh_key") -> tuple[Path, Pa
 
     private_key_pem, public_key_openssh = generate_ssh_keypair()
 
-    _atomic_write_text(private_key_path, private_key_pem, 0o600)
-    _atomic_write_text(public_key_path, public_key_openssh, 0o644)
+    atomic_write(private_key_path, private_key_pem, mode=0o600)
+    atomic_write(public_key_path, public_key_openssh, mode=0o644)
 
     return private_key_path, public_key_path
 
