@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.system_interface_health import should_enroll_sus
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.telegram.setup import TelegramSetupOrchestrator
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.minds.utils.output import emit_event
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
@@ -247,7 +248,14 @@ def run(
     # orphan tree running across restarts.
     start_grandparent_death_watcher(root_concurrency_group)
 
-    mngr_message_sender = MngrMessageSender()
+    # Run ``mngr message`` (and, over time, other ``mngr`` CLI calls) in children
+    # forked from a pre-warmed forkserver instead of spawning a fresh subprocess
+    # each time, so UI actions like Approve/Deny don't pay the multi-second
+    # interpreter+import startup cost. ``prewarm`` is non-blocking: it pays the
+    # one-time import cost on a background thread, off the request path.
+    mngr_caller = get_default_mngr_caller()
+    mngr_caller.prewarm()
+    mngr_message_sender = MngrMessageSender(caller=mngr_caller)
     latchkey_permission_handler = LatchkeyPermissionGrantHandler(
         data_dir=data_directory,
         latchkey=latchkey,

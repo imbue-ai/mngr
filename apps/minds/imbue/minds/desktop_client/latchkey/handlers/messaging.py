@@ -17,6 +17,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
@@ -58,9 +60,40 @@ class MngrMessageSender(MutableModel):
     Failures are logged at warning level but never raised: the response
     event has already been written, so an undelivered nudge is recoverable
     (the agent will eventually wake up on its own).
+
+    When a :class:`MngrCaller` is supplied (the production wiring passes the
+    pre-warmed forkserver-backed singleton), each ``mngr message`` runs in a
+    warm forked child instead of a brand-new subprocess, avoiding the
+    multi-second interpreter+import startup cost. When ``caller`` is ``None``,
+    it falls back to spawning ``mngr_binary`` as a subprocess. This dual path
+    lets call sites migrate to the caller incrementally.
     """
 
-    mngr_binary: str = Field(default=MNGR_BINARY, frozen=True, description="Path to mngr binary.")
+    mngr_binary: str = Field(
+        default=MNGR_BINARY, frozen=True, description="Path to mngr binary (subprocess fallback)."
+    )
+    caller: MngrCaller | None = Field(
+        default=None,
+        description="Forkserver-backed in-app caller; when set, used instead of spawning a subprocess.",
+    )
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
+
+    def _run_message(self, argv: list[str]) -> MngrCallResult:
+        """Run a ``mngr`` ``argv`` either via the caller or a subprocess fallback."""
+        if self.caller is not None:
+            return self.caller.call(argv, timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS)
+        cg = ConcurrencyGroup(name="mngr-message")
+        with cg:
+            result = cg.run_process_to_completion(
+                command=[self.mngr_binary, *argv],
+                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
+                is_checked_after=False,
+            )
+        # ``run_process_to_completion`` always waits for exit, so returncode is
+        # set; treat a missing code defensively as a failure.
+        returncode = result.returncode if result.returncode is not None else 1
+        return MngrCallResult(returncode=returncode, stdout=result.stdout, stderr=result.stderr)
 
     def send(self, agent_id: AgentId, text: str) -> None:
         is_delivered = self.try_send(str(agent_id), text)
@@ -73,21 +106,14 @@ class MngrMessageSender(MutableModel):
         ``target`` is matched by ``mngr message`` against agent ids and
         names, so onboarding can address the bootstrap-created chat agent
         by its host name before its canonical id is known. Returns ``True``
-        when the subprocess exits 0; logs the failure and returns ``False``
+        when the invocation exits 0; logs the failure and returns ``False``
         otherwise so pollers can retry.
         """
-        cg = ConcurrencyGroup(name="mngr-message")
-        with cg:
-            result = cg.run_process_to_completion(
-                # ``-m`` and ``--`` are required: ``mngr message`` treats every
-                # positional argument as an agent identifier (``nargs=-1``), so
-                # passing the text as a positional would be parsed as a second
-                # agent and the actual message content would be read from
-                # stdin (silently empty in this subprocess context).
-                command=[self.mngr_binary, "message", "-m", text, "--", target],
-                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
+        # ``-m`` and ``--`` are required: ``mngr message`` treats every
+        # positional argument as an agent identifier (``nargs=-1``), so passing
+        # the text as a positional would be parsed as a second agent and the
+        # actual message content would be read from stdin (silently empty here).
+        result = self._run_message(["message", "-m", text, "--", target])
         if result.returncode != 0:
             logger.warning(
                 "mngr message to target {} exited {}: {}",
@@ -107,13 +133,7 @@ class MngrMessageSender(MutableModel):
         when no agent matches the target, so a caller that retries until the
         agent exists must inspect the output, not the exit code.
         """
-        cg = ConcurrencyGroup(name="mngr-message")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=[self.mngr_binary, "message", "--format", "jsonl", "-m", text, "--", target],
-                timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS,
-                is_checked_after=False,
-            )
+        result = self._run_message(["message", "--format", "jsonl", "-m", text, "--", target])
         is_delivered = stdout_reports_message_delivered(result.stdout)
         if not is_delivered:
             logger.debug(
