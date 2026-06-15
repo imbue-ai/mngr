@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
 from imbue.mngr_pi_coding.plugin import _LIFECYCLE_EXTENSION_NAME
 from imbue.mngr_pi_coding.plugin import _load_resource
 
@@ -208,6 +209,55 @@ def test_common_transcript_records_for_each_role(tmp_path: Path) -> None:
     assert records[2]["is_error"] is False
     assert all(r["source"] == "pi-coding/common_transcript" for r in records)
     assert len({r["event_id"] for r in records}) == 3
+
+
+def test_emitted_common_records_conform_to_canonical_schema(tmp_path: Path) -> None:
+    """Every record the extension emits must validate against the shared envelope schema.
+
+    Guards against the pi emitter (resources/mngr_pi_lifecycle.ts) and the canonical
+    schema (imbue.mngr.agents.common_transcript_records) drifting apart -- a divergence
+    no other plugin's tests would catch. Drives all three record types from real pi
+    message_end payloads and asserts each emitted record conforms.
+    """
+    state = _run_extension(
+        tmp_path,
+        [
+            {"event": "message_end", "payload": {"message": {"role": "user", "content": "hi", "timestamp": 1}}},
+            {
+                "event": "message_end",
+                "payload": {
+                    "message": {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "ok"},
+                            {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}},
+                        ],
+                        "model": "m",
+                        "stopReason": "toolUse",
+                        "usage": {"input": 7, "output": 3, "cacheRead": 1, "cacheWrite": 0},
+                        "timestamp": 2,
+                    }
+                },
+            },
+            {
+                "event": "message_end",
+                "payload": {
+                    "message": {
+                        "role": "toolResult",
+                        "toolCallId": "c1",
+                        "toolName": "bash",
+                        "content": [{"type": "text", "text": "out"}],
+                        "isError": False,
+                        "timestamp": 3,
+                    }
+                },
+            },
+        ],
+    )
+    records = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    assert {r["type"] for r in records} == {"user_message", "assistant_message", "tool_result"}
+    for record in records:
+        assert validate_common_transcript_record(record) is None, record
 
 
 def test_raw_transcript_captures_every_message(tmp_path: Path) -> None:

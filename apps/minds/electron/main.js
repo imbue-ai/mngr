@@ -1436,10 +1436,20 @@ function handleChromeSSEEvent(evt) {
 
     updateAllOsTitles();
   } else if (evt.type === 'system_interface_status') {
-    // Remember each mind's latest health so the Stop handler can leave a
-    // window that is actively restarting alone (see confirm-stop-mind).
+    // Remember each mind's latest non-healthy health so (a) the Stop handler
+    // can leave a window that is actively restarting alone (see
+    // confirm-stop-mind) and (b) primeViewWithCachedChromeState can replay it
+    // to a freshly (re)loaded view. A ``healthy`` (or empty) status clears the
+    // entry: it mirrors the server snapshot (which omits healthy agents), keeps
+    // the map scoped to agents that still need attention, and matches chrome.js
+    // dropping the agent from its own map on ``healthy``.
     if (evt.agent_id) {
-      systemInterfaceStatusByAgent.set(String(evt.agent_id), evt.status ? String(evt.status) : '');
+      const status = evt.status ? String(evt.status) : '';
+      if (!status || status === 'healthy') {
+        systemInterfaceStatusByAgent.delete(String(evt.agent_id));
+      } else {
+        systemInterfaceStatusByAgent.set(String(evt.agent_id), status);
+      }
     }
   } else if (evt.type === 'auth_required') {
     // Clear every window's stored accent on the authenticated ->
@@ -1534,6 +1544,25 @@ function primeViewWithCachedChromeState(bundle, wc) {
     count: latestChromeState.requestCount,
     request_ids: latestChromeState.requestIds,
   });
+  // Replay the latest non-healthy system-interface status for each agent so a
+  // freshly (re)loaded chrome/sidebar view re-learns which workspaces are
+  // stuck / restarting. Unlike the events above, per-agent health is NOT held
+  // in ``latestChromeState`` -- it lives in ``systemInterfaceStatusByAgent``,
+  // populated one-shot from the SSE's ``system_interface_status`` events.
+  // Without this replay, a renderer that reloads after an agent went STUCK
+  // never re-learns it: the backend only (re)emits ``system_interface_status``
+  // on a state transition or a brand-new SSE connection, and the main process
+  // holds a single long-lived SSE -- so the in-memory status here is the only
+  // surviving copy. Missing the replay leaves the stuck workspace's content
+  // view parked on the plugin's "Loading workspace" loader forever, because
+  // chrome.js's auto-redirect to the recovery page only fires when it holds a
+  // ``stuck`` status for the displayed agent. HEALTHY (and the empty
+  // placeholder) is skipped to mirror the server's connect-time snapshot,
+  // which omits healthy agents.
+  for (const [agentId, status] of systemInterfaceStatusByAgent) {
+    if (!status || status === 'healthy') continue;
+    wc.send('chrome-event', { type: 'system_interface_status', agent_id: agentId, status });
+  }
   // Re-send modal state to the chrome titlebar in case the modal opened
   // before chrome.js registered its onModalStateChanged listener (e.g. the
   // requests panel auto-opens at startup faster than chrome.js loads).

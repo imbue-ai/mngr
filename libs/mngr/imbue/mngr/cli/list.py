@@ -40,6 +40,7 @@ from imbue.mngr.cli.output_helpers import emit_format_template_lines
 from imbue.mngr.cli.output_helpers import render_format_template
 from imbue.mngr.cli.output_helpers import write_human_line
 from imbue.mngr.cli.output_helpers import write_json_line
+from imbue.mngr.config.agent_alias_registry import list_agent_aliases
 from imbue.mngr.config.completion_writer import write_cli_completions_cache
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
@@ -238,7 +239,9 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
     # dynamic values from the runtime context (agent types, templates, etc.).
     if ctx.parent is not None and isinstance(ctx.parent.command, click.Group):
         cli_group = ctx.parent.command
-        registered_agent_types = list_registered_agent_types()
+        # Include alias names so they are tab-completable for --type, even
+        # though they are not distinct agent types.
+        registered_agent_types = sorted(set(list_registered_agent_types()) | set(list_agent_aliases().keys()))
         topic_names = sorted(get_all_topics().keys())
         installed_plugin_packages = get_installed_plugin_package_names()
         mngr_ctx.concurrency_group.start_new_thread(
@@ -1087,7 +1090,9 @@ def _render_format_template(template: str, agent: AgentDetails) -> str:
 CommandHelpMetadata(
     key="list",
     one_line_description="List all agents managed by mngr",
-    synopsis="mngr [list|ls] [OPTIONS]",
+    synopsis="mngr [list|ls] [--stdin] [--schema] [--ids] [--addrs] [--fields FIELDS] [--sort CEL] "
+    "[--include CEL] [--exclude CEL] [--provider PROVIDER] [--running] [--stopped] [--archived] [--active] "
+    "[--local] [--remote] [--project PROJECT] [--limit N] [--on-error MODE]",
     description="""Displays agents with their status, host information, and other metadata.
 Supports filtering, sorting, and multiple output formats.""",
     aliases=("ls",),

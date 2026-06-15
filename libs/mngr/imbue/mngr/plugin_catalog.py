@@ -65,6 +65,12 @@ class OpenCodeSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("opencode", "--version")
 
 
+class CodexSignalCheck(SignalCheck):
+    """Detects whether the OpenAI Codex CLI is installed."""
+
+    command: tuple[str, ...] = ("codex", "--version")
+
+
 class AntigravitySignalCheck(SignalCheck):
     """Detects whether the Antigravity CLI is installed."""
 
@@ -92,6 +98,7 @@ class LimaSignalCheck(SignalCheck):
 # Shared instances for use across catalog entries.
 _CLAUDE_SIGNAL: Final[ClaudeSignalCheck] = ClaudeSignalCheck()
 _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
+_CODEX_SIGNAL: Final[CodexSignalCheck] = CodexSignalCheck()
 _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
@@ -130,6 +137,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="OpenCode agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         signal=_OPENCODE_SIGNAL,
+        is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="codex",
+        package_name="imbue-mngr-codex",
+        description="Codex agent type plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        signal=_CODEX_SIGNAL,
         is_recommended=True,
     ),
     CatalogEntry(
@@ -173,6 +188,18 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         entry_point_name="aws",
         package_name="imbue-mngr-aws",
         description="AWS provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="gcp",
+        package_name="imbue-mngr-gcp",
+        description="GCP Compute Engine provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+    ),
+    CatalogEntry(
+        entry_point_name="ovh",
+        package_name="imbue-mngr-ovh",
+        description="OVH Cloud VPS provider backend plugin for mngr",
         tier=PluginTier.INDEPENDENT,
     ),
     CatalogEntry(

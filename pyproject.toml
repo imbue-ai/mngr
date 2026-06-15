@@ -17,7 +17,7 @@ dependencies = [
 # only ever forward -- pushing it back would re-exclude a deliberately-pinned
 # fresh dep and break resolution. This only buys a detection delay;
 # it can't catch a compromise that stays undetected past the window.
-exclude-newer = "2026-05-26T00:00:00Z"
+exclude-newer = "2026-06-01T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }
@@ -73,6 +73,7 @@ addopts = [
   "--cov=imbue.mngr_claude_subagent_proxy",
   "--cov=imbue.mngr_opencode",
   "--cov=imbue.mngr_antigravity",
+  "--cov=imbue.mngr_codex",
   "--cov=imbue.mngr_pi_coding",
   "--cov=imbue.mngr_pair",
   "--cov=imbue.mngr_schedule",
@@ -102,6 +103,7 @@ addopts = [
   "--cov=imbue.mngr_vultr",
   "--cov=imbue.mngr_aws",
   "--cov=imbue.mngr_ovh",
+  "--cov=imbue.mngr_gcp",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--durations=20",
