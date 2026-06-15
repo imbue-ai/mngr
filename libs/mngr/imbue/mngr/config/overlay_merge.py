@@ -49,23 +49,18 @@ from imbue.overlay.node_merge import lift
 from imbue.overlay.node_merge import lower
 from imbue.overlay.node_merge import merge_narrowing_allowed
 from imbue.overlay.operators import EXTEND_SUFFIX
+from imbue.overlay.operators import bare_key
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
-# The ordered builtin-aggregate -> ``Static*`` marker mapping, shared by ``_aggregate_shape``
-# (which returns the first matching key) and the override-side re-marking. Ordered tuple ->
-# list -> dict so the ``isinstance`` probe is unambiguous (a ``StaticDict`` is both a dict
-# and a ``Mapping``, but never a tuple/list).
+# The ordered builtin-aggregate -> ``Static*`` marker mapping driving the override-side
+# re-marking. Ordered tuple -> list -> dict so the ``isinstance`` probe is unambiguous (a
+# ``StaticDict`` is both a dict and a ``Mapping``, but never a tuple/list).
 _MARKER_BY_AGGREGATE_SHAPE: dict[type, Callable[[Any], Any]] = {
     tuple: StaticTuple,
     list: StaticList,
     dict: StaticDict,
 }
-
-
-def _strip_extend_suffix(key: str) -> str:
-    """Return ``key`` without a trailing ``__extend`` suffix (unchanged if absent)."""
-    return key[: -len(EXTEND_SUFFIX)] if key.endswith(EXTEND_SUFFIX) else key
 
 
 def _submodel_values(model: BaseModel) -> dict[str, BaseModel]:
@@ -203,8 +198,8 @@ def _from_operator_dict(
     )
     result: dict[str, Any] = {}
     for key, value in merged.items():
-        unsuffixed = _strip_extend_suffix(key)
         is_extended = key.endswith(EXTEND_SUFFIX)
+        unsuffixed = bare_key(key) if is_extended else key
         if is_extended and unsuffixed in registry_field_names and isinstance(value, dict):
             result[unsuffixed] = _container_from_operator_dict(
                 value, base_entry_models.get(unsuffixed, {}), override_entry_models.get(unsuffixed, {})
@@ -234,7 +229,7 @@ def _container_from_operator_dict(
     so the merged container re-parses against the real entry keys and field names."""
     result: dict[Any, Any] = {}
     for marked_entry_key, entry in container.items():
-        entry_key = _strip_extend_suffix(marked_entry_key)
+        entry_key = bare_key(marked_entry_key)
         result[entry_key] = _from_operator_dict(
             entry, base_entry_models.get(entry_key), override_entry_models.get(entry_key)
         )
@@ -276,8 +271,8 @@ def _collect_static_marker_paths(model: BaseModel) -> set[tuple[str, ...]]:
     """Collect the dotted paths (as segment tuples) of every ``Static*`` marker value
     living on the *live* ``model``, matching the sparse ``model_dump(exclude_unset=True)``.
 
-    ``model_dump`` strips ``Static*`` subclasses (``ScalarTuple`` / ``StringDerivedTuple``
-    / ``StaticList`` / ``StaticDict``) back to plain aggregates, so the overlay path would
+    ``model_dump`` strips ``Static*`` subclasses (``ScalarTuple`` / ``StaticList`` /
+    ``StaticDict``) back to plain aggregates, so the overlay path would
     wrongly flag a higher-layer replacement of one (e.g. a string-shaped ``cli_args`` or a
     provider's ``allowed_ssh_cidrs``) as narrowing. Recording the marker paths here lets a
     consumer re-mark the dumped dict before pre-processing.
@@ -338,17 +333,15 @@ def _remark_static_leaves(dumped: dict[str, Any], static_paths: set[tuple[str, .
         if leaf_key not in container:
             continue
         leaf = container[leaf_key]
-        shape = _aggregate_shape(leaf)
-        if shape is not None:
-            container[leaf_key] = _MARKER_BY_AGGREGATE_SHAPE[shape](leaf)
+        # Choose the marker by builtin-aggregate shape (ordered tuple -> list -> dict, so a
+        # ``StaticDict``, which is also a dict, is unambiguous); non-aggregate leaves are left
+        # untouched. ``isinstance`` matches even a leaf a previous re-mark wrapped in a
+        # ``Static*`` subclass.
+        for shape, marker in _MARKER_BY_AGGREGATE_SHAPE.items():
+            if isinstance(leaf, shape):
+                container[leaf_key] = marker(leaf)
+                break
     return dumped
-
-
-def _aggregate_shape(value: Any) -> type | None:
-    """Return the builtin aggregate base (``tuple`` / ``list`` / ``dict``) of ``value``,
-    so a marker can be chosen even if a previous re-mark already wrapped the leaf in a
-    ``Static*`` subclass. Returns ``None`` for a non-aggregate."""
-    return next((shape for shape in _MARKER_BY_AGGREGATE_SHAPE if isinstance(value, shape)), None)
 
 
 def merge_models_via_overlay(

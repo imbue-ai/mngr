@@ -31,8 +31,6 @@ from imbue.mngr.config.field_markers import RegistryField as RegistryField
 from imbue.mngr.config.field_markers import SettingsPatchField as SettingsPatchField
 from imbue.mngr.config.field_markers import get_registry_field_names as get_registry_field_names
 from imbue.mngr.config.field_markers import get_settings_patch_field_names as get_settings_patch_field_names
-from imbue.mngr.config.field_markers import is_registry_field as is_registry_field
-from imbue.mngr.config.field_markers import is_settings_patch_field as is_settings_patch_field
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay
 from imbue.mngr.config.overlay_merge import merge_models_via_overlay_with_narrowings
 from imbue.mngr.errors import ConfigParseError

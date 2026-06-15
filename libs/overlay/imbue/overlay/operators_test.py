@@ -13,7 +13,6 @@ from imbue.overlay.operators import check_no_conflicting_assign
 from imbue.overlay.operators import is_assign_key
 from imbue.overlay.operators import is_extend_key
 from imbue.overlay.operators import parse_scalar_value
-from imbue.overlay.operators import resolved_bare_key
 
 # =============================================================================
 # is_extend_key / bare_key
@@ -41,7 +40,7 @@ def test_bare_key_strips_suffix() -> None:
 
 
 # =============================================================================
-# is_assign_key / assign_bare_key / resolved_bare_key
+# is_assign_key / assign_bare_key
 # =============================================================================
 
 
@@ -61,12 +60,6 @@ def test_is_assign_key_rejects_plain_field() -> None:
 
 def test_assign_bare_key_strips_suffix() -> None:
     assert assign_bare_key("permissions__assign") == "permissions"
-
-
-def test_resolved_bare_key_strips_either_suffix() -> None:
-    assert resolved_bare_key("f__extend") == "f"
-    assert resolved_bare_key("f__assign") == "f"
-    assert resolved_bare_key("f") == "f"
 
 
 # =============================================================================

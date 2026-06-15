@@ -7,9 +7,6 @@ merge pipeline without a cycle. ``data_types`` re-exports these names, so existi
 ``from ...data_types import SettingsPatchField / get_*`` imports keep working.
 """
 
-from collections.abc import Sequence
-from typing import Any
-
 from pydantic import BaseModel
 
 
@@ -65,16 +62,6 @@ def get_field_names_with_marker(model_class: type[BaseModel], marker_type: type)
         for name, field in model_class.model_fields.items()
         if any(isinstance(item, marker_type) for item in field.metadata)
     )
-
-
-def is_settings_patch_field(metadata: Sequence[Any]) -> bool:
-    """Return True if a field's ``metadata`` contains a ``SettingsPatchField`` marker."""
-    return any(isinstance(item, SettingsPatchField) for item in metadata)
-
-
-def is_registry_field(metadata: Sequence[Any]) -> bool:
-    """Return True if a field's ``metadata`` contains a ``RegistryField`` marker."""
-    return any(isinstance(item, RegistryField) for item in metadata)
 
 
 def get_settings_patch_field_names(model_class: type[BaseModel]) -> frozenset[str]:

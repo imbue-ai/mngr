@@ -543,6 +543,19 @@ def get_managed_settings_path(agent_state_dir: Path) -> Path:
     return get_agent_claude_plugin_dir(agent_state_dir) / MANAGED_SETTINGS_FILENAME
 
 
+def get_agent_hook_settings_path(agent_state_dir: Path, *, use_env_config_dir: bool) -> Path:
+    """Return the settings file mngr's Claude hooks live in for this agent.
+
+    In ``use_env_config_dir`` mode the managed ``--settings`` file (no per-agent config dir
+    exists); otherwise the per-agent config-dir ``settings.json`` (the "user" layer Claude
+    reads, built by ``_build_settings_json``). Single source of truth shared by mngr_claude
+    and the subagent-proxy plugin so the branch never drifts between them.
+    """
+    if use_env_config_dir:
+        return get_managed_settings_path(agent_state_dir)
+    return get_agent_claude_config_dir(agent_state_dir) / "settings.json"
+
+
 # =============================================================================
 # Readiness Hooks Configuration
 # =============================================================================

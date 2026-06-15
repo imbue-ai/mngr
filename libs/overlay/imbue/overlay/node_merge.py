@@ -1,6 +1,12 @@
 """The typed-node merge algebra: lift, combine, finalize, and the public API.
 
-This is the node-based counterpart to the string-suffix algebra in ``merge.py``.
+This is the self-contained typed-node engine. ``merge.py`` holds the suffix-keyed-dict
+leaf resolver (``apply_extend`` / ``extend_dict``, used by mngr's ``key_resolver`` /
+``common_opts``) and the value-level narrowing predicates
+(``would_assignment_narrow`` / ``narrowing_paths``); this module imports only
+``narrowing_paths`` from there and otherwise owns its own ``apply_extend`` /
+``combine_extend_payloads``.
+
 The operator lives in the node *type* (``Default`` / ``Assign`` / ``Extend``), so
 the algebra dispatches on type and rewrites the outermost wrapper but never unwraps
 a payload to look for an inner operator -- which is what makes stacked suffixes safe
@@ -23,6 +29,7 @@ from typing import Any
 from imbue.overlay.errors import NarrowingError
 from imbue.overlay.errors import OverlayError
 from imbue.overlay.markers import is_static_marker
+from imbue.overlay.merge import extend_aggregate_leaf
 from imbue.overlay.merge import narrowing_paths
 from imbue.overlay.nodes import Assign
 from imbue.overlay.nodes import Default
@@ -208,26 +215,7 @@ def apply_extend(
                 f"got: {type(extend_payload).__name__}"
             )
         return combine(current_payload, extend_payload, path=(field_path,), assign_drops=assign_drops)
-    if isinstance(current_payload, (list, tuple)):
-        if not isinstance(extend_payload, (list, tuple)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
-                f"got: {type(extend_payload).__name__}"
-            )
-        merged = list(current_payload) + list(extend_payload)
-        return tuple(merged) if isinstance(current_payload, tuple) else merged
-    if isinstance(current_payload, (set, frozenset)):
-        if not isinstance(extend_payload, (list, tuple, set, frozenset)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (set) requires a JSON array value; "
-                f"got: {type(extend_payload).__name__}"
-            )
-        merged_set = set(current_payload) | set(extend_payload)
-        return frozenset(merged_set) if isinstance(current_payload, frozenset) else merged_set
-    raise OverlayError(
-        f"__extend on field '{field_path}' is not valid: target field is a scalar "
-        f"({type(current_payload).__name__}); use bare assignment instead."
-    )
+    return extend_aggregate_leaf(current_payload, extend_payload, field_path)
 
 
 def combine_extend_payloads(

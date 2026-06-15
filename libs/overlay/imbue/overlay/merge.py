@@ -1,12 +1,13 @@
-"""The leaf-resolution and narrowing primitives that back the node algebra.
+"""The plain-dict leaf resolver and the shared narrowing predicates.
 
 Everything here operates purely on plain dicts/lists/sets/scalars plus the
 key-suffix operators and the ``Static*`` markers. ``apply_extend`` / ``extend_dict``
-resolve a single ``__extend`` against a concrete value (the payload-level extend the
-node algebra reuses); ``would_assignment_narrow`` is the value-level narrowing
-predicate and ``narrowing_paths`` its path-collecting counterpart, reporting the
-specific narrowed leaf paths. The node algebra in ``node_merge.py`` is the engine that
-combines and finalizes whole patches; it calls into these primitives.
+resolve a single ``__extend`` against a concrete value; this is mngr's suffix-keyed-dict
+leaf resolver (its ``key_resolver`` / ``common_opts``), distinct from the node algebra's
+own ``apply_extend`` in ``node_merge.py``. ``would_assignment_narrow`` is the value-level
+narrowing predicate and ``narrowing_paths`` its path-collecting counterpart, reporting the
+specific narrowed leaf paths; ``node_merge.py`` imports ``narrowing_paths`` from here to
+expand its recorded assign drops.
 """
 
 from collections.abc import Mapping
@@ -32,27 +33,11 @@ def would_assignment_narrow(base_value: Any, override_value: Any) -> bool:
     aggregate as a coherent unit (a value written as a single scalar, or a value
     declared replace-by-default), not aggregate narrowing. Scalars and
     empty/non-aggregate bases never narrow.
+
+    Equivalent to ``narrowing_paths`` being non-empty: it narrows iff that
+    path-collecting counterpart finds at least one narrowed leaf path.
     """
-    if not isinstance(base_value, (list, tuple, dict, set, frozenset)) or not base_value:
-        return False
-    # A ``Static*`` override replaces the whole aggregate as a coherent unit
-    # (value-set, not narrowing), regardless of the base aggregate shape.
-    if is_static_marker(override_value):
-        return False
-    if isinstance(base_value, (list, tuple)):
-        if isinstance(override_value, (list, tuple)) and all(entry in override_value for entry in base_value):
-            return False
-        return True
-    if isinstance(base_value, (set, frozenset)):
-        if isinstance(override_value, (set, frozenset, list, tuple)) and set(base_value) <= set(override_value):
-            return False
-        return True
-    # base_value is a non-empty dict
-    if not isinstance(override_value, dict):
-        return True
-    if any(key not in override_value for key in base_value):
-        return True
-    return any(would_assignment_narrow(sub_base, override_value[key]) for key, sub_base in base_value.items())
+    return bool(narrowing_paths(base_value, override_value, ""))
 
 
 def narrowing_paths(base_value: Any, override_value: Any, prefix: str) -> list[str]:
@@ -86,6 +71,36 @@ def narrowing_paths(base_value: Any, override_value: Any, prefix: str) -> list[s
     return sum(
         (narrowing_paths(sub_base, override_value[key], f"{prefix}.{key}") for key, sub_base in base_value.items()),
         [],
+    )
+
+
+def extend_aggregate_leaf(current: Any, extend_payload: Any, field_path: str) -> Any:
+    """Extend a non-dict aggregate leaf (``current``) by ``extend_payload`` and return it.
+
+    The shape-checked leaf branches shared by both ``apply_extend`` engines (this module's
+    plain-dict resolver and ``node_merge.py``'s node algebra): a list/tuple concatenates, a
+    set/frozenset unions, and a scalar target is an error. The caller handles the
+    ``current is None`` and dict/``Patch`` cases before reaching here.
+    """
+    if isinstance(current, (list, tuple)):
+        if not isinstance(extend_payload, (list, tuple)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged = list(current) + list(extend_payload)
+        return tuple(merged) if isinstance(current, tuple) else merged
+    if isinstance(current, (set, frozenset)):
+        if not isinstance(extend_payload, (list, tuple, set, frozenset)):
+            raise OverlayError(
+                f"__extend on field '{field_path}' (set) requires a JSON array value; "
+                f"got: {type(extend_payload).__name__}"
+            )
+        merged_set = set(current) | set(extend_payload)
+        return frozenset(merged_set) if isinstance(current, frozenset) else merged_set
+    raise OverlayError(
+        f"__extend on field '{field_path}' is not valid: target field is a scalar "
+        f"({type(current).__name__}); use bare assignment instead."
     )
 
 
@@ -123,22 +138,6 @@ def apply_extend(
         if isinstance(extend_value, Mapping):
             return extend_dict({}, extend_value, field_path)
         return extend_value
-    if isinstance(current_value, (list, tuple)):
-        if not isinstance(extend_value, (list, tuple)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (list/tuple) requires a JSON array value; "
-                f"got: {type(extend_value).__name__}"
-            )
-        merged = list(current_value) + list(extend_value)
-        return tuple(merged) if isinstance(current_value, tuple) else merged
-    if isinstance(current_value, (set, frozenset)):
-        if not isinstance(extend_value, (list, tuple, set, frozenset)):
-            raise OverlayError(
-                f"__extend on field '{field_path}' (set) requires a JSON array value; "
-                f"got: {type(extend_value).__name__}"
-            )
-        merged_set = set(current_value) | set(extend_value)
-        return frozenset(merged_set) if isinstance(current_value, frozenset) else merged_set
     if isinstance(current_value, Mapping):
         if not isinstance(extend_value, Mapping):
             raise OverlayError(
@@ -146,10 +145,7 @@ def apply_extend(
                 f"got: {type(extend_value).__name__}"
             )
         return extend_dict(current_value, extend_value, field_path)
-    raise OverlayError(
-        f"__extend on field '{field_path}' is not valid: target field is a scalar "
-        f"({type(current_value).__name__}); use bare assignment instead."
-    )
+    return extend_aggregate_leaf(current_value, extend_value, field_path)
 
 
 def extend_dict(

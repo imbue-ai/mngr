@@ -25,8 +25,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
 from imbue.mngr_claude.claude_config import SESSION_GUARD
 from imbue.mngr_claude.claude_config import build_permission_auto_allow_hooks_config
-from imbue.mngr_claude.claude_config import get_agent_claude_config_dir
-from imbue.mngr_claude.claude_config import get_managed_settings_path
+from imbue.mngr_claude.claude_config import get_agent_hook_settings_path
 from imbue.mngr_claude.claude_config import get_user_claude_config_dir
 from imbue.mngr_claude.claude_config import merge_hooks_config
 from imbue.mngr_claude.plugin import ClaudeAgent
@@ -657,10 +656,7 @@ def on_after_provisioning(agent: AgentInterface, host: OnlineHostInterface, mngr
     # (no per-agent config dir exists). Both paths are derived from the same shared
     # claude_config helpers mngr_claude uses, so they never drift.
     agent_state_dir = get_agent_state_dir_path(host.host_dir, agent.id)
-    if config.use_env_config_dir:
-        hook_settings_path = get_managed_settings_path(agent_state_dir)
-    else:
-        hook_settings_path = get_agent_claude_config_dir(agent_state_dir) / "settings.json"
+    hook_settings_path = get_agent_hook_settings_path(agent_state_dir, use_env_config_dir=config.use_env_config_dir)
     if mode == SubagentProxyMode.DENY:
         _merge_subagent_proxy_deny_hooks(host, hook_settings_path)
         _write_proxy_skill(host, agent.work_dir)

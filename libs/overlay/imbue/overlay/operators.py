@@ -73,19 +73,6 @@ def assign_bare_key(assign_key: str) -> str:
     return assign_key[: -len(ASSIGN_SUFFIX)]
 
 
-def resolved_bare_key(key: str) -> str:
-    """Return the bare field name for any key, stripping ``__extend``/``__assign``.
-
-    A bare key is returned unchanged. Used to detect operator collisions on the
-    same field within one layer.
-    """
-    if is_extend_key(key):
-        return bare_key(key)
-    if is_assign_key(key):
-        return assign_bare_key(key)
-    return key
-
-
 def check_no_conflicting_assign(value: Mapping[str, Any], field_path: str = "") -> None:
     """Raise ``OverlayError`` if a dict has both a bare ``key`` and ``key__assign``.
 
